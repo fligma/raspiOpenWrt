@@ -1,0 +1,10 @@
+{
+  "host": "192.168.1.1",
+  "port": 22,
+  "username": "root",
+  "key_file": "",
+  "remote_root": "/",
+  "source": "",
+  "trust_unknown_host": false,
+  "deploy_ignore": []
+}

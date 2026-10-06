@@ -1,0 +1,49 @@
+:root {
+    color-scheme: dark;
+    --color-background: #121212;
+    --color-surface: #212121;
+    --color-surface-raised: #2e2e2e;
+    --color-surface-tab: #2a2a2a;
+    --color-line: #3c3c3c;
+    --color-field: #1a1a1a;
+    --color-accent: #c51a4a;
+    --color-accent-hover: #a0153c;
+    --color-text: #e0e0e0;
+    --color-muted: #aaa;
+    --color-muted-strong: #888;
+    --color-success: #4caf50;
+    --color-error: #f44336;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--color-background);
+    color: var(--color-text);
+    font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+}
+
+button,
+input {
+    font: inherit;
+}
+
+.btn {
+    width: 100%;
+    border: 0;
+    border-radius: 6px;
+    background: var(--color-accent);
+    color: white;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: bold;
+    text-transform: uppercase;
+    transition: background-color 0.2s;
+}
+
+.btn:hover {
+    background: var(--color-accent-hover);
+}

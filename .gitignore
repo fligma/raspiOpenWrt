@@ -1,3 +1,6 @@
 notes
 bkup
 .gitattributes
+.kilo
+.venv
+/utils/update util/config.json
