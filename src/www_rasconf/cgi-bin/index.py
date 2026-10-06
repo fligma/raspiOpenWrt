@@ -4,8 +4,13 @@ import sys
 import json
 import subprocess
 import urllib.parse
+import hashlib
+from http import cookies
 
-CONFIG_FILE = "/config/index.conf"
+# Generate new hash via CLI: python3 -c "import hashlib; print(hashlib.sha256(b'YOUR_PIN').hexdigest())"
+SECRET_HASH = "4791512d9f517bff255c49e11cbc678909181958b7b1d09335fc3c8246c24323"
+
+CONFIG_FILE = "/etc/rasconf.conf"
 DEFAULT_CONFIG = {
     "temp_interval": 2,
     "sys_interval": 3,
@@ -14,10 +19,21 @@ DEFAULT_CONFIG = {
     "dev_interval": 5
 }
 
+def check_auth(params, cookie):
+    """Verify session cookie or PIN login attempt."""
+    submitted_pin = params.get("pin", [""])[0]
+    
+    if submitted_pin:
+        pin_hash = hashlib.sha256(submitted_pin.encode("utf-8")).hexdigest()
+        if pin_hash == SECRET_HASH:
+            return True, True
+            
+    if "session" in cookie and cookie["session"].value == SECRET_HASH:
+        return True, False
+        
+    return False, False
+
 def load_config():
-    if not os.path.exists("/config"):
-        try: os.makedirs("/config", exist_ok=True)
-        except: pass
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -29,9 +45,6 @@ def load_config():
     return DEFAULT_CONFIG
 
 def save_config(new_conf):
-    if not os.path.exists("/config"):
-        try: os.makedirs("/config", exist_ok=True)
-        except: pass
     try:
         with open(CONFIG_FILE, "w") as f:
             f.write(json.dumps(new_conf, indent=2))
@@ -60,7 +73,7 @@ def get_sys():
         with open("/proc/loadavg", "r") as f:
             load = " ".join(f.read().strip().split()[0:3])
     except: pass
-    
+
     mem = {}
     try:
         with open("/proc/meminfo", "r") as f:
@@ -91,7 +104,6 @@ def get_wireless():
 
 def get_devices():
     devices = {}
-    
     try:
         if os.path.exists("/tmp/dhcp.leases"):
             with open("/tmp/dhcp.leases", "r") as f:
@@ -101,7 +113,7 @@ def get_devices():
                         mac = parts[1].upper()
                         devices[mac] = {"ip": parts[2], "mac": mac, "hostname": parts[3], "source": "DHCP"}
     except: pass
-    
+
     try:
         if os.path.exists("/proc/net/arp"):
             with open("/proc/net/arp", "r") as f:
@@ -117,42 +129,95 @@ def get_devices():
                                 devices[mac] = {"ip": ip, "mac": mac, "hostname": "Unknown", "source": "ARP"}
                             devices[mac]["interface"] = parts[5]
     except: pass
-    
+
     return list(devices.values())
 
 method = os.environ.get("REQUEST_METHOD", "GET")
 query_string = os.environ.get("QUERY_STRING", "")
-params = urllib.parse.parse_qs(query_string)
-action = params.get("action", [""])[0]
+get_params = urllib.parse.parse_qs(query_string)
 
-if action == "api":
-    sys.stdout.write("Content-Type: application/json\r\n\r\n")
-    data_type = params.get("type", ["all"])[0]
-    res = {}
-    if data_type in ["all", "temp"]: res["temp"] = get_temp()
-    if data_type in ["all", "sys"]: res["sys"] = get_sys()
-    if data_type in ["all", "net"]: res["net"] = get_net()
-    if data_type in ["all", "wifi"]: res["wifi"] = get_wireless()
-    if data_type in ["all", "dev"]: res["dev"] = get_devices()
-    sys.stdout.write(json.dumps(res))
+try:
+    content_length = int(os.environ.get("CONTENT_LENGTH", 0))
+except (ValueError, TypeError):
+    content_length = 0
+
+post_data = sys.stdin.read(content_length) if content_length > 0 else ""
+post_params = urllib.parse.parse_qs(post_data)
+
+cookie_header = os.environ.get("HTTP_COOKIE", "")
+cookie = cookies.SimpleCookie(cookie_header)
+
+action = get_params.get("action", [""])[0] or post_params.get("action", [""])[0]
+is_auth, set_new_cookie = check_auth(post_params, cookie)
+
+if action == "logout":
+    sys.stdout.write("Set-Cookie: session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT\r\n")
+    sys.stdout.write("Location: /cgi-bin/index.py\r\n\r\n")
     sys.exit(0)
 
-elif action == "save_config" and method == "POST":
+if action in ["api", "save_config"]:
+    if not is_auth:
+        sys.stdout.write("Status: 401 Unauthorized\r\n")
+        sys.stdout.write("Content-Type: application/json\r\n\r\n")
+        sys.stdout.write(json.dumps({"error": "Unauthorized"}))
+        sys.exit(0)
+
     sys.stdout.write("Content-Type: application/json\r\n\r\n")
-    try:
-        content_length = int(os.environ.get("CONTENT_LENGTH", 0))
-        body = sys.stdin.read(content_length)
-        new_conf = json.loads(body)
-        success = save_config(new_conf)
-        sys.stdout.write(json.dumps({"success": success}))
-    except Exception as e:
-        sys.stdout.write(json.dumps({"success": False, "error": str(e)}))
+    if action == "api":
+        data_type = get_params.get("type", ["all"])[0]
+        res = {}
+        if data_type in ["all", "temp"]: res["temp"] = get_temp()
+        if data_type in ["all", "sys"]: res["sys"] = get_sys()
+        if data_type in ["all", "net"]: res["net"] = get_net()
+        if data_type in ["all", "wifi"]: res["wifi"] = get_wireless()
+        if data_type in ["all", "dev"]: res["dev"] = get_devices()
+        sys.stdout.write(json.dumps(res))
+    elif action == "save_config" and method == "POST":
+        try:
+            new_conf = json.loads(post_data)
+            success = save_config(new_conf)
+            sys.stdout.write(json.dumps({"success": success}))
+        except Exception as e:
+            sys.stdout.write(json.dumps({"success": False, "error": str(e)}))
+    sys.exit(0)
+
+if set_new_cookie:
+    sys.stdout.write(f"Set-Cookie: session={SECRET_HASH}; HttpOnly; Path=/\r\n")
+
+sys.stdout.write("Content-Type: text/html; charset=utf-8\r\n\r\n")
+
+if not is_auth
+    login_html = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>rasconf - PIN Required</title>
+    <style>
+        body { background: #121212; color: #E0E0E0; font-family: 'Segoe UI', Roboto, Arial, sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; align-items: center; justify-content: center; }
+        .login-card { background: #212121; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); width: 100%; max-width: 360px; border-top: 4px solid #C51A4A; text-align: center; }
+        .login-card h2 { margin-top: 0; color: white; font-size: 20px; margin-bottom: 20px; }
+        .login-card input[type="password"] { width: 100%; padding: 12px; background: #1A1A1A; border: 1px solid #444; color: white; border-radius: 6px; box-sizing: border-box; font-size: 16px; margin-bottom: 20px; text-align: center; }
+        .btn { background: #C51A4A; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: bold; width: 100%; text-transform: uppercase; letter-spacing: 1px; transition: 0.2s; }
+        .btn:hover { background: #A0153C; }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <h2>Raspberry Pi Access</h2>
+        <form method="POST" action="">
+            <input type="password" name="pin" placeholder="Enter Security PIN" required autofocus>
+            <button class="btn" type="submit">Unlock Dashboard</button>
+        </form>
+    </div>
+</body>
+</html>"""
+    sys.stdout.write(login_html)
     sys.exit(0)
 
 config_obj = load_config()
-sys.stdout.write("Content-Type: text/html; charset=utf-8\r\n\r\n")
 
-html = f"""<!DOCTYPE html>
+dashboard_html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -163,7 +228,10 @@ html = f"""<!DOCTYPE html>
         .container {{ max-width: 900px; margin: 0 auto; background: #212121; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); overflow: hidden; }}
         .header {{ background: #C51A4A; color: white; padding: 20px; display: flex; justify-content: space-between; align-items: center; }}
         .header h1 {{ margin: 0; font-size: 22px; font-weight: 600; letter-spacing: 0.5px; }}
+        .header-actions {{ display: flex; align-items: center; gap: 15px; }}
         .indicator {{ font-size: 12px; opacity: 0.9; font-weight: bold; }}
+        .logout-btn {{ background: rgba(0,0,0,0.3); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 5px 12px; border-radius: 4px; text-decoration: none; font-size: 12px; font-weight: bold; transition: 0.2s; }}
+        .logout-btn:hover {{ background: rgba(0,0,0,0.6); }}
         
         .tabs {{ display: flex; background: #2A2A2A; border-bottom: 1px solid #333; }}
         .tab {{ flex: 1; padding: 15px; text-align: center; cursor: pointer; color: #AAA; transition: 0.2s; font-weight: 500; font-size: 14px; text-transform: uppercase; }}
@@ -199,7 +267,10 @@ html = f"""<!DOCTYPE html>
     <div class="container">
         <div class="header">
             <h1>Raspberry Pi 3B+ Status</h1>
-            <div class="indicator">● Live Tracker</div>
+            <div class="header-actions">
+                <div class="indicator">● Live Tracker</div>
+                <a href="?action=logout" class="logout-btn">Logout</a>
+            </div>
         </div>
         <div class="tabs">
             <div class="tab active" onclick="switchTab(event, 'dashboard')">Dashboard</div>
@@ -312,13 +383,15 @@ html = f"""<!DOCTYPE html>
         }}
 
         function updateTemp() {{
-            fetchData('temp', d => {{ document.getElementById('val_temp').innerText = d.temp; }});
+            fetchData('temp', d => {{ if(d.temp) document.getElementById('val_temp').innerText = d.temp; }});
         }}
 
         function updateSys() {{
             fetchData('sys', d => {{
-                document.getElementById('val_load').innerText = d.sys.load;
-                document.getElementById('val_ram').innerText = d.sys.ram;
+                if(d.sys) {{
+                    document.getElementById('val_load').innerText = d.sys.load;
+                    document.getElementById('val_ram').innerText = d.sys.ram;
+                }}
             }});
         }}
 
@@ -429,7 +502,7 @@ html = f"""<!DOCTYPE html>
             .then(res => {{
                 if(res.success) {{
                     document.getElementById('save_msg').style.display = 'block';
-                    setTimeout(() => location.reload(), 2000);
+                    setTimeout(() => location.reload(), 1500);
                 }} else {{
                     alert("Error saving: " + res.error);
                 }}
@@ -439,6 +512,20 @@ html = f"""<!DOCTYPE html>
         window.onload = init;
     </script>
 </body>
-</html>
-"""
-sys.stdout.write(html)
+</html>"""
+
+sys.stdout.write(dashboard_html)
+lock';
+                    setTimeout(() => location.reload(), 1500);
+                }} else {{
+                    alert("Error saving: " + res.error);
+                }}
+            }});
+        }}
+
+        window.onload = init;
+    </script>
+</body>
+</html>"""
+
+sys.stdout.write(dashboard_html)
