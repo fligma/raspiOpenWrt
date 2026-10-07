@@ -2,4 +2,4 @@ paramiko>=3.4,<5
 PyQt6>=6.6,<7
 pathspec>=0.12,<1
 keyring>=24,<26
-PyQt6-WebEngine=>=6.11,<7
+PyQt6-WebEngine>=6.11,<7

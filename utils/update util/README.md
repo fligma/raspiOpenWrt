@@ -2,7 +2,9 @@
 
 compile with :
 `
-pyinstaller --windowed --noconfirm --onefile --hidden-import secretstorage --hidden-import jeepney --icon="icon.png" --add-data="icon.png:." --add-data="config.example.json:." rasconf_manager.py
+pyinstaller --noconfirm --onefile --windowed --hidden-import secretstorage --hidden-import jeepney --icon="icon.png" --add-data="icon.png:." --add-data="config.example.json:." --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore rasconf_manager.py
+
+pyinstaller --noconfirm --onefile --windowed --icon="icon.png" --add-data="icon.png:." --add-data="config.example.json:." --collect-all PyQt6.QtWebEngineWidgets --collect-all PyQt6.QtWebEngineCore --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore rasconf_manager.py
 `
 
 ## Local settings

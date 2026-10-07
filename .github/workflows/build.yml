@@ -1,0 +1,63 @@
+name: Build rasconf Manager Executables
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Linux system dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libgl1 libegl1 libnss3 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0
+
+    - name: Install Python dependencies
+      working-directory: "utils/update util"
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Build with PyInstaller (Windows)
+      if: runner.os == 'Windows'
+      working-directory: "utils/update util"
+      run: >
+        pyinstaller --noconfirm --onefile --windowed --icon="icon.png"
+        --add-data="icon.png;." --add-data="config.example.json;."
+        --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
+        rasconf_manager.py
+
+    - name: Build with PyInstaller (Linux)
+      if: runner.os == 'Linux'
+      working-directory: "utils/update util"
+      run: >
+        pyinstaller --noconfirm --onefile --windowed --icon="icon.png"
+        --add-data="icon.png:." --add-data="config.example.json:."
+        --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
+        rasconf_manager.py
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: rasconf_manager-${{ runner.os }}
+        path: |
+          utils/update util/dist/rasconf_manager.exe
+          utils/update util/dist/rasconf_manager
+        retention-days: 7
