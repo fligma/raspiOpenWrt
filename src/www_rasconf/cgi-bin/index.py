@@ -275,7 +275,12 @@ if not is_auth:
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>rasconf - PIN Required</title>
+    <title>Rasconf - PIN Required</title>
+    <link rel="icon" href="/assets/favicon.ico" sizes="any">
+    <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
+    <link rel="manifest" href="/assets/site.webmanifest">
     <link rel="stylesheet" href="/css/main.css">
     <link rel="stylesheet" href="/css/index.css">
 </head>
@@ -299,7 +304,12 @@ dashboard_html = f"""<!DOCTYPE html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Raspberry Pi Status</title>
+    <title>Rasconf - Dashboard</title>
+    <link rel="icon" href="/assets/favicon.ico" sizes="any">
+    <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
+    <link rel="manifest" href="/assets/site.webmanifest">
     <link rel="stylesheet" href="/css/main.css">
     <link rel="stylesheet" href="/css/index.css">
     <script src="/js/main.js" defer></script>
@@ -308,7 +318,7 @@ dashboard_html = f"""<!DOCTYPE html>
 <body class="dashboard-page">
     <div class="container">
         <div class="header">
-            <h1>Raspberry Pi 3B+ Status</h1>
+            <h1>Pi Status</h1>
             <div class="header-actions">
                 <div class="indicator">● Live Tracker</div>
                 <a href="?action=logout" class="logout-btn">Logout</a>

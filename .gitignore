@@ -3,4 +3,6 @@ bkup
 .gitattributes
 .kilo
 .venv
-/utils/update util/config.json
+media
+local tools
+dist

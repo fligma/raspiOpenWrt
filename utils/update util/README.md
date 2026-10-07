@@ -1,21 +1,6 @@
 # rasconf SFTP Manager
 
-This desktop tool uploads, downloads, browses, and removes files in the OpenWrt
-web root over SSH/SFTP. Its default local source is the repository's
-`src/www_rasconf` directory and its default remote directory is `/www_rasconf`.
-
-## Install and run on Windows
-
-From the repository root in PowerShell:
-
-```powershell
-py -m venv ".venv-rasconf-manager"
-.\.venv-rasconf-manager\Scripts\python.exe -m pip install -r "utils\update util\requirements.txt"
-.\.venv-rasconf-manager\Scripts\python.exe "utils\update util\rasconf_manager.py"
-```
-
-Python 3.10 or newer is required. The utility runs on the computer with the GUI;
-the Raspberry Pi only needs SSH/SFTP access enabled.
+compile with :```pyinstaller --noconfirm --onefile --windowed --icon="favicon.ico" --add-data="favicon.ico;." --add-data="config.example.json;." rasconf_manager.py```
 
 ## Local settings
 

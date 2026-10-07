@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage and deploy the rasconf web files over SSH/SFTP."""
+"""Manage and deploy the rasconf web interface"""
 
 from __future__ import annotations
 
@@ -15,9 +15,11 @@ from pathlib import Path, PurePosixPath
 
 import keyring
 import paramiko
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QTextCursor
+from PyQt6.QtGui import QFont, QIcon
 from pathspec import GitIgnoreSpec
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
+from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -45,13 +47,22 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE = REPOSITORY_ROOT / "src" / "www_rasconf"
 KNOWN_HOSTS_FILE = Path.home() / ".ssh" / "known_hosts_rasconf"
 KEYRING_SERVICE = "rasconf-sftp-manager"
-APP_CONFIG_FILE = Path(__file__).with_name("config.json")
-APP_CONFIG_EXAMPLE_FILE = Path(__file__).with_name("config.example.json")
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
+
+APP_CONFIG_FILE = BASE_DIR / "config.json"
+if getattr(sys, 'frozen', False):
+    RESOURCE_DIR = Path(sys._MEIPASS)
+else:
+    RESOURCE_DIR = Path(__file__).parent
+
+APP_CONFIG_EXAMPLE_FILE = RESOURCE_DIR / "config.example.json"
 DEFAULT_APP_CONFIG = {
     "host": "192.168.1.1",
     "port": 22,
@@ -227,8 +238,14 @@ def load_app_config() -> dict:
         isinstance(pattern, str) for pattern in config["deploy_ignore"]
     ):
         config["deploy_ignore"] = []
-    return config
 
+    if not APP_CONFIG_FILE.is_file():
+        try:
+            APP_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    return config
 
 def safe_relative_path(value: str) -> str:
     path = PurePosixPath(value)
@@ -289,7 +306,6 @@ def create_ssh_client(settings: dict) -> paramiko.SSHClient:
         KNOWN_HOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
         client.save_host_keys(str(KNOWN_HOSTS_FILE))
     return client
-
 
 class SSHShellWorker(QThread):
     connected = pyqtSignal()
@@ -366,7 +382,6 @@ def local_entries(
                 if not ignore_spec or not ignore_spec.match_file(relative):
                     files.append(relative)
     return directories, files
-
 
 class SftpWorker(QThread):
     succeeded = pyqtSignal(object)
@@ -590,7 +605,6 @@ class SftpWorker(QThread):
                 result.append(path)
         return result
 
-
 class RasconfManager(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -598,7 +612,8 @@ class RasconfManager(QMainWindow):
         self.shell_worker: SSHShellWorker | None = None
         self.remote_tree_entries: list[dict] = []
         self.app_config = load_app_config()
-        self.setWindowTitle("rasconf SFTP Manager")
+        self.current_term_color = "#e0e0e0"
+        self.setWindowTitle("rasconf Manager")
         self.resize(1100, 760)
         self.build_ui()
         self.refresh_local_tree()
@@ -607,6 +622,7 @@ class RasconfManager(QMainWindow):
         central = QWidget()
         root_layout = QVBoxLayout(central)
 
+        # sftp connection header
         connection_header = QHBoxLayout()
         self.connection_toggle = QToolButton()
         self.connection_toggle.setText("Connection settings")
@@ -736,9 +752,9 @@ class RasconfManager(QMainWindow):
         terminal_actions.addStretch(1)
         ssh_layout.addLayout(terminal_actions)
 
-        self.terminal_output = QPlainTextEdit()
+        self.terminal_output = QTextEdit()
         self.terminal_output.setReadOnly(True)
-        self.terminal_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.terminal_output.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.terminal_output.setPlaceholderText("SSH terminal output will appear here.")
         terminal_font = QFont("Consolas", 10)
         terminal_font.setStyleHint(QFont.StyleHint.Monospace)
@@ -758,6 +774,64 @@ class RasconfManager(QMainWindow):
         terminal_input_row.addWidget(self.terminal_send_button)
         ssh_layout.addLayout(terminal_input_row)
         self.tabs.addTab(ssh_page, "SSH")
+
+        # Rasconf web interface
+        web_page = QWidget()
+        web_layout = QVBoxLayout(web_page)
+        
+        web_controls = QHBoxLayout()
+        host = self.app_config.get("host", "192.168.50.1")
+        target_url = f"http://{host}:8989/cgi-bin/index.py"
+        
+        self.web_url_input = QLineEdit(target_url)
+        web_go_button = QPushButton("Go / Refresh")
+        web_go_button.setObjectName("primaryAction")
+        
+        self.web_view = QWebEngineView()
+        
+        def load_web_url():
+            self.web_view.setUrl(QUrl(self.web_url_input.text()))
+            
+        web_go_button.clicked.connect(load_web_url)
+        self.web_url_input.returnPressed.connect(load_web_url)
+        
+        web_controls.addWidget(self.web_url_input, 1)
+        web_controls.addWidget(web_go_button)
+        
+        web_layout.addLayout(web_controls)
+        web_layout.addWidget(self.web_view, 1)
+        
+        self.tabs.addTab(web_page, "Web Interface")
+        
+        load_web_url()
+
+        # Luci web interface
+        luci_page = QWidget()
+        luci_layout = QVBoxLayout(luci_page)
+        
+        luci_controls = QHBoxLayout()
+        self.luci_url_input = QLineEdit("http://192.168.50.1/")
+        
+        luci_go_button = QPushButton("Go / Refresh")
+        luci_go_button.setObjectName("primaryAction")
+        
+        self.luci_view = QWebEngineView()
+        
+        def load_luci_url():
+            self.luci_view.setUrl(QUrl(self.luci_url_input.text()))
+            
+        luci_go_button.clicked.connect(load_luci_url)
+        self.luci_url_input.returnPressed.connect(load_luci_url)
+        
+        luci_controls.addWidget(self.luci_url_input, 1)
+        luci_controls.addWidget(luci_go_button)
+        
+        luci_layout.addLayout(luci_controls)
+        luci_layout.addWidget(self.luci_view, 1)
+        
+        self.tabs.addTab(luci_page, "Luci")
+        
+        load_luci_url()
 
         for field in (
             self.host_input,
@@ -907,6 +981,41 @@ class RasconfManager(QMainWindow):
         self.log(f"Starting {operation}...")
         self.worker.start()
 
+    def append_terminal_output(self, text: str) -> None:
+        """Parses standard ANSI escape codes and appends formatted HTML to the terminal"""
+        text = re.sub(r'\x1b\][0-9;]*[^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
+        parts = re.split(r'\x1b\[([\d;]*)m', text)
+        
+        cursor = self.terminal_output.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        
+        for i, part in enumerate(parts):
+            if i % 2 == 0:
+                chunk = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', part)
+                chunk = re.sub(r'\x1b[()][A-Z]', '', chunk)
+                chunk = re.sub(r'[\x07\x08\r]', '', chunk)
+                
+                if chunk:
+                    chunk = chunk.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    chunk = chunk.replace('\n', '<br>')
+                    chunk = chunk.replace(' ', '&nbsp;')
+                    cursor.insertHtml(f'<span style="color: {self.current_term_color};">{chunk}</span>')
+            else:
+                for c in part.split(';'):
+                    c = c.strip()
+                    code = int(c) if c.isdigit() else 0
+                    if code == 0:
+                        self.current_term_color = '#e0e0e0'
+                    elif 30 <= code <= 37:
+                        colors = ['#1a1a1a', '#c51a4a', '#23d18b', '#d7ba7d', '#3b8eea', '#c586c0', '#29b8db', '#e5e5e5']
+                        self.current_term_color = colors[code - 30]
+                    elif 90 <= code <= 97:
+                        colors = ['#666666', '#f14c4c', '#23d18b', '#f5f543', '#3b8eea', '#d670d6', '#29b8db', '#e5e5e5']
+                        self.current_term_color = colors[code - 90]
+        
+        self.terminal_output.setTextCursor(cursor)
+        self.terminal_output.ensureCursorVisible()
+
     def connect_shell(self, _checked: bool = False) -> None:
         if self.shell_worker is not None and self.shell_worker.isRunning():
             return
@@ -932,29 +1041,30 @@ class RasconfManager(QMainWindow):
         self.store_password()
         self.save_app_config()
         self.terminal_output.clear()
-        self.terminal_output.appendPlainText(
+        self.terminal_output.append(
             f"Connecting to {settings['username']}@{settings['host']}:{settings['port']}..."
         )
+        self.current_term_color = "#e0e0e0"
         self.shell_worker = SSHShellWorker(settings)
         self.shell_worker.connected.connect(self.shell_connected)
-        self.shell_worker.received.connect(self.terminal_output.insertPlainText)
+        self.shell_worker.received.connect(self.append_terminal_output)
         self.shell_worker.failed.connect(self.shell_failed)
         self.shell_worker.disconnected.connect(self.shell_disconnected)
         self.shell_worker.start()
         self.shell_connect_button.setEnabled(False)
 
     def shell_connected(self) -> None:
-        self.terminal_output.appendPlainText("\nSSH shell connected.")
+        self.terminal_output.append("\nSSH shell connected.")
         self.shell_disconnect_button.setEnabled(True)
         self.terminal_send_button.setEnabled(True)
         self.terminal_input.setFocus()
 
     def shell_failed(self, message: str) -> None:
-        self.terminal_output.appendPlainText(f"\nSSH error: {message}")
+        self.terminal_output.append(f"\nSSH error: {message}")
         QMessageBox.critical(self, "SSH terminal failed", message)
 
     def shell_disconnected(self) -> None:
-        self.terminal_output.appendPlainText("\nSSH shell disconnected.")
+        self.terminal_output.append("\nSSH shell disconnected.")
         self.shell_connect_button.setEnabled(True)
         self.shell_disconnect_button.setEnabled(False)
         self.terminal_send_button.setEnabled(False)
@@ -1138,6 +1248,8 @@ class RasconfManager(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
+    icon_path = Path(__file__).parent / "icon.png"
+    app.setWindowIcon(QIcon(str(icon_path)))
     window = RasconfManager()
     window.show()
     return app.exec()
