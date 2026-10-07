@@ -60,7 +60,6 @@ KNOWN_HOSTS_FILE = Path.home() / ".ssh" / "known_hosts_rasconf"
 KEYRING_SERVICE = "rasconf-sftp-manager"
 APP_CONFIG_FILE = BASE_DIR / "config.json"
 APP_CONFIG_EXAMPLE_FILE = RESOURCE_DIR / "config.example.json"
-
 DEFAULT_APP_CONFIG = {
     "host": "192.168.1.1",
     "port": 22,
@@ -71,7 +70,6 @@ DEFAULT_APP_CONFIG = {
     "trust_unknown_host": False,
     "deploy_ignore": [],
 }
-
 APP_STYLESHEET = """
 QWidget {
     background-color: #121212;
@@ -225,8 +223,12 @@ def load_app_config() -> dict:
             config.update(loaded)
             break
 
-    if not config.get("source"):
-        config["source"] = str(DEFAULT_SOURCE)
+    if not config.get("source") or not Path(config["source"]).is_dir():
+        if DEFAULT_SOURCE.is_dir():
+            config["source"] = str(DEFAULT_SOURCE)
+        else:
+            config["source"] = str(Path.home())
+            
     try:
         config["port"] = int(config["port"])
     except (KeyError, TypeError, ValueError):
@@ -312,8 +314,8 @@ class SSHShellWorker(QThread):
     failed = pyqtSignal(str)
     disconnected = pyqtSignal()
 
-    def __init__(self, settings: dict):
-        super().__init__()
+    def __init__(self, settings: dict, parent=None):
+        super().__init__(parent)
         self.settings = settings
         self.outgoing: queue.Queue[str] = queue.Queue()
         self.stop_requested = threading.Event()
@@ -387,8 +389,8 @@ class SftpWorker(QThread):
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, operation: str, settings: dict, options: dict):
-        super().__init__()
+    def __init__(self, operation: str, settings: dict, options: dict, parent=None):
+        super().__init__(parent)
         self.operation = operation
         self.settings = settings
         self.options = options
@@ -612,7 +614,7 @@ class RasconfManager(QMainWindow):
         self.remote_tree_entries: list[dict] = []
         self.app_config = load_app_config()
         self.current_term_color = "#e0e0e0"
-        self.setWindowTitle("rasconf Manager")
+        self.setWindowTitle("rasconf SFTP Manager")
         self.resize(1100, 760)
         self.build_ui()
         self.refresh_local_tree()
@@ -621,7 +623,6 @@ class RasconfManager(QMainWindow):
         central = QWidget()
         root_layout = QVBoxLayout(central)
 
-        # sftp connection header
         connection_header = QHBoxLayout()
         self.connection_toggle = QToolButton()
         self.connection_toggle.setText("Connection settings")
@@ -700,6 +701,7 @@ class RasconfManager(QMainWindow):
         sftp_layout.addLayout(source_row)
 
         self.local_tree = self.create_tree("Local source files")
+        self.local_tree.itemExpanded.connect(self.on_local_item_expanded)
         self.remote_tree = self.create_tree("Remote /www_rasconf")
         self.remote_tree.setEnabled(False)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -751,6 +753,7 @@ class RasconfManager(QMainWindow):
         terminal_actions.addStretch(1)
         ssh_layout.addLayout(terminal_actions)
 
+        # Using QTextEdit to allow parsing and rendering of HTML <span> styled ANSI colors
         self.terminal_output = QTextEdit()
         self.terminal_output.setReadOnly(True)
         self.terminal_output.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
@@ -774,7 +777,7 @@ class RasconfManager(QMainWindow):
         ssh_layout.addLayout(terminal_input_row)
         self.tabs.addTab(ssh_page, "SSH")
 
-        # Rasconf web interface
+        # --- Web Interface Tab ---
         web_page = QWidget()
         web_layout = QVBoxLayout(web_page)
         
@@ -971,7 +974,7 @@ class RasconfManager(QMainWindow):
         self.store_password()
         self.save_app_config()
 
-        self.worker = SftpWorker(operation, settings, options or {})
+        self.worker = SftpWorker(operation, settings, options or {}, parent=self)
         self.worker.progress.connect(self.log)
         self.worker.succeeded.connect(self.operation_succeeded)
         self.worker.failed.connect(self.operation_failed)
@@ -983,6 +986,7 @@ class RasconfManager(QMainWindow):
     def append_terminal_output(self, text: str) -> None:
         """Parses standard ANSI escape codes and appends formatted HTML to the terminal"""
         text = re.sub(r'\x1b\][0-9;]*[^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
+        
         parts = re.split(r'\x1b\[([\d;]*)m', text)
         
         cursor = self.terminal_output.textCursor()
@@ -995,6 +999,7 @@ class RasconfManager(QMainWindow):
                 chunk = re.sub(r'[\x07\x08\r]', '', chunk)
                 
                 if chunk:
+                    # Escape HTML operators before injecting
                     chunk = chunk.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
                     chunk = chunk.replace('\n', '<br>')
                     chunk = chunk.replace(' ', '&nbsp;')
@@ -1044,7 +1049,7 @@ class RasconfManager(QMainWindow):
             f"Connecting to {settings['username']}@{settings['host']}:{settings['port']}..."
         )
         self.current_term_color = "#e0e0e0"
-        self.shell_worker = SSHShellWorker(settings)
+        self.shell_worker = SSHShellWorker(settings, parent=self)
         self.shell_worker.connected.connect(self.shell_connected)
         self.shell_worker.received.connect(self.append_terminal_output)
         self.shell_worker.failed.connect(self.shell_failed)
@@ -1067,7 +1072,9 @@ class RasconfManager(QMainWindow):
         self.shell_connect_button.setEnabled(True)
         self.shell_disconnect_button.setEnabled(False)
         self.terminal_send_button.setEnabled(False)
-        self.shell_worker = None
+        if self.shell_worker is not None:
+            self.shell_worker.deleteLater()
+            self.shell_worker = None
 
     def disconnect_shell(self, _checked: bool = False) -> None:
         if self.shell_worker is not None:
@@ -1106,7 +1113,9 @@ class RasconfManager(QMainWindow):
 
     def operation_finished(self) -> None:
         self.set_busy(False)
-        self.worker = None
+        if self.worker is not None:
+            self.worker.deleteLater()
+            self.worker = None
 
     def log(self, message: str) -> None:
         self.log_output.append(message)
@@ -1129,6 +1138,14 @@ class RasconfManager(QMainWindow):
         self.populate_local_children(root_item, source)
         root_item.setExpanded(True)
 
+    def on_local_item_expanded(self, item: QTreeWidgetItem) -> None:
+        if item.childCount() == 1 and item.child(0).text(0) == "Loading...":
+            item.takeChildren()
+            source = Path(self.source_input.text()).expanduser().resolve()
+            relative = item.data(0, Qt.ItemDataRole.UserRole)
+            dir_path = (source / relative).resolve() if relative else source
+            self.populate_local_children(item, dir_path)
+
     def populate_local_children(self, parent_item: QTreeWidgetItem, directory: Path) -> None:
         try:
             children = sorted(directory.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))
@@ -1145,11 +1162,12 @@ class RasconfManager(QMainWindow):
                 continue
             item = QTreeWidgetItem([child.name])
             item.setData(0, Qt.ItemDataRole.UserRole, relative)
-            icon = self.style().StandardPixmap.SP_DirIcon if child.is_dir() else self.style().StandardPixmap.SP_FileIcon
-            item.setIcon(0, self.style().standardIcon(icon))
-            parent_item.addChild(item)
             if child.is_dir():
-                self.populate_local_children(item, child)
+                item.setIcon(0, self.style().standardIcon(self.style().StandardPixmap.SP_DirIcon))
+                item.addChild(QTreeWidgetItem(["Loading..."]))
+            else:
+                item.setIcon(0, self.style().standardIcon(self.style().StandardPixmap.SP_FileIcon))
+            parent_item.addChild(item)
 
     def populate_remote_tree(self, entries: list[dict]) -> None:
         self.remote_tree.clear()
@@ -1183,7 +1201,16 @@ class RasconfManager(QMainWindow):
             self.save_app_config()
 
     def choose_source(self, _checked: bool = False) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Choose local source", self.source_input.text())
+        start_dir = self.source_input.text()
+        if not Path(start_dir).is_dir():
+            start_dir = str(Path.home())
+            
+        path = QFileDialog.getExistingDirectory(
+            self, 
+            "Choose local source", 
+            start_dir,
+            QFileDialog.Option.ShowDirsOnly
+        )
         if path:
             self.source_input.setText(path)
             self.save_app_config()
@@ -1247,10 +1274,6 @@ class RasconfManager(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
-    
-    icon_path = RESOURCE_DIR / "icon.png"
-    app.setWindowIcon(QIcon(str(icon_path)))
-    
     window = RasconfManager()
     window.show()
     return app.exec()
