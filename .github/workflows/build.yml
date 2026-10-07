@@ -32,6 +32,7 @@ jobs:
       working-directory: "utils/update util"
       run: |
         python -m pip install --upgrade pip
+        pip install pyinstaller Pillow
         pip install -r requirements.txt
         pip install pyinstaller
 
