@@ -15,8 +15,7 @@ from pathlib import Path, PurePosixPath
 
 import keyring
 import paramiko
-from PyQt6.QtGui import QFont, QTextCursor
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont, QTextCursor, QIcon
 from pathspec import GitIgnoreSpec
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -47,22 +46,21 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).parent
+    RESOURCE_DIR = Path(sys._MEIPASS)
+    REPOSITORY_ROOT = BASE_DIR
+else:
+    BASE_DIR = Path(__file__).resolve().parent
+    RESOURCE_DIR = BASE_DIR
+    REPOSITORY_ROOT = BASE_DIR.parents[2] if len(BASE_DIR.parents) >= 2 else BASE_DIR
+
 DEFAULT_SOURCE = REPOSITORY_ROOT / "src" / "www_rasconf"
 KNOWN_HOSTS_FILE = Path.home() / ".ssh" / "known_hosts_rasconf"
 KEYRING_SERVICE = "rasconf-sftp-manager"
-if getattr(sys, 'frozen', False):
-    BASE_DIR = Path(sys.executable).parent
-else:
-    BASE_DIR = Path(__file__).parent
-
 APP_CONFIG_FILE = BASE_DIR / "config.json"
-if getattr(sys, 'frozen', False):
-    RESOURCE_DIR = Path(sys._MEIPASS)
-else:
-    RESOURCE_DIR = Path(__file__).parent
-
 APP_CONFIG_EXAMPLE_FILE = RESOURCE_DIR / "config.example.json"
+
 DEFAULT_APP_CONFIG = {
     "host": "192.168.1.1",
     "port": 22,
@@ -73,6 +71,7 @@ DEFAULT_APP_CONFIG = {
     "trust_unknown_host": False,
     "deploy_ignore": [],
 }
+
 APP_STYLESHEET = """
 QWidget {
     background-color: #121212;
@@ -1248,8 +1247,10 @@ class RasconfManager(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
-    icon_path = Path(__file__).parent / "icon.png"
+    
+    icon_path = RESOURCE_DIR / "icon.png"
     app.setWindowIcon(QIcon(str(icon_path)))
+    
     window = RasconfManager()
     window.show()
     return app.exec()

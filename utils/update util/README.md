@@ -1,6 +1,9 @@
 # rasconf SFTP Manager
 
-compile with :```pyinstaller --noconfirm --onefile --windowed --icon="favicon.ico" --add-data="favicon.ico;." --add-data="config.example.json;." rasconf_manager.py```
+compile with :
+`
+pyinstaller --windowed --noconfirm --onefile --hidden-import secretstorage --hidden-import jeepney --icon="icon.png" --add-data="icon.png:." --add-data="config.example.json:." rasconf_manager.py
+`
 
 ## Local settings
 
