@@ -7,3 +7,6 @@ local tools
 *hash.file
 *.priv
 *__pycache__
+*config.json
+*rasconf_manager.log
+*command_history.json

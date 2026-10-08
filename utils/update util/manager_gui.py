@@ -1838,8 +1838,8 @@ class RasconfManager(QMainWindow):
             "<b>Rasconf Manager</b><br>"
             "Manage the rasconf web interface over SSH/SFTP.<br>"
             "+ LuCI embeded page<br><br>"
-            'GitHub: <a href="{repo}">{repo}</a><br>'
-            'License: <a href="{license}">MIT License</a><br><br>'
+            'GitHub: <a href="{repo}" style="color: #c51a4a">{repo}</a><br>'
+            'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'
             "Copyright &copy; 2026 fligma. Licensed under the MIT License.".format(
                 repo=PROJECT_GITHUB_URL, license=PROJECT_LICENSE_URL
             )
@@ -1848,7 +1848,6 @@ class RasconfManager(QMainWindow):
             Qt.TextInteractionFlag.TextBrowserInteraction
         )
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        box.linkActivated.connect(lambda url: QDesktopServices.openUrl(QUrl(url)))
         box.exec()
 
     def closeEvent(self, event) -> None:
