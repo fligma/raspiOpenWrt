@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 from manager_const import (
     APP_CONFIG_EXAMPLE_FILE,
@@ -24,9 +25,6 @@ from manager_const import (
 
 def _coerce_int(value, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
     """Turn anything read from JSON into an int inside [minimum, maximum].
-
-    Never raises: a missing or malformed value falls back to `default`, which
-    keeps a hand-edited config file from breaking startup.
     """
     try:
         result = int(value)
@@ -103,6 +101,92 @@ def _sync_flat_mirror(config: dict) -> dict:
     return config
 
 
+# ---------------------------------------------------------------------------
+# Web tabs: url building, migration from the legacy keys, and normalisation
+# ---------------------------------------------------------------------------
+
+def web_tab_url(tab: dict, default_host: str) -> str:
+    """Build the URL for one configurable tab.
+
+    A blank ip means "follow the active profile host", so a tab can track the
+    device the user is connected to. The port is omitted when it already matches
+    the scheme default to keep the address tidy.
+    """
+    scheme = str(tab.get("scheme") or "http").lower()
+    host = str(tab.get("ip") or "").strip() or (default_host or "127.0.0.1")
+    port = _coerce_int(tab.get("port"), 80, 1, 65535)
+    path = str(tab.get("path") or "/")
+    if not path.startswith("/"):
+        path = "/" + path
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        return f"{scheme}://{host}{path}"
+    return f"{scheme}://{host}:{port}{path}"
+
+
+def _normalize_web_tab(raw: dict) -> dict | None:
+    """Validate a single tab entry, dropping it if it has no usable name."""
+    if not isinstance(raw, dict):
+        return None
+    name = str(raw.get("name") or "").strip()
+    if not name:
+        return None
+    scheme = str(raw.get("scheme") or "http").strip().lower()
+    if scheme not in ("http", "https"):
+        scheme = "http"
+    return {
+        "name": name,
+        "ip": str(raw.get("ip") or "").strip(),
+        "port": _coerce_int(raw.get("port"), 80, 1, 65535),
+        "path": str(raw.get("path") or "/").strip() or "/",
+        "scheme": scheme,
+    }
+
+
+def _normalize_web_tabs(config: dict) -> dict:
+    tabs = config.get("web_tabs")
+    if not isinstance(tabs, list):
+        tabs = []
+    cleaned = []
+    for raw in tabs:
+        tab = _normalize_web_tab(raw)
+        if tab is not None:
+            cleaned.append(tab)
+    if not cleaned:
+        cleaned = json.loads(json.dumps(DEFAULT_APP_CONFIG["web_tabs"]))
+    config["web_tabs"] = cleaned
+    return config
+
+
+def _migrate_web_tabs(config: dict) -> dict:
+    """Seed web_tabs from the legacy web_port/web_path/luci_url keys.
+
+    Only used when a config file predates the tab list, so an existing setup
+    keeps its exact addresses: the Web Interface follows the profile host, while
+    LuCI keeps whatever host its stored URL pointed at.
+    """
+    luci = urlparse(str(config.get("luci_url", "http://192.168.1.1/")))
+    luci_host = luci.hostname or ""
+    luci_port = luci.port or (443 if luci.scheme == "https" else 80)
+    luci_path = luci.path or "/"
+    config["web_tabs"] = [
+        {
+            "name": "Web Interface",
+            "ip": "",
+            "port": _coerce_int(config.get("web_port"), 8989, 1, 65535),
+            "path": str(config.get("web_path", "/cgi-bin/index.py")),
+            "scheme": "http",
+        },
+        {
+            "name": "LuCI",
+            "ip": luci_host,
+            "port": luci_port,
+            "path": luci_path,
+            "scheme": luci.scheme or "http",
+        },
+    ]
+    return config
+
+
 def load_app_config() -> dict:
     """Load config.json (or the shipped example), then normalise every key.
 
@@ -111,6 +195,7 @@ def load_app_config() -> dict:
     """
     config = json.loads(json.dumps(DEFAULT_APP_CONFIG))  # deep copy
     # A real config wins over the example; if neither parses we keep defaults.
+    had_web_tabs = False
     for config_path in (APP_CONFIG_FILE, APP_CONFIG_EXAMPLE_FILE):
         if not config_path.is_file():
             continue
@@ -119,11 +204,17 @@ def load_app_config() -> dict:
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(loaded, dict):
+            had_web_tabs = isinstance(loaded.get("web_tabs"), list)
             config.update(loaded)
             break
 
     config = _migrate_legacy_config(config)
     config = _sync_flat_mirror(config)
+    # A config that predates the tab list keeps its old addresses by rebuilding
+    # web_tabs from the legacy keys; newer files are just type-checked.
+    if not had_web_tabs:
+        config = _migrate_web_tabs(config)
+    config = _normalize_web_tabs(config)
 
     # A source path from another machine is useless - fall back to the repo,
     # then to the home directory, so the local tree is never empty by accident.
@@ -140,6 +231,8 @@ def load_app_config() -> dict:
     config["terminal_history_limit"] = _coerce_int(config.get("terminal_history_limit"), 500, 20, 5000)
     config["web_port"] = _coerce_int(config.get("web_port"), 8989, 1, 65535)
     config["keep_last_n_backups"] = _coerce_int(config.get("keep_last_n_backups"), 5, 0, 100)
+    config["reboot_wait_seconds"] = _coerce_int(config.get("reboot_wait_seconds"), 30, 0, 600)
+    config["reboot_retry_interval"] = _coerce_int(config.get("reboot_retry_interval"), 10, 1, 300)
     config["default_tab"] = str(config.get("default_tab", "SFTP"))
     config["backup_directory"] = str(config.get("backup_directory", "/tmp/rasconf_backups"))
     config["local_backup_directory"] = str(config.get("local_backup_directory", str(BASE_DIR / "backups")))
@@ -162,7 +255,15 @@ def load_app_config() -> dict:
             sanitized_quick.append({"label": str(entry.get("label", entry["command"])), "command": str(entry["command"])})
     config["quick_commands"] = sanitized_quick
 
-    for key in ("confirm_destructive", "show_hidden_files", "auto_connect"):
+    for key in (
+        "confirm_destructive",
+        "show_hidden_files",
+        "auto_connect",
+        "use_alt_icon",
+        "sftp_enabled",
+        "ssh_enabled",
+        "reboot_auto_watch",
+    ):
         config[key] = bool(config.get(key, DEFAULT_APP_CONFIG[key]))
 
     # The old single "backup before deploy" switch became two independent ones;

@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 import keyring
 import paramiko
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QEvent
-from PyQt6.QtGui import QAction, QFont, QIcon, QKeySequence, QTextCursor, QDesktopServices
+from PyQt6.QtGui import QAction, QFont, QIcon, QKeySequence, QPixmap, QTextCursor, QDesktopServices
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -84,11 +84,13 @@ from manager_const import (
 from manager_config import (
     _coerce_int,
     _migrate_legacy_config,
+    _normalize_web_tabs,
     _sync_flat_mirror,
     load_app_config,
     load_command_history,
     save_app_config_static,
     save_command_history,
+    web_tab_url,
 )
 from manager_net import (
     create_ssh_client,
@@ -100,8 +102,8 @@ from manager_net import (
     remote_join,
     safe_relative_path,
 )
-from manager_workers import RemoteExecWorker, SftpWorker, SSHShellWorker
-from manager_dialogs import DryRunDialog, StringListDialog
+from manager_workers import RemoteExecWorker, RebootWaitWorker, SftpWorker, SSHShellWorker
+from manager_dialogs import DryRunDialog, StringListDialog, TabEditDialog
 
 
 class RasconfManager(QMainWindow):
@@ -110,6 +112,7 @@ class RasconfManager(QMainWindow):
         self.worker: SftpWorker | None = None
         self.shell_worker: SSHShellWorker | None = None
         self.exec_worker: RemoteExecWorker | None = None
+        self.reboot_worker: RebootWaitWorker | None = None
         self.remote_tree_entries: list[dict] = []
         self.app_config = load_app_config()
         self.current_term_color = "#e0e0e0"
@@ -127,11 +130,16 @@ class RasconfManager(QMainWindow):
         self.build_menu()
         self.build_ui()
         self.apply_runtime_settings()
+        self.apply_window_icon()
         self.refresh_local_tree()
 
         if self.app_config.get("auto_connect"):
             self.toggle_connection_panel(False)
-            QTimer.singleShot(400, self.connect_remote)
+            # Prefer SFTP; when its tab is switched off fall back to SSH if enabled.
+            if self.app_config.get("sftp_enabled", True):
+                QTimer.singleShot(400, self.connect_remote)
+            elif self.app_config.get("ssh_enabled", True):
+                QTimer.singleShot(400, self.connect_shell)
 
     def build_menu(self) -> None:
         menubar = self.menuBar()
@@ -204,6 +212,13 @@ class RasconfManager(QMainWindow):
         self.action_fullscreen.setShortcut(QKeySequence("F11"))
         self.action_fullscreen.toggled.connect(self.set_fullscreen)
         view_menu.addAction(self.action_fullscreen)
+        view_menu.addSeparator()
+        self.action_alt_icon = QAction("Alternate icon", self)
+        self.action_alt_icon.setCheckable(True)
+        self.action_alt_icon.setChecked(bool(self.app_config.get("use_alt_icon", False)))
+        self.action_alt_icon.setToolTip("Switch between the default and alternate toolbar icon")
+        self.action_alt_icon.toggled.connect(self.toggle_window_icon)
+        view_menu.addAction(self.action_alt_icon)
 
         tools_menu = menubar.addMenu("&Tools")
         self.action_edit_ignores = QAction("Edit deploy ignore patterns...", self)
@@ -256,7 +271,10 @@ class RasconfManager(QMainWindow):
         self.connection_toggle.setCheckable(True)
         self.connection_toggle.setChecked(True)
         self.connection_toggle.toggled.connect(self.toggle_connection_panel)
+        self.header_icon = QLabel()
+        self.header_icon.setToolTip("Rasconf Manager")
         header_row = QHBoxLayout()
+        header_row.addWidget(self.header_icon)
         header_row.addWidget(self.connection_toggle)
         self.status_dot = QLabel("\u25CF")
         self.status_dot.setObjectName("statusDotOffline")
@@ -340,8 +358,8 @@ class RasconfManager(QMainWindow):
 
         self.build_sftp_tab()
         self.build_ssh_tab()
-        self.build_web_tab()
-        self.build_luci_tab()
+        self._web_tab_entries = []  # each: {page, url_input, view, tab}
+        self.build_web_tabs()
         self.build_settings_tab()
 
         for field in (
@@ -453,6 +471,7 @@ class RasconfManager(QMainWindow):
         self.log_output.setMaximumHeight(130)
         sftp_layout.addWidget(self.log_output)
         self.tabs.addTab(sftp_page, "SFTP")
+        self.sftp_page = sftp_page
 
         shortcut_deploy = QAction(self)
         shortcut_deploy.setShortcut(QKeySequence("Ctrl+D"))
@@ -475,9 +494,23 @@ class RasconfManager(QMainWindow):
         self.shell_disconnect_button.clicked.connect(self.disconnect_shell)
         clear_button = QPushButton("Clear")
         clear_button.clicked.connect(self.clear_terminal)
+        self.reboot_button = QPushButton("Reboot device")
+        self.reboot_button.setObjectName("dangerAction")
+        self.reboot_button.setToolTip(
+            "Send reboot over SSH, wait the configured downtime, then retry the "
+            "connection until the device answers (waits are set in the Settings tab)"
+        )
+        self.reboot_button.clicked.connect(self.reboot_device)
+        self.reboot_cancel_button = QPushButton("Cancel reboot wait")
+        self.reboot_cancel_button.setObjectName("dangerAction")
+        self.reboot_cancel_button.setToolTip("Stop waiting for the device to come back")
+        self.reboot_cancel_button.setEnabled(False)
+        self.reboot_cancel_button.clicked.connect(self.cancel_reboot_watch)
         terminal_actions.addWidget(self.shell_connect_button)
         terminal_actions.addWidget(self.shell_disconnect_button)
         terminal_actions.addWidget(clear_button)
+        terminal_actions.addWidget(self.reboot_button)
+        terminal_actions.addWidget(self.reboot_cancel_button)
         terminal_actions.addStretch(1)
         ssh_layout.addLayout(terminal_actions)
 
@@ -508,6 +541,7 @@ class RasconfManager(QMainWindow):
         terminal_input_row.addWidget(self.terminal_send_button)
         ssh_layout.addLayout(terminal_input_row)
         self.tabs.addTab(ssh_page, "SSH")
+        self.ssh_page = ssh_page
 
         history_prev = QAction(self)
         history_prev.setShortcut(QKeySequence("Ctrl+Up"))
@@ -539,6 +573,11 @@ class RasconfManager(QMainWindow):
         settings = self.current_settings(silent=True)
         if settings is None:
             return
+        if self._looks_like_reboot(command):
+            # A one-off exec would just die mid-reboot; use the reboot flow so
+            # the tool waits and reconnects afterwards.
+            self.reboot_device()
+            return
         if self.exec_worker is not None and self.exec_worker.isRunning():
             QMessageBox.information(self, "Busy", "Another command is still running.")
             return
@@ -546,7 +585,7 @@ class RasconfManager(QMainWindow):
         self.exec_worker.log.connect(self.log)
         self.exec_worker.finished_ok.connect(lambda: self.statusBar().showMessage("Quick command completed", 4000))
         self.exec_worker.failed.connect(lambda msg: QMessageBox.critical(self, "Command failed", msg))
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentWidget(self.sftp_page)
         self.log(f"Running quick command: {command}")
         self.exec_worker.start()
 
@@ -568,7 +607,7 @@ class RasconfManager(QMainWindow):
         save_command_history([])
         self.log("Terminal command history cleared")
 
-    def _build_web_like_tab(self, initial_url: str, title: str):
+    def _build_web_like_tab(self, initial_url: str, title: str, position: int | None = None):
         page = QWidget()
         layout = QVBoxLayout(page)
         controls = QHBoxLayout()
@@ -580,6 +619,11 @@ class RasconfManager(QMainWindow):
         controls.addWidget(go_button)
         controls.addWidget(home_button)
         layout.addLayout(controls)
+
+        def add_tab() -> int:
+            if position is None:
+                return self.tabs.addTab(page, title)
+            return self.tabs.insertTab(position, page, title)
 
         if QWebEngineView is None:
             notice = QLabel(
@@ -594,39 +638,76 @@ class RasconfManager(QMainWindow):
             open_btn.clicked.connect(lambda: os.startfile(url_input.text()) if hasattr(os, "startfile") else None)
             layout.addWidget(open_btn)
             go_button.clicked.connect(lambda: None)
-            self.tabs.addTab(page, title)
-            return url_input, None
+            add_tab()
+            return url_input, None, page
 
         view = QWebEngineView()
+        add_tab()
 
         def load_url():
             view.setUrl(QUrl(url_input.text()))
 
         def go_home():
-            url_input.setText(initial_url)
+            url_input.setText(web_tab_url(self._tab_def_for(url_input), self.app_config.get("host", "192.168.1.1")))
             load_url()
 
         go_button.clicked.connect(load_url)
         home_button.clicked.connect(go_home)
         url_input.returnPressed.connect(load_url)
+
+        def apply_tab_icon(icon):
+            if not icon.isNull():
+                idx = self.tabs.indexOf(page)
+                if idx >= 0:
+                    self.tabs.setTabIcon(idx, icon)
+
+        view.page().iconChanged.connect(apply_tab_icon)
+
         layout.addWidget(view, 1)
-        self.tabs.addTab(page, title)
-        return url_input, view
+        return url_input, view, page
 
-    def build_web_tab(self) -> None:
-        host = self.app_config.get("host", "192.168.1.1")
-        port = int(self.app_config.get("web_port", 8989))
-        path = self.app_config.get("web_path", "/cgi-bin/index.py")
-        url = f"http://{host}:{port}{path}"
-        self.web_url_input, self.web_view = self._build_web_like_tab(url, "Web Interface")
-        if self.web_view is not None:
-            QTimer.singleShot(200, lambda: self.web_view.setUrl(QUrl(self.web_url_input.text())))
+    def _tab_def_for(self, url_input: QLineEdit) -> dict:
+        """Look up the stored tab definition that owns the given url input."""
+        for entry in getattr(self, "_web_tab_entries", []):
+            if entry["url_input"] is url_input:
+                return entry["tab"]
+        return {}
 
-    def build_luci_tab(self) -> None:
-        url = self.app_config.get("luci_url", "http://192.168.1.1/")
-        self.luci_url_input, self.luci_view = self._build_web_like_tab(url, "LuCI")
-        if self.luci_view is not None:
-            QTimer.singleShot(200, lambda: self.luci_view.setUrl(QUrl(self.luci_url_input.text())))
+    def build_web_tabs(self) -> None:
+        """Create one browser tab per entry in config['web_tabs']."""
+        default_host = self.app_config.get("host", "192.168.1.1")
+        self._web_tab_entries = []
+        for tab in self.app_config.get("web_tabs", []):
+            self._add_web_tab(tab, default_host)
+
+    def _add_web_tab(self, tab: dict, default_host: str, position: int | None = None) -> None:
+        url = web_tab_url(tab, default_host)
+        url_input, view, page = self._build_web_like_tab(url, tab.get("name", "Tab"), position)
+        self._web_tab_entries.append({"page": page, "url_input": url_input, "view": view, "tab": tab})
+        if view is not None:
+            QTimer.singleShot(200, lambda v=view, u=url_input: v.setUrl(QUrl(u.text())))
+
+    def rebuild_web_tabs(self) -> None:
+        """Recreate every configurable tab from the current config, keeping them
+        in front of the Settings tab. Used after adding, editing or removing one."""
+        for entry in getattr(self, "_web_tab_entries", []):
+            idx = self.tabs.indexOf(entry["page"])
+            if idx >= 0:
+                self.tabs.removeTab(idx)
+                entry["page"].deleteLater()
+        self._web_tab_entries = []
+        default_host = self.app_config.get("host", "192.168.1.1")
+        settings_index = self.tabs.indexOf(self.settings_page)
+        position = settings_index if settings_index >= 0 else self.tabs.count()
+        for tab in self.app_config.get("web_tabs", []):
+            self._add_web_tab(tab, default_host, position)
+            position += 1
+
+    def refresh_web_tab_urls(self) -> None:
+        """Re-point host-following tabs at the active profile host without a reload."""
+        default_host = self.app_config.get("host", "192.168.1.1")
+        for entry in getattr(self, "_web_tab_entries", []):
+            entry["url_input"].setText(web_tab_url(entry["tab"], default_host))
 
     def _make_toggle_group(self, title: str, checked: bool) -> tuple[QGroupBox, QFormLayout]:
         """Return a checkable group box whose indented body hides when the toggle is off."""
@@ -645,6 +726,26 @@ class RasconfManager(QMainWindow):
         group.toggled.connect(body.setVisible)
         return group, form
 
+    def _make_category(self, title: str, checked: bool, tip: str = "") -> tuple[QGroupBox, QVBoxLayout]:
+        """A top-level Settings category. When checkable and unticked its whole
+        body collapses; the caller wires the state to the matching tab."""
+        group = QGroupBox(title)
+        if tip:
+            group.setToolTip(tip)
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(16, 12, 12, 10)
+        outer.setSpacing(10)
+        body = QWidget()
+        vbox = QVBoxLayout(body)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(8)
+        outer.addWidget(body)
+        group.setCheckable(True)
+        group.setChecked(checked)
+        body.setVisible(checked)
+        group.toggled.connect(body.setVisible)
+        return group, vbox
+
     def build_settings_tab(self) -> None:
         page = QWidget()
         outer = QVBoxLayout(page)
@@ -654,43 +755,36 @@ class RasconfManager(QMainWindow):
         vbox = QVBoxLayout(inner)
         vbox.setSpacing(16)
 
-        iface_group = QGroupBox("Interface & connection")
-        iface_form = QFormLayout(iface_group)
-        iface_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        iface_form.setHorizontalSpacing(12)
-        iface_form.setVerticalSpacing(8)
-
-        self.web_port_input = QSpinBox()
-        self.web_port_input.setRange(1, 65535)
-        self.web_port_input.setValue(int(self.app_config.get("web_port", 8989)))
-        iface_form.addRow("Web interface port", self.web_port_input)
-
-        self.web_path_input = QLineEdit(self.app_config.get("web_path", "/cgi-bin/index.py"))
-        iface_form.addRow("Web interface path", self.web_path_input)
-
-        self.luci_url_field = QLineEdit(self.app_config.get("luci_url", "http://192.168.1.1/"))
-        iface_form.addRow("LuCI URL", self.luci_url_field)
+        # --- Startup & defaults (always shown) ---
+        startup_group = QGroupBox("Startup & defaults")
+        startup_form = QFormLayout(startup_group)
+        startup_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        startup_form.setHorizontalSpacing(12)
+        startup_form.setVerticalSpacing(8)
 
         self.default_tab_combo = QComboBox()
-        self.default_tab_combo.addItems(["SFTP", "SSH", "Web Interface", "LuCI", "Settings"])
-        idx = self.default_tab_combo.findText(self.app_config.get("default_tab", "SFTP"))
-        self.default_tab_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        iface_form.addRow("Default tab", self.default_tab_combo)
+        self.default_tab_combo.setToolTip("Tab selected when the app starts (only visible tabs are listed).")
+        startup_form.addRow("Default tab", self.default_tab_combo)
 
         self.auto_connect_check = QCheckBox("Connect automatically at startup")
+        self.auto_connect_check.setToolTip(
+            "Connects over SFTP when the SFTP tab is ticked, otherwise falls back to SSH "
+            "if the SSH tab is enabled."
+        )
         self.auto_connect_check.setChecked(bool(self.app_config.get("auto_connect", False)))
-        iface_form.addRow(self.auto_connect_check)
+        startup_form.addRow(self.auto_connect_check)
+        vbox.addWidget(startup_group)
+
+        # --- SFTP tab (can be switched off) and its related settings ---
+        self.sftp_group, sftp_body = self._make_category(
+            "SFTP", bool(self.app_config.get("sftp_enabled", True)),
+            "Show the SFTP file-transfer tab. Untick to hide it; with auto-connect it "
+            "falls back to SSH when SSH is enabled.",
+        )
 
         self.confirm_destructive_check = QCheckBox("Confirm destructive operations (delete, mirror)")
         self.confirm_destructive_check.setChecked(bool(self.app_config.get("confirm_destructive", True)))
-        iface_form.addRow(self.confirm_destructive_check)
-
-        self.terminal_font_spin = QSpinBox()
-        self.terminal_font_spin.setRange(6, 24)
-        self.terminal_font_spin.setValue(int(self.app_config.get("terminal_font_size", 10)))
-        iface_form.addRow("Terminal font size", self.terminal_font_spin)
-
-        vbox.addWidget(iface_group)
+        sftp_body.addWidget(self.confirm_destructive_check)
 
         self.logging_group, log_form = self._make_toggle_group(
             "Enable logging to file", bool(self.app_config.get("logging_enabled", True))
@@ -703,7 +797,7 @@ class RasconfManager(QMainWindow):
         log_path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         log_path_label.setStyleSheet("color: #aaaaaa;")
         log_form.addRow("Log file", log_path_label)
-        vbox.addWidget(self.logging_group)
+        sftp_body.addWidget(self.logging_group)
 
         self.remote_backup_group, remote_form = self._make_toggle_group(
             "Backup remote files before deploy",
@@ -717,7 +811,7 @@ class RasconfManager(QMainWindow):
         self.keep_backups_spin.setValue(int(self.app_config.get("keep_last_n_backups", 5)))
         self.keep_backups_spin.setToolTip("Older backups beyond this count are deleted (0 = keep all)")
         remote_form.addRow("Keep last N backups", self.keep_backups_spin)
-        vbox.addWidget(self.remote_backup_group)
+        sftp_body.addWidget(self.remote_backup_group)
 
         self.local_backup_group, local_form = self._make_toggle_group(
             "Save a copy of the remote to this PC before deploy",
@@ -731,7 +825,7 @@ class RasconfManager(QMainWindow):
         browse_local = QPushButton("Browse...")
         browse_local.clicked.connect(self.choose_local_backup_dir)
         local_form.addRow("", browse_local)
-        vbox.addWidget(self.local_backup_group)
+        sftp_body.addWidget(self.local_backup_group)
 
         self.mirror_group, mirror_form = self._make_toggle_group(
             "Mirror cleanup on deploy (destructive)",
@@ -754,31 +848,180 @@ class RasconfManager(QMainWindow):
         )
         self.mirror_delete_local_check.setChecked(bool(self.app_config.get("mirror_delete_local", False)))
         mirror_form.addRow(self.mirror_delete_local_check)
-        vbox.addWidget(self.mirror_group)
+        sftp_body.addWidget(self.mirror_group)
 
-        vbox.addStretch(1)
-        scroll.setWidget(inner)
-        outer.addWidget(scroll)
-
-        buttons_row = QHBoxLayout()
+        sftp_edit_row = QHBoxLayout()
         edit_ignores_btn = QPushButton("Edit deploy ignore patterns...")
         edit_ignores_btn.clicked.connect(self.edit_ignore_patterns)
         edit_post_btn = QPushButton("Edit post-deploy commands...")
         edit_post_btn.clicked.connect(self.edit_post_deploy_commands)
+        sftp_edit_row.addWidget(edit_ignores_btn)
+        sftp_edit_row.addWidget(edit_post_btn)
+        sftp_edit_row.addStretch(1)
+        sftp_body.addLayout(sftp_edit_row)
+        vbox.addWidget(self.sftp_group)
+
+        # --- SSH tab (can be switched off) and its related settings ---
+        self.ssh_group, ssh_body = self._make_category(
+            "SSH", bool(self.app_config.get("ssh_enabled", True)),
+            "Show the SSH terminal tab. Untick to hide it.",
+        )
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("Terminal font size"))
+        self.terminal_font_spin = QSpinBox()
+        self.terminal_font_spin.setRange(6, 24)
+        self.terminal_font_spin.setValue(int(self.app_config.get("terminal_font_size", 10)))
+        font_row.addWidget(self.terminal_font_spin)
+        font_row.addStretch(1)
+        ssh_body.addLayout(font_row)
+
+        reboot_form = QFormLayout()
+        reboot_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        reboot_form.setHorizontalSpacing(12)
+        reboot_form.setVerticalSpacing(8)
+        self.reboot_wait_spin = QSpinBox()
+        self.reboot_wait_spin.setRange(0, 600)
+        self.reboot_wait_spin.setSuffix(" s")
+        self.reboot_wait_spin.setValue(int(self.app_config.get("reboot_wait_seconds", 30)))
+        self.reboot_wait_spin.setToolTip(
+            "Time allowed for the device to go down before the first reconnect attempt"
+        )
+        reboot_form.addRow("Wait before first retry", self.reboot_wait_spin)
+        self.reboot_retry_spin = QSpinBox()
+        self.reboot_retry_spin.setRange(1, 300)
+        self.reboot_retry_spin.setSuffix(" s")
+        self.reboot_retry_spin.setValue(int(self.app_config.get("reboot_retry_interval", 10)))
+        self.reboot_retry_spin.setToolTip("Seconds between reconnect attempts until the device answers")
+        reboot_form.addRow("Retry every", self.reboot_retry_spin)
+        self.reboot_auto_watch_check = QCheckBox("Offer to watch for the device after a reboot command")
+        self.reboot_auto_watch_check.setToolTip(
+            "Ask whether to start the wait-and-retry cycle when you send reboot "
+            "(or shutdown -r) from the terminal"
+        )
+        self.reboot_auto_watch_check.setChecked(bool(self.app_config.get("reboot_auto_watch", True)))
+        reboot_form.addRow(self.reboot_auto_watch_check)
+        ssh_body.addLayout(reboot_form)
+
         edit_quick_btn = QPushButton("Edit quick commands...")
         edit_quick_btn.clicked.connect(self.edit_quick_commands)
-        buttons_row.addWidget(edit_ignores_btn)
-        buttons_row.addWidget(edit_post_btn)
-        buttons_row.addWidget(edit_quick_btn)
-        outer.addLayout(buttons_row)
+        ssh_body.addWidget(edit_quick_btn)
+        vbox.addWidget(self.ssh_group)
+
+        # --- Custom browser tabs (always shown, cannot be switched off) ---
+        tabs_category = QGroupBox("Custom tabs")
+        tabs_category.setToolTip("Embedded browser tabs. These are always shown.")
+        tabs_body = QVBoxLayout(tabs_category)
+        tabs_body.setContentsMargins(16, 12, 12, 10)
+        self.tabs_combo = QComboBox()
+        self.tabs_combo.setToolTip("Embeddable browser tabs shown after the main tabs.")
+        add_tab_btn = QPushButton("Add...")
+        add_tab_btn.clicked.connect(self.add_web_tab)
+        edit_tab_btn = QPushButton("Edit")
+        edit_tab_btn.clicked.connect(self.edit_web_tab)
+        remove_tab_btn = QPushButton("Remove")
+        remove_tab_btn.setObjectName("dangerAction")
+        remove_tab_btn.clicked.connect(self.remove_web_tab)
+        tabs_row = QHBoxLayout()
+        tabs_row.addWidget(self.tabs_combo, 1)
+        tabs_row.addWidget(add_tab_btn)
+        tabs_row.addWidget(edit_tab_btn)
+        tabs_row.addWidget(remove_tab_btn)
+        tabs_body.addLayout(tabs_row)
+        vbox.addWidget(tabs_category)
+
+        vbox.addStretch(1)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll, 1)
 
         save_btn = QPushButton("Apply settings")
         save_btn.setObjectName("primaryAction")
         save_btn.clicked.connect(self.apply_settings_from_form)
         outer.addWidget(save_btn)
-        outer.addStretch(1)
 
         self.tabs.addTab(page, "Settings")
+        self.settings_page = page
+        self._reload_tabs_combo()
+        self._reload_default_tab_combo(select=self.app_config.get("default_tab", "SFTP"))
+        # Unticking the SFTP/SSH category hides the matching tab right away.
+        self.sftp_group.toggled.connect(self._on_tab_category_toggled)
+        self.ssh_group.toggled.connect(self._on_tab_category_toggled)
+
+    def _reload_tabs_combo(self, select: str | None = None) -> None:
+        """Fill the Settings 'Tabs' dropdown from the configurable tab list."""
+        self.tabs_combo.blockSignals(True)
+        self.tabs_combo.clear()
+        for tab in self.app_config.get("web_tabs", []):
+            self.tabs_combo.addItem(tab.get("name", ""))
+        if select:
+            idx = self.tabs_combo.findText(select)
+            if idx >= 0:
+                self.tabs_combo.setCurrentIndex(idx)
+        self.tabs_combo.blockSignals(False)
+
+    def _reload_default_tab_combo(self, select: str | None = None) -> None:
+        """List every real tab as the possible startup tab, keeping the choice."""
+        chosen = select or self.default_tab_combo.currentText() or self.app_config.get("default_tab", "SFTP")
+        self.default_tab_combo.blockSignals(True)
+        self.default_tab_combo.clear()
+        self.default_tab_combo.addItems([self.tabs.tabText(i) for i in range(self.tabs.count())])
+        idx = self.default_tab_combo.findText(chosen)
+        self.default_tab_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.default_tab_combo.blockSignals(False)
+
+    def add_web_tab(self) -> None:
+        dialog = TabEditDialog(
+            self, {"name": "", "ip": "", "port": 80, "path": "/", "scheme": "http"}, "Add tab"
+        )
+        if not dialog.exec():
+            return
+        tab = dialog.values()
+        if not tab["name"]:
+            QMessageBox.warning(self, "Missing name", "A display name is required.")
+            return
+        self.app_config.setdefault("web_tabs", []).append(tab)
+        self.save_app_config()
+        self._reload_tabs_combo(select=tab["name"])
+        self.rebuild_web_tabs()
+        self._reload_default_tab_combo()
+        self.log(f"Added tab '{tab['name']}'")
+
+    def edit_web_tab(self) -> None:
+        index = self.tabs_combo.currentIndex()
+        if index < 0:
+            return
+        dialog = TabEditDialog(self, self.app_config["web_tabs"][index], "Edit tab")
+        if not dialog.exec():
+            return
+        tab = dialog.values()
+        if not tab["name"]:
+            QMessageBox.warning(self, "Missing name", "A display name is required.")
+            return
+        self.app_config["web_tabs"][index] = tab
+        self.save_app_config()
+        self._reload_tabs_combo(select=tab["name"])
+        self.rebuild_web_tabs()
+        self._reload_default_tab_combo()
+        self.log(f"Updated tab '{tab['name']}'")
+
+    def remove_web_tab(self) -> None:
+        index = self.tabs_combo.currentIndex()
+        if index < 0:
+            return
+        name = self.tabs_combo.currentText()
+        answer = QMessageBox.question(
+            self, "Remove tab",
+            f"Remove the '{name}' tab? (This only hides it; the device is untouched.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.app_config["web_tabs"].pop(index)
+        self.save_app_config()
+        self._reload_tabs_combo()
+        self.rebuild_web_tabs()
+        self._reload_default_tab_combo()
+        self.log(f"Removed tab '{name}'")
 
     def update_backup_status_label(self) -> None:
         if hasattr(self, "mirror_status_label"):
@@ -806,9 +1049,6 @@ class RasconfManager(QMainWindow):
             self.local_backup_dir_input.setText(path)
 
     def apply_settings_from_form(self) -> None:
-        self.app_config["web_port"] = self.web_port_input.value()
-        self.app_config["web_path"] = self.web_path_input.text().strip() or "/cgi-bin/index.py"
-        self.app_config["luci_url"] = self.luci_url_field.text().strip()
         self.app_config["default_tab"] = self.default_tab_combo.currentText()
         self.app_config["auto_connect"] = self.auto_connect_check.isChecked()
         self.app_config["confirm_destructive"] = self.confirm_destructive_check.isChecked()
@@ -828,23 +1068,81 @@ class RasconfManager(QMainWindow):
             self.local_backup_dir_input.text().strip() or str(BASE_DIR / "backups")
         )
         self.app_config["keep_last_n_backups"] = self.keep_backups_spin.value()
+        self.app_config["sftp_enabled"] = self.sftp_group.isChecked()
+        self.app_config["ssh_enabled"] = self.ssh_group.isChecked()
+        self.app_config["reboot_wait_seconds"] = self.reboot_wait_spin.value()
+        self.app_config["reboot_retry_interval"] = self.reboot_retry_spin.value()
+        self.app_config["reboot_auto_watch"] = self.reboot_auto_watch_check.isChecked()
         self.save_app_config()
         self.apply_runtime_settings()
-        host = self.host_input.text().strip() or self.app_config.get("host", "192.168.1.1")
-        self.web_url_input.setText(f"http://{host}:{self.app_config['web_port']}{self.app_config['web_path']}")
-        self.luci_url_input.setText(self.app_config["luci_url"])
+        self.refresh_web_tab_urls()
         self.update_backup_status_label()
         self.log("Settings applied")
+
+    def _on_tab_category_toggled(self, _checked: bool = False) -> None:
+        """Persist the SFTP/SSH category state and show/hide the matching tab."""
+        self.app_config["sftp_enabled"] = self.sftp_group.isChecked()
+        self.app_config["ssh_enabled"] = self.ssh_group.isChecked()
+        self.save_app_config()
+        self.ensure_main_tabs()
+        self._reload_default_tab_combo(select=self.app_config.get("default_tab", "SFTP"))
+
+    def ensure_main_tabs(self) -> None:
+        """Add or remove the SFTP / SSH tabs to match the enabled flags. Custom
+        browser tabs and Settings are always present."""
+        sftp_on = bool(self.app_config.get("sftp_enabled", True))
+        ssh_on = bool(self.app_config.get("ssh_enabled", True))
+        self._set_main_tab(self.sftp_page, "SFTP", sftp_on, 0)
+        self._set_main_tab(self.ssh_page, "SSH", ssh_on, 1 if sftp_on else 0)
+
+    def _set_main_tab(self, page: QWidget, title: str, want: bool, desired_index: int) -> None:
+        current = self.tabs.indexOf(page)
+        if want:
+            if current == -1:
+                self.tabs.insertTab(min(desired_index, self.tabs.count()), page, title)
+        elif current != -1:
+            self.tabs.removeTab(current)
 
     def apply_runtime_settings(self) -> None:
         self.terminal_font.setPointSize(int(self.app_config.get("terminal_font_size", 10)))
         self.terminal_output.setFont(self.terminal_font)
+        self.ensure_main_tabs()
+        self._reload_default_tab_combo(select=self.app_config.get("default_tab", "SFTP"))
         default_tab = self.app_config.get("default_tab", "SFTP")
         for i in range(self.tabs.count()):
             if self.tabs.tabText(i) == default_tab:
                 self.tabs.setCurrentIndex(i)
                 break
         self.rebuild_quick_bar()
+
+    def _icon_path(self, filename: str):
+        """Resolve an icon file from the PyInstaller resources or the source dir."""
+        for candidate in (RESOURCE_DIR / filename, BASE_DIR / filename):
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def apply_window_icon(self) -> None:
+        """Show the selected icon in the top toolbar and as the window icon."""
+        use_alt = bool(self.app_config.get("use_alt_icon"))
+        path = self._icon_path("icon2.png" if use_alt else "icon.png") or self._icon_path("icon.png")
+        if path is None:
+            return
+        icon = QIcon(str(path))
+        self.setWindowIcon(icon)
+        QApplication.setWindowIcon(icon)
+        if hasattr(self, "header_icon"):
+            pixmap = QPixmap(str(path)).scaled(
+                22, 22,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.header_icon.setPixmap(pixmap)
+
+    def toggle_window_icon(self, checked: bool) -> None:
+        self.app_config["use_alt_icon"] = bool(checked)
+        self.save_app_config()
+        self.apply_window_icon()
 
     def refresh_profile_combo(self) -> None:
         self.profile_combo.blockSignals(True)
@@ -875,6 +1173,7 @@ class RasconfManager(QMainWindow):
         self.password_input.clear()
         self.load_saved_password()
         self.refresh_local_tree()
+        self.refresh_web_tab_urls()
         self.save_app_config()
 
     def new_profile(self) -> None:
@@ -1346,7 +1645,9 @@ class RasconfManager(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Upload selected", self.upload_selected)
         menu.addAction("Refresh", self.refresh_local_tree)
-        menu.exec(position)
+        # position is in the tree's local coordinates; the menu needs global
+        # ones, otherwise it lands at the same offset on the primary screen.
+        menu.exec(self.local_tree.mapToGlobal(position))
 
     def show_remote_context_menu(self, position) -> None:
         menu = QMenu(self)
@@ -1359,7 +1660,7 @@ class RasconfManager(QMainWindow):
                 menu.addAction("Copy path", self.copy_selected_remote_path)
         menu.addSeparator()
         menu.addAction("Refresh remote", self.connect_remote)
-        menu.exec(position)
+        menu.exec(self.remote_tree.mapToGlobal(position))
 
     def copy_selected_remote_path(self) -> None:
         items = self.remote_tree.selectedItems()
@@ -1721,6 +2022,109 @@ class RasconfManager(QMainWindow):
         if self.shell_worker is not None:
             self.shell_worker.stop()
 
+    # ------------------------------------------------------------------
+    # Reboot watch - wait out a reboot, then retry until the device answers
+    # ------------------------------------------------------------------
+
+    REBOOT_COMMAND_PATTERN = re.compile(r"^(?:sudo\s+)?(?:busybox\s+)?(?:reboot|shutdown\s+-r)\b")
+
+    def _looks_like_reboot(self, command: str) -> bool:
+        """Match the commands that take the device down; ``shutdown -n`` only
+        reboots in memory, so it is left alone."""
+        stripped = command.strip()
+        return bool(self.REBOOT_COMMAND_PATTERN.match(stripped)) and "-n" not in stripped
+
+    def reboot_device(self) -> None:
+        """Send the reboot command and start the wait-and-retry cycle."""
+        if self.reboot_worker is not None and self.reboot_worker.isRunning():
+            return
+        settings = self.current_settings()
+        if settings is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Reboot device",
+            f"Reboot {settings['username']}@{settings['host']} and wait for it to come back?\n\n"
+            f"First attempt after {int(self.app_config.get('reboot_wait_seconds', 30))} s, "
+            f"then every {int(self.app_config.get('reboot_retry_interval', 10))} s "
+            "(both set in the Settings tab).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if self.shell_worker is not None and self.shell_worker.isRunning():
+            # A live shell: send it there so the output shows in the terminal.
+            self.terminal_write_message("Sending: reboot\n")
+            self.shell_worker.send_line("reboot")
+            self._start_reboot_watch(None)
+        else:
+            self._start_reboot_watch("reboot")
+
+    def offer_reboot_watch(self) -> None:
+        """Ask whether to start the watch after a reboot was sent by hand. The
+        offer itself is disabled by the Settings checkbox."""
+        if not self.app_config.get("reboot_auto_watch", True):
+            return
+        if self.reboot_worker is not None and self.reboot_worker.isRunning():
+            return
+        answer = QMessageBox.question(
+            self,
+            "Watch for the device?",
+            "That looks like a reboot command. Wait for the device to go down and "
+            "then retry the connection until it is back?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_reboot_watch(None)
+
+    def _start_reboot_watch(self, reboot_command: str | None) -> None:
+        """Run the wait/retry loop off the UI thread. `reboot_command` is only
+        passed when nothing has sent the reboot yet."""
+        settings = self.current_settings(silent=True)
+        if settings is None:
+            self.log("Cannot start the reboot wait: the connection details are incomplete")
+            return
+        self.reboot_worker = RebootWaitWorker(
+            settings,
+            int(self.app_config.get("reboot_wait_seconds", 30)),
+            int(self.app_config.get("reboot_retry_interval", 10)),
+            reboot_command,
+            parent=self,
+        )
+        self.reboot_worker.status.connect(self.on_reboot_status)
+        self.reboot_worker.connected.connect(self.on_reboot_back)
+        self.reboot_worker.failed.connect(lambda msg: self.on_reboot_status(f"Reboot watch failed: {msg}"))
+        self.reboot_worker.finished.connect(self.reboot_watch_finished)
+        self.reboot_button.setEnabled(False)
+        self.reboot_cancel_button.setEnabled(True)
+        self.tabs.setCurrentWidget(self.ssh_page)
+        self.reboot_worker.start()
+
+    def on_reboot_status(self, message: str) -> None:
+        self.terminal_write_message(f"[reboot] {message}\n")
+        self.statusBar().showMessage(message)
+
+    def on_reboot_back(self) -> None:
+        self.statusBar().showMessage("Device is back online", 5000)
+        self.log("Device is back online after reboot")
+        if self.app_config.get("ssh_enabled", True):
+            self.connect_shell()
+
+    def reboot_watch_finished(self) -> None:
+        if self.reboot_worker is not None:
+            self.reboot_worker.deleteLater()
+            self.reboot_worker = None
+        self.reboot_button.setEnabled(True)
+        self.reboot_cancel_button.setEnabled(False)
+
+    def cancel_reboot_watch(self, _checked: bool = False) -> None:
+        if self.reboot_worker is not None and self.reboot_worker.isRunning():
+            self.reboot_worker.cancel()
+            self.statusBar().showMessage("Reboot wait cancelled", 4000)
+            self.log("Reboot wait cancelled")
+
     def send_terminal_input(self) -> None:
         if self.shell_worker is None or not self.shell_worker.isRunning():
             return
@@ -1733,6 +2137,8 @@ class RasconfManager(QMainWindow):
             self.terminal_history_pos = len(self.terminal_history)
             save_command_history(self.terminal_history)
         self.shell_worker.send_line(command)
+        if self._looks_like_reboot(command):
+            QTimer.singleShot(300, self.offer_reboot_watch)
         self.terminal_input.clear()
 
     def edit_ignore_patterns(self) -> None:
@@ -1812,9 +2218,15 @@ class RasconfManager(QMainWindow):
             return
         merged = json.loads(json.dumps(DEFAULT_APP_CONFIG))
         merged.update(loaded)
-        self.app_config = _sync_flat_mirror(_migrate_legacy_config(merged))
+        self.app_config = _normalize_web_tabs(_sync_flat_mirror(_migrate_legacy_config(merged)))
         self.refresh_profile_combo()
         self.on_profile_changed(max(0, self.profile_combo.currentIndex()))
+        self.rebuild_web_tabs()
+        self._reload_tabs_combo()
+        self.sftp_group.setChecked(bool(self.app_config.get("sftp_enabled", True)))
+        self.ssh_group.setChecked(bool(self.app_config.get("ssh_enabled", True)))
+        self.ensure_main_tabs()
+        self._reload_default_tab_combo(select=self.app_config.get("default_tab", "SFTP"))
         self.save_app_config()
         QMessageBox.information(self, "Imported", "Configuration replaced from file.")
 
@@ -1835,10 +2247,9 @@ class RasconfManager(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("About Rasconf Manager")
         box.setText(
-            "<b>Rasconf Manager</b><br>"
-            "Manage the rasconf web interface over SSH/SFTP.<br>"
-            "+ LuCI embeded page<br><br>"
-            'GitHub: <a href="{repo}" style="color: #c51a4a">{repo}</a><br>'
+            "<b>Rasconf Manager V1.2</b><br>"
+            "Manage Router & Web interfaces.<br>"
+            'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'
             "Copyright &copy; 2026 fligma. Licensed under the MIT License.".format(
                 repo=PROJECT_GITHUB_URL, license=PROJECT_LICENSE_URL
@@ -1848,10 +2259,24 @@ class RasconfManager(QMainWindow):
             Qt.TextInteractionFlag.TextBrowserInteraction
         )
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        for candidate in (RESOURCE_DIR / "icon.png", BASE_DIR / "icon.png"):
+            if candidate.is_file():
+                box.layout().activate()
+                side = max(64, box.sizeHint().height())
+                logo = QPixmap(str(candidate)).scaled(
+                    side, side,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                box.setIconPixmap(logo)
+                break
         box.exec()
 
     def closeEvent(self, event) -> None:
         self.save_current_profile_edits()
+        if self.reboot_worker is not None and self.reboot_worker.isRunning():
+            self.reboot_worker.cancel()
+            self.reboot_worker.wait(1500)
         if self.shell_worker is not None:
             self.shell_worker.stop()
             self.shell_worker.wait(1500)

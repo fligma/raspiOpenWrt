@@ -85,6 +85,16 @@ DEFAULT_APP_CONFIG = {
     "confirm_destructive": True,
     "show_hidden_files": False,
     "auto_connect": False,
+    "use_alt_icon": False,
+    # Which main tabs are available. Custom browser tabs are always shown.
+    "sftp_enabled": True,
+    "ssh_enabled": True,
+    # Reboot handling: downtime to wait before the first reconnect attempt,
+    # the seconds between attempts after that, and whether a reboot command
+    # typed in the terminal offers to start that watch.
+    "reboot_wait_seconds": 30,
+    "reboot_retry_interval": 10,
+    "reboot_auto_watch": True,
     "default_tab": "SFTP",
     "terminal_font_size": 10,
     "max_log_lines": 500,
@@ -92,6 +102,13 @@ DEFAULT_APP_CONFIG = {
     "web_port": 8989,
     "web_path": "/cgi-bin/index.py",
     "luci_url": "http://192.168.1.1/",
+    # Embeddable browser tabs. Each entry has a display name, an optional ip
+    # (blank = follow the active profile host), a port and a path. Seeded from
+    # the legacy web_port/web_path/luci_url keys during migration.
+    "web_tabs": [
+        {"name": "Web Interface", "ip": "", "port": 8989, "path": "/cgi-bin/index.py", "scheme": "http"},
+        {"name": "LuCI", "ip": "192.168.1.1", "port": 80, "path": "/", "scheme": "http"},
+    ],
     # Shown as buttons above the SSH terminal; "Label||command" in the editor.
     "quick_commands": [
         {"label": "Reload uhttpd", "command": "killall -HUP uhttpd"},

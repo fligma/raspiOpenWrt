@@ -10,6 +10,7 @@ import queue
 import shutil
 import stat
 import threading
+import time
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
@@ -102,6 +103,99 @@ class SSHShellWorker(QThread):
             if self.client is not None:
                 self.client.close()
             self.disconnected.emit()
+
+
+# ---------------------------------------------------------------------------
+# Reboot wait - used by the "Reboot device" button in the SSH tab
+# ---------------------------------------------------------------------------
+
+class RebootWaitWorker(QThread):
+    """Wait out a device reboot and retry SSH until it answers again.
+
+    If `reboot_command` is given the reboot is sent over a fresh connection
+    first (best effort - the connection dying is expected); pass None when the
+    command was already sent through the interactive shell. run() keeps the
+    settings dict alive, so a successful probe persists the password and
+    refreshes the credential before the GUI opens the new shell.
+    """
+
+    status = pyqtSignal(str)
+    connected = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    def __init__(self, settings: dict, initial_wait: int, retry_interval: int,
+                 reboot_command: str | None = None, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.initial_wait = max(0, int(initial_wait))
+        self.retry_interval = max(1, int(retry_interval))
+        self.reboot_command = reboot_command
+        self.stop_requested = threading.Event()
+
+    def cancel(self) -> None:
+        self.stop_requested.set()
+
+    def _sleep(self, seconds: int) -> bool:
+        """Interruptible sleep in 50 ms slices; True means cancelled."""
+        deadline = time.monotonic() + seconds
+        while not self.stop_requested.is_set() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return self.stop_requested.is_set()
+
+    def _send_reboot(self) -> None:
+        """Open a connection just long enough to fire the reboot command."""
+        self.status.emit(f"Sending: {self.reboot_command}")
+        client = None
+        try:
+            client = create_ssh_client(self.settings)
+            exec_remote(client, self.reboot_command, timeout=10)
+        except Exception:
+            # The device drops the socket while shutting down; that is the point.
+            pass
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+    def run(self) -> None:
+        try:
+            if self.reboot_command:
+                self._send_reboot()
+            if self.initial_wait > 0:
+                self.status.emit(f"Device is rebooting, waiting {self.initial_wait}s before the first attempt...")
+                if self._sleep(self.initial_wait):
+                    return
+            attempt = 0
+            while not self.stop_requested.is_set():
+                attempt += 1
+                self.status.emit(f"Connection attempt {attempt} to {self.settings['host']}:{self.settings['port']}...")
+                client = None
+                try:
+                    client = create_ssh_client(self.settings)
+                    code, _, _ = exec_remote(client, "echo rasconf", timeout=10)
+                    if code == 0:
+                        self.status.emit("Device is back online.")
+                        self.connected.emit()
+                        return
+                    reason = f"ssh responded with exit code {code}"
+                except Exception as error:
+                    reason = str(error) or type(error).__name__
+                finally:
+                    if client is not None:
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
+                if self.stop_requested.is_set():
+                    return
+                self.status.emit(f"Not reachable yet ({reason}), retrying in {self.retry_interval}s...")
+                if self._sleep(self.retry_interval):
+                    return
+        except Exception as error:
+            if not self.stop_requested.is_set():
+                self.failed.emit(str(error))
 
 
 # ---------------------------------------------------------------------------

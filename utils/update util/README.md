@@ -1,3 +1,4 @@
+![alt text](https://github.com/fligma/raspiOpenWrt/blob/main/SCREENSHOT.png?raw=true)
 # rasconf Manager
 
 A desktop tool for deploying and managing the rasconf web interface on a
@@ -8,7 +9,7 @@ deploy with preview, backup, and post-deploy actions.
 ## Build the executable
 
 ```
-pyinstaller --noconfirm --onefile --windowed --icon="icon.png" --add-data="icon.png:." --add-data="config.example.json:." --collect-all PyQt6.QtWebEngineWidgets --collect-all PyQt6.QtWebEngineCore --hidden-import=secretstorage --hidden-import=jeepney rasconf_manager.py
+pyinstaller --noconfirm --onefile --windowed --icon="icon.png" --add-data="icon.png:." --add-data="icon2.png:." --add-data="config.example.json:." --collect-all PyQt6.QtWebEngineWidgets --collect-all PyQt6.QtWebEngineCore --hidden-import=secretstorage --hidden-import=jeepney rasconf_manager.py
 ```
 
 PyQt6-WebEngine is optional. If it is not installed, the Web Interface and
@@ -37,28 +38,47 @@ password field, and reloads any saved credential.
 
 ### Settings tab
 
-The Settings tab is organised into collapsible sections. The three toggles
-below hide their related options (shown indented under the toggle) while they
-are off, and turn the feature off completely:
+The Settings tab is grouped into categories by tab so that each section only
+shows the options that belong to it. The **SFTP** and **SSH** categories can be
+ticked off: unchecking one hides its options and removes that tab from the
+window, and the state is saved (`sftp_enabled` / `ssh_enabled`). The
+**Custom tabs** category is always on. Nested toggles (logging, remote backup,
+local backup, mirror) still hide their own indented options while off.
 
-- **Enable logging to file** - when off, nothing is written to
-  `rasconf_manager.log`. While on it exposes the maximum on-screen log lines
-  and the log file path.
-- **Backup remote files before deploy** - when on, every deploy first copies
-  the current remote tree into a timestamped folder under the remote backup
-  directory. Exposes the remote backup directory and how many backups to keep.
-- **Save a copy of the remote to this PC before deploy** (local backup) - when
-  on, every deploy first downloads the current remote tree into a timestamped
-  folder in the local backup directory. Exposes the local backup folder.
+- **Startup & defaults** (always visible)
+  - Default tab shown at startup (only the currently visible tabs are listed)
+  - Connect automatically at startup - see the auto-connect note below
+- **SFTP** (checkable tab)
+  - Confirm destructive operations (delete and mirror)
+  - **Enable logging to file** - when off, nothing is written to
+    `rasconf_manager.log`. While on it exposes the maximum on-screen log lines
+    and the log file path.
+  - **Backup remote files before deploy** - when on, every deploy first copies
+    the current remote tree into a timestamped folder under the remote backup
+    directory. Exposes the remote backup directory and how many backups to keep.
+  - **Save a copy of the remote to this PC before deploy** (local backup) - when
+    on, every deploy first downloads the current remote tree into a timestamped
+    folder in the local backup directory. Exposes the local backup folder.
+  - **Mirror cleanup on deploy** (destructive, off by default)
+  - Edit deploy ignore patterns and post-deploy commands
+- **SSH** (checkable tab)
+  - Terminal font size
+  - Reboot timing: **Wait before first retry** and **Retry every**, plus the
+    option to be asked after sending a reboot command
+  - Edit quick commands
+- **Custom tabs** (always on)
+  - **Tabs** - add, edit, or remove the embedded browser tabs. Each tab has a
+    display name, an IP/hostname (leave blank to follow the active profile
+    host), a port, a path, and http/https.
 
-A plain **Interface & connection** section stays visible at all times:
+When **Connect automatically at startup** is on, the app opens SFTP if the SFTP
+tab is ticked; if you switch SFTP off it falls back to opening the SSH terminal
+(only when the SSH tab is still enabled). If both tabs are off, nothing
+auto-connects.
 
-- Web interface port and path (used to build the Web Interface tab URL)
-- LuCI URL
-- Default tab shown at startup
-- Connect automatically at startup
-- Confirm destructive operations (delete and mirror)
-- Terminal font size
+The View menu has an **Alternate icon** toggle that switches the toolbar and
+window icon between `icon.png` and `icon2.png`; the choice is saved to
+`use_alt_icon`.
 
 Deploy-time backups are now driven entirely from this tab (the old per-deploy
 checkbox on the SFTP tab is gone). The SFTP tab shows a small label telling you
@@ -81,13 +101,18 @@ whether remote/local backup is currently active.
 | `keep_last_n_backups` | Oldest backups removed beyond this count (0 = keep all) |
 | `confirm_destructive` | Ask before delete/mirror operations |
 | `show_hidden_files` | Include dot-files in the local browser and deploys |
-| `auto_connect` | Refresh the remote tree at startup |
+| `auto_connect` | Connect at startup (SFTP, or SSH if the SFTP tab is off) |
+| `sftp_enabled` | Show the SFTP tab (untick to hide it) |
+| `ssh_enabled` | Show the SSH tab (untick to hide it) |
+| `reboot_wait_seconds` | Downtime allowed for a reboot before the first reconnect attempt (0-600) |
+| `reboot_retry_interval` | Seconds between reconnect attempts until the device answers (1-300) |
+| `reboot_auto_watch` | Offer to watch for the device when a reboot command is sent |
 | `default_tab` | Tab selected when the window opens |
 | `terminal_font_size` | SSH terminal font point size |
 | `max_log_lines` | Lines kept in the on-screen log (the log file is not truncated) |
 | `terminal_history_limit` | Commands remembered in the terminal |
-| `web_port` / `web_path` | rasconf web interface URL parts |
-| `luci_url` | LuCI address for the LuCI tab |
+| `web_tabs` | List of embedded browser tabs (name, ip, port, path, scheme) |
+| `use_alt_icon` | Show `icon2.png` instead of `icon.png` in the toolbar |
 | `quick_commands` | Buttons shown above the terminal |
 
 Editing `deploy_ignore`, `post_deploy_commands`, and `quick_commands` is done
@@ -129,6 +154,21 @@ a command and press Enter or Send. Ctrl+Up and Ctrl+Down walk through command
 history, which is saved to `command_history.json` and restored next time. The
 quick-command buttons above the terminal run a command in the shell if one is
 open, otherwise they execute it over a one-off connection and log the output.
+
+## Rebooting the device
+
+**Reboot device** in the SSH tab sends `reboot` and then waits for the router to
+come back: it holds off for `reboot_wait_seconds` (the downtime the device is
+allowed to take), then tries SSH every `reboot_retry_interval` seconds until the
+device answers, and reopens the terminal session. Progress is printed in the
+terminal with a `[reboot]` prefix, and **Cancel reboot wait** stops the cycle
+early.
+
+Typing `reboot` (or `sudo reboot`, `busybox reboot`, `shutdown -r ...`) in the
+terminal, or running a quick command that looks like one, offers to start the
+same watch - the offer is controlled by **Offer to watch for the device after a
+reboot command** in the Settings tab. Both timings live in the SSH section of
+Settings and are saved to `config.json`.
 
 ## File browser extras
 

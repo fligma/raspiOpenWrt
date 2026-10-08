@@ -5,13 +5,17 @@ from __future__ import annotations
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
 )
@@ -75,6 +79,57 @@ class StringListDialog(QDialog):
     def values(self) -> list[str]:
         """The list as typed, minus anything that is only whitespace."""
         return [self.list_widget.item(i).text() for i in range(self.list_widget.count()) if self.list_widget.item(i).text().strip()]
+
+
+class TabEditDialog(QDialog):
+    """Editor for one configurable web tab (display name, ip, port, path)."""
+
+    def __init__(self, parent=None, tab: dict | None = None, title: str = "Web tab"):
+        super().__init__(parent)
+        tab = tab or {}
+        self.setWindowTitle(title)
+        layout = QFormLayout(self)
+        self.name_input = QLineEdit(str(tab.get("name", "")))
+        self.name_input.setPlaceholderText("e.g. LuCI")
+        layout.addRow("Display name", self.name_input)
+        self.ip_input = QLineEdit(str(tab.get("ip", "")))
+        self.ip_input.setPlaceholderText("IP or hostname (leave blank to use profile host)")
+        self.ip_input.setToolTip(
+            "Address this tab opens. Empty means follow the connected profile's host, so the "
+            "tab updates whenever you switch profiles."
+        )
+        layout.addRow("IP / host", self.ip_input)
+        self.port_input = QSpinBox()
+        self.port_input.setRange(1, 65535)
+        try:
+            self.port_input.setValue(int(tab.get("port", 80)))
+        except (TypeError, ValueError):
+            self.port_input.setValue(80)
+        layout.addRow("Port", self.port_input)
+        self.path_input = QLineEdit(str(tab.get("path", "/")))
+        self.path_input.setPlaceholderText("/")
+        layout.addRow("Path", self.path_input)
+        self.scheme_combo = QComboBox()
+        self.scheme_combo.addItems(["http", "https"])
+        self.scheme_combo.setCurrentText(str(tab.get("scheme", "http")).lower() or "http")
+        layout.addRow("Protocol", self.scheme_combo)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def values(self) -> dict:
+        path = self.path_input.text().strip() or "/"
+        if not path.startswith("/"):
+            path = "/" + path
+        return {
+            "name": self.name_input.text().strip(),
+            "ip": self.ip_input.text().strip(),
+            "port": self.port_input.value(),
+            "path": path,
+            "scheme": self.scheme_combo.currentText(),
+        }
 
 
 class DryRunDialog(QDialog):
