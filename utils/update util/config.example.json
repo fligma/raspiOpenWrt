@@ -1,10 +1,45 @@
 {
-  "host": "192.168.1.1",
-  "port": 22,
-  "username": "root",
-  "key_file": "",
-  "remote_root": "/home",
-  "source": "",
-  "trust_unknown_host": false,
-  "deploy_ignore": ["MySecretFile.txt"]
+  "profiles": [
+    {
+      "name": "Home Pi",
+      "host": "192.168.1.1",
+      "port": 22,
+      "username": "root",
+      "key_file": "",
+      "remote_root": "/www_rasconf",
+      "source": "",
+      "trust_unknown_host": false,
+      "remember_password": false
+    }
+  ],
+  "active_profile": "Home Pi",
+  "ssh_timeout": 12,
+  "deploy_ignore": [
+    "*.bak",
+    "assets/private/"
+  ],
+  "post_deploy_commands": [
+    "killall -HUP uhttpd"
+  ],
+  "logging_enabled": true,
+  "remote_backup_enabled": false,
+  "local_backup_enabled": false,
+  "backup_directory": "/tmp/rasconf_backups",
+  "local_backup_directory": "",
+  "keep_last_n_backups": 5,
+  "confirm_destructive": true,
+  "show_hidden_files": false,
+  "auto_connect": false,
+  "default_tab": "SFTP",
+  "terminal_font_size": 10,
+  "max_log_lines": 500,
+  "terminal_history_limit": 500,
+  "web_port": 8989,
+  "web_path": "/cgi-bin/index.py",
+  "luci_url": "http://192.168.1.1/",
+  "quick_commands": [
+    { "label": "Reload uhttpd", "command": "killall -HUP uhttpd" },
+    { "label": "Show version", "command": "cat /etc/openwrt_release" },
+    { "label": "Reboot", "command": "reboot" }
+  ]
 }

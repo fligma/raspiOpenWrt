@@ -228,7 +228,7 @@ if action == "logout":
     sys.stdout.write("Location: /cgi-bin/index.py\r\n\r\n")
     sys.exit(0)
 
-if action in ["api", "save_config", "disconnect_device"]:
+if action in ["api", "save_config", "disconnect_device", "restart_service", "restart_interface"]:
     if not is_auth:
         sys.stdout.write("Status: 401 Unauthorized\r\n")
         sys.stdout.write("Content-Type: application/json\r\n\r\n")
@@ -245,6 +245,7 @@ if action in ["api", "save_config", "disconnect_device"]:
         if data_type in ["all", "wifi"]: res["wifi"] = get_wireless()
         if data_type in ["all", "dev"]: res["dev"] = get_devices()
         sys.stdout.write(json.dumps(res))
+        
     elif action == "disconnect_device":
         if method != "POST":
             sys.stdout.write(json.dumps({"success": False, "error": "POST required"}))
@@ -255,6 +256,40 @@ if action in ["api", "save_config", "disconnect_device"]:
                 sys.stdout.write(json.dumps(result))
             except Exception as e:
                 sys.stdout.write(json.dumps({"success": False, "error": str(e)}))
+                
+    elif action == "restart_service":
+        if method != "POST":
+            sys.stdout.write(json.dumps({"success": False, "error": "POST required"}))
+        else:
+            try:
+                request = json.loads(post_data)
+                srv = request.get("service", "")
+                if srv in ["network", "dnsmasq", "firewall", "uhttpd", "cron", "odhcpd", "system"]:
+                    cmd = ["reboot"] if srv == "system" else ["/etc/init.d/" + srv, "restart"]
+                    with open(os.devnull, 'w') as devnull:
+                        subprocess.Popen(cmd, stdout=devnull, stderr=devnull)
+                    sys.stdout.write(json.dumps({"success": True, "message": f"{srv.capitalize()} restart initiated."}))
+                else:
+                    sys.stdout.write(json.dumps({"success": False, "error": "Invalid service target."}))
+            except Exception as e:
+                sys.stdout.write(json.dumps({"success": False, "error": str(e)}))
+                
+    elif action == "restart_interface":
+        if method != "POST":
+            sys.stdout.write(json.dumps({"success": False, "error": "POST required"}))
+        else:
+            try:
+                request = json.loads(post_data)
+                iface = request.get("interface", "")
+                if re.match(r"^[a-zA-Z0-9_]+$", iface):
+                    with open(os.devnull, 'w') as devnull:
+                        subprocess.Popen(["/sbin/ifup", iface], stdout=devnull, stderr=devnull)
+                    sys.stdout.write(json.dumps({"success": True, "message": f"Interface {iface} restarted."}))
+                else:
+                    sys.stdout.write(json.dumps({"success": False, "error": "Invalid interface name."}))
+            except Exception as e:
+                sys.stdout.write(json.dumps({"success": False, "error": str(e)}))
+                
     elif action == "save_config" and method == "POST":
         try:
             new_conf = json.loads(post_data)
@@ -299,7 +334,7 @@ if not is_auth:
 
 config_obj = load_config()
 
-dashboard_html = f"""<!DOCTYPE html>
+dashboard_html = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -320,6 +355,7 @@ dashboard_html = f"""<!DOCTYPE html>
         <div class="header">
             <h1>Pi Status</h1>
             <div class="header-actions">
+                <a href="?action=api&type=all" target="_blank" class="btn" style="margin-right: 15px; background: #2980b9;">JSON API</a>
                 <div class="indicator">● Live Tracker</div>
                 <a href="?action=logout" class="logout-btn">Logout</a>
             </div>
@@ -329,6 +365,7 @@ dashboard_html = f"""<!DOCTYPE html>
             <div class="tab" data-tab-target="interfaces" role="tab" aria-selected="false">Interfaces</div>
             <div class="tab" data-tab-target="wireless" role="tab" aria-selected="false">Wireless</div>
             <div class="tab" data-tab-target="devices" role="tab" aria-selected="false">Devices</div>
+            <div class="tab" data-tab-target="controls" role="tab" aria-selected="false">System Controls</div>
             <div class="tab" data-tab-target="settings" role="tab" aria-selected="false">Settings</div>
         </div>
         
@@ -384,6 +421,38 @@ dashboard_html = f"""<!DOCTYPE html>
                     </div>
                 </div>
             </div>
+
+            <!-- System Controls -->
+            <div id="controls" class="panel">
+                <div class="grid-2">
+                    <div class="card">
+                        <h3>Service Controls</h3>
+                        <p style="margin-bottom: 15px; font-size: 0.9em; color: #a0a0a0;">Restart core system services. Note that this may temporarily interrupt your connection.</p>
+                        <div style="display: grid; gap: 10px; grid-template-columns: 1fr 1fr;">
+                            <button class="btn cmd-btn" data-type="service" data-target="network">Restart Network</button>
+                            <button class="btn cmd-btn" data-type="service" data-target="dnsmasq">Restart DNS/DHCP</button>
+                            <button class="btn cmd-btn" data-type="service" data-target="firewall">Restart Firewall</button>
+                            <button class="btn cmd-btn" style="background: #e74c3c;" data-type="service" data-target="system">Reboot System</button>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>Interface Controls</h3>
+                        <p style="margin-bottom: 15px; font-size: 0.9em; color: #a0a0a0;">Bring up/restart specific network interfaces.</p>
+                        <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                            <button class="btn cmd-btn" data-type="interface" data-target="lan">Restart LAN</button>
+                            <button class="btn cmd-btn" data-type="interface" data-target="wan">Restart WAN</button>
+                        </div>
+                        <div class="form-group" style="margin-top: 15px; border-top: 1px solid #333; padding-top: 15px;">
+                            <label>Restart Custom Interface</label>
+                            <div style="display: flex; gap: 10px;">
+                                <input type="text" id="custom_iface" placeholder="e.g. wg0">
+                                <button class="btn" onclick="restartCustomIface()">Restart</button>
+                            </div>
+                        </div>
+                        <div id="cmd_msg" class="save-message" style="margin-top:10px;"></div>
+                    </div>
+                </div>
+            </div>
             
             <!-- Settings -->
             <div id="settings" class="panel">
@@ -416,8 +485,59 @@ dashboard_html = f"""<!DOCTYPE html>
         </div>
     </div>
 
-    <script type="application/json" id="rasconf-config">{json.dumps(config_obj)}</script>
+    <!-- Inject command execution script specific to controls -->
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('.cmd-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const type = e.target.dataset.type;
+                    const target = e.target.dataset.target;
+                    if(confirm(`Are you sure you want to restart ${target}?`)) {
+                        executeCmd(type, target);
+                    }
+                });
+            });
+        });
+
+        function restartCustomIface() {
+            const iface = document.getElementById('custom_iface').value.trim();
+            if(iface && confirm(`Are you sure you want to restart interface ${iface}?`)) {
+                executeCmd('interface', iface);
+            }
+        }
+
+        async function executeCmd(type, target) {
+            const msgEl = document.getElementById('cmd_msg');
+            msgEl.style.display = 'block';
+            msgEl.textContent = 'Executing...';
+            msgEl.style.color = 'var(--text-color)';
+            
+            const action = type === 'service' ? 'restart_service' : 'restart_interface';
+            const payload = type === 'service' ? { service: target } : { interface: target };
+
+            try {
+                const res = await fetch(`?action=${action}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if(data.success) {
+                    msgEl.textContent = data.message;
+                    msgEl.style.color = '#2ecc71';
+                } else {
+                    msgEl.textContent = 'Error: ' + data.error;
+                    msgEl.style.color = '#e74c3c';
+                }
+            } catch(e) {
+                msgEl.textContent = 'Request failed.';
+                msgEl.style.color = '#e74c3c';
+            }
+            setTimeout(() => { msgEl.style.display = 'none'; }, 5000);
+        }
+    </script>
+    <script type="application/json" id="rasconf-config">__CONFIG_JSON__</script>
 </body>
 </html>"""
 
-sys.stdout.write(dashboard_html)
+sys.stdout.write(dashboard_html.replace("__CONFIG_JSON__", json.dumps(config_obj)))

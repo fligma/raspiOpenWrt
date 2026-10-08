@@ -1,8 +1,8 @@
 notes
 bkup
 .gitattributes
-.kilo
 .venv
 media
 local tools
 dist
+.idea
