@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
-"""rasconf Manager support module (auto-generated split)."""
+"""Paths, defaults and the dark stylesheet shared by every rasconf Manager module."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path, PurePosixPath
 
+
+# ---------------------------------------------------------------------------
+# Where things live - a source checkout and a frozen build resolve differently
+# ---------------------------------------------------------------------------
+
 if getattr(sys, "frozen", False):
+    # BASE_DIR is the exe folder (writable, user data), RESOURCE_DIR is the
+    # read-only directory PyInstaller unpacks next to it.
     BASE_DIR = Path(sys.executable).parent
     RESOURCE_DIR = Path(sys._MEIPASS)
     REPOSITORY_ROOT = BASE_DIR
 else:
     BASE_DIR = Path(__file__).resolve().parent
     RESOURCE_DIR = BASE_DIR
+    # Walk up out of utils/update util to find the repository root.
     REPOSITORY_ROOT = BASE_DIR.parents[2] if len(BASE_DIR.parents) >= 2 else BASE_DIR
 
 DEFAULT_SOURCE = REPOSITORY_ROOT / "src" / "www_rasconf"
+
+# ---------------------------------------------------------------------------
+# File names and other fixed identifiers
+# ---------------------------------------------------------------------------
+
+# Kept separate from ~/.ssh/known_hosts so "trust unknown host" never pollutes
+# the keys the system ssh client uses.
 KNOWN_HOSTS_FILE = Path.home() / ".ssh" / "known_hosts_rasconf"
 KEYRING_SERVICE = "rasconf-sftp-manager"
 APP_CONFIG_FILE = BASE_DIR / "config.json"
@@ -23,6 +38,13 @@ APP_CONFIG_EXAMPLE_FILE = RESOURCE_DIR / "config.example.json"
 HISTORY_FILE = BASE_DIR / "command_history.json"
 LOG_FILE = BASE_DIR / "rasconf_manager.log"
 MAX_COMMAND_HISTORY = 200
+
+PROJECT_GITHUB_URL = "https://github.com/fligma/raspiOpenWrt"
+PROJECT_LICENSE_URL = PROJECT_GITHUB_URL + "/blob/main/LICENSE"
+
+# ---------------------------------------------------------------------------
+# Defaults - used when config.json is missing a key or a profile
+# ---------------------------------------------------------------------------
 
 DEFAULT_PROFILE = {
     "name": "Default",
@@ -36,6 +58,8 @@ DEFAULT_PROFILE = {
     "remember_password": False,
 }
 
+# Everything the Settings tab can change, plus the connection profile list.
+# Flat host/port/... keys mirror the active profile - see _sync_flat_mirror.
 DEFAULT_APP_CONFIG = {
     "profiles": [],
     "active_profile": "Default",
@@ -68,6 +92,7 @@ DEFAULT_APP_CONFIG = {
     "web_port": 8989,
     "web_path": "/cgi-bin/index.py",
     "luci_url": "http://192.168.1.1/",
+    # Shown as buttons above the SSH terminal; "Label||command" in the editor.
     "quick_commands": [
         {"label": "Reload uhttpd", "command": "killall -HUP uhttpd"},
         {"label": "Restart cgi wrapper", "command": "/etc/init.d/cgiwrapper restart"},
@@ -77,7 +102,12 @@ DEFAULT_APP_CONFIG = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Application stylesheet - dark theme with the crimson accent colour
+# ---------------------------------------------------------------------------
+
 APP_STYLESHEET = """
+/* Base colours and font for everything */
 QWidget {
     background-color: #121212;
     color: #e0e0e0;
@@ -102,6 +132,7 @@ QGroupBox::title {
     padding: 0 6px;
     color: #c51a4a;
 }
+/* Text inputs and list-like widgets */
 QLineEdit, QSpinBox, QPlainTextEdit, QTextEdit, QTreeWidget,
 QComboBox, QListWidget {
     border: 1px solid #3c3c3c;
@@ -118,6 +149,7 @@ QLineEdit:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus,
 QTreeWidget:focus, QComboBox:focus, QListWidget:focus {
     border: 1px solid #c51a4a;
 }
+/* Buttons - #primaryAction and #dangerAction are set via setObjectName() */
 QPushButton, QToolButton, QComboBox::drop-down {
     background-color: #333333;
     border: 1px solid #4a4a4a;
@@ -155,6 +187,7 @@ QPushButton#dangerAction {
 QPushButton#dangerAction:hover {
     background-color: #8a2a2a;
 }
+/* Tab bar, the active tab gets the accent underline */
 QTabBar::tab {
     background-color: #2a2a2a;
     color: #aaaaaa;
@@ -172,6 +205,7 @@ QTabBar::tab:hover:!selected {
     color: #ffffff;
     background-color: #3a3a3a;
 }
+/* Tree rows: alternating shades, and selected rows keep the accent colour */
 QTreeWidget::item, QListWidget::item {
     padding: 4px;
     color: #e0e0e0;
@@ -190,6 +224,7 @@ QTreeWidget::item:selected:alternate, QListWidget::item:selected:alternate {
 QTreeWidget::item:hover:!selected, QListWidget::item:hover:!selected {
     background-color: #2c2c2c;
 }
+/* Column headers */
 QHeaderView::section {
     background-color: #2a2a2a;
     color: #aaaaaa;
@@ -197,6 +232,7 @@ QHeaderView::section {
     border-bottom: 1px solid #3c3c3c;
     padding: 6px;
 }
+/* Check boxes */
 QCheckBox::indicator {
     width: 15px;
     height: 15px;
@@ -211,6 +247,7 @@ QCheckBox::indicator:checked {
     border: 1px solid #c51a4a;
     border-radius: 3px;
 }
+/* Progress bar, status bar and tooltips */
 QProgressBar {
     background-color: #2e2e2e;
     border: 1px solid #3c3c3c;
@@ -233,6 +270,7 @@ QToolTip {
     border: 1px solid #c51a4a;
     padding: 5px;
 }
+/* Menus and toolbars */
 QMenu {
     background-color: #1e1e1e;
     border: 1px solid #3c3c3c;
@@ -253,6 +291,7 @@ QToolBar {
     spacing: 4px;
     padding: 4px;
 }
+/* Scrollbars, drawn thin with no arrow buttons */
 QScrollBar:vertical {
     width: 12px;
     background-color: #1a1a1a;
@@ -270,6 +309,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     height: 0;
     background: none;
 }
+/* Connection status dot, recoloured by set_status_dot() */
 QLabel#statusDot {
     color: #ffb020;
     font-size: 14pt;

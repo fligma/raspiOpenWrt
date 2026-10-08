@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rasconf Manager support module (auto-generated split)."""
+"""Reading, migrating and writing config.json plus the saved command history."""
 
 from __future__ import annotations
 
@@ -17,7 +17,17 @@ from manager_const import (
     MAX_COMMAND_HISTORY,
 )
 
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
 def _coerce_int(value, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    """Turn anything read from JSON into an int inside [minimum, maximum].
+
+    Never raises: a missing or malformed value falls back to `default`, which
+    keeps a hand-edited config file from breaking startup.
+    """
     try:
         result = int(value)
     except (TypeError, ValueError):
@@ -28,6 +38,10 @@ def _coerce_int(value, default: int, minimum: int | None = None, maximum: int | 
         result = maximum
     return result
 
+
+# ---------------------------------------------------------------------------
+# Config shape: migration and the flat/profile split
+# ---------------------------------------------------------------------------
 
 def _migrate_legacy_config(config: dict) -> dict:
     """Ensure a profiles list exists; if the file only has flat keys, wrap them."""
@@ -47,7 +61,8 @@ def _migrate_legacy_config(config: dict) -> dict:
         profiles = [legacy]
         config["profiles"] = profiles
         config.setdefault("active_profile", "Default")
-    # sanitize each profile
+    # Rebuild every profile from scratch so stray or renamed keys cannot leak
+    # into the saved file, and drop entries that are not dicts at all.
     cleaned = []
     for raw in profiles:
         if not isinstance(raw, dict):
@@ -67,6 +82,7 @@ def _migrate_legacy_config(config: dict) -> dict:
     if not cleaned:
         cleaned = [DEFAULT_PROFILE.copy()]
     config["profiles"] = cleaned
+    # Point at a profile that actually exists, otherwise the UI has no selection.
     names = {p["name"] for p in cleaned}
     if config.get("active_profile") not in names:
         config["active_profile"] = cleaned[0]["name"]
@@ -88,7 +104,13 @@ def _sync_flat_mirror(config: dict) -> dict:
 
 
 def load_app_config() -> dict:
+    """Load config.json (or the shipped example), then normalise every key.
+
+    The result always has the full set of keys with sane, type-checked values,
+    so the rest of the app can read the dict without defensive get() calls.
+    """
     config = json.loads(json.dumps(DEFAULT_APP_CONFIG))  # deep copy
+    # A real config wins over the example; if neither parses we keep defaults.
     for config_path in (APP_CONFIG_FILE, APP_CONFIG_EXAMPLE_FILE):
         if not config_path.is_file():
             continue
@@ -103,12 +125,15 @@ def load_app_config() -> dict:
     config = _migrate_legacy_config(config)
     config = _sync_flat_mirror(config)
 
+    # A source path from another machine is useless - fall back to the repo,
+    # then to the home directory, so the local tree is never empty by accident.
     if not config.get("source") or not Path(config["source"]).is_dir():
         if DEFAULT_SOURCE.is_dir():
             config["source"] = str(DEFAULT_SOURCE)
         else:
             config["source"] = str(Path.home())
 
+    # Clamp the numeric settings and coerce the free-text ones to str.
     config["ssh_timeout"] = _coerce_int(config.get("ssh_timeout"), 12, 3, 300)
     config["terminal_font_size"] = _coerce_int(config.get("terminal_font_size"), 10, 6, 24)
     config["max_log_lines"] = _coerce_int(config.get("max_log_lines"), 500, 50, 10000)
@@ -121,11 +146,13 @@ def load_app_config() -> dict:
     config["luci_url"] = str(config.get("luci_url", "http://192.168.1.1/"))
     config["web_path"] = str(config.get("web_path", "/cgi-bin/index.py"))
 
+    # List-valued settings must stay lists of strings.
     for key in ("deploy_ignore", "post_deploy_commands"):
         value = config.get(key)
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             config[key] = []
 
+    # Quick commands are {label, command} pairs; anything without a command is dropped.
     quick = config.get("quick_commands")
     if not isinstance(quick, list):
         quick = []
@@ -138,6 +165,8 @@ def load_app_config() -> dict:
     for key in ("confirm_destructive", "show_hidden_files", "auto_connect"):
         config[key] = bool(config.get(key, DEFAULT_APP_CONFIG[key]))
 
+    # The old single "backup before deploy" switch became two independent ones;
+    # it seeds the remote backup flag and is then removed.
     legacy_backup = config.get("backup_before_deploy")
     config["remote_backup_enabled"] = bool(
         config.get("remote_backup_enabled", legacy_backup if legacy_backup is not None else False)
@@ -148,18 +177,29 @@ def load_app_config() -> dict:
     config["logging_enabled"] = bool(config.get("logging_enabled", True))
     config.pop("backup_before_deploy", None)
 
+    # First run: write what we worked out so the user has a file to edit.
     if not APP_CONFIG_FILE.is_file():
         save_app_config_static(config)
 
     return config
 
 
+# ---------------------------------------------------------------------------
+# Writing
+# ---------------------------------------------------------------------------
+
 def save_app_config_static(config: dict) -> None:
+    """Write config.json. Failures are ignored - a read-only folder must not
+    stop the app, the settings simply do not survive the session."""
     try:
         APP_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     except OSError:
         pass
 
+
+# ---------------------------------------------------------------------------
+# Terminal command history (separate file, shared by all profiles)
+# ---------------------------------------------------------------------------
 
 def load_command_history() -> list[str]:
     try:
@@ -172,6 +212,7 @@ def load_command_history() -> list[str]:
 
 
 def save_command_history(history: list[str]) -> None:
+    """Persist the most recent entries, newest last."""
     try:
         HISTORY_FILE.write_text(json.dumps(history[-MAX_COMMAND_HISTORY:], indent=2), encoding="utf-8")
     except OSError:

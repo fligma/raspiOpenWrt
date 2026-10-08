@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rasconf Manager support module (auto-generated split)."""
+"""SSH/SFTP plumbing: path safety, connections, remote exec and local scanning."""
 
 from __future__ import annotations
 
@@ -14,7 +14,16 @@ from pathspec import GitIgnoreSpec
 from manager_config import _coerce_int
 from manager_const import KNOWN_HOSTS_FILE
 
+
+# ---------------------------------------------------------------------------
+# Path helpers
+#
+# Everything the user can pick or type is handled as a path relative to the
+# remote root, so a "../.." can never escape the directory being deployed.
+# ---------------------------------------------------------------------------
+
 def safe_relative_path(value: str) -> str:
+    """Validate a source-relative path, rejecting absolute paths and traversal."""
     path = PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"Unsafe relative path: {value}")
@@ -22,11 +31,13 @@ def safe_relative_path(value: str) -> str:
 
 
 def remote_join(root: str, relative: str) -> str:
+    """Append a validated relative path to the remote root."""
     safe_relative_path(relative)
     return posixpath.join(root, relative) if relative else root
 
 
 def make_remote_directories(sftp: paramiko.SFTPClient, path: str) -> None:
+    """mkdir -p on the far side, skipping segments that already exist."""
     if not path.startswith("/"):
         raise ValueError("The remote directory must be an absolute path")
     current = "/"
@@ -40,11 +51,21 @@ def make_remote_directories(sftp: paramiko.SFTPClient, path: str) -> None:
             sftp.mkdir(current)
 
 
+# ---------------------------------------------------------------------------
+# Connecting
+# ---------------------------------------------------------------------------
+
 def credential_id(username: str, host: str, port: int) -> str:
+    """Key used to look a password up in the OS credential store."""
     return f"{username}@{host}:{port}"
 
 
 def create_ssh_client(settings: dict) -> paramiko.SSHClient:
+    """Open and authenticate a connection using the current profile settings.
+
+    Host key policy follows the "trust unknown host" checkbox: strict rejection
+    by default, AutoAdd plus a private known_hosts file when the user opts in.
+    """
     client = paramiko.SSHClient()
     client.load_system_host_keys()
     if KNOWN_HOSTS_FILE.exists():
@@ -57,6 +78,8 @@ def create_ssh_client(settings: dict) -> paramiko.SSHClient:
     password = settings["password"] or None
     key_file = settings["key_file"] or None
     timeout = _coerce_int(settings.get("ssh_timeout"), 12, 3, 300)
+    # Only hunt for agent/default keys when the user supplied no credential of
+    # their own, otherwise paramiko tries every key on file before failing.
     client.connect(
         hostname=settings["host"],
         port=settings["port"],
@@ -76,7 +99,11 @@ def create_ssh_client(settings: dict) -> paramiko.SSHClient:
 
 
 def exec_remote(client: paramiko.SSHClient, command: str, timeout: int = 30) -> tuple[int, str, str]:
-    """Run a single non-interactive command. Returns (exit_code, stdout, stderr)."""
+    """Run a single non-interactive command. Returns (exit_code, stdout, stderr).
+
+    Reads both streams to EOF before asking for the exit status, so a command
+    that fills the socket buffer cannot deadlock.
+    """
     stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
     del stdin
     out = stdout.read().decode("utf-8", errors="replace")
@@ -85,11 +112,21 @@ def exec_remote(client: paramiko.SSHClient, command: str, timeout: int = 30) -> 
     return code, out, err
 
 
+# ---------------------------------------------------------------------------
+# Local source tree
+# ---------------------------------------------------------------------------
+
 def local_entries(
     source: Path,
     ignore_spec: GitIgnoreSpec | None = None,
     show_hidden: bool = False,
 ) -> tuple[list[str], list[str]]:
+    """Walk the source directory once, returning (directories, files) as
+    slash-separated paths relative to `source`.
+
+    Symlinks and ignore-matched entries are skipped, and a pruned directory is
+    removed from `dir_names` so os.walk does not descend into it at all.
+    """
     directories: list[str] = []
     files: list[str] = []
     for current, dir_names, file_names in os.walk(source, followlinks=False):
@@ -120,7 +157,12 @@ def local_entries(
     return directories, files
 
 
+# ---------------------------------------------------------------------------
+# Display helpers
+# ---------------------------------------------------------------------------
+
 def human_size(num: float) -> str:
+    """Format a byte count as a short string like '12.4 KB' for the tree columns."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if num < 1024:
             return f"{num:.0f} {unit}" if unit == "B" else f"{num:.1f} {unit}"

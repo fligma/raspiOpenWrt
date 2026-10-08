@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rasconf Manager support module (auto-generated split)."""
+"""Standalone dialogs used by the main window: a string-list editor and the dry-run preview."""
 
 from __future__ import annotations
 
@@ -18,7 +18,11 @@ from PyQt6.QtWidgets import (
 
 
 class StringListDialog(QDialog):
-    """Editor for a list of strings (used for ignore patterns and post-deploy commands)."""
+    """Editor for a list of strings (used for ignore patterns and post-deploy commands).
+
+    Values are only read back through values() when the dialog is accepted, and
+    blank lines are dropped there rather than blocked on entry.
+    """
 
     def __init__(self, title: str, label: str, items: list[str], parent=None, monospace: bool = False):
         super().__init__(parent)
@@ -34,6 +38,7 @@ class StringListDialog(QDialog):
             font.setStyleHint(QFont.StyleHint.Monospace)
             self.list_widget.setFont(font)
         layout.addWidget(self.list_widget)
+        # Add / edit / remove act on the current or selected rows.
         row = QHBoxLayout()
         add_button = QPushButton("Add...")
         add_button.clicked.connect(self.add_item)
@@ -68,16 +73,25 @@ class StringListDialog(QDialog):
             self.list_widget.takeItem(self.list_widget.row(item))
 
     def values(self) -> list[str]:
+        """The list as typed, minus anything that is only whitespace."""
         return [self.list_widget.item(i).text() for i in range(self.list_widget.count()) if self.list_widget.item(i).text().strip()]
 
 
 class DryRunDialog(QDialog):
+    """Read-only report of what a deploy would change, built from a dry-run plan.
+
+    The plan comes straight from SftpWorker.deploy() in dry_run mode, so nothing
+    here has to re-derive anything - it only counts and lists.
+    """
+
     def __init__(self, plan: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Deploy preview (dry run)")
         self.resize(620, 480)
         layout = QVBoxLayout(self)
         unchanged = plan.get("unchanged", [])
+        # Headline numbers first; the deletion lines only appear if that mirror
+        # direction is actually switched on.
         summary = (
             f"Directories to create: {len(plan['directories'])}\n"
             f"Files to upload (changed): {len(plan['files'])}\n"
@@ -96,6 +110,7 @@ class DryRunDialog(QDialog):
         label.setStyleSheet("color: #e0e0e0;")
         layout.addWidget(label)
 
+        # The delete tabs stay visible but empty when mirror cleanup is off.
         tabs = QTabWidget()
         tabs.addTab(self._make_list(plan["directories"]), "New / update dirs")
         tabs.addTab(self._make_list(plan["files"]), "Files to upload")
@@ -119,6 +134,7 @@ class DryRunDialog(QDialog):
 
     @staticmethod
     def _make_list(items: list[str]) -> QListWidget:
+        """A read-only sorted list box for one tab of the preview."""
         widget = QListWidget()
         for item in sorted(items, key=lambda entry: entry.lower()):
             widget.addItem(item)

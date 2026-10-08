@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""rasconf Manager support module (auto-generated split)."""
+"""Background threads that talk to the device: interactive shell, one-off commands and all SFTP work."""
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import posixpath
 import queue
@@ -28,7 +29,17 @@ from manager_net import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Interactive shell
+# ---------------------------------------------------------------------------
+
 class SSHShellWorker(QThread):
+    """Owns one PTY channel and pumps bytes in both directions until it is stopped.
+
+    Output arrives on received() as decoded text; send_line() queues input so the
+    GUI thread never writes to the socket itself.
+    """
+
     connected = pyqtSignal()
     received = pyqtSignal(str)
     failed = pyqtSignal(str)
@@ -44,9 +55,11 @@ class SSHShellWorker(QThread):
         self.client: paramiko.SSHClient | None = None
 
     def send_line(self, text: str) -> None:
+        """Queue a line for the shell; the Enter key is added for you."""
         self.outgoing.put(text + "\n")
 
     def stop(self) -> None:
+        """Ask for a shutdown; closing the channel also breaks any blocked read."""
         self.stop_requested.set()
         if self.channel is not None:
             try:
@@ -55,14 +68,21 @@ class SSHShellWorker(QThread):
                 pass
 
     def run(self) -> None:
+        """Connect, then alternate between reading output and flushing queued input.
+
+        The short socket timeout and recv_ready() keep the loop responsive to the
+        stop flag and to typed commands. An incremental decoder is needed because
+        a multi-byte UTF-8 character can be split across two reads.
+        """
         try:
             self.client = create_ssh_client(self.settings)
             self.channel = self.client.invoke_shell(term="xterm", width=120, height=32)
             self.channel.settimeout(0.1)
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             self.connected.emit()
             while not self.stop_requested.is_set() and not self.channel.closed:
                 if self.channel.recv_ready():
-                    data = self.channel.recv(65536).decode("utf-8", errors="replace")
+                    data = decoder.decode(self.channel.recv(65536))
                     if data:
                         self.received.emit(data)
                 try:
@@ -84,8 +104,12 @@ class SSHShellWorker(QThread):
             self.disconnected.emit()
 
 
+# ---------------------------------------------------------------------------
+# One-off commands - used by the quick buttons when no shell is open
+# ---------------------------------------------------------------------------
+
 class RemoteExecWorker(QThread):
-    """Run a list of one-off commands over a fresh SSH connection."""
+    """Run a list of one-off commands over a fresh SSH connection, stopping at the first failure."""
     log = pyqtSignal(str)
     finished_ok = pyqtSignal()
     failed = pyqtSignal(str)
@@ -117,7 +141,17 @@ class RemoteExecWorker(QThread):
                 client.close()
 
 
+# ---------------------------------------------------------------------------
+# SFTP work
+#
+# One thread per operation: `operation` picks what run() does and `options`
+# carries the extras for that operation (selected paths, dry run, backups,
+# mirror directions).
+# ---------------------------------------------------------------------------
+
 class SftpWorker(QThread):
+    """Listing, transferring, deleting, renaming, deploying and backing up."""
+
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
@@ -130,6 +164,11 @@ class SftpWorker(QThread):
         self.options = options
 
     def run(self) -> None:
+        """Connect, hand over to perform(), and always close the session.
+
+        `stage` records how far we got, so a failure can come with advice that
+        matches the real problem - a missing SFTP subsystem is not a bad password.
+        """
         client = None
         sftp = None
         stage = "SSH connection"
@@ -158,6 +197,7 @@ class SftpWorker(QThread):
                 client.close()
 
     def perform(self, sftp: paramiko.SFTPClient, client: paramiko.SSHClient):
+        """Dispatch on the operation name; tree-returning ops hand back a fresh listing."""
         operation = self.operation
         remote_root = self.settings["remote_root"]
 
@@ -180,6 +220,8 @@ class SftpWorker(QThread):
         raise ValueError(f"Unknown operation: {operation}")
 
     def read_remote_tree(self, sftp: paramiko.SFTPClient, directory: str) -> list[dict]:
+        """Recursive listing in the nested shape the remote tree widget expects.
+        Symlinks are skipped, which also keeps a link loop from hanging the walk."""
         try:
             attributes = sftp.listdir_attr(directory)
         except OSError:
@@ -206,6 +248,7 @@ class SftpWorker(QThread):
         return entries
 
     def ensure_remote_root(self, sftp: paramiko.SFTPClient, remote_root: str) -> None:
+        """Create the deploy target if the device does not have it yet."""
         make_remote_directories(sftp, remote_root)
 
     def upload_relative_paths(
@@ -216,6 +259,12 @@ class SftpWorker(QThread):
         ignore_spec: GitIgnoreSpec | None = None,
         skip_unchanged: bool = False,
     ) -> tuple[int, int]:
+        """Upload a subset of the local tree and return (done, total).
+
+        An empty selection means the whole source. Directories are created first
+        so every file already has somewhere to land, and with skip_unchanged set
+        this is exactly what a normal deploy does.
+        """
         source = Path(self.settings["source"])
         self.ensure_remote_root(sftp, remote_root)
         directories, files = local_entries(source, ignore_spec, self.settings.get("show_hidden_files", False))
@@ -251,6 +300,10 @@ class SftpWorker(QThread):
             done += 1
             self.stage.emit(f"Uploading {relative}", done, total)
         return done, total
+
+    # ------------------------------------------------------------------
+    # Deciding what counts as changed
+    # ------------------------------------------------------------------
 
     def remote_file_stats(self, sftp: paramiko.SFTPClient, directory: str) -> dict[str, tuple[int, float]]:
         """Recursive metadata-only scan: {relative path: (size, mtime)}.
@@ -321,12 +374,15 @@ class SftpWorker(QThread):
             if remote_mtime and abs(remote_mtime - info.st_mtime) <= 2:
                 unchanged.append(relative)
                 continue
-            # Same size but timestamps disagree: verify in RAM before skipping.
             if self.file_identical(sftp, local_path, remote_join(remote_root, relative)):
                 unchanged.append(relative)
             else:
                 changed.append(relative)
         return changed, unchanged
+
+    # ------------------------------------------------------------------
+    # Deploy planning
+    # ------------------------------------------------------------------
 
     def collect_deploy_plan(
         self, sftp: paramiko.SFTPClient, remote_root: str
@@ -394,6 +450,13 @@ class SftpWorker(QThread):
         return removed
 
     def deploy(self, sftp: paramiko.SFTPClient, client: paramiko.SSHClient, remote_root: str) -> list[dict]:
+        """The full deploy: optional backups, incremental upload, mirror cleanup,
+        post-deploy commands.
+
+        A dry run stops early and returns the plan instead of touching anything.
+        Local-only entries are collected before the upload, otherwise the fresh
+        uploads would look like server files and survive the local cleanup.
+        """
         mirror_remote = bool(self.options.get("mirror_remote", self.options.get("mirror")))
         mirror_local = bool(self.options.get("mirror_local"))
 
@@ -414,8 +477,6 @@ class SftpWorker(QThread):
                 "would_delete_local": bool(mirror_local),
             }
 
-        # Capture the local-only set before uploading: once the deploy copies every
-        # local file to the server nothing would be flagged as absent remotely.
         pre_upload_local_files, pre_upload_local_dirs = (
             self.collect_local_only(sftp, remote_root) if mirror_local else ([], [])
         )
@@ -426,7 +487,6 @@ class SftpWorker(QThread):
         if self.options.get("backup"):
             self.backup_remote(sftp, remote_root)
 
-        # Deploy honours the ignore patterns and uploads only files that actually changed.
         ignore_spec = GitIgnoreSpec.from_lines(self.settings.get("deploy_ignore", []))
         self.upload_relative_paths(sftp, remote_root, [""], ignore_spec, skip_unchanged=True)
 
@@ -464,7 +524,12 @@ class SftpWorker(QThread):
 
         return self.read_remote_tree(sftp, remote_root)
 
+    # ------------------------------------------------------------------
+    # Backups
+    # ------------------------------------------------------------------
+
     def backup_remote(self, sftp: paramiko.SFTPClient, remote_root: str) -> None:
+        """Copy the current remote tree to a timestamped folder on the device."""
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup_dir = posixpath.normpath(
             posixpath.join(self.settings.get("backup_directory", "/tmp/rasconf_backups"), f"backup-{stamp}")
@@ -528,6 +593,7 @@ class SftpWorker(QThread):
         self.prune_local_backups(base_dir)
 
     def prune_remote_backups(self, sftp: paramiko.SFTPClient) -> None:
+        """Delete the oldest remote backup folders once there are more than the kept count."""
         keep = int(self.settings.get("keep_last_n_backups", 5))
         if keep <= 0:
             return
@@ -544,6 +610,7 @@ class SftpWorker(QThread):
                 pass
 
     def prune_local_backups(self, base_dir: Path) -> None:
+        """Same as prune_remote_backups, for the copies saved on this PC."""
         keep = int(self.settings.get("keep_last_n_backups", 5))
         if keep <= 0:
             return
@@ -562,6 +629,7 @@ class SftpWorker(QThread):
 
     @staticmethod
     def _remove_remote_tree(sftp: paramiko.SFTPClient, path: str) -> None:
+        """rm -r on the far side, deepest entries first."""
         for attribute in sftp.listdir_attr(path):
             if attribute.filename in {".", ".."}:
                 continue
@@ -573,6 +641,7 @@ class SftpWorker(QThread):
         sftp.rmdir(path)
 
     def remote_inventory(self, sftp: paramiko.SFTPClient, directory: str) -> list[tuple[str, bool]]:
+        """Flat (relative path, is directory) list of everything under a remote folder."""
         inventory: list[tuple[str, bool]] = []
         try:
             attributes = sftp.listdir_attr(directory)
@@ -589,9 +658,14 @@ class SftpWorker(QThread):
                 inventory.extend(self.remote_inventory(sftp, full_path))
         return inventory
 
+    # ------------------------------------------------------------------
+    # Single operations driven from the tree widgets
+    # ------------------------------------------------------------------
+
     def upload_selected(
         self, sftp: paramiko.SFTPClient, remote_root: str, selected_paths: list[str]
     ) -> None:
+        """Upload the highlighted items, always replacing what is already there."""
         self.upload_relative_paths(sftp, remote_root, selected_paths, None)
 
     def download_selected(
@@ -600,6 +674,7 @@ class SftpWorker(QThread):
         remote_root: str,
         selected_paths: list[str],
     ) -> None:
+        """Copy the highlighted remote items into a local folder, keeping the tree shape."""
         destination_root = Path(self.options["destination"]).resolve()
         destination_root.mkdir(parents=True, exist_ok=True)
 
@@ -640,6 +715,7 @@ class SftpWorker(QThread):
         remote_root: str,
         selected_paths: list[str],
     ) -> None:
+        """Recursively delete the highlighted remote items."""
         paths = self.normalize_paths(selected_paths)
         if not paths or "" in paths:
             raise ValueError("Select one or more remote files or directories, not the remote root")
@@ -661,6 +737,7 @@ class SftpWorker(QThread):
             remove(relative)
 
     def rename_remote(self, sftp: paramiko.SFTPClient, relative: str, new_name: str) -> None:
+        """Rename within the item's own directory; the parent never changes."""
         safe_relative_path(relative)
         if not relative:
             raise ValueError("Cannot rename the remote root")
@@ -674,6 +751,8 @@ class SftpWorker(QThread):
 
     @staticmethod
     def normalize_paths(paths: list[str]) -> list[str]:
+        """Clean up a tree selection: validate, sort shallowest first and drop
+        anything already covered by a selected parent directory."""
         normalized = sorted({safe_relative_path(path) for path in paths}, key=lambda item: (item.count("/"), item))
         result: list[str] = []
         for path in normalized:

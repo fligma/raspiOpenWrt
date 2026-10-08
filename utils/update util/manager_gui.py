@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 import keyring
 import paramiko
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QEvent
-from PyQt6.QtGui import QAction, QFont, QIcon, QKeySequence, QTextCursor
+from PyQt6.QtGui import QAction, QFont, QIcon, QKeySequence, QTextCursor, QDesktopServices
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -76,6 +76,8 @@ from manager_const import (
     KNOWN_HOSTS_FILE,
     LOG_FILE,
     MAX_COMMAND_HISTORY,
+    PROJECT_GITHUB_URL,
+    PROJECT_LICENSE_URL,
     REPOSITORY_ROOT,
     RESOURCE_DIR,
 )
@@ -111,6 +113,11 @@ class RasconfManager(QMainWindow):
         self.remote_tree_entries: list[dict] = []
         self.app_config = load_app_config()
         self.current_term_color = "#e0e0e0"
+        self.term_partial = ""
+        self.term_cells: list[tuple[str, str]] = []
+        self.term_pen = 0
+        self.term_saved_pen = 0
+        self.term_line_doc_pos = 0
         self.terminal_history: list[str] = load_command_history()
         self.terminal_history_pos = len(self.terminal_history)
         self.connected_once = False
@@ -169,7 +176,7 @@ class RasconfManager(QMainWindow):
         edit_menu.addAction(self.action_clear_log)
         self.action_clear_terminal = QAction("Clear terminal", self)
         self.action_clear_terminal.setShortcut(QKeySequence("Ctrl+L"))
-        self.action_clear_terminal.triggered.connect(lambda: self.terminal_output.clear())
+        self.action_clear_terminal.triggered.connect(self.clear_terminal)
         edit_menu.addAction(self.action_clear_terminal)
         self.action_clear_history = QAction("Clear command history", self)
         self.action_clear_history.triggered.connect(self.clear_command_history)
@@ -467,7 +474,7 @@ class RasconfManager(QMainWindow):
         self.shell_disconnect_button.setEnabled(False)
         self.shell_disconnect_button.clicked.connect(self.disconnect_shell)
         clear_button = QPushButton("Clear")
-        clear_button.clicked.connect(lambda: self.terminal_output.clear())
+        clear_button.clicked.connect(self.clear_terminal)
         terminal_actions.addWidget(self.shell_connect_button)
         terminal_actions.addWidget(self.shell_disconnect_button)
         terminal_actions.addWidget(clear_button)
@@ -1474,34 +1481,187 @@ class RasconfManager(QMainWindow):
         self.terminal_font_spin.setValue(size)
         self.save_app_config()
 
-    def append_terminal_output(self, text: str) -> None:
-        text = re.sub(r'\x1b\][0-9;]*[^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
-        parts = re.split(r'\x1b\[([\d;]*)m', text)
-        cursor = self.terminal_output.textCursor()
+    def clear_terminal(self) -> None:
+        self.terminal_output.clear()
+        self.reset_terminal_state()
+
+    def reset_terminal_state(self) -> None:
+        """Drop all pending terminal rendering state and start a fresh output line."""
+        self.term_partial = ""
+        self.term_cells = []
+        self.term_pen = 0
+        self.term_saved_pen = 0
+        self.current_term_color = "#e0e0e0"
+        cursor = QTextCursor(self.terminal_output.document())
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        for i, part in enumerate(parts):
-            if i % 2 == 0:
-                chunk = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', part)
-                chunk = re.sub(r'\x1b[()][A-Z]', '', chunk)
-                chunk = re.sub(r'[\x07\x08\r]', '', chunk)
-                if chunk:
-                    chunk = chunk.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                    chunk = chunk.replace('\n', '<br>').replace(' ', '&nbsp;')
-                    cursor.insertHtml(f'<span style="color: {self.current_term_color};">{chunk}</span>')
+        self.term_line_doc_pos = cursor.position()
+
+    def append_terminal_output(self, text: str) -> None:
+        """Feed raw PTY bytes through a minimal line renderer.
+
+        Emulates carriage-return overwriting and the ESC 7 / ESC 8 (save and
+        restore cursor) sequences that apk's progress bar uses, so repeated
+        redraws replace the current line instead of being appended as garbage.
+        """
+        text = self.term_partial + text
+        self.term_partial = ""
+        index = text.rfind("\x1b")
+        if index != -1:
+            tail = text[index:]
+            incomplete = (
+                tail == "\x1b"
+                or (tail.startswith("\x1b[") and not re.fullmatch(r"\x1b\[[0-9;?]*[a-zA-Z]", tail))
+                or (tail.startswith("\x1b]") and "\x07" not in tail[2:] and not tail.endswith("\x1b\\"))
+            )
+            if incomplete:
+                self.term_partial = tail
+                text = text[:index]
+        dirty = False
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if ch == "\x1b":
+                consumed = self.handle_terminal_escape(text, i)
+                dirty = True
+                i += max(consumed, 1)
+                continue
+            if ch == "\n":
+                self.flush_terminal_line(newline=True)
+                dirty = False
+                i += 1
+                continue
+            if ch == "\r":
+                self.term_pen = 0
+                dirty = True
+                i += 1
+                continue
+            if ch == "\x08":
+                self.term_pen = max(0, self.term_pen - 1)
+                dirty = True
+                i += 1
+                continue
+            if ch == "\t":
+                self.term_pen = (self.term_pen // 8 + 1) * 8
+                dirty = True
+                i += 1
+                continue
+            if ch == "\x07" or ch in "\x00\x0b\x0c":
+                i += 1
+                continue
+            self.put_terminal_char(ch)
+            dirty = True
+            i += 1
+        if dirty:
+            self.flush_terminal_line(newline=False)
+
+    def handle_terminal_escape(self, text: str, index: int) -> int:
+        """Consume one escape sequence starting at index; return characters used."""
+        rest = text[index:]
+        if len(rest) < 2:
+            return 1
+        if rest[1] == "7":
+            self.term_saved_pen = self.term_pen
+            return 2
+        if rest[1] == "8":
+            self.term_pen = self.term_saved_pen
+            return 2
+        match = re.match(r"\x1b\[([0-9;?]*)([a-zA-Z])", rest)
+        if match:
+            self.apply_terminal_csi(match.group(1), match.group(2))
+            return match.end()
+        match = re.match(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", rest)
+        if match:
+            return match.end()
+        match = re.match(r"\x1b[()#][A-Z0-9]?", rest)
+        if match:
+            return match.end()
+        return 2  # any other two-character escape (ESC c, ESC M, ...)
+
+    def apply_terminal_csi(self, params: str, command: str) -> None:
+        if command == "m":
+            for token in params.split(";"):
+                token = token.strip("?")
+                code = int(token) if token.isdigit() else 0
+                if code in (0, 39):
+                    self.current_term_color = "#e0e0e0"
+                elif 30 <= code <= 37:
+                    palette = ['#1a1a1a', '#c51a4a', '#23d18b', '#d7ba7d', '#3b8eea', '#c586c0', '#29b8db', '#e5e5e5']
+                    self.current_term_color = palette[code - 30]
+                elif 90 <= code <= 97:
+                    palette = ['#666666', '#f14c4c', '#23d18b', '#f5f543', '#3b8eea', '#d670d6', '#29b8db', '#e5e5e5']
+                    self.current_term_color = palette[code - 90]
+            return
+        if command == "K":
+            mode = int(params) if params.isdigit() else 0
+            if mode == 0:
+                self.term_cells = self.term_cells[:self.term_pen]
+            elif mode == 1:
+                self.term_cells = self.term_cells[self.term_pen:]
+                self.term_pen = 0
             else:
-                for token in part.split(';'):
-                    token = token.strip()
-                    code = int(token) if token.isdigit() else 0
-                    if code == 0:
-                        self.current_term_color = '#e0e0e0'
-                    elif 30 <= code <= 37:
-                        palette = ['#1a1a1a', '#c51a4a', '#23d18b', '#d7ba7d', '#3b8eea', '#c586c0', '#29b8db', '#e5e5e5']
-                        self.current_term_color = palette[code - 30]
-                    elif 90 <= code <= 97:
-                        palette = ['#666666', '#f14c4c', '#23d18b', '#f5f543', '#3b8eea', '#d670d6', '#29b8db', '#e5e5e5']
-                        self.current_term_color = palette[code - 90]
+                self.term_cells = []
+                self.term_pen = 0
+                self.term_saved_pen = 0
+            return
+        # Cursor moves, erase display, and mode sets have no meaning in the
+        # single-overwritable-line model; ignore them like before.
+
+    def put_terminal_char(self, ch: str) -> None:
+        while len(self.term_cells) <= self.term_pen:
+            pad_color = self.term_cells[-1][1] if self.term_cells else self.current_term_color
+            self.term_cells.append((" ", pad_color))
+        self.term_cells[self.term_pen] = (ch, self.current_term_color)
+        self.term_pen += 1
+
+    def render_terminal_cells(self) -> str:
+        parts: list[str] = []
+        run_color = None
+        run: list[str] = []
+
+        def flush_run() -> None:
+            if not run:
+                return
+            text = "".join(run)
+            text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            text = text.replace(" ", "&nbsp;")
+            parts.append(f'<span style="color: {run_color};">{text}</span>')
+
+        for ch, color in self.term_cells:
+            if color != run_color:
+                flush_run()
+                run.clear()
+                run_color = color
+            run.append(ch)
+        flush_run()
+        return "".join(parts)
+
+    def flush_terminal_line(self, newline: bool) -> None:
+        """Replace the current output line in the widget with the rendered cells."""
+        html = self.render_terminal_cells()
+        if newline:
+            html += "<br>"
+        cursor = self.terminal_output.textCursor()
+        cursor.setPosition(self.term_line_doc_pos)
+        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        if html:
+            cursor.insertHtml(html)
         self.terminal_output.setTextCursor(cursor)
+        if newline:
+            self.term_cells = []
+            self.term_pen = 0
+            self.term_saved_pen = 0
+            self.term_line_doc_pos = cursor.position()
         self.terminal_output.ensureCursorVisible()
+
+    def terminal_write_message(self, text: str) -> None:
+        """Write a local status message through the same renderer as shell data."""
+        for ch in text:
+            if ch == "\n":
+                self.flush_terminal_line(newline=True)
+            else:
+                self.put_terminal_char(ch)
+        self.flush_terminal_line(newline=False)
 
     def connect_shell(self, _checked: bool = False) -> None:
         if self.shell_worker is not None and self.shell_worker.isRunning():
@@ -1525,10 +1685,10 @@ class RasconfManager(QMainWindow):
         self.store_password()
         self.save_current_profile_edits()
         self.terminal_output.clear()
-        self.terminal_output.append(
-            f"Connecting to {settings['username']}@{settings['host']}:{settings['port']}..."
+        self.reset_terminal_state()
+        self.terminal_write_message(
+            f"Connecting to {settings['username']}@{settings['host']}:{settings['port']}...\n"
         )
-        self.current_term_color = "#e0e0e0"
         self.shell_worker = SSHShellWorker(settings, parent=self)
         self.shell_worker.connected.connect(self.shell_connected)
         self.shell_worker.received.connect(self.append_terminal_output)
@@ -1538,18 +1698,18 @@ class RasconfManager(QMainWindow):
         self.shell_connect_button.setEnabled(False)
 
     def shell_connected(self) -> None:
-        self.terminal_output.append("\nSSH shell connected.")
+        self.terminal_write_message("SSH shell connected.\n")
         self.shell_disconnect_button.setEnabled(True)
         self.terminal_send_button.setEnabled(True)
         self.terminal_input.setFocus()
         self.set_status_dot("online")
 
     def shell_failed(self, message: str) -> None:
-        self.terminal_output.append(f"\nSSH error: {message}")
+        self.terminal_write_message(f"SSH error: {message}\n")
         QMessageBox.critical(self, "SSH terminal failed", message)
 
     def shell_disconnected(self) -> None:
-        self.terminal_output.append("\nSSH shell disconnected.")
+        self.terminal_write_message("SSH shell disconnected.\n")
         self.shell_connect_button.setEnabled(True)
         self.shell_disconnect_button.setEnabled(False)
         self.terminal_send_button.setEnabled(False)
@@ -1672,12 +1832,24 @@ class RasconfManager(QMainWindow):
             QMessageBox.critical(self, "Save failed", str(error))
 
     def show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "Rasconf Manager",
-            "Manage the rasconf web interface over SSH/SFTP.\n\n"
-            "+ LuCI embeded page",
+        box = QMessageBox(self)
+        box.setWindowTitle("About Rasconf Manager")
+        box.setText(
+            "<b>Rasconf Manager</b><br>"
+            "Manage the rasconf web interface over SSH/SFTP.<br>"
+            "+ LuCI embeded page<br><br>"
+            'GitHub: <a href="{repo}">{repo}</a><br>'
+            'License: <a href="{license}">MIT License</a><br><br>'
+            "Copyright &copy; 2026 fligma. Licensed under the MIT License.".format(
+                repo=PROJECT_GITHUB_URL, license=PROJECT_LICENSE_URL
+            )
         )
+        box.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.linkActivated.connect(lambda url: QDesktopServices.openUrl(QUrl(url)))
+        box.exec()
 
     def closeEvent(self, event) -> None:
         self.save_current_profile_edits()
