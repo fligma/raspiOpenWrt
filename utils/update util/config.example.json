@@ -24,6 +24,8 @@
   "logging_enabled": true,
   "remote_backup_enabled": false,
   "local_backup_enabled": false,
+  "mirror_delete_remote": false,
+  "mirror_delete_local": false,
   "backup_directory": "/tmp/rasconf_backups",
   "local_backup_directory": "",
   "keep_last_n_backups": 5,

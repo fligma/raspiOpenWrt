@@ -7,6 +7,9 @@ uci set uhttpd.rasconf.cgi_prefix='/cgi-bin'
 uci commit uhttpd
 /etc/init.d/uhttpd restart
 
+# Generate new hash via CLI: python -c "import hashlib; print(hashlib.sha256(b'YOUR_PASSWORD').hexdigest())"
+# Then Place it in file /www_rasconf/cgi-bin/hash.file
+
 #pages
 http://192.168.50.1 Luci
 http://192.168.50.1:8989/cgi-bin/index.py dashboard

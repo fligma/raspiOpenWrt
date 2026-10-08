@@ -1,8 +1,10 @@
-notes
 bkup
 .gitattributes
 .venv
 media
 local tools
-dist
+*dist
 .idea
+*hash.file
+*.priv
+*__pycache__

@@ -97,14 +97,20 @@ to open the JSON by hand.
 ## Deploying
 
 1. Pick a profile and connect (the remote tree is the same action as Refresh).
-2. Choose **Deploy source** to upload the whole local source tree, or select
-   individual files and use **Upload selected**.
+2. Choose **Deploy source** to sync the local source tree, or select individual
+   files and use **Upload selected**. Deploy only uploads files that actually
+   changed: size and modified-time are compared from remote directory metadata
+   (no downloads), and when those disagree but the size matches, both files are
+   hashed in RAM to avoid needless transfers. Files matching `deploy_ignore`
+   are never uploaded.
 3. **Preview deploy** (Ctrl+Shift+D) runs a dry pass and lists the directories,
-   files, and (with Mirror on) remote items that would change. Nothing is
-   written.
-4. **Mirror** removes remote files and directories that do not exist locally.
-   It is off by default and always protected by the confirmation setting.
-   Ignore-patterned files are never deleted during a mirror.
+   changed files, unchanged files that will be skipped, and (with mirror
+   cleanup on) items that would be deleted on either side. Nothing is written.
+4. **Mirror cleanup** (Settings tab, off by default) has two independent
+   options: *Delete server files not on local* removes remote items absent
+   locally, and *Delete local files not on server* removes local items absent
+   on the remote (compared before the upload starts). Ignore-patterned files
+   are never touched in either direction.
 5. **Deploy-time backups** (configured in Settings) run before uploading:
    *Remote backup* copies the current remote tree to the remote backup
    directory, and *Local backup* downloads it to your PC. Both skip files over
@@ -112,8 +118,9 @@ to open the JSON by hand.
 6. **Post-deploy commands** run automatically after a successful deploy, which
    is handy for reloading the web server (for example `killall -HUP uhttpd`).
 
-Deploy overwrites matching remote files. `Upload selected` intentionally
-ignores the `deploy_ignore` rules so you can send an excluded file by hand.
+Deploy overwrites changed remote files and leaves unchanged ones untouched.
+`Upload selected` intentionally ignores both the `deploy_ignore` rules and the
+change detection so you can always force-send an excluded file by hand.
 
 ## SSH terminal
 

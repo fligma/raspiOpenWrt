@@ -8,8 +8,16 @@ import hashlib
 import re
 from http import cookies
 
-# Generate new hash via CLI: python3 -c "import hashlib; print(hashlib.sha256(b'YOUR_PIN').hexdigest())"
-SECRET_HASH = "4791512d9f517bff255c49e11cbc678909181958b7b1d09335fc3c8246c24323"
+current_file = os.path.abspath(__file__)
+hashpath=f'{current_file.replace('index.py', '')}hash.file'
+if os.path.exists(hashpath):
+    with open(hashpath) as f:
+        SECRET_HASH = f.readline()
+else:
+    with open(hashpath, "w") as file:
+        file.write("9b8769a4a742959a2d0298c36fb70623f2dfacda8436237df08d8dfd5b37374c") # pass123 default
+    with open(hashpath) as file:
+        SECRET_HASH = f.readline()
 
 CONFIG_FILE = "/config/index.conf"
 DEFAULT_CONFIG = {
@@ -21,7 +29,7 @@ DEFAULT_CONFIG = {
 }
 
 def check_auth(params, cookie):
-    """Verify session cookie or PIN login attempt."""
+    """Verify session cookie or passwrd login attempt."""
     submitted_pin = params.get("pin", [""])[0]
     
     if submitted_pin:
