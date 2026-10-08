@@ -1,7 +1,6 @@
 bkup
 .gitattributes
 .venv
-media
 local tools
 *dist
 .idea
