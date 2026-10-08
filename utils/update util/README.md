@@ -1,4 +1,4 @@
-![alt text](https://github.com/fligma/raspiOpenWrt/blob/main/SCREENSHOT.png?raw=true)
+![SCREENSHOT.png](https://raw.githubusercontent.com/fligma/raspiOpenWrt/refs/heads/main/media/SCREENSHOT.png)
 # rasconf Manager
 
 A desktop tool for deploying and managing the rasconf web interface on a
