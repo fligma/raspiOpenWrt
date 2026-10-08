@@ -1674,10 +1674,9 @@ class RasconfManager(QMainWindow):
     def show_about(self) -> None:
         QMessageBox.about(
             self,
-            "About rasconf Manager",
-            "Deploy and manage the rasconf web interface over SSH/SFTP.\n\n"
-            "Supports connection profiles, dry-run preview, remote backup, post-deploy actions, "
-            "and an integrated SSH terminal with command history.",
+            "Rasconf Manager",
+            "Manage the rasconf web interface over SSH/SFTP.\n\n"
+            "+ LuCI embeded page",
         )
 
     def closeEvent(self, event) -> None:
