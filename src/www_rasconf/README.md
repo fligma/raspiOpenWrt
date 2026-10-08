@@ -11,7 +11,7 @@ uci commit uhttpd
 # Then Place it in file /www_rasconf/cgi-bin/hash.file
 
 #pages
-http://192.168.50.1 Luci
-http://192.168.50.1:8989/cgi-bin/index.py dashboard
-http://192.168.50.1:8989/cgi-bin/index.py?action=api&type=sys api calls
-http://192.168.50.1:8989/cgi-bin/index.py?action=api for all
+http://0.0.0.0 Luci
+http://0.0.0.0:8989/cgi-bin/index.py dashboard
+http://0.0.0.0:8989/cgi-bin/index.py?action=api&type=sys api calls
+http://0.0.0.0:8989/cgi-bin/index.py?action=api for all
