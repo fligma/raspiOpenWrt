@@ -58,11 +58,10 @@ DEFAULT_PROFILE = {
     "remember_password": False,
 }
 
-# Everything the Settings tab can change, plus the connection profile list.
-# Flat host/port/... keys mirror the active profile - see _sync_flat_mirror.
+# Everything one profile can hold: the connection defaults plus everything
+# the Settings tab can change. A profile record in config.json is this dict
+# with the user's own values; see manager_config for the profile store.
 DEFAULT_APP_CONFIG = {
-    "profiles": [],
-    "active_profile": "Default",
     "host": DEFAULT_PROFILE["host"],
     "port": DEFAULT_PROFILE["port"],
     "username": DEFAULT_PROFILE["username"],
@@ -84,7 +83,10 @@ DEFAULT_APP_CONFIG = {
     "keep_last_n_backups": 5,
     "confirm_destructive": True,
     "show_hidden_files": False,
-    "auto_connect": False,
+    # Auto-connect is per protocol now that SSH and SFTP have their own
+    # connection indicators; each fires at startup when its tab is enabled.
+    "auto_connect_sftp": False,
+    "auto_connect_ssh": False,
     "use_alt_icon": False,
     # Which main tabs are available. Custom browser tabs are always shown.
     "sftp_enabled": True,

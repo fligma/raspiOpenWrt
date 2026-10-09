@@ -1,180 +1,148 @@
+// Main dashboard module: wires the split renderers into a single scheduler that
+// behaves like OpenWrt LuCI's auto-refresh (global pause + live countdown).
+import {
+    updateTemp,
+    updateSys,
+    updateStorage,
+    updateNet,
+    updateWifi,
+    updateDev,
+    updateTraffic,
+    disconnectDevice,
+} from './render.js';
+import { postJson } from './api.js';
+
 const configElement = document.getElementById('rasconf-config');
 const CONFIG = configElement ? JSON.parse(configElement.textContent) : {};
-const intervals = {};
 
-function fetchData(type, callback) {
-    fetch('?action=api&type=' + type)
-        .then(response => response.json())
-        .then(data => callback(data))
-        .catch(error => console.error('Error fetching ' + type, error));
+// A task is one panel: how often it refreshes and when it is next due.
+let tasks = [];
+let paused = false;
+let tickTimer = null;
+
+function seconds(value, fallback) {
+    const n = parseInt(value, 10);
+    return isNaN(n) || n < 1 ? fallback : n;
 }
 
-function updateTemp() {
-    fetchData('temp', data => {
-        if (data.temp) document.getElementById('val_temp').innerText = data.temp;
-    });
+function buildTasks() {
+    const now = Date.now();
+    tasks = [
+        { name: 'temp', fn: updateTemp, interval: seconds(CONFIG.temp_interval, 2), next: now },
+        { name: 'sys', fn: updateSys, interval: seconds(CONFIG.sys_interval, 3), next: now },
+        { name: 'storage', fn: updateStorage, interval: seconds(CONFIG.storage_interval, 10), next: now },
+        { name: 'net', fn: updateNet, interval: seconds(CONFIG.net_interval, 5), next: now },
+        { name: 'traffic', fn: updateTraffic, interval: seconds(CONFIG.traffic_interval, 5), next: now },
+        { name: 'wifi', fn: updateWifi, interval: seconds(CONFIG.wifi_interval, 5), next: now },
+        { name: 'dev', fn: updateDev, interval: seconds(CONFIG.dev_interval, 5), next: now },
+    ];
 }
 
-function updateSys() {
-    fetchData('sys', data => {
-        if (data.sys) {
-            document.getElementById('val_load').innerText = data.sys.load;
-            document.getElementById('val_ram').innerText = data.sys.ram;
+function secondsToNext() {
+    const now = Date.now();
+    let soonest = Infinity;
+    tasks.forEach(task => { soonest = Math.min(soonest, task.next - now); });
+    if (!isFinite(soonest)) return 0;
+    return Math.max(0, Math.ceil(soonest / 1000));
+}
+
+function paintIndicator() {
+    const indicator = document.getElementById('live_indicator');
+    const countdown = document.getElementById('refresh_countdown');
+    if (paused) {
+        if (indicator) { indicator.textContent = '\u25cf Paused'; indicator.classList.add('paused'); }
+        if (countdown) countdown.textContent = 'paused';
+    } else {
+        if (indicator) { indicator.textContent = '\u25cf Live'; indicator.classList.remove('paused'); }
+        if (countdown) countdown.textContent = secondsToNext() + 's';
+    }
+}
+
+function tick() {
+    if (paused) { paintIndicator(); return; }
+    const now = Date.now();
+    tasks.forEach(task => {
+        if (now >= task.next) {
+            try { task.fn(); } catch (error) { console.error('refresh ' + task.name, error); }
+            task.next = now + task.interval * 1000;
         }
     });
+    paintIndicator();
 }
 
-function replacePreservingDetails(element, html) {
-    const expandedKeys = new Set(
-        Array.from(element.querySelectorAll('details[open]'))
-            .map(details => details.dataset.detailKey)
-    );
-    element.innerHTML = html;
-    element.querySelectorAll('details[data-detail-key]').forEach(details => {
-        details.open = expandedKeys.has(details.dataset.detailKey);
+function togglePause() {
+    paused = !paused;
+    const button = document.getElementById('refresh_toggle');
+    if (button) {
+        button.textContent = paused ? 'Resume' : 'Pause';
+        button.setAttribute('aria-pressed', String(paused));
+        button.classList.toggle('paused', paused);
+    }
+    if (!paused) {
+        // Resume: run everything now, then fall back to the normal cadence.
+        const now = Date.now();
+        tasks.forEach(task => { task.next = now; });
+    }
+    paintIndicator();
+}
+
+function runOnce() {
+    tasks.forEach(task => {
+        try { task.fn(); } catch (error) { console.error('init ' + task.name, error); }
     });
 }
 
-function updateNet() {
-    fetchData('net', data => {
-        let html = '';
-        if (Array.isArray(data.net)) {
-            data.net.forEach((iface, index) => {
-                const statusClass = iface.up ? 'status-up' : 'status-down';
-                const statusText = iface.up ? 'UP' : 'DOWN';
-                const ipInfo = iface['ipv4-address'] && iface['ipv4-address'].length > 0
-                    ? iface['ipv4-address'].map(ip => ip.address + '/' + ip.mask).join(', ')
-                    : 'No IPv4 Address';
-
-                html += `
-                <div class="data-row">
-                    <div class="data-row-title">${iface.interface} <span class="${statusClass}">${statusText}</span></div>
-                    <div class="data-row-details">
-                        <span class="pill">Device: ${iface.device || 'N/A'}</span>
-                        <span class="data-ip">IPv4: ${ipInfo}</span>
-                    </div>
-                    <details data-detail-key="interface-${index}">
-                        <summary>► View Full Interface Data</summary>
-                        <pre>${JSON.stringify(iface, null, 2)}</pre>
-                    </details>
-                </div>`;
-            });
-        } else {
-            html = '<pre>' + JSON.stringify(data.net, null, 2) + '</pre>';
-        }
-        replacePreservingDetails(document.getElementById('net_list'), html);
+function fillSettingsForm() {
+    const map = {
+        cfg_temp: CONFIG.temp_interval,
+        cfg_sys: CONFIG.sys_interval,
+        cfg_net: CONFIG.net_interval,
+        cfg_wifi: CONFIG.wifi_interval,
+        cfg_dev: CONFIG.dev_interval,
+        cfg_storage: CONFIG.storage_interval,
+        cfg_traffic: CONFIG.traffic_interval,
+    };
+    Object.entries(map).forEach(([id, value]) => {
+        const el = document.getElementById(id);
+        if (el) el.value = value;
     });
-}
-
-function updateWifi() {
-    fetchData('wifi', data => {
-        let html = '';
-        if (data.wifi && Object.keys(data.wifi).length > 0 && !data.wifi.error) {
-            Object.entries(data.wifi).forEach(([radio, radioData], index) => {
-                const statusClass = radioData.up ? 'status-up' : 'status-down';
-                const statusText = radioData.up ? 'UP' : 'DOWN';
-                html += `
-                <div class="data-row">
-                    <div class="data-row-title">${radio} <span class="${statusClass}">${statusText}</span></div>
-                    <details data-detail-key="radio-${index}">
-                        <summary>► View Full Radio Data</summary>
-                        <pre>${JSON.stringify(radioData, null, 2)}</pre>
-                    </details>
-                </div>`;
-            });
-        } else {
-            html = '<div class="muted-message">No wireless interfaces found or device offline.</div><pre>' + JSON.stringify(data.wifi, null, 2) + '</pre>';
-        }
-        replacePreservingDetails(document.getElementById('wifi_list'), html);
-    });
-}
-
-function updateDev() {
-    fetchData('dev', data => {
-        let html = '';
-        if (data.dev && data.dev.length > 0) {
-            data.dev.forEach(device => {
-                const iface = device.interface ? device.interface : device.source;
-                const disconnectAction = device.wireless_interface
-                    ? `<button class="disconnect-device" type="button" data-device-mac="${device.mac}" aria-label="Disconnect ${device.hostname} from Wi-Fi">Disconnect Wi-Fi</button>`
-                    : '<span class="muted-message">Wired / not on Wi-Fi</span>';
-                html += `<tr>
-                    <td class="device-name">${device.hostname}</td>
-                    <td>${device.ip}</td>
-                    <td class="device-mac">${device.mac}</td>
-                    <td><span class="pill">${device.wireless_interface || iface}</span></td>
-                    <td>${disconnectAction}</td>
-                </tr>`;
-            });
-        } else {
-            html = '<tr><td class="empty-row" colspan="5">No connected devices found.</td></tr>';
-        }
-        document.getElementById('dev_list').innerHTML = html;
-    });
-}
-
-function disconnectDevice(mac) {
-    if (!confirm(`Disconnect Wi-Fi device ${mac}? It may reconnect if the device retries.`)) return;
-
-    fetch('?action=disconnect_device', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({mac})
-    })
-        .then(response => response.json())
-        .then(result => {
-            if (!result.success) {
-                alert('Unable to disconnect device: ' + result.error);
-                return;
-            }
-            updateDev();
-        })
-        .catch(error => alert('Unable to disconnect device: ' + error));
-}
-
-function init() {
-    document.getElementById('cfg_temp').value = CONFIG.temp_interval;
-    document.getElementById('cfg_sys').value = CONFIG.sys_interval;
-    document.getElementById('cfg_net').value = CONFIG.net_interval;
-    document.getElementById('cfg_wifi').value = CONFIG.wifi_interval;
-    document.getElementById('cfg_dev').value = CONFIG.dev_interval;
-
-    updateTemp();
-    updateSys();
-    updateNet();
-    updateWifi();
-    updateDev();
-
-    intervals.temp = setInterval(updateTemp, CONFIG.temp_interval * 1000);
-    intervals.sys = setInterval(updateSys, CONFIG.sys_interval * 1000);
-    intervals.net = setInterval(updateNet, CONFIG.net_interval * 1000);
-    intervals.wifi = setInterval(updateWifi, CONFIG.wifi_interval * 1000);
-    intervals.dev = setInterval(updateDev, CONFIG.dev_interval * 1000);
 }
 
 function saveSettings() {
     const newConfig = {
-        temp_interval: parseInt(document.getElementById('cfg_temp').value, 10) || 2,
-        sys_interval: parseInt(document.getElementById('cfg_sys').value, 10) || 3,
-        net_interval: parseInt(document.getElementById('cfg_net').value, 10) || 5,
-        wifi_interval: parseInt(document.getElementById('cfg_wifi').value, 10) || 5,
-        dev_interval: parseInt(document.getElementById('cfg_dev').value, 10) || 5
+        temp_interval: seconds(document.getElementById('cfg_temp').value, 2),
+        sys_interval: seconds(document.getElementById('cfg_sys').value, 3),
+        net_interval: seconds(document.getElementById('cfg_net').value, 5),
+        wifi_interval: seconds(document.getElementById('cfg_wifi').value, 5),
+        dev_interval: seconds(document.getElementById('cfg_dev').value, 5),
+        storage_interval: seconds(document.getElementById('cfg_storage').value, 10),
+        traffic_interval: seconds(document.getElementById('cfg_traffic').value, 5),
     };
 
-    fetch('?action=save_config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(newConfig)
-    })
-        .then(response => response.json())
+    postJson('save_config', newConfig)
         .then(result => {
             if (result.success) {
-                document.getElementById('save_msg').classList.add('visible');
+                const msg = document.getElementById('save_msg');
+                if (msg) msg.classList.add('visible');
                 setTimeout(() => location.reload(), 1500);
             } else {
                 alert('Error saving: ' + result.error);
             }
-        });
+        })
+        .catch(error => alert('Error saving: ' + error));
+}
+
+function init() {
+    fillSettingsForm();
+
+    buildTasks();
+    runOnce();
+
+    tickTimer = setInterval(tick, 1000);
+    paintIndicator();
+
+    const toggleButton = document.getElementById('refresh_toggle');
+    if (toggleButton) toggleButton.addEventListener('click', togglePause);
 }
 
 document.addEventListener('rasconf:save-settings', saveSettings);
@@ -182,4 +150,9 @@ document.addEventListener('click', event => {
     const disconnectButton = event.target.closest('.disconnect-device');
     if (disconnectButton) disconnectDevice(disconnectButton.dataset.deviceMac);
 });
-window.addEventListener('DOMContentLoaded', init);
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+} else {
+    init();
+}

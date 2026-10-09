@@ -47,8 +47,8 @@ local backup, mirror) still hide their own indented options while off.
 
 - **Startup & defaults** (always visible)
   - Default tab shown at startup (only the currently visible tabs are listed)
-  - Connect automatically at startup - see the auto-connect note below
 - **SFTP** (checkable tab)
+  - Auto-connect at startup (opens the SFTP connection when the app launches)
   - Confirm destructive operations (delete and mirror)
   - **Enable logging to file** - when off, nothing is written to
     `rasconf_manager.log`. While on it exposes the maximum on-screen log lines
@@ -62,6 +62,7 @@ local backup, mirror) still hide their own indented options while off.
   - **Mirror cleanup on deploy** (destructive, off by default)
   - Edit deploy ignore patterns and post-deploy commands
 - **SSH** (checkable tab)
+  - Auto-connect at startup (opens the SSH terminal when the app launches)
   - Terminal font size
   - Reboot timing: **Wait before first retry** and **Retry every**, plus the
     option to be asked after sending a reboot command
@@ -71,10 +72,12 @@ local backup, mirror) still hide their own indented options while off.
     display name, an IP/hostname (leave blank to follow the active profile
     host), a port, a path, and http/https.
 
-When **Connect automatically at startup** is on, the app opens SFTP if the SFTP
-tab is ticked; if you switch SFTP off it falls back to opening the SSH terminal
-(only when the SSH tab is still enabled). If both tabs are off, nothing
-auto-connects.
+Auto-connect is now per protocol: each tab has its own **Auto-connect at
+startup** option, and they are independent. With the SFTP option on the app
+opens the SFTP connection at launch; with the SSH option on it opens the SSH
+terminal. Turning both on starts both connections. An option is ignored while
+its tab is switched off (unticking the category hides the option too), so if
+both tabs are off nothing auto-connects.
 
 The View menu has an **Alternate icon** toggle that switches the toolbar and
 window icon between `icon.png` and `icon2.png`; the choice is saved to
@@ -101,7 +104,8 @@ whether remote/local backup is currently active.
 | `keep_last_n_backups` | Oldest backups removed beyond this count (0 = keep all) |
 | `confirm_destructive` | Ask before delete/mirror operations |
 | `show_hidden_files` | Include dot-files in the local browser and deploys |
-| `auto_connect` | Connect at startup (SFTP, or SSH if the SFTP tab is off) |
+| `auto_connect_sftp` | Open the SFTP connection at startup (only when the SFTP tab is on) |
+| `auto_connect_ssh` | Open the SSH terminal at startup (only when the SSH tab is on) |
 | `sftp_enabled` | Show the SFTP tab (untick to hide it) |
 | `ssh_enabled` | Show the SSH tab (untick to hide it) |
 | `reboot_wait_seconds` | Downtime allowed for a reboot before the first reconnect attempt (0-600) |
@@ -121,7 +125,9 @@ to open the JSON by hand.
 
 ## Deploying
 
-1. Pick a profile and connect (the remote tree is the same action as Refresh).
+1. Pick a profile and connect with **Connect (SFTP)** (the same action refreshes
+   the remote tree). **Disconnect (SFTP)** closes the session and disables the
+   remote actions until you reconnect.
 2. Choose **Deploy source** to sync the local source tree, or select individual
    files and use **Upload selected**. Deploy only uploads files that actually
    changed: size and modified-time are compared from remote directory metadata
@@ -154,6 +160,13 @@ a command and press Enter or Send. Ctrl+Up and Ctrl+Down walk through command
 history, which is saved to `command_history.json` and restored next time. The
 quick-command buttons above the terminal run a command in the shell if one is
 open, otherwise they execute it over a one-off connection and log the output.
+
+SFTP and SSH have separate connection indicators in the header and separate
+disconnect controls. **Open SSH terminal** and **Disconnect** drive the live
+shell; **Connect (SFTP)** and **Disconnect (SFTP)** drive the file-transfer
+session. Because SFTP opens a fresh connection per operation, Disconnect (SFTP)
+clears the remote view and locks the upload/download/deploy buttons until you
+connect again.
 
 ## Rebooting the device
 

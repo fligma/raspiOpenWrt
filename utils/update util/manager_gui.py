@@ -17,8 +17,32 @@ from pathlib import Path, PurePosixPath
 
 import keyring
 import paramiko
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QEvent
-from PyQt6.QtGui import QAction, QFont, QIcon, QKeySequence, QPixmap, QTextCursor, QDesktopServices
+from PyQt6.QtCore import (
+    Qt,
+    QThread,
+    pyqtSignal,
+    pyqtProperty,
+    QUrl,
+    QTimer,
+    QEvent,
+    QSize,
+    QRectF,
+    QPropertyAnimation,
+    QEasingCurve,
+)
+from PyQt6.QtGui import (
+    QAction,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+    QTextCursor,
+    QDesktopServices,
+    QBrush,
+    QColor,
+    QPainter,
+    QPen,
+)
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -68,7 +92,6 @@ from manager_const import (
     APP_CONFIG_FILE,
     APP_STYLESHEET,
     BASE_DIR,
-    DEFAULT_APP_CONFIG,
     DEFAULT_PROFILE,
     DEFAULT_SOURCE,
     HISTORY_FILE,
@@ -82,14 +105,18 @@ from manager_const import (
     RESOURCE_DIR,
 )
 from manager_config import (
-    _coerce_int,
-    _migrate_legacy_config,
-    _normalize_web_tabs,
-    _sync_flat_mirror,
+    active_profile_name,
+    create_profile,
+    delete_profile,
+    export_document,
+    import_app_config,
     load_app_config,
     load_command_history,
+    profile_names,
+    rename_profile,
     save_app_config_static,
     save_command_history,
+    set_active_profile,
     web_tab_url,
 )
 from manager_net import (
@@ -104,6 +131,128 @@ from manager_net import (
 )
 from manager_workers import RemoteExecWorker, RebootWaitWorker, SftpWorker, SSHShellWorker
 from manager_dialogs import DryRunDialog, StringListDialog, TabEditDialog
+
+
+class ToggleSwitch(QCheckBox):
+    """A pill-shaped on/off switch that replaces checkboxes in Settings,
+    painted in the raspberry accent colours of the app theme."""
+
+    TRACK_W = 40
+    TRACK_H = 20
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self._handle = 1.0 if self.isChecked() else 0.0
+        self._anim = QPropertyAnimation(self, b"handle_pos", self)
+        self._anim.setDuration(120)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.toggled.connect(self._animate)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _animate(self, checked: bool) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._handle)
+        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.start()
+
+    def _get_handle(self) -> float:
+        return self._handle
+
+    def _set_handle(self, value: float) -> None:
+        self._handle = float(value)
+        self.update()
+
+    handle_pos = pyqtProperty(float, fget=_get_handle, fset=_set_handle)
+
+    def minimumSizeHint(self) -> QSize:
+        fm = self.fontMetrics()
+        width = self.TRACK_W
+        if self.text():
+            width += 8 + fm.horizontalAdvance(self.text())
+        return QSize(width, max(self.TRACK_H, fm.height()) + 4)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSizeHint()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        on = self.isChecked()
+        enabled = self.isEnabled()
+        track_top = (self.height() - self.TRACK_H) / 2
+        if on:
+            track, border = QColor("#c51a4a"), QColor("#8f1236")
+        else:
+            track, border = QColor("#2b2b2b"), QColor("#4a4a4a")
+        if not enabled:
+            track.setAlpha(120)
+            border.setAlpha(120)
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(QBrush(track))
+        radius = self.TRACK_H / 2
+        painter.drawRoundedRect(
+            QRectF(0.5, track_top + 0.5, self.TRACK_W - 1, self.TRACK_H - 1), radius, radius
+        )
+        handle_r = radius - 3.5
+        travel = self.TRACK_W - 2 * (handle_r + 3.5)
+        center_x = handle_r + 3.5 + self._handle * travel
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#f5f5f5") if enabled else QColor("#888888"))
+        painter.drawEllipse(
+            QRectF(center_x - handle_r, track_top + radius - handle_r, handle_r * 2, handle_r * 2)
+        )
+        if self.text():
+            color = self.palette().color(self.palette().ColorRole.WindowText)
+            if not enabled:
+                color.setAlpha(140)
+            painter.setPen(QPen(color))
+            text_rect = QRectF(self.TRACK_W + 8, 0, self.width() - self.TRACK_W - 8, self.height())
+            painter.drawText(
+                text_rect,
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                self.text(),
+            )
+
+
+class ToggleGroup(QGroupBox):
+    """A settings category headed by a ToggleSwitch instead of the checkable
+    group-box checkbox. Keeps the old isChecked/setChecked/toggled interface
+    so the Settings code does not have to care which kind it got."""
+
+    def __init__(self, title: str, checked: bool, body: str = "box", tip: str = ""):
+        super().__init__()
+        if tip:
+            self.setToolTip(tip)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 12, 10)
+        outer.setSpacing(6)
+        header = QHBoxLayout()
+        caption = QLabel(title)
+        caption.setStyleSheet("color: #c51a4a; font-weight: 600;")
+        header.addWidget(caption)
+        header.addStretch(1)
+        self.switch = ToggleSwitch(parent=self)
+        self.switch.setChecked(bool(checked))
+        header.addWidget(self.switch)
+        outer.addLayout(header)
+        body_widget = QWidget()
+        if body == "form":
+            self.body_layout = QFormLayout(body_widget)
+            self.body_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+            self.body_layout.setHorizontalSpacing(12)
+            self.body_layout.setVerticalSpacing(8)
+            outer.setContentsMargins(22, 8, 12, 10)
+        else:
+            self.body_layout = QVBoxLayout(body_widget)
+            self.body_layout.setContentsMargins(0, 0, 0, 0)
+            self.body_layout.setSpacing(8)
+        body_widget.setVisible(self.switch.isChecked())
+        self.switch.toggled.connect(body_widget.setVisible)
+        outer.addWidget(body_widget)
+        # Old checkable-groupbox interface used across the Settings tab.
+        self.toggled = self.switch.toggled
+        self.isChecked = self.switch.isChecked
+        self.setChecked = self.switch.setChecked
 
 
 class RasconfManager(QMainWindow):
@@ -124,6 +273,7 @@ class RasconfManager(QMainWindow):
         self.terminal_history: list[str] = load_command_history()
         self.terminal_history_pos = len(self.terminal_history)
         self.connected_once = False
+        self.sftp_connected = False
         self.setWindowTitle("rasconf Manager")
         self.resize(1180, 780)
 
@@ -133,12 +283,13 @@ class RasconfManager(QMainWindow):
         self.apply_window_icon()
         self.refresh_local_tree()
 
-        if self.app_config.get("auto_connect"):
+        want_sftp_auto = bool(self.app_config.get("auto_connect_sftp")) and self.app_config.get("sftp_enabled", True)
+        want_ssh_auto = bool(self.app_config.get("auto_connect_ssh")) and self.app_config.get("ssh_enabled", True)
+        if want_sftp_auto or want_ssh_auto:
             self.toggle_connection_panel(False)
-            # Prefer SFTP; when its tab is switched off fall back to SSH if enabled.
-            if self.app_config.get("sftp_enabled", True):
+            if want_sftp_auto:
                 QTimer.singleShot(400, self.connect_remote)
-            elif self.app_config.get("ssh_enabled", True):
+            if want_ssh_auto:
                 QTimer.singleShot(400, self.connect_shell)
 
     def build_menu(self) -> None:
@@ -276,10 +427,21 @@ class RasconfManager(QMainWindow):
         header_row = QHBoxLayout()
         header_row.addWidget(self.header_icon)
         header_row.addWidget(self.connection_toggle)
-        self.status_dot = QLabel("\u25CF")
-        self.status_dot.setObjectName("statusDotOffline")
-        self.status_dot.setToolTip("Not connected")
-        header_row.addWidget(self.status_dot)
+        self.sftp_dot = QLabel("\u25CF")
+        self.sftp_dot.setObjectName("statusDotOffline")
+        self.sftp_dot.setToolTip("SFTP: not connected")
+        self.ssh_dot = QLabel("\u25CF")
+        self.ssh_dot.setObjectName("statusDotOffline")
+        self.ssh_dot.setToolTip("SSH: not connected")
+        self.sftp_caption = QLabel("SFTP")
+        self.sftp_caption.setStyleSheet("color: #aaaaaa;")
+        self.ssh_caption = QLabel("SSH")
+        self.ssh_caption.setStyleSheet("color: #aaaaaa;")
+        header_row.addWidget(self.sftp_caption)
+        header_row.addWidget(self.sftp_dot)
+        header_row.addSpacing(8)
+        header_row.addWidget(self.ssh_caption)
+        header_row.addWidget(self.ssh_dot)
         header_row.addStretch(1)
         root_layout.addLayout(header_row)
 
@@ -324,9 +486,23 @@ class RasconfManager(QMainWindow):
         self.timeout_input.setRange(3, 300)
         self.timeout_input.setValue(int(self.app_config.get("ssh_timeout", 12)))
         self.timeout_input.setSuffix(" s")
-        self.connect_button = QPushButton("Connect")
+        self.connect_button = QPushButton("Connect (SFTP)")
         self.connect_button.setObjectName("primaryAction")
         self.connect_button.clicked.connect(self.connect_remote)
+        self.disconnect_button = QPushButton("Disconnect (SFTP)")
+        self.disconnect_button.setObjectName("dangerAction")
+        self.disconnect_button.setToolTip("Close the SFTP session and disable remote actions until you reconnect")
+        self.disconnect_button.setEnabled(False)
+        self.disconnect_button.clicked.connect(self.disconnect_remote)
+        self.shell_connect_button = QPushButton("Connect (SSH)")
+        self.shell_connect_button.setObjectName("primaryAction")
+        self.shell_connect_button.setToolTip("Uses the same credentials as the SFTP connection")
+        self.shell_connect_button.clicked.connect(self.connect_shell)
+        self.shell_disconnect_button = QPushButton("Disconnect (SSH)")
+        self.shell_disconnect_button.setObjectName("dangerAction")
+        self.shell_disconnect_button.setToolTip("Close the SSH terminal session")
+        self.shell_disconnect_button.setEnabled(False)
+        self.shell_disconnect_button.clicked.connect(self.disconnect_shell)
 
         pw_row = QHBoxLayout()
         pw_row.addWidget(self.password_input, 1)
@@ -348,8 +524,13 @@ class RasconfManager(QMainWindow):
         connection_layout.addWidget(self.remote_root_input, 4, 1, 1, 2)
         connection_layout.addWidget(QLabel("Timeout"), 4, 2)
         connection_layout.addWidget(self.timeout_input, 4, 3)
+        conn_actions = QHBoxLayout()
+        conn_actions.addWidget(self.shell_connect_button)
+        conn_actions.addWidget(self.shell_disconnect_button)
+        conn_actions.addWidget(self.connect_button)
+        conn_actions.addWidget(self.disconnect_button)
         connection_layout.addWidget(self.trust_host_checkbox, 5, 0, 1, 2)
-        connection_layout.addWidget(self.connect_button, 5, 3)
+        connection_layout.addLayout(conn_actions, 5, 2, 1, 2)
         root_layout.addWidget(connection_group)
         self.connection_panel = connection_group
 
@@ -448,6 +629,7 @@ class RasconfManager(QMainWindow):
         preview_button = QPushButton("Preview deploy")
         preview_button.setToolTip("Show what deploy would change: files to update, skip, and delete (Ctrl+Shift+D)")
         preview_button.clicked.connect(self.preview_deploy)
+        self.preview_button = preview_button
         action_row.addWidget(self.upload_button)
         action_row.addWidget(self.download_button)
         action_row.addWidget(self.delete_button)
@@ -459,6 +641,15 @@ class RasconfManager(QMainWindow):
         self.update_backup_status_label()
         action_row.addWidget(self.backup_status_label)
         sftp_layout.addLayout(action_row)
+        # Remote actions need a live SFTP session; enable them on connect.
+        for button in (
+            self.upload_button,
+            self.download_button,
+            self.delete_button,
+            self.deploy_button,
+            self.preview_button,
+        ):
+            button.setEnabled(False)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)
@@ -486,12 +677,6 @@ class RasconfManager(QMainWindow):
         ssh_page = QWidget()
         ssh_layout = QVBoxLayout(ssh_page)
         terminal_actions = QHBoxLayout()
-        self.shell_connect_button = QPushButton("Open SSH terminal")
-        self.shell_connect_button.setObjectName("primaryAction")
-        self.shell_connect_button.clicked.connect(self.connect_shell)
-        self.shell_disconnect_button = QPushButton("Disconnect")
-        self.shell_disconnect_button.setEnabled(False)
-        self.shell_disconnect_button.clicked.connect(self.disconnect_shell)
         clear_button = QPushButton("Clear")
         clear_button.clicked.connect(self.clear_terminal)
         self.reboot_button = QPushButton("Reboot device")
@@ -506,8 +691,6 @@ class RasconfManager(QMainWindow):
         self.reboot_cancel_button.setToolTip("Stop waiting for the device to come back")
         self.reboot_cancel_button.setEnabled(False)
         self.reboot_cancel_button.clicked.connect(self.cancel_reboot_watch)
-        terminal_actions.addWidget(self.shell_connect_button)
-        terminal_actions.addWidget(self.shell_disconnect_button)
         terminal_actions.addWidget(clear_button)
         terminal_actions.addWidget(self.reboot_button)
         terminal_actions.addWidget(self.reboot_cancel_button)
@@ -709,42 +892,16 @@ class RasconfManager(QMainWindow):
         for entry in getattr(self, "_web_tab_entries", []):
             entry["url_input"].setText(web_tab_url(entry["tab"], default_host))
 
-    def _make_toggle_group(self, title: str, checked: bool) -> tuple[QGroupBox, QFormLayout]:
-        """Return a checkable group box whose indented body hides when the toggle is off."""
-        group = QGroupBox(title)
-        group.setCheckable(True)
-        group.setChecked(checked)
-        outer = QVBoxLayout(group)
-        outer.setContentsMargins(22, 14, 12, 10)
-        body = QWidget()
-        body.setVisible(checked)
-        form = QFormLayout(body)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(8)
-        outer.addWidget(body)
-        group.toggled.connect(body.setVisible)
-        return group, form
+    def _make_toggle_group(self, title: str, checked: bool) -> tuple[ToggleGroup, QFormLayout]:
+        """A toggle-headed group whose indented form body hides when off."""
+        group = ToggleGroup(title, checked, body="form")
+        return group, group.body_layout
 
-    def _make_category(self, title: str, checked: bool, tip: str = "") -> tuple[QGroupBox, QVBoxLayout]:
-        """A top-level Settings category. When checkable and unticked its whole
-        body collapses; the caller wires the state to the matching tab."""
-        group = QGroupBox(title)
-        if tip:
-            group.setToolTip(tip)
-        outer = QVBoxLayout(group)
-        outer.setContentsMargins(16, 12, 12, 10)
-        outer.setSpacing(10)
-        body = QWidget()
-        vbox = QVBoxLayout(body)
-        vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.setSpacing(8)
-        outer.addWidget(body)
-        group.setCheckable(True)
-        group.setChecked(checked)
-        body.setVisible(checked)
-        group.toggled.connect(body.setVisible)
-        return group, vbox
+    def _make_category(self, title: str, checked: bool, tip: str = "") -> tuple[ToggleGroup, QVBoxLayout]:
+        """A top-level Settings category with a switch in its header; the
+        caller wires the state to the matching tab."""
+        group = ToggleGroup(title, checked, body="box", tip=tip)
+        return group, group.body_layout
 
     def build_settings_tab(self) -> None:
         page = QWidget()
@@ -765,24 +922,20 @@ class RasconfManager(QMainWindow):
         self.default_tab_combo = QComboBox()
         self.default_tab_combo.setToolTip("Tab selected when the app starts (only visible tabs are listed).")
         startup_form.addRow("Default tab", self.default_tab_combo)
-
-        self.auto_connect_check = QCheckBox("Connect automatically at startup")
-        self.auto_connect_check.setToolTip(
-            "Connects over SFTP when the SFTP tab is ticked, otherwise falls back to SSH "
-            "if the SSH tab is enabled."
-        )
-        self.auto_connect_check.setChecked(bool(self.app_config.get("auto_connect", False)))
-        startup_form.addRow(self.auto_connect_check)
         vbox.addWidget(startup_group)
 
         # --- SFTP tab (can be switched off) and its related settings ---
         self.sftp_group, sftp_body = self._make_category(
             "SFTP", bool(self.app_config.get("sftp_enabled", True)),
-            "Show the SFTP file-transfer tab. Untick to hide it; with auto-connect it "
-            "falls back to SSH when SSH is enabled.",
+            "Show the SFTP file-transfer tab. Untick to hide it.",
         )
 
-        self.confirm_destructive_check = QCheckBox("Confirm destructive operations (delete, mirror)")
+        self.sftp_auto_connect_check = ToggleSwitch("Auto-connect at startup")
+        self.sftp_auto_connect_check.setToolTip("Open the SFTP connection automatically when the app starts.")
+        self.sftp_auto_connect_check.setChecked(bool(self.app_config.get("auto_connect_sftp", False)))
+        sftp_body.addWidget(self.sftp_auto_connect_check)
+
+        self.confirm_destructive_check = ToggleSwitch("Confirm destructive operations (delete, mirror)")
         self.confirm_destructive_check.setChecked(bool(self.app_config.get("confirm_destructive", True)))
         sftp_body.addWidget(self.confirm_destructive_check)
 
@@ -834,14 +987,14 @@ class RasconfManager(QMainWindow):
                 or self.app_config.get("mirror_delete_local", False)
             ),
         )
-        self.mirror_delete_remote_check = QCheckBox("Delete server files not on local")
+        self.mirror_delete_remote_check = ToggleSwitch("Delete server files not on local")
         self.mirror_delete_remote_check.setToolTip(
             "After uploading, remove remote files and directories that do not exist in the local source. "
             "Files matching the deploy ignore patterns are never touched."
         )
         self.mirror_delete_remote_check.setChecked(bool(self.app_config.get("mirror_delete_remote", False)))
         mirror_form.addRow(self.mirror_delete_remote_check)
-        self.mirror_delete_local_check = QCheckBox("Delete local files not on server")
+        self.mirror_delete_local_check = ToggleSwitch("Delete local files not on server")
         self.mirror_delete_local_check.setToolTip(
             "Remove files and directories from the local source that do not exist on the server "
             "(compared before the deploy starts). Files matching the deploy ignore patterns are never touched."
@@ -866,6 +1019,11 @@ class RasconfManager(QMainWindow):
             "SSH", bool(self.app_config.get("ssh_enabled", True)),
             "Show the SSH terminal tab. Untick to hide it.",
         )
+
+        self.ssh_auto_connect_check = ToggleSwitch("Auto-connect at startup")
+        self.ssh_auto_connect_check.setToolTip("Open the SSH terminal automatically when the app starts.")
+        self.ssh_auto_connect_check.setChecked(bool(self.app_config.get("auto_connect_ssh", False)))
+        ssh_body.addWidget(self.ssh_auto_connect_check)
         font_row = QHBoxLayout()
         font_row.addWidget(QLabel("Terminal font size"))
         self.terminal_font_spin = QSpinBox()
@@ -893,7 +1051,7 @@ class RasconfManager(QMainWindow):
         self.reboot_retry_spin.setValue(int(self.app_config.get("reboot_retry_interval", 10)))
         self.reboot_retry_spin.setToolTip("Seconds between reconnect attempts until the device answers")
         reboot_form.addRow("Retry every", self.reboot_retry_spin)
-        self.reboot_auto_watch_check = QCheckBox("Offer to watch for the device after a reboot command")
+        self.reboot_auto_watch_check = ToggleSwitch("Offer to watch for the device after a reboot command")
         self.reboot_auto_watch_check.setToolTip(
             "Ask whether to start the wait-and-retry cycle when you send reboot "
             "(or shutdown -r) from the terminal"
@@ -1050,7 +1208,8 @@ class RasconfManager(QMainWindow):
 
     def apply_settings_from_form(self) -> None:
         self.app_config["default_tab"] = self.default_tab_combo.currentText()
-        self.app_config["auto_connect"] = self.auto_connect_check.isChecked()
+        self.app_config["auto_connect_sftp"] = self.sftp_auto_connect_check.isChecked()
+        self.app_config["auto_connect_ssh"] = self.ssh_auto_connect_check.isChecked()
         self.app_config["confirm_destructive"] = self.confirm_destructive_check.isChecked()
         self.app_config["terminal_font_size"] = self.terminal_font_spin.value()
         self.app_config["max_log_lines"] = self.max_log_spin.value()
@@ -1094,6 +1253,35 @@ class RasconfManager(QMainWindow):
         ssh_on = bool(self.app_config.get("ssh_enabled", True))
         self._set_main_tab(self.sftp_page, "SFTP", sftp_on, 0)
         self._set_main_tab(self.ssh_page, "SSH", ssh_on, 1 if sftp_on else 0)
+        self.update_connection_ui()
+
+    def update_connection_ui(self) -> None:
+        """Hide the connect/disconnect buttons and header status dots of any
+        disabled protocol, and name the panel toggle after the enabled ones.
+        When both are off the whole connection panel disappears."""
+        sftp_on = bool(self.app_config.get("sftp_enabled", True))
+        ssh_on = bool(self.app_config.get("ssh_enabled", True))
+        self.connect_button.setVisible(sftp_on)
+        self.disconnect_button.setVisible(sftp_on)
+        self.shell_connect_button.setVisible(ssh_on)
+        self.shell_disconnect_button.setVisible(ssh_on)
+        self.sftp_caption.setVisible(sftp_on)
+        self.sftp_dot.setVisible(sftp_on)
+        self.ssh_caption.setVisible(ssh_on)
+        self.ssh_dot.setVisible(ssh_on)
+        if sftp_on and ssh_on:
+            label = "SFTP/SSH settings"
+        elif sftp_on:
+            label = "SFTP settings"
+        elif ssh_on:
+            label = "SSH settings"
+        else:
+            label = "Connection settings"
+        self.connection_toggle.setText(label)
+        any_on = sftp_on or ssh_on
+        self.connection_toggle.setVisible(any_on)
+        self.action_toggle_conn.setVisible(any_on)
+        self.connection_panel.setVisible(any_on and self.connection_toggle.isChecked())
 
     def _set_main_tab(self, page: QWidget, title: str, want: bool, desired_index: int) -> None:
         current = self.tabs.indexOf(page)
@@ -1147,9 +1335,9 @@ class RasconfManager(QMainWindow):
     def refresh_profile_combo(self) -> None:
         self.profile_combo.blockSignals(True)
         self.profile_combo.clear()
-        for prof in self.app_config["profiles"]:
-            self.profile_combo.addItem(prof["name"])
-        idx = self.profile_combo.findText(self.app_config.get("active_profile", ""))
+        for name in profile_names():
+            self.profile_combo.addItem(name)
+        idx = self.profile_combo.findText(active_profile_name())
         self.profile_combo.setCurrentIndex(max(0, idx))
         self.profile_combo.blockSignals(False)
 
@@ -1157,21 +1345,67 @@ class RasconfManager(QMainWindow):
         if index < 0:
             return
         name = self.profile_combo.itemText(index)
-        profile = next((p for p in self.app_config["profiles"] if p["name"] == name), None)
-        if not profile:
+        if not name or name == active_profile_name():
             return
-        self.app_config["active_profile"] = name
-        self.app_config = _sync_flat_mirror(self.app_config)
-        self.host_input.setText(profile["host"])
-        self.port_input.setValue(profile["port"])
-        self.username_input.setText(profile["username"])
-        self.key_input.setText(profile["key_file"])
-        self.remote_root_input.setText(profile["remote_root"])
-        self.source_input.setText(profile["source"])
-        self.trust_host_checkbox.setChecked(profile["trust_unknown_host"])
-        self.remember_password_checkbox.setChecked(profile["remember_password"])
+        # Every profile now carries the full settings, so switching means
+        # flushing the current widgets, swapping the working dict and
+        # reloading the whole UI from the newly active profile.
+        self.save_current_profile_edits()
+        self.app_config = set_active_profile(name)
+        self.reload_ui_from_config()
+        self.log(f"Switched to profile '{name}'")
+
+    def reload_ui_from_config(self) -> None:
+        """Refresh every widget from self.app_config after a profile switch,
+        a profile delete or a config import."""
+        cfg = self.app_config
+        self.host_input.setText(str(cfg.get("host", DEFAULT_PROFILE["host"])))
+        self.port_input.setValue(int(cfg.get("port", DEFAULT_PROFILE["port"])))
+        self.username_input.setText(str(cfg.get("username", DEFAULT_PROFILE["username"])))
+        self.key_input.setText(str(cfg.get("key_file", "")))
+        self.remote_root_input.setText(str(cfg.get("remote_root", DEFAULT_PROFILE["remote_root"])))
+        self.source_input.setText(str(cfg.get("source", DEFAULT_PROFILE["source"])))
+        self.timeout_input.setValue(int(cfg.get("ssh_timeout", 12)))
+        self.trust_host_checkbox.setChecked(bool(cfg.get("trust_unknown_host", False)))
+        # Changing this checkbox saves/removes the stored credential, so it
+        # must not react while the widgets are being repopulated.
+        self.remember_password_checkbox.blockSignals(True)
+        self.remember_password_checkbox.setChecked(bool(cfg.get("remember_password", False)))
+        self.remember_password_checkbox.blockSignals(False)
         self.password_input.clear()
         self.load_saved_password()
+
+        # Settings tab widgets mirror the profile's settings section.
+        self.sftp_auto_connect_check.setChecked(bool(cfg.get("auto_connect_sftp", False)))
+        self.ssh_auto_connect_check.setChecked(bool(cfg.get("auto_connect_ssh", False)))
+        self.confirm_destructive_check.setChecked(bool(cfg.get("confirm_destructive", True)))
+        self.logging_group.setChecked(bool(cfg.get("logging_enabled", True)))
+        self.max_log_spin.setValue(int(cfg.get("max_log_lines", 500)))
+        self.remote_backup_group.setChecked(bool(cfg.get("remote_backup_enabled", False)))
+        self.backup_dir_input.setText(str(cfg.get("backup_directory", "/tmp/rasconf_backups")))
+        self.keep_backups_spin.setValue(int(cfg.get("keep_last_n_backups", 5)))
+        self.local_backup_group.setChecked(bool(cfg.get("local_backup_enabled", False)))
+        self.local_backup_dir_input.setText(str(cfg.get("local_backup_directory", str(BASE_DIR / "backups"))))
+        self.mirror_group.setChecked(
+            bool(cfg.get("mirror_delete_remote") or cfg.get("mirror_delete_local"))
+        )
+        self.mirror_delete_remote_check.setChecked(bool(cfg.get("mirror_delete_remote", False)))
+        self.mirror_delete_local_check.setChecked(bool(cfg.get("mirror_delete_local", False)))
+        self.terminal_font_spin.setValue(int(cfg.get("terminal_font_size", 10)))
+        self.reboot_wait_spin.setValue(int(cfg.get("reboot_wait_seconds", 30)))
+        self.reboot_retry_spin.setValue(int(cfg.get("reboot_retry_interval", 10)))
+        self.reboot_auto_watch_check.setChecked(bool(cfg.get("reboot_auto_watch", True)))
+        self.show_hidden_checkbox.setChecked(bool(cfg.get("show_hidden_files", False)))
+        self.action_alt_icon.setChecked(bool(cfg.get("use_alt_icon", False)))
+        # These two fire _on_tab_category_toggled, which is harmless: it just
+        # re-persists the flags and refreshes the tabs done below anyway.
+        self.sftp_group.setChecked(bool(cfg.get("sftp_enabled", True)))
+        self.ssh_group.setChecked(bool(cfg.get("ssh_enabled", True)))
+
+        self.rebuild_web_tabs()
+        self._reload_tabs_combo()
+        self.apply_runtime_settings()
+        self.update_backup_status_label()
         self.refresh_local_tree()
         self.refresh_web_tab_urls()
         self.save_app_config()
@@ -1181,82 +1415,60 @@ class RasconfManager(QMainWindow):
         if not ok or not name.strip():
             return
         name = name.strip()
-        if any(p["name"] == name for p in self.app_config["profiles"]):
+        if name in profile_names():
             QMessageBox.warning(self, "Duplicate", "A profile with that name already exists.")
             return
         self.save_current_profile_edits()
-        base = {
-            "name": name,
-            "host": self.host_input.text().strip() or DEFAULT_PROFILE["host"],
-            "port": self.port_input.value(),
-            "username": self.username_input.text().strip() or DEFAULT_PROFILE["username"],
-            "key_file": self.key_input.text().strip(),
-            "remote_root": self.remote_root_input.text().strip() or DEFAULT_PROFILE["remote_root"],
-            "source": self.source_input.text().strip() or str(DEFAULT_SOURCE),
-            "trust_unknown_host": self.trust_host_checkbox.isChecked(),
-            "remember_password": False,
-        }
-        self.app_config["profiles"].append(base)
-        self.app_config["active_profile"] = name
-        self.app_config = _sync_flat_mirror(self.app_config)
+        # A new profile starts as an exact copy of the current one, settings
+        # included, and becomes the active profile right away.
+        self.app_config = create_profile(name, self.app_config)
         self.refresh_profile_combo()
-        idx = self.profile_combo.findText(name)
-        if idx >= 0:
-            self.profile_combo.setCurrentIndex(idx)
-        self.save_app_config()
+        self.reload_ui_from_config()
+        self.log(f"Created profile '{active_profile_name()}' from the current settings")
 
     def rename_current_profile(self) -> None:
-        current = self.app_config.get("active_profile")
+        current = active_profile_name()
         name, ok = QInputDialog.getText(self, "Rename profile", "New name:", text=current or "")
         if not ok or not name.strip():
             return
         name = name.strip()
-        if any(p["name"] == name for p in self.app_config["profiles"]):
+        if name != current and name in profile_names():
             QMessageBox.warning(self, "Duplicate", "Another profile already has that name.")
             return
-        for p in self.app_config["profiles"]:
-            if p["name"] == current:
-                p["name"] = name
-                break
-        self.app_config["active_profile"] = name
-        self.refresh_profile_combo()
-        self.save_app_config()
+        if rename_profile(current, name):
+            self.refresh_profile_combo()
+            self.log(f"Profile renamed to '{name}'")
 
     def delete_current_profile(self) -> None:
-        current = self.app_config.get("active_profile")
-        if len(self.app_config["profiles"]) <= 1:
+        current = active_profile_name()
+        if len(profile_names()) <= 1:
             QMessageBox.information(self, "Cannot delete", "At least one profile must exist.")
             return
         answer = QMessageBox.question(
             self, "Delete profile",
-            f"Delete profile '{current}'? (This only removes saved connection details.)",
+            f"Delete profile '{current}'? (This removes its saved connection details and settings.)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.app_config["profiles"] = [p for p in self.app_config["profiles"] if p["name"] != current]
-        self.app_config["active_profile"] = self.app_config["profiles"][0]["name"]
-        self.app_config = _sync_flat_mirror(self.app_config)
+        working = delete_profile(current)
+        if working is not None:
+            self.app_config = working
         self.refresh_profile_combo()
-        self.on_profile_changed(max(0, self.profile_combo.currentIndex()))
-        self.save_app_config()
+        self.reload_ui_from_config()
+        self.log(f"Deleted profile '{current}'")
 
     def save_current_profile_edits(self, _value=None) -> None:
-        current = self.app_config.get("active_profile")
-        target = next((p for p in self.app_config["profiles"] if p["name"] == current), None)
-        if target is None:
-            target = self.app_config["profiles"][0]
-            self.app_config["active_profile"] = target["name"]
-        target["host"] = self.host_input.text().strip() or DEFAULT_PROFILE["host"]
-        target["port"] = self.port_input.value()
-        target["username"] = self.username_input.text().strip() or DEFAULT_PROFILE["username"]
-        target["key_file"] = self.key_input.text().strip()
-        target["remote_root"] = self.remote_root_input.text().strip() or DEFAULT_PROFILE["remote_root"]
-        target["source"] = self.source_input.text().strip() or DEFAULT_PROFILE["source"]
-        target["trust_unknown_host"] = self.trust_host_checkbox.isChecked()
-        target["remember_password"] = self.remember_password_checkbox.isChecked()
-        self.app_config = _sync_flat_mirror(self.app_config)
+        cfg = self.app_config
+        cfg["host"] = self.host_input.text().strip() or DEFAULT_PROFILE["host"]
+        cfg["port"] = self.port_input.value()
+        cfg["username"] = self.username_input.text().strip() or DEFAULT_PROFILE["username"]
+        cfg["key_file"] = self.key_input.text().strip()
+        cfg["remote_root"] = self.remote_root_input.text().strip() or DEFAULT_PROFILE["remote_root"]
+        cfg["source"] = self.source_input.text().strip() or DEFAULT_PROFILE["source"]
+        cfg["trust_unknown_host"] = self.trust_host_checkbox.isChecked()
+        cfg["remember_password"] = self.remember_password_checkbox.isChecked()
         self.save_app_config()
 
     def toggle_connection_panel(self, expanded: bool) -> None:
@@ -1270,6 +1482,9 @@ class RasconfManager(QMainWindow):
         self.connection_toggle.blockSignals(True)
         self.connection_toggle.setChecked(expanded)
         self.connection_toggle.blockSignals(False)
+        # Re-applies the "both protocols off hides everything" rule, since the
+        # panel was just re-shown by the toggle rather than by the flags.
+        self.update_connection_ui()
 
     def set_fullscreen(self, enabled: bool) -> None:
         self.showFullScreen() if enabled else self.showNormal()
@@ -1405,6 +1620,9 @@ class RasconfManager(QMainWindow):
     def start_worker(self, operation: str, options: dict | None = None) -> None:
         if self.worker is not None and self.worker.isRunning():
             return
+        if operation != "list" and not self.sftp_connected:
+            QMessageBox.information(self, "Not connected", "Connect over SFTP first.")
+            return
         settings = self.current_settings()
         if settings is None:
             return
@@ -1446,14 +1664,16 @@ class RasconfManager(QMainWindow):
         self.progress_bar.setVisible(busy)
         if not busy:
             self.progress_bar.setFormat("Done")
+        self.connect_button.setEnabled(not busy)
         for button in (
-            self.connect_button,
             self.upload_button,
             self.download_button,
             self.delete_button,
             self.deploy_button,
+            self.preview_button,
         ):
-            button.setEnabled(not busy)
+            button.setEnabled(not busy and self.sftp_connected)
+        self.disconnect_button.setEnabled(not busy and self.sftp_connected)
 
     def operation_succeeded(self, result) -> None:
         if isinstance(result, dict) and result.get("dry_run"):
@@ -1462,38 +1682,42 @@ class RasconfManager(QMainWindow):
             self.remote_tree_entries = result
             self.populate_remote_tree(result)
             self.remote_tree.setEnabled(True)
-            if (
-                self.worker is not None
-                and self.worker.operation == "deploy"
-                and self.app_config.get("mirror_delete_local")
-            ):
-                self.refresh_local_tree()
         self.statusBar().showMessage("Operation completed", 5000)
-        self.set_status_dot("online")
+        self.sftp_connected = True
+        self.set_status_dot("sftp", "online")
         self.log("Operation completed successfully")
 
     def operation_failed(self, message: str) -> None:
         self.statusBar().showMessage("Operation failed", 5000)
         self.log("Error: " + message)
-        self.set_status_dot("offline")
+        self.sftp_connected = False
+        self.set_status_dot("sftp", "offline")
         QMessageBox.critical(self, "SFTP operation failed", message)
 
     def operation_finished(self) -> None:
         self.set_busy(False)
         if self.worker is not None:
+            operation = self.worker.operation
             self.worker.deleteLater()
             self.worker = None
+            # Every SFTP action can change both trees (deploy, upload, delete,
+            # mirror cleanup...), so refresh the local view and re-list the
+            # remote one. The plain "list" refresh must not re-trigger itself.
+            if operation != "list" and self.sftp_connected:
+                self.refresh_local_tree()
+                QTimer.singleShot(0, lambda: self.start_worker("list"))
 
-    def set_status_dot(self, mode: str) -> None:
+    def set_status_dot(self, which: str, mode: str) -> None:
+        dot = self.ssh_dot if which == "ssh" else self.sftp_dot
         if mode == "online":
-            self.status_dot.setObjectName("statusDotOnline")
-            self.status_dot.setToolTip("Connected")
+            dot.setObjectName("statusDotOnline")
+            dot.setToolTip(f"{which.upper()}: connected")
             self.connected_once = True
         else:
-            self.status_dot.setObjectName("statusDotOffline")
-            self.status_dot.setToolTip("Not connected")
-        self.status_dot.style().unpolish(self.status_dot)
-        self.status_dot.style().polish(self.status_dot)
+            dot.setObjectName("statusDotOffline")
+            dot.setToolTip(f"{which.upper()}: not connected")
+        dot.style().unpolish(dot)
+        dot.style().polish(dot)
 
     def log(self, message: str) -> None:
         timestamped = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
@@ -1515,6 +1739,18 @@ class RasconfManager(QMainWindow):
     def connect_remote(self, _checked: bool = False) -> None:
         self.remote_tree.setEnabled(False)
         self.start_worker("list")
+
+    def disconnect_remote(self, _checked: bool = False) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            return
+        self.sftp_connected = False
+        self.remote_tree.clear()
+        self.remote_tree.setEnabled(False)
+        self.remote_tree_entries = []
+        self.set_status_dot("sftp", "offline")
+        self.set_busy(False)
+        self.log("SFTP session closed")
+        self.statusBar().showMessage("Disconnected (SFTP)", 4000)
 
     def preview_deploy(self) -> None:
         self.start_worker(
@@ -2003,7 +2239,7 @@ class RasconfManager(QMainWindow):
         self.shell_disconnect_button.setEnabled(True)
         self.terminal_send_button.setEnabled(True)
         self.terminal_input.setFocus()
-        self.set_status_dot("online")
+        self.set_status_dot("ssh", "online")
 
     def shell_failed(self, message: str) -> None:
         self.terminal_write_message(f"SSH error: {message}\n")
@@ -2014,6 +2250,7 @@ class RasconfManager(QMainWindow):
         self.shell_connect_button.setEnabled(True)
         self.shell_disconnect_button.setEnabled(False)
         self.terminal_send_button.setEnabled(False)
+        self.set_status_dot("ssh", "offline")
         if self.shell_worker is not None:
             self.shell_worker.deleteLater()
             self.shell_worker = None
@@ -2197,10 +2434,13 @@ class RasconfManager(QMainWindow):
         )
         if not path:
             return
-        sanitized = json.loads(json.dumps(self.app_config))
+        sanitized = export_document()
         try:
             Path(path).write_text(json.dumps(sanitized, indent=2), encoding="utf-8")
-            QMessageBox.information(self, "Exported", f"Saved to {path}\n\nPasswords are never stored in this file.")
+            QMessageBox.information(
+                self, "Exported",
+                f"Saved to {path}\n\nAll profiles are included. Passwords are never stored in this file.",
+            )
         except OSError as error:
             QMessageBox.critical(self, "Export failed", str(error))
 
@@ -2216,18 +2456,10 @@ class RasconfManager(QMainWindow):
         if not isinstance(loaded, dict):
             QMessageBox.critical(self, "Import failed", "File does not contain a JSON object.")
             return
-        merged = json.loads(json.dumps(DEFAULT_APP_CONFIG))
-        merged.update(loaded)
-        self.app_config = _normalize_web_tabs(_sync_flat_mirror(_migrate_legacy_config(merged)))
+        # Accepts both the current profile document and any older flat layout.
+        self.app_config = import_app_config(loaded)
         self.refresh_profile_combo()
-        self.on_profile_changed(max(0, self.profile_combo.currentIndex()))
-        self.rebuild_web_tabs()
-        self._reload_tabs_combo()
-        self.sftp_group.setChecked(bool(self.app_config.get("sftp_enabled", True)))
-        self.ssh_group.setChecked(bool(self.app_config.get("ssh_enabled", True)))
-        self.ensure_main_tabs()
-        self._reload_default_tab_combo(select=self.app_config.get("default_tab", "SFTP"))
-        self.save_app_config()
+        self.reload_ui_from_config()
         QMessageBox.information(self, "Imported", "Configuration replaced from file.")
 
     def save_log_to_file(self) -> None:
@@ -2247,7 +2479,7 @@ class RasconfManager(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("About Rasconf Manager")
         box.setText(
-            "<b>Rasconf Manager V1.2</b><br>"
+            "<b>Rasconf Manager V1.3 (10/9/2026)</b><br>"
             "Manage Router & Web interfaces.<br>"
             'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'

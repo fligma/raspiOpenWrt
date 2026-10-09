@@ -276,6 +276,140 @@ details summary {
     margin-bottom: 0;
 }
 
+/* Progress bars (memory / storage / per-core CPU) */
+.bar {
+    height: 10px;
+    margin-top: 4px;
+    border-radius: 6px;
+    background: var(--color-field);
+    overflow: hidden;
+}
+
+.bar-fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: 6px;
+    background: var(--color-success);
+    transition: width 0.4s ease;
+}
+
+.bar-fill.mid {
+    background: #f39c12;
+}
+
+.bar-fill.high {
+    background: var(--color-error);
+}
+
+/* Host & Uptime stat grid */
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.stat-grid .metric-label {
+    margin-bottom: 4px;
+}
+
+.stat-value {
+    color: white;
+    font-size: 18px;
+    font-weight: 500;
+    word-break: break-word;
+}
+
+/* Per-core CPU usage */
+.cpu-overall {
+    float: right;
+    color: var(--color-accent);
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.core-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px 18px;
+    margin-top: 6px;
+}
+
+.core-head {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 3px;
+    font-size: 12px;
+}
+
+.core-name {
+    color: var(--color-muted-strong);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.core-pct {
+    color: white;
+    font-weight: 600;
+}
+
+.card-wide {
+    grid-column: 1 / -1;
+}
+
+/* Global auto-refresh control (LuCI-style pause + countdown) */
+.refresh-control {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.refresh-countdown {
+    min-width: 34px;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.indicator.paused {
+    color: #ffe082;
+}
+
+.btn-mini {
+    padding: 5px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.25);
+    color: white;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: background-color 0.2s;
+}
+
+.btn-mini:hover {
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.btn-mini.paused {
+    background: #ffe082;
+    border-color: #ffe082;
+    color: #333;
+}
+
+.api-btn {
+    width: auto;
+    padding: 6px 14px;
+    background: #2980b9;
+    font-size: 13px;
+    text-decoration: none;
+}
+
+.api-btn:hover {
+    background: #206a97;
+}
+
 .device-table-wrap {
     overflow-x: auto;
     overscroll-behavior-x: contain;

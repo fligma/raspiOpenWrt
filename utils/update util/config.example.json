@@ -1,4 +1,6 @@
 {
+  "config_version": 2,
+  "active_profile": "Home Pi",
   "profiles": [
     {
       "name": "Home Pi",
@@ -9,49 +11,49 @@
       "remote_root": "/www_rasconf",
       "source": "",
       "trust_unknown_host": false,
-      "remember_password": false
+      "remember_password": false,
+      "deploy_ignore": [
+        "*.bak",
+        "assets/private/"
+      ],
+      "ssh_timeout": 12,
+      "post_deploy_commands": [
+        "killall -HUP uhttpd"
+      ],
+      "logging_enabled": true,
+      "remote_backup_enabled": false,
+      "local_backup_enabled": false,
+      "mirror_delete_remote": false,
+      "mirror_delete_local": false,
+      "backup_directory": "/tmp/rasconf_backups",
+      "local_backup_directory": "",
+      "keep_last_n_backups": 5,
+      "confirm_destructive": true,
+      "show_hidden_files": false,
+      "auto_connect_sftp": false,
+      "auto_connect_ssh": false,
+      "use_alt_icon": false,
+      "sftp_enabled": true,
+      "ssh_enabled": true,
+      "reboot_wait_seconds": 30,
+      "reboot_retry_interval": 10,
+      "reboot_auto_watch": true,
+      "default_tab": "SFTP",
+      "terminal_font_size": 10,
+      "max_log_lines": 500,
+      "terminal_history_limit": 500,
+      "web_port": 8989,
+      "web_path": "/cgi-bin/index.py",
+      "luci_url": "http://192.168.1.1/",
+      "web_tabs": [
+        { "name": "Web Interface", "ip": "", "port": 8989, "path": "/cgi-bin/index.py", "scheme": "http" },
+        { "name": "LuCI", "ip": "192.168.1.1", "port": 80, "path": "/", "scheme": "http" }
+      ],
+      "quick_commands": [
+        { "label": "Reload uhttpd", "command": "killall -HUP uhttpd" },
+        { "label": "Show version", "command": "cat /etc/openwrt_release" },
+        { "label": "Reboot", "command": "reboot" }
+      ]
     }
-  ],
-  "active_profile": "Home Pi",
-  "ssh_timeout": 12,
-  "deploy_ignore": [
-    "*.bak",
-    "assets/private/"
-  ],
-  "post_deploy_commands": [
-    "killall -HUP uhttpd"
-  ],
-  "logging_enabled": true,
-  "remote_backup_enabled": false,
-  "local_backup_enabled": false,
-  "mirror_delete_remote": false,
-  "mirror_delete_local": false,
-  "backup_directory": "/tmp/rasconf_backups",
-  "local_backup_directory": "",
-  "keep_last_n_backups": 5,
-  "confirm_destructive": true,
-  "show_hidden_files": false,
-  "auto_connect": false,
-  "sftp_enabled": true,
-  "ssh_enabled": true,
-  "reboot_wait_seconds": 30,
-  "reboot_retry_interval": 10,
-  "reboot_auto_watch": true,
-  "default_tab": "SFTP",
-  "terminal_font_size": 10,
-  "max_log_lines": 500,
-  "terminal_history_limit": 500,
-  "use_alt_icon": false,
-  "web_port": 8989,
-  "web_path": "/cgi-bin/index.py",
-  "luci_url": "http://192.168.1.1/",
-  "web_tabs": [
-    { "name": "Web Interface", "ip": "", "port": 8989, "path": "/cgi-bin/index.py", "scheme": "http" },
-    { "name": "LuCI", "ip": "192.168.1.1", "port": 80, "path": "/", "scheme": "http" }
-  ],
-  "quick_commands": [
-    { "label": "Reload uhttpd", "command": "killall -HUP uhttpd" },
-    { "label": "Show version", "command": "cat /etc/openwrt_release" },
-    { "label": "Reboot", "command": "reboot" }
   ]
 }
