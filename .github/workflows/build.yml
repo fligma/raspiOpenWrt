@@ -36,13 +36,92 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
+    - name: Run the addon test scripts
+      shell: pwsh
+      working-directory: "utils/update util"
+      run: |
+        # Every addon's test lives in addons/_tests as test_<id>.py. Run them
+        # here, before anything is packaged: they drive the addon against a
+        # stubbed app offscreen, so no device and no window are involved.
+        # A failing test fails the build. The tests themselves never reach
+        # the executable - the staging step below skips _folders.
+        $failed = $false
+        foreach ($test in (Get-ChildItem -Path addons/_tests -Filter test_*.py -File)) {
+          Write-Output "=== $($test.Name)"
+          python $test.FullName
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "FAILED: $($test.Name) (exit $LASTEXITCODE)"
+            $failed = $true
+          }
+        }
+        if ($failed) { exit 1 }
+        Write-Output "all addon tests passed"
+
+    - name: Stage the addons that ship inside the program
+      shell: pwsh
+      working-directory: "utils/update util"
+      run: |
+        # Every addon in addons/ is packed into the executable under the name the
+        # app reads as its shipped addons. Such an addon can be switched on and
+        # off in Settings and keeps its own config file beside the exe, but its
+        # source belongs to the build: it is shown as it is and never edited.
+        # Only what the app's scanner recognises counts, in every shape it takes:
+        # a loose .py, a loose compiled program (.exe or .bin) with its own
+        # <name>.json manifest beside it, and a folder holding addon.py, main.py
+        # or a compiled addon.exe / addon.bin / <folder>.exe. The folders the
+        # runtime and the Addon Dev tab write while they work (_tests, _data,
+        # _build, configs, __pycache__) are left out.
+        $stage = "_addon_bundle"
+        if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+        New-Item -ItemType Directory -Force -Path $stage | Out-Null
+        Get-ChildItem -Path addons -Filter *.py -File |
+          Copy-Item -Destination $stage -Force
+        foreach ($program in (Get-ChildItem -Path addons -File |
+                    Where-Object { $_.Extension -in ".exe", ".bin" })) {
+          Copy-Item -Path $program.FullName -Destination $stage -Force
+          $manifest = Join-Path "addons" ($program.BaseName + ".json")
+          if (Test-Path $manifest -PathType Leaf) {
+            Copy-Item -Path $manifest -Destination $stage -Force
+          }
+        }
+        Get-ChildItem -Path addons -Directory |
+          Where-Object { $_.Name -notlike ".*" -and $_.Name -notlike "_*" -and $_.Name -ne "configs" } |
+          Where-Object {
+            (Test-Path (Join-Path $_.FullName "addon.py") -PathType Leaf) -or
+            (Test-Path (Join-Path $_.FullName "main.py") -PathType Leaf) -or
+            (Test-Path (Join-Path $_.FullName "addon.exe") -PathType Leaf) -or
+            (Test-Path (Join-Path $_.FullName "addon.bin") -PathType Leaf) -or
+            (Test-Path (Join-Path $_.FullName ($_.Name + ".exe")) -PathType Leaf)
+          } |
+          ForEach-Object {
+            $into = Join-Path $stage $_.Name
+            New-Item -ItemType Directory -Force -Path $into | Out-Null
+            Copy-Item -Path (Join-Path $_.FullName "*") -Destination $into -Recurse -Force
+          }
+        # Nothing test-shaped or left over from a local run travels with the
+        # build, wherever it hides: a folder addon's own tests or bytecode,
+        # if one ever carried them, are stripped from the staged copy.
+        Get-ChildItem -Path $stage -Recurse -Directory |
+          Where-Object { $_.Name -in "__pycache__", "tests", "_tests" } |
+          ForEach-Object { Remove-Item -Recurse -Force $_.FullName }
+        Get-ChildItem -Path $stage -Recurse -File |
+          Where-Object { $_.Extension -eq ".pyc" } |
+          ForEach-Object { Remove-Item -Force $_.FullName }
+        if (-not (Get-ChildItem -Path $stage -Recurse -File)) {
+          # PyInstaller wants every --add-data source to exist and hold something.
+          Set-Content -Path (Join-Path $stage "README.txt") -Value "no addon ships inside this build"
+        }
+        Write-Output "addons packed into the program:"
+        Get-ChildItem -Path $stage -Recurse -Name
+
     - name: Build with PyInstaller (Windows)
       if: runner.os == 'Windows'
       working-directory: "utils/update util"
       shell: cmd
       run: >
-        pyinstaller --noconfirm --onefile --windowed --icon="icon.png"
-        --add-data="icon.png;." --add-data="icon2.png;." --add-data="config.example.json;."
+        pyinstaller --noconfirm --onefile --windowed --icon="assets\icon.png"
+        --add-data="assets;assets" --add-data="config.example.json;."
+        --add-data="_addon_bundle;addons"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
         rasconf_manager.py
 
@@ -50,10 +129,34 @@ jobs:
       if: runner.os == 'Linux'
       working-directory: "utils/update util"
       run: >
-        pyinstaller --noconfirm --onefile --windowed --icon="icon.png"
-        --add-data="icon.png:." --add-data="icon2.png:." --add-data="config.example.json:."
+        pyinstaller --noconfirm --onefile --windowed --icon="assets/icon.png"
+        --add-data="assets:assets" --add-data="config.example.json:."
+        --add-data="_addon_bundle:addons"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
+        --hidden-import=secretstorage --hidden-import=jeepney
         rasconf_manager.py
+
+    - name: Ship the drop-in addons folder
+      shell: pwsh
+      working-directory: "utils/update util"
+      run: |
+        # The addons that came with the program are inside the executable, so the
+        # folder beside it starts empty and is the user's own: what they drop
+        # there is what they can read, change and delete. The app creates the
+        # folder anyway, so a note is all that is shipped with it.
+        New-Item -ItemType Directory -Force -Path dist/addons | Out-Null
+        $note = @(
+          "Drop an addon in this folder: a .py file, a folder holding addon.py,",
+          "or a program (.exe) with a .json manifest of the same name. The app",
+          "reads the folder when it starts and lists what it finds under",
+          "Settings > Addons.",
+          "",
+          "An addon that came with the program is packed inside the executable",
+          "and can only be switched on and off there. A file dropped here with",
+          "the same name takes the place of that shipped addon. Each addon keeps",
+          "its own settings in addons/_data/<name>/config.json.",
+        ) -join [Environment]::NewLine
+        Set-Content -Path dist/addons/README.txt -Value $note -Encoding utf8
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
@@ -62,4 +165,5 @@ jobs:
         path: |
           utils/update util/dist/rasconf_manager.exe
           utils/update util/dist/rasconf_manager
+          utils/update util/dist/addons/
         retention-days: 7

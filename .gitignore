@@ -1,4 +1,5 @@
 bkup
+utils/update util/config/
 .gitattributes
 .venv
 local tools
@@ -10,3 +11,20 @@ local tools
 *config.json
 *rasconf_manager.log
 *command_history.json
+*.crt
+*.key
+
+utils/update util/config/
+utils/update util/addons/_data/
+
+utils/update util/addons/_build/
+utils/update util/addons/*.exe
+utils/update util/addons/*.bin
+utils/update util/addons/*/*.exe
+utils/update util/addons/*/*.bin
+utils/update util/addons/*/_internal/
+*.new
+
+# The folder the CI build stages the shipped addons in before packing them
+# inside the executable.
+utils/update util/_addon_bundle/

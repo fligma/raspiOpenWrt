@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Reading, migrating and writing config.json plus the saved command history.
 
+Everything the manager writes to its own root lives in the ``config`` folder
+(see ``manager_const.CONFIG_DIR``): the profile config, the command history,
+the activity log and the shared addon build record. The folder is created on
+the way up, and a loose file left beside the program from an older layout is
+moved into it, so an existing installation keeps its settings.
+
 config.json v2 stores one record per profile and every record holds the
 complete set of settings (connection details, tabs, backups, terminal...).
 The app always works from the profile named by ``active_profile``; the old
@@ -19,11 +25,16 @@ from manager_const import (
     APP_CONFIG_EXAMPLE_FILE,
     APP_CONFIG_FILE,
     BASE_DIR,
+    CONFIG_DIR,
     DEFAULT_APP_CONFIG,
     DEFAULT_PROFILE,
     DEFAULT_SOURCE,
     HISTORY_FILE,
+    LOG_FILE,
     MAX_COMMAND_HISTORY,
+    UI_ZOOM_DEFAULT,
+    UI_ZOOM_MAX,
+    UI_ZOOM_MIN,
 )
 
 CONFIG_VERSION = 2
@@ -70,6 +81,7 @@ def _normalize_values(config: dict) -> dict:
     if not isinstance(config.get("web_tabs"), list):
         config = _migrate_web_tabs(config)
     config = _normalize_web_tabs(config)
+    config = _normalize_addons(config)
 
     # A source path from another machine is useless - fall back to the repo,
     # then to the home directory, so the local tree is never empty by accident.
@@ -82,6 +94,9 @@ def _normalize_values(config: dict) -> dict:
     # Clamp the numeric settings and coerce the free-text ones to str.
     config["ssh_timeout"] = _coerce_int(config.get("ssh_timeout"), 12, 3, 300)
     config["terminal_font_size"] = _coerce_int(config.get("terminal_font_size"), 10, 6, 24)
+    # The interface zoom is kept as a sane percentage; the rungs it may sit on
+    # are the window's business (see manager_const.step_zoom).
+    config["ui_zoom"] = _coerce_int(config.get("ui_zoom"), UI_ZOOM_DEFAULT, UI_ZOOM_MIN, UI_ZOOM_MAX)
     config["max_log_lines"] = _coerce_int(config.get("max_log_lines"), 500, 50, 10000)
     config["terminal_history_limit"] = _coerce_int(config.get("terminal_history_limit"), 500, 20, 5000)
     config["web_port"] = _coerce_int(config.get("web_port"), 8989, 1, 65535)
@@ -106,6 +121,12 @@ def _normalize_values(config: dict) -> dict:
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             config[key] = []
 
+    # The saved tab order is a list of tab titles; anything else is dropped so
+    # the app falls back to its built-in arrangement.
+    order = config.get("tab_order")
+    if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
+        config["tab_order"] = []
+
     # Quick commands are {label, command} pairs; anything without a command is dropped.
     quick = config.get("quick_commands")
     if not isinstance(quick, list):
@@ -128,14 +149,16 @@ def _normalize_values(config: dict) -> dict:
     config.pop("auto_connect", None)
 
     for key in (
-        "confirm_destructive",
         "show_hidden_files",
         "auto_connect_sftp",
         "auto_connect_ssh",
         "use_alt_icon",
+        "log_visible",
         "sftp_enabled",
         "ssh_enabled",
+        "ignore_cert_errors",
         "reboot_auto_watch",
+        "remember_tab_order",
         "trust_unknown_host",
         "remember_password",
     ):
@@ -397,8 +420,58 @@ def _migrate_web_tabs(config: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Addons: which ones this profile runs, and the data they keep there
+# ---------------------------------------------------------------------------
+
+def _normalize_addons(config: dict) -> dict:
+    """Keep the addon section a plain id -> {enabled, settings} mapping.
+
+    Ids that no longer have a file in the addons folder are left alone: the
+    addon may have been renamed or put back later, and its stored settings are
+    the addon's business, not something to guess at here.
+    """
+    raw = config.get("addons")
+    if not isinstance(raw, dict):
+        raw = {}
+    cleaned = {}
+    for key, value in raw.items():
+        addon_id = str(key).strip()
+        if not addon_id:
+            continue
+        record = value if isinstance(value, dict) else {}
+        settings = record.get("settings")
+        cleaned[addon_id] = {
+            "enabled": bool(record.get("enabled", True)),
+            "settings": settings if isinstance(settings, dict) else {},
+        }
+    config["addons"] = cleaned
+    return config
+
+
+# ---------------------------------------------------------------------------
 # Loading, saving and transporting the whole file
 # ---------------------------------------------------------------------------
+
+def _prepare_config_dir() -> None:
+    """Make the config folder and move the loose files into it.
+
+    Older layouts wrote ``config.json``, ``command_history.json`` and the log
+    straight beside the program. The folder is created before anything reads
+    or writes those paths, and a loose file is moved in only when the new
+    location is still empty, so nothing is ever overwritten."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    for old, new in ((BASE_DIR / "config.json", APP_CONFIG_FILE),
+                     (BASE_DIR / "command_history.json", HISTORY_FILE),
+                     (BASE_DIR / "rasconf_manager.log", LOG_FILE)):
+        if old.is_file() and not new.exists():
+            try:
+                old.replace(new)
+            except OSError:
+                pass
+
 
 def load_app_config() -> dict:
     """Load config.json (or the shipped example), build the profile store and
@@ -407,6 +480,7 @@ def load_app_config() -> dict:
     The result always has the full set of keys with sane, type-checked values,
     so the rest of the app can read the dict without defensive get() calls.
     """
+    _prepare_config_dir()
     config: dict = {}
     # A real config wins over the example; if neither parses we keep defaults.
     for config_path in (APP_CONFIG_FILE, APP_CONFIG_EXAMPLE_FILE):
@@ -453,6 +527,7 @@ def persist_store() -> None:
     """Write config.json. Failures are ignored - a read-only folder must not
     stop the app, the settings simply do not survive the session."""
     try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         APP_CONFIG_FILE.write_text(json.dumps(_document(), indent=2) + "\n", encoding="utf-8")
     except OSError:
         pass
@@ -490,6 +565,7 @@ def load_command_history() -> list[str]:
 def save_command_history(history: list[str]) -> None:
     """Persist the most recent entries, newest last."""
     try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         HISTORY_FILE.write_text(json.dumps(history[-MAX_COMMAND_HISTORY:], indent=2), encoding="utf-8")
     except OSError:
         pass
