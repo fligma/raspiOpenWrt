@@ -154,7 +154,7 @@ jobs:
           "An addon that came with the program is packed inside the executable",
           "and can only be switched on and off there. A file dropped here with",
           "the same name takes the place of that shipped addon. Each addon keeps",
-          "its own settings in addons/_data/<name>/config.json.",
+          "its own settings in addons/_data/<name>/config.json."
         ) -join [Environment]::NewLine
         Set-Content -Path dist/addons/README.txt -Value $note -Encoding utf8
 
