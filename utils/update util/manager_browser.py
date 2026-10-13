@@ -17,10 +17,11 @@ a restart (see :func:`restart_process`).
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QProcess, QTimer, QUrl
+from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -33,6 +34,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from addon_common import clean_child_env
 from manager_config import web_tab_url
 from manager_widgets import TabEditDialog
 
@@ -63,13 +65,57 @@ def set_cert_bypass(enabled: bool) -> None:
         os.environ.pop(CHROMIUM_FLAGS_ENV, None)
 
 
+#: Whether this process owes the user a fresh copy of the app; set by a
+#: restart request and taken by ``berry_manager`` once everything is closed.
+_RESTART = {"wanted": False}
+
+
 def restart_process() -> bool:
-    """Launch a fresh copy (source run or frozen build) without waiting; returns whether it started."""
+    """Ask for the app to relaunch; the fresh copy only starts once this one
+    has closed, so the two never share the config, the addons or the
+    unpacked build folder at the same time (see :func:`relaunch_process`).
+    """
+    _RESTART["wanted"] = True
+    return True
+
+
+def cancel_restart_request() -> None:
+    """Withdraw a restart request: the user answered an abort question with
+    cancel, so the app stays open and must not relaunch when it closes later
+    for an unrelated reason."""
+    _RESTART["wanted"] = False
+
+
+def take_restart_request() -> bool:
+    """True once, when a restart was asked for; the entry point calls this
+    after the event loop ends and relaunches instead of exiting."""
+    wanted = _RESTART["wanted"]
+    _RESTART["wanted"] = False
+    return wanted
+
+
+def relaunch_process() -> bool:
+    """Start a detached fresh copy right now, with the dying process's own
+    folders out of its search path; call it only when teardown is finished."""
     if getattr(sys, "frozen", False):
         program, arguments = sys.executable, sys.argv[1:]
     else:
-        program, arguments = sys.executable, sys.argv
-    return QProcess.startDetached(program, arguments)
+        program = sys.executable
+        first = os.path.abspath(sys.argv[0])       # cwd may not be the app's
+        arguments = [first, *sys.argv[1:]]
+    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.DEVNULL, "close_fds": True,
+                    "env": clean_child_env()}
+    if os.name == "nt":
+        kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
+                                   | subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen([program, *arguments], **kwargs)
+    except OSError:
+        return False
+    return True
 
 
 if TYPE_CHECKING:
@@ -309,16 +355,16 @@ class BrowserMixin:
             self.log("Certificate setting stored; it applies after the next start")
 
     def restart_for_cert_bypass(self) -> None:
-        """Relaunch the program so QtWebEngine starts with the new flags."""
-        if not restart_process():
-            QMessageBox.warning(
-                self, "Restart failed",
-                "A new instance could not be started. Close the app and open it again.",
-            )
-            return
+        """Close this copy and have a fresh one start, so QtWebEngine reads
+        the new flags; the relaunch itself waits until the process ends."""
         self.log("Restarting to apply the certificate setting")
-        self.close()
-        QApplication.instance().quit()
+        restart_process()
+        if self.close():
+            QApplication.instance().quit()
+        else:
+            # An abort question was answered "cancel": the window stays up,
+            # so nothing may be quit and no relaunch may be owed.
+            cancel_restart_request()
 
     def request_cert_bypass(self) -> None:
         """Turn the bypass on from a blocked web tab and offer to restart."""

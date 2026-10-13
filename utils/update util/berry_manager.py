@@ -19,7 +19,8 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from addon_common import kill_all_trees
-from manager_browser import set_cert_bypass
+from manager_browser import (relaunch_process, set_cert_bypass,
+                             take_restart_request)
 from manager_config import load_app_config
 from manager_const import ICON_FILES, find_asset
 from manager_gui import BerryManager
@@ -47,4 +48,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    _code = main()
+    # A requested restart really starts here: the window is closed, the
+    # addons and connections are down and Qt is finished, so the fresh
+    # copy meets none of this one's files still held open - and it is
+    # started detached and untracked, so the exit cleanup below lets it
+    # live.
+    if take_restart_request() and not relaunch_process():
+        print("could not start a new copy; reopen the app manually",
+              file=sys.stderr)
+    raise SystemExit(_code)
