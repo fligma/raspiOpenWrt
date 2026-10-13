@@ -20,6 +20,16 @@
         "openwrtlogsicon.png"
       ],
       "test": "test_openwrt_logs.py"
+    },
+    {
+      "id": "openwrt_package_manager",
+      "name": "OpenWrt Package Manager",
+      "version": "1.0",
+      "author": "fligma",
+      "description": "Audits installed OpenWrt packages and manages software installation via apk or opkg.",
+      "filename": "openwrt_package_manager.py",
+      "test": "test_openwrt_package_manager.py",
+      "status": "new"
     }
   ]
 }
