@@ -458,6 +458,29 @@ def _win_terminate_pid(pid: int) -> None:
             _kernel32.CloseHandle(handle)
 
 
+def _strip_bundle_ld_path(env: dict) -> dict:
+    """Take the frozen app's own library folder out of a child's loader path.
+
+    A PyInstaller onefile on Linux puts its unpacked folder - bundled
+    libcrypto and friends and all - into LD_LIBRARY_PATH, and the whole
+    environment passes to children. A child running the machine's own
+    Python would then resolve system modules against those older
+    libraries and die on a version mismatch; compiled addons bring their
+    own libraries and never need the app's folder either.
+    """
+    bundle = getattr(sys, "_MEIPASS", None)
+    if not bundle:
+        return env
+    wanted = os.path.realpath(str(bundle))
+    kept = [entry for entry in env.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+            if entry and os.path.realpath(entry) != wanted]
+    if kept:
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(kept)
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+    return env
+
+
 def popen_tree(command: Any, **kwargs: Any) -> subprocess.Popen:
     """``subprocess.Popen`` for a child that must never outlive the app.
 
@@ -466,6 +489,10 @@ def popen_tree(command: Any, **kwargs: Any) -> subprocess.Popen:
     """
     if os.name != "nt":
         kwargs.setdefault("start_new_session", True)
+        if getattr(sys, "_MEIPASS", None):
+            base = kwargs.get("env")
+            kwargs["env"] = _strip_bundle_ld_path(
+                dict(os.environ if base is None else base))
         proc = subprocess.Popen(command, **kwargs)
         _TREES.append(proc)
         return proc
