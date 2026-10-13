@@ -186,10 +186,12 @@ def _got_search(result: dict) -> None:
         if not line:
             continue
         if backend == "opkg":
-            parts = line.split(" - ", 1)
-            if len(parts) == 2:
-                name, desc = parts[0].strip(), parts[1].strip()
-                rows.append([name, "", desc])
+            # "opkg list" answers with name - version - description.
+            parts = [part.strip() for part in line.split(" - ", 2)]
+            if len(parts) == 3:
+                rows.append([parts[0], parts[1], parts[2]])
+            elif len(parts) == 2:
+                rows.append([parts[0], parts[1], ""])
             else:
                 rows.append([line, "", ""])
         else:
@@ -198,6 +200,17 @@ def _got_search(result: dict) -> None:
             
     api.tabs.set_widget("Package Manager", "browse_table", "rows", rows)
     api.ui.notify(f"Found {len(rows)} matching packages.")
+
+def _done_change(result: dict, verb: str, pkg_name: str) -> None:
+    """Tell the user how the install or removal went, then pace a refresh of
+    the installed list on a timer instead of chaining it into this reply."""
+    code = int(result.get("code", -1))
+    if code != 0:
+        reason = str(result.get("err", "")).strip() or f"code {code}"
+        api.ui.error("Package Manager", f"{verb} of {pkg_name} failed: {reason}")
+        return
+    api.ui.notify(f"{verb} of {pkg_name} completed.")
+    api.schedule.after(0.5, fetch_installed)
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     backend = _pm_backend()
@@ -220,7 +233,7 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         pkg_name = selected[0]
         if api.ui.question("Confirm Removal", f"Are you sure you want to remove '{pkg_name}' via {backend}?"):
             cmd = f"apk del {pkg_name}" if backend == "apk" else f"opkg remove {pkg_name}"
-            api.device.run_async(cmd, on_done=lambda r: fetch_installed())
+            api.device.run_async(cmd, on_done=lambda r, name=pkg_name: _done_change(r, "Removal", name))
     elif identifier == "btn_install" and event == "clicked":
         selected = api.tabs.widget_value("Package Manager", "browse_table", "selected")
         if not selected:
@@ -229,4 +242,4 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         pkg_name = selected[0].split()[0] # Handle potential version suffixes in apk search
         if api.ui.question("Confirm Install", f"Do you want to install '{pkg_name}' via {backend}?"):
             cmd = f"apk add {pkg_name}" if backend == "apk" else f"opkg install {pkg_name}"
-            api.device.run_async(cmd, on_done=lambda r: api.ui.notify(f"Installation of {pkg_name} completed."))
+            api.device.run_async(cmd, on_done=lambda r, name=pkg_name: _done_change(r, "Installation", name))
