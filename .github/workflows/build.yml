@@ -105,14 +105,16 @@ jobs:
         fi
 
   build:
-    # The catalog is a needed job only so that a push carrying both halves does
-    # not package the program while the catalog is still being committed. A
-    # catalog that had nothing to rewrite has not failed, so it must not stop a
-    # build either: only the push deciding that the program moved may do that.
-    needs: [changes, catalog]
-    if: >-
-      needs.changes.outputs.manager == 'true' &&
-      (needs.catalog.result == 'success' || needs.catalog.result == 'skipped')
+    # Only what the push changed decides this job, so it waits for nothing but
+    # the reading of it. Depending on `catalog` looks natural and is a trap:
+    # GitHub counts a skipped job as not successful, so a push that moved the
+    # program while the catalog had nothing to rewrite would have taken its
+    # build down with it. No waiting is needed either: the program does not
+    # carry index.json - the store fetches that off GitHub when it runs - so
+    # the two halves share nothing but the checkout, and neither can disturb
+    # what the other commits or uploads.
+    needs: changes
+    if: needs.changes.outputs.manager == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

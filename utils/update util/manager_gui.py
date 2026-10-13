@@ -1621,7 +1621,7 @@ class BerryManager(
             "Manage Router & Interfaces.<br>"
             'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'
-            "Copyright &copy; 2026 fligma. Licensed under the MIT License.".format(
+            "Copyright &copy; 2026 fligma. Licensed under the MIT License".format(
                 repo=PROJECT_GITHUB_URL, license=PROJECT_LICENSE_URL
             )
         )
