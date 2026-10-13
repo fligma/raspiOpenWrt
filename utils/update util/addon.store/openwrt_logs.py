@@ -19,7 +19,7 @@ ADDON = {
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],
-    "description": ("a single-device log viewer"
+    "description": ("a single-device log viewer "
                     "and a multi-device view,"
                     "colour-coded connections,"
                     "log by time. The search highlights matching lines,"

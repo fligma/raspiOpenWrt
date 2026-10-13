@@ -636,6 +636,13 @@ if __name__ == "__main__":
 #: Which interpreter can build, and whether it has PyInstaller (costly to ask).
 _READY: dict[str, tuple[bool, str]] = {}
 
+#: What a Python may be started by, tried in this order. ``py`` is the launcher
+#: the Windows installer puts on the path in its own right.
+PYTHON_NAMES = ("python3", "python", "py")
+
+#: The interpreter the path was asked for, once; nothing means it was not asked.
+_INTERPRETER: tuple[str | None, str] | None = None
+
 
 def pyinstaller_ready() -> tuple[bool, str]:
     """Whether the interpreter that would do the building has PyInstaller."""
@@ -652,16 +659,74 @@ def pyinstaller_ready() -> tuple[bool, str]:
     return answer
 
 
+def _not_a_python(found: str) -> str:
+    """Why this command on the path cannot build; nothing when it can.
+
+    Windows leaves zero-length python and python3 files in its WindowsApps
+    folder - the app execution aliases. Running one prints that Python was not
+    found, points at the Microsoft Store and stops with code 9009, which
+    otherwise reads as a failure of the build itself. An empty file is therefore
+    refused outright rather than started, and whatever is left is asked to start
+    once, so a command that is broken is not chosen either.
+    """
+    try:
+        size = Path(found).stat().st_size
+    except OSError as error:
+        return f"a command that cannot be read ({error})"
+    if size == 0:
+        return ("a Windows app execution alias, standing for the Microsoft Store "
+                "page instead of a Python" if os.name == "nt"
+                else "an empty file that is not a Python")
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        done = subprocess.run([found, "-c", "import sys"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=20, creationflags=flags)
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"a command that did not start ({error})"
+    if done.returncode != 0:
+        return f"a command that stopped with code {done.returncode}"
+    return ""
+
+
 def build_interpreter() -> tuple[str | None, str]:
-    """The Python to build or test with: ours, or one found on the path."""
+    """The Python to build or test with: ours, or a working one found on the path.
+
+    A packaged program carries no interpreter of its own, so ``python3``,
+    ``python`` and the Windows ``py`` launcher are tried in turn on either
+    system, and each is checked rather than trusted. The answer is kept, because
+    asking costs a process and the panels ask often; :func:`forget_interpreter`
+    puts it back so a Python installed since is noticed.
+    """
+    global _INTERPRETER
     if not IS_COMPILED:
         return sys.executable, ""
-    for name in ("python3", "python"):
+    if _INTERPRETER is not None:
+        return _INTERPRETER
+    seen: list[str] = []
+    for name in PYTHON_NAMES:
         found = shutil.which(name)
-        if found:
-            return found, ""
-    return None, ("no Python found on the path. Install Python, or run this app "
-                  "from a source checkout to compile and test addons")
+        if found is None:
+            continue
+        why = _not_a_python(found)
+        if why:
+            seen.append(f"{name} at {found} is {why}")
+            continue
+        _INTERPRETER = (found, "")
+        return _INTERPRETER
+    _INTERPRETER = (None, "no working Python found on the path"
+                    + (" (" + "; ".join(seen) + ")" if seen else "")
+                    + ". Install Python, or on Windows untick the app execution "
+                      "aliases under Settings > Apps > Advanced app settings, or "
+                      "run this app from a source checkout to compile and test "
+                      "addons")
+    return _INTERPRETER
+
+
+def forget_interpreter() -> None:
+    """Ask the path again next time, and drop what was found along with it."""
+    global _INTERPRETER
+    _INTERPRETER = None
+    _READY.clear()
 
 
 def app_modules_ready() -> tuple[bool, str]:
@@ -732,16 +797,29 @@ def icon_choice(icon: Any) -> Path | None:
     return icon_for_build()
 
 
-def staged_name(addon_id: str, onefile: bool) -> Path:
+def build_root(root: Path | None = None) -> Path:
+    """The folder a build is staged in: ``addons/_build``, or a caller's own.
+
+    An addon that builds things of its own (the store) keeps its work under its
+    own ``_data`` folder rather than in the dev tab's, so nothing it makes lands
+    among the files the Addon Dev tab made. Nothing is created here: whoever
+    stages a build makes the folder it needs.
+    """
+    return ADDON_BUILD_DIR if root is None else Path(root)
+
+
+def staged_name(addon_id: str, onefile: bool,
+                root: Path | None = None) -> Path:
     """Where PyInstaller puts the program before it is copied into ``addons``."""
-    folder = ADDON_BUILD_DIR / addon_id / ("dist" if onefile else Path("dist") / addon_id)
+    folder = build_root(root) / addon_id / ("dist" if onefile else Path("dist") / addon_id)
     return folder / f"{addon_id}{ADDON_EXECUTABLE_SUFFIX}"
 
 
 def build_command(launcher: Path, addon_id: str, options: dict,
-                  source: Path | None = None) -> list[str]:
-    """The PyInstaller line for a build staged inside ``addons/_build/<id>``."""
-    work = ADDON_BUILD_DIR / addon_id
+                  source: Path | None = None,
+                  root: Path | None = None) -> list[str]:
+    """The PyInstaller line for a build staged inside ``<root>/<id>``."""
+    work = build_root(root) / addon_id
     where, _why = build_interpreter()
     command = [
         where or sys.executable, "-m", "PyInstaller",
@@ -1659,6 +1737,7 @@ class AddonDevWidget(QWidget):
             self.win.tabs.setCurrentWidget(page)
 
     def rescan(self) -> None:
+        forget_interpreter()        # a Python installed since is noticed here
         self.mgr.reload()
         self.refresh()
         self.state_note.setText("the addons folder was read again")

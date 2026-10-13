@@ -1113,6 +1113,32 @@ class SessionAPI:
         """The logo the program wears now, as a path; empty if none."""
         return app_icon_path(self._win)
 
+    def rescan_addons(self) -> bool:
+        """Look at the addons folder again, on the next turn of the event loop.
+
+        A file an addon installed or deleted only reaches the app through a
+        rescan. It is queued rather than run here, because a rescan shuts down
+        and starts again every addon it re-reads - the caller among them - and
+        answering this request first is what lets a process addon hear about it
+        and close itself down politely instead of being cut off mid-call.
+        """
+        QTimer.singleShot(0, self._api._manager.reload)
+        return True
+
+    def set_addon_enabled(self, addon_id: str, enabled: bool) -> dict:
+        """Write one addon's switch into the active profile's settings.
+
+        Nothing is started or stopped here: only the record is written, so the
+        addon comes up, or stays down, at the next rescan - which is what an
+        installer does straight after putting a program in the folder.
+        """
+        manager = self._api._manager
+        record = manager.record_for(str(addon_id))
+        record["enabled"] = bool(enabled)
+        manager.save_records()
+        return jsonable({"enabled": bool(record["enabled"]),
+                         "settings": dict(record.get("settings") or {})})
+
 
 class Connection:
     """A live SSH/SFTP pair, handed out by ``api.device.open()``."""

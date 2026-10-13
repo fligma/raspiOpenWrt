@@ -31,7 +31,15 @@ are extension modules rather than packages, so collecting them as packages only
 produces a "not a package" warning.
 
 The GitHub workflow in `.github/workflows/build.yml` runs exactly this command
-per operating system. Before it, a step runs every `test_*.py` in
+per operating system, for the pushes that can change its result: a first job
+reads the commits a push carries and says which half of the build moved. The
+executables are packaged when anything of the program did - the app, the
+addons that ship in `addons`, its assets, its requirements, the workflow
+itself. A push that only brought an addon to `addon.store`, or changed the
+tool that writes `index.json` from it, packages nothing and only rewrites the
+catalog, and a push of neither - the web dashboard, the pictures, a README -
+does nothing. A manual run, and a push whose starting commit cannot be read,
+counts as everything. Before the packaging, a step runs every `test_*.py` in
 `addons/_tests` against the stubbed app - a failing test fails the build, and
 the tests themselves are never packaged. The step after that stages the addons
 out of `addons` into `_addon_bundle`, which is what gets packed inside the
@@ -41,6 +49,13 @@ with its `<name>.json` manifest, or a folder whose program is `addon.exe`,
 `main.py`; `__pycache__` and any `tests`/`_tests` folder are stripped from the
 copy. The `addons` folder that ships beside the built program is left empty
 for the user's own drop-ins.
+
+The store's addons are therefore checked by CI only on a push that also moves
+the program: `addon.store/_tests` is run by the same packaging step. A new
+addon on its own is proved when somebody installs it - the store fetches
+`test_<id>.py` beside the source and runs it before spending a minute
+compiling - and the catalog itself is generated from the manifest in the file,
+which needs no import of the addon.
 
 PyQt6-WebEngine is optional. If it is not installed, the Web Interface and
 LuCI tabs show the URL and an "Open in browser" button instead of an embedded
@@ -477,7 +492,7 @@ The object in `init` is the only door into the app:
 | Namespace | What it gives |
 | --- | --- |
 | `api.id`, `api.name`, `api.log(text)`, `api.error(text)` | identity and the shared log |
-| `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()` |
+| `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the two an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request) and `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything) |
 | `api.device` | SSH and SFTP: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download` |
 | `api.tabs` | `add_web_tab`, `add_tab`, `close`, `rename`, `activate`, `names`, `exists`, `url`, `navigate`, `reload`, `view`, `widget`, `set_widget`, `widget_value`, `set_html`, `inject_css`, `inject_js`, `set_style`, `set_icon`, `icon`, `use_app_icon` |
 | `api.ui` | `information`, `warning`, `error`, `question`, `input`, `choose`, `notify`, `menu_item`, `dialog`, `set_setting_widget`, `window()` |
@@ -780,10 +795,13 @@ Compile starts PyInstaller for the one addon against a generated launcher
 nothing of yours is touched, and puts the result where the runtime looks for it:
 `addons/<id>.exe` on Windows, an extension-less executable with the exec bit on
 Linux, or the whole folder of a `--onedir` build at `addons/<id>/` with its
-program named `addon.bin`. PyInstaller is **not** needed to run the app - only
-to build an addon, and it has to be installed in the interpreter the source runs
-from (`python -m pip install pyinstaller`); the Compile pane says so, with the
-exact command, instead of failing.
+program named `addon.bin`. `build_command` and `staged_name` take a `root=` for
+an addon that builds things of its own, which is how the addon store stages its
+work inside `addons/_data/addon_store/build` instead of in the dev tab's folder,
+and clears it as soon as the program is installed. PyInstaller is **not** needed
+to run the app - only to build an addon, and it has to be installed in the
+interpreter the source runs from (`python -m pip install pyinstaller`); the
+Compile pane says so, with the exact command, instead of failing.
 
 `addons/_build` and the programs a build leaves in `addons` are Git-ignored, the
 same way the config and data folders are: they belong to one machine. The test

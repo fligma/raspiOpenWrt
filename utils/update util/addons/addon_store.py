@@ -15,8 +15,14 @@ staging folder under ``addons/_data/addon_store``, then compiled into a program
 of its own by PyInstaller - the assets packed into the executable's ``assets``
 folder so ``api.paths.assets`` finds them - and dropped into ``addons/`` exactly
 where the runtime looks, the same result the Addon Dev tab's Compile button
-produces. Nothing downloaded stays in the catalog folder; it becomes a normal
-drop-in addon.
+produces. The build is staged in a folder of the store's own beside the
+downloads, under ``addons/_data/addon_store/build``, and both the downloads and
+the build are thrown away as soon as the program is in ``addons/``: only the
+installed file and the addon's own settings are left behind.
+
+A freshly installed addon is written into the active profile's settings as
+switched off, so nothing of it runs until it is turned on in Settings > Addons,
+where its row appears as soon as the app has rescanned the folder.
 
 Before the compile, when the store ships a ``test_<id>.py`` for the addon, it is
 fetched too and run against the freshly downloaded ``.py``: a test that does not
@@ -26,10 +32,13 @@ test published is compiled as it is.
 Deleting one takes that compiled program (or folder) back out of ``addons/`` and
 rescans, leaving the addon's own ``_data`` settings where they are.
 
-Compiling needs a Python on this machine and PyInstaller within it. When
-PyInstaller is missing the store installs it itself with ``pip`` - the user is
-not asked to. The repository, branch, folder and token are all editable in
-``addons/_data/addon_store/config.json``.
+Compiling needs a Python on this machine and PyInstaller within it. The
+interpreter is looked for as ``python3``, then ``python``, then the Windows ``py``
+launcher, and a name that turns out to be the Microsoft Store's stand-in rather
+than a Python is passed over. When PyInstaller is missing the store installs it
+itself with ``pip`` - for this user alone when the plain install is refused -
+and the user is not asked to. The repository, branch, folder and token are all
+editable in ``addons/_data/addon_store/config.json``.
 
 The tab is built from a declarative spec and its buttons report back through
 ``on_widget``, so the same file works imported into the app and compiled into a
@@ -191,6 +200,9 @@ def build_tab() -> None:
 
 
 def say(text: str, bad: bool = False) -> None:
+    """One line on the tab's status, and nothing once this copy has been reloaded."""
+    if api is None:
+        return
     try:
         api.tabs.set_widget(TAB, "status", "text", str(text))
         api.tabs.set_widget(TAB, "status", "style",
@@ -202,6 +214,8 @@ def say(text: str, bad: bool = False) -> None:
 
 def note(text: str) -> None:
     """One line into the tab's own log and the program's log, the same words."""
+    if api is None:
+        return
     try:
         api.tabs.set_widget(TAB, "log", "append", str(text))
     except AddonError:
@@ -213,6 +227,8 @@ def show_source(values: dict) -> None:
     """The header chip: which owner/repo/ref/folder the catalog is read from."""
     text = (f"{config_get(values, 'owner', '')}/{config_get(values, 'repo', '')}"
             f" @ {config_get(values, 'ref', 'main')}")
+    if api is None:
+        return
     try:
         api.tabs.set_widget(TAB, "source", "text", text)
     except AddonError:
@@ -220,6 +236,8 @@ def show_source(values: dict) -> None:
 
 
 def _buttons(usable: bool) -> None:
+    if api is None:
+        return
     for identifier, _text in BUTTONS:
         try:
             api.tabs.set_widget(TAB, identifier, "enabled", bool(usable))
@@ -394,6 +412,18 @@ def staging() -> Path:
     return folder
 
 
+def work_dir() -> Path:
+    """The addon's own folder under ``api.paths.data`` for the build's work.
+
+    PyInstaller writes a spec, a ``build`` folder and a ``dist`` folder for every
+    program it makes. All of that belongs to the store, not to the Addon Dev tab
+    beside it, so it is staged here, under ``addons/_data/addon_store``.
+    """
+    folder = Path(api.paths.data) / "build"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 def _reset_staging() -> None:
     for child in staging().iterdir():
         try:
@@ -405,10 +435,26 @@ def _reset_staging() -> None:
             pass
 
 
+def _tidy(id_value: str) -> None:
+    """Throw the downloads and the build away once the program is in ``addons``.
+
+    The source, its assets, its test and everything PyInstaller made on the way
+    were only a means to the one file that got installed, so they are cleared;
+    what the addon itself keeps in its ``_data`` folder is left alone.
+    """
+    try:
+        shutil.rmtree(work_dir() / id_value, ignore_errors=True)
+    except OSError as error:
+        note(f"the build folder could not be cleared: {error}")
+    _reset_staging()
+
+
 # --- the table ---
 
 def show_entries() -> None:
     """The catalog as rows: last column installed or not, first marks new or updated."""
+    if api is None:
+        return
     rows = []
     marks = {"new": "  \u25cf new", "updated": "  \u21bb updated"}
     for entry in entries:
@@ -505,12 +551,14 @@ def _finish(text: str, bad: bool = False) -> None:
 
 
 def _stream(command: list[str], cwd: Path | None, on_ok: Any,
-            env: dict | None = None, fail: str = "") -> None:
+            env: dict | None = None, fail: str = "",
+            on_bad: Any = None) -> None:
     """Run one child process and call ``on_ok`` when it ends clean.
 
     ``env`` is the environment for this one process (``None`` keeps the app's),
     and ``fail`` the line left up when it stops non-zero, in place of the plain
-    exit-code message, so a failed test says what it was.
+    exit-code message, so a failed test says what it was. ``on_bad``, when given,
+    is called instead of ending the job, so a step can try another way first.
     """
     dev = _dev()
     stream = dev._Stream(command, cwd=cwd, env=env)
@@ -519,6 +567,7 @@ def _stream(command: list[str], cwd: Path | None, on_ok: Any,
         job["stream"] = stream
         job["on_ok"] = on_ok
         job["fail"] = fail
+        job["on_bad"] = on_bad
     _poll_stream()
 
 
@@ -533,21 +582,29 @@ def _poll_stream() -> None:
         if line is not None:
             note(line)
     if not stream.finished:
+        if api is None:
+            return
         api.schedule.after(0.2, _poll_stream)
         return
     code = int(stream.code or 0)
     job["stream"] = None
     if code != 0:
+        on_bad = job.pop("on_bad", None)
+        if callable(on_bad):
+            on_bad()
+            return
         _finish(job.get("fail") or f"the job stopped with code {code}", bad=True)
         return
+    job.pop("on_bad", None)
     on_ok = job.pop("on_ok", None)
     if callable(on_ok):
         on_ok()
 
 
 def _clear_ready() -> None:
+    """Put away what the dev machinery remembered: the interpreter and PyInstaller."""
     try:
-        _dev()._READY.clear()
+        _dev().forget_interpreter()
     except Exception:
         pass
 
@@ -558,6 +615,7 @@ def _ensure_python() -> str:
     if where is None:
         _finish(why, bad=True)
         return ""
+    note(f"building with {where}")
     return str(where)
 
 
@@ -652,7 +710,8 @@ def _build(id_value: str, source: Path) -> None:
     if job is None:
         return
     dev = _dev()
-    work = dev.ADDON_BUILD_DIR / id_value
+    root = work_dir()
+    work = root / id_value
     try:
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True, exist_ok=True)
@@ -670,39 +729,88 @@ def _build(id_value: str, source: Path) -> None:
         icon_name = entry.get("icon") or ""
         icon = assets / icon_name if icon_name else None
         options["icon"] = str(icon) if (icon is not None and icon.is_file()) else True
-    command = dev.build_command(launcher, id_value, options, source)
+    command = dev.build_command(launcher, id_value, options, source, root=root)
     say(f"compiling {id_value} with PyInstaller...")
     note("$ " + " ".join(command))
     _stream(command, work, lambda: _install_step(id_value))
 
 
+def _stay_off(id_value: str) -> None:
+    """Write the new addon into the active profile as switched off.
+
+    The app starts only what the profile enables, so an addon that has just
+    arrived runs nothing: it appears in Settings > Addons with its switch down
+    and waits to be turned on. The row shows up in the rescan that follows.
+    """
+    if api is None:
+        return
+    try:
+        api.session.set_addon_enabled(addon_id=id_value, enabled=False)
+    except Exception as error:              # a settings hiccup never loses an install
+        note(f"{id_value} could not be written to the profile as switched off: "
+             f"{error}")
+
+
 def _install_step(id_value: str) -> None:
-    """Move the fresh program into ``addons/``, then rescan and repaint."""
+    """Move the fresh program into ``addons/``, then leave it switched off.
+
+    The rescan that lets the app see the new file re-loads this addon as well,
+    which takes the module this code runs in out of the app: the api is gone the
+    moment ``_reload()`` starts. So everything that still needs it - clearing the
+    build away, marking the addon off, the table and the status line - is done
+    first, and the rescan is the last thing here.
+    """
     if job is None:
         return
     dev = _dev()
-    staged = dev.staged_name(id_value, True)
+    staged = dev.staged_name(id_value, True, root=work_dir())
     if not staged.is_file():
+        _tidy(id_value)
         _finish("no program was produced; see the log above", bad=True)
         return
     try:
         target = dev.install_build(staged, id_value, True)
     except OSError as error:
+        _tidy(id_value)
         _finish(f"it could not be put in the addons folder: {error}", bad=True)
         return
-    _reload()
+    _tidy(id_value)
+    _stay_off(id_value)
     show_entries()
-    _finish(f"installed {target.name} into the addons folder")
+    _finish(f"installed {target.name}, switched off until you turn it on in "
+            "Settings > Addons")
+    _reload()
 
 
-def _pip_install(where: str) -> None:
-    """Install PyInstaller into the interpreter that would do the building."""
+def _pip_install(where: str, user: bool = False) -> None:
+    """Install PyInstaller into the interpreter that would do the building.
+
+    Plain first and ``--user`` second: a machine-wide Python on Windows refuses
+    a normal install without elevation, and a distribution's Python on Linux
+    refuses it altogether unless the packages are for this user alone.
+    """
     if job is None:
         return
-    say("getting PyInstaller ready (pip install)...")
-    command = [where, "-m", "pip", "install", "--disable-pip-version-check",
-               "pyinstaller"]
-    _stream(command, None, lambda: _after_pip(where))
+    who = " for this user" if user else ""
+    say(f"getting PyInstaller ready (pip install{who})...")
+    command = [where, "-m", "pip", "install", "--disable-pip-version-check"]
+    if user:
+        command.append("--user")
+    command.append("pyinstaller")
+    _stream(command, None, lambda: _after_pip(where),
+            on_bad=lambda: _pip_again(where, user),
+            fail="pip could not install PyInstaller; the lines above say why")
+
+
+def _pip_again(where: str, user: bool) -> None:
+    """The pip that failed: once more for this user, and then it is reported."""
+    if user or job is None:
+        _finish("PyInstaller could not be installed with pip, for this user "
+                "either; the lines above say why. A distribution's Python on "
+                "Linux may need a virtualenv instead", bad=True)
+        return
+    note("that install did not go through; trying again for this user alone")
+    _pip_install(where, user=True)
 
 
 def _after_pip(where: str) -> None:
@@ -770,18 +878,29 @@ def delete_selected(_checked: bool = False) -> None:
     except OSError as error:
         say(f"{id_value} could not be removed: {error}", bad=True)
         return
-    _reload()
+    _tidy(id_value)
     show_entries()
     say(f"deleted {id_value} from the addons folder")
     note(f"deleted {id_value}")
+    _reload()
 
 
 def _reload() -> None:
-    """Ask the running app to rescan ``addons/`` and pick up what changed."""
+    """Ask the running app to look at ``addons/`` again and pick up what changed.
+
+    The rescan shuts this addon down on its way to starting it again from the
+    file on disk - and in a compiled store it ends this process too - so it is
+    the last thing a job does and nothing after it reaches for the api.
+    """
+    if api is None:
+        return
     try:
-        api._manager.reload()
+        api.session.rescan_addons()
     except Exception as error:                 # never let a rescan break the tab
-        api.log(f"addon rescan after a store job: {error}")
+        try:
+            api.log(f"addon rescan after a store job: {error}")
+        except Exception:
+            pass
 
 
 # --- the hooks the app calls ---

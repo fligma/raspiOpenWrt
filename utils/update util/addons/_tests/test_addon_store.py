@@ -18,8 +18,12 @@ Three things get looked at:
   and the table and the log really share one horizontal splitter;
 * what counts as installed, against a temporary addons folder, and how a compiled
   addon finds its own bundled assets;
-* the catalog generator that rebuilds ``index.json`` from the store folder, and
-  the store's rule that an addon's test is run before it is compiled.
+* the catalog generator that rebuilds ``index.json`` from the store folder, the
+  store's rule that an addon's test is run before it is compiled, which Python
+  it is allowed to build with, and how a refused pip install is retried;
+* what an install leaves where: the build staged and then cleared inside the
+  store's own ``_data`` folder, the new addon written into the profile as
+  switched off, and the rescan that shuts the store down done last of all.
 
 No internet, no compiler and no device are needed. Run it from the Test panel,
 or::
@@ -422,6 +426,300 @@ def test_the_gate(store: Any) -> None:
         store.job = real_job
 
 
+# --- seven: the interpreter it builds with, and the pip that fills it ---
+
+def test_the_interpreter(store: Any) -> None:
+    """A python3 that is the Windows Store stand-in is passed over for a real one.
+
+    The store asks :mod:`manager_addondev` which Python to build with, and on
+    Windows the first name on the path is often a zero-length alias that answers
+    "Python was not found" and stops with code 9009 - which reads as a broken
+    build unless the search refuses it. Needs the app's own modules, so it is
+    quiet when they are not there.
+    """
+    print("\n9. the interpreter search takes a Python that actually starts")
+    try:
+        import manager_addondev as dev
+    except Exception as error:                      # noqa: BLE001 - app modules
+        look(f"manager_addondev is not importable here: {error}")
+        return
+    check("python3" in dev.PYTHON_NAMES and "python" in dev.PYTHON_NAMES,
+          f"both usual names are not tried: {dev.PYTHON_NAMES}")
+    check(dev._not_a_python(str(sys.executable)) == "",
+          f"this interpreter was not taken for a Python: "
+          f"{dev._not_a_python(str(sys.executable))!r}")
+    saved = (dev.shutil.which, dev.IS_COMPILED, dev._INTERPRETER)
+    try:
+        with tempfile.TemporaryDirectory() as where:
+            stub = Path(where) / ("python3.exe" if os.name == "nt" else "python3")
+            stub.write_bytes(b"")            # exactly what the alias is: nothing
+            reason = dev._not_a_python(str(stub))
+            check("alias" in reason.lower() or "empty" in reason.lower(),
+                  f"a zero-length stand-in was not refused: {reason!r}")
+
+            dev.shutil.which = lambda name: str(stub) if name == "python3" else None
+            dev.IS_COMPILED, dev._INTERPRETER = True, None
+            gone, why = dev.build_interpreter()
+            check(gone is None and "python" in why.lower(),
+                  f"a path with only a stand-in produced {gone!r}: {why!r}")
+
+            dev._INTERPRETER = None
+            dev.shutil.which = lambda name: (
+                str(stub) if name == "python3"
+                else str(sys.executable) if name == "python" else None)
+            picked, why = dev.build_interpreter()
+            check(picked == str(sys.executable),
+                  f"the stand-in was not passed over for the python behind it: "
+                  f"{picked!r} / {why!r}")
+
+            # the answer is kept, and forgetting asks the path again
+            dev.shutil.which = lambda name: None
+            check(dev.build_interpreter()[0] == str(sys.executable),
+                  "the second ask did not use the kept answer")
+            dev.forget_interpreter()
+            check(dev.build_interpreter()[0] is None,
+                  "forgetting the answer did not put the path back to asking")
+    finally:
+        dev.shutil.which, dev.IS_COMPILED, dev._INTERPRETER = saved
+
+
+def test_the_pip_fallback(store: Any) -> None:
+    """A refused pip install is tried again for this user, then reported."""
+    print("\n10. PyInstaller is installed for this user when the plain way fails")
+    real_stream, real_finish, real_job = store._stream, store._finish, store.job
+    asked: list[dict] = []
+    try:
+        store.job = {"values": {}}
+        store._finish = lambda text, bad=False: asked.append({"ended": text})
+
+        def refused(command, cwd, on_ok, env=None, fail="", on_bad=None):
+            asked.append({"command": command, "fail": fail, "on_bad": on_bad})
+            if callable(on_bad):
+                on_bad()                     # pretend pip said no
+        store._stream = refused
+        store._pip_install("python")
+        check(len(asked) == 3, f"the two tries and the ending are not there: {asked}")
+        first, second = asked[0], asked[1]
+        check("--user" not in first["command"],
+              f"the first try was not the plain one: {first['command']}")
+        check("--user" in second["command"],
+              f"the second try did not go for this user: {second['command']}")
+        check(first["command"][:2] == ["python", "-m"],
+              f"pip was not run through the interpreter that builds: {first['command']}")
+        check("ended" in asked[-1] and "pip" in asked[-1]["ended"].lower(),
+              f"giving up said nothing about pip: {asked[-1]}")
+
+        # a pip that goes through simply carries on to the compile
+        asked.clear()
+        def clean(command, cwd, on_ok, env=None, fail="", on_bad=None):
+            asked.append({"command": command})
+            on_ok()
+        class Ready:
+            """A dev module whose interpreter now has PyInstaller in it."""
+
+            @staticmethod
+            def pyinstaller_ready() -> tuple[bool, str]:
+                return True, ""
+
+            @staticmethod
+            def forget_interpreter() -> None:
+                pass
+        real_dev = store._dev
+        real_compile = store._compile
+        store._stream = clean
+        store._dev = lambda: Ready
+        store._compile = lambda id_value: asked.append({"compiled": id_value})
+        try:
+            store.job["id"] = "widget"
+            store._pip_install("python")
+            check(any("compiled" in item for item in asked),
+                  f"a clean install did not carry on to the compile: {asked}")
+        finally:
+            store._compile = real_compile
+            store._dev = real_dev
+    finally:
+        store._stream = real_stream
+        store._finish = real_finish
+        store.job = real_job
+
+
+# --- eight: where an install leaves its work, and what it must not touch after ---
+
+class _BuildDev:
+    """The dev machinery as the store sees it, with nothing really compiled."""
+
+    BASE_DIR = ROOT
+
+    class _Launcher:
+        @staticmethod
+        def substitute(**values: Any) -> str:
+            return " ".join(f"{key}={value}" for key, value in values.items())
+
+    _LAUNCHER = _Launcher()
+
+    def __init__(self, dist: Path) -> None:
+        self.dist = dist                # where the finished program is said to be
+        self.seen: dict = {}
+
+    @staticmethod
+    def build_interpreter() -> tuple[str, str]:
+        return str(sys.executable), ""
+
+    @staticmethod
+    def module_name(source: Path) -> str:
+        return source.stem
+
+    @staticmethod
+    def _write_text(target: Path, text: str) -> None:
+        Path(target).write_text(text, encoding="utf-8")
+
+    def build_command(self, launcher: Path, addon_id: str, options: dict,
+                      source: Path | None = None,
+                      root: Path | None = None) -> list[str]:
+        self.seen["root"] = root
+        self.seen["launcher"] = Path(launcher)
+        return ["py", "-m", "PyInstaller", str(launcher)]
+
+    def staged_name(self, addon_id: str, onefile: bool,
+                    root: Path | None = None) -> Path:
+        self.seen["staged root"] = root
+        return self.dist / f"{addon_id}.exe"
+
+    def install_build(self, staged: Path, addon_id: str, onefile: bool) -> Path:
+        self.seen["copied"] = Path(staged)
+        return Path("addons") / f"{addon_id}.exe"
+
+
+class _FakeApp:
+    """The two app calls an install ends with, recorded instead of carried out.
+
+    ``session`` is the one namespace both kinds of addon reach the app through,
+    so the store's last two moves are watched here rather than on a manager it
+    no longer touches directly.
+    """
+
+    def __init__(self, on_rescan: Any = None) -> None:
+        self.on_rescan = on_rescan
+        self.written: list = []
+        self.rescans = 0
+
+    def set_addon_enabled(self, addon_id: str, enabled: bool) -> dict:
+        self.written.append((str(addon_id), bool(enabled)))
+        return {"enabled": bool(enabled)}
+
+    def rescan_addons(self) -> bool:
+        self.rescans += 1
+        if callable(self.on_rescan):
+            self.on_rescan()
+        return True
+
+
+def test_the_install(store: Any) -> None:
+    """The build stays in the store's own folder, and the rescan comes last.
+
+    A rescan shuts the store down and starts it again from disk, which takes the
+    api out from under the code that asked for it - the crash this guards against
+    - so the install has to finish everything that speaks to the tab first.
+    """
+    print("\n11. an install stages its work at home, clears it, and reloads last")
+    api = fresh(store)
+    saved_env = os.environ.pop("RASCONF_ADDON_DATA", None)
+    real_dev, real_stream = store._dev, store._stream
+    real_job, real_addons = store.job, store.addons_dir
+    try:
+        with tempfile.TemporaryDirectory() as where:
+            data = Path(where)
+            os.environ["RASCONF_ADDON_DATA"] = str(data)
+            build = data / "build"
+            stage = data / "staging"
+            addons = data / "addons"
+            store.addons_dir = lambda: addons
+
+            # the build is asked for inside the store's own data folder
+            streamed: dict = {}
+
+            def watch(command, cwd, on_ok, env=None, fail="", on_bad=None):
+                streamed["command"] = command
+                streamed["cwd"] = cwd
+            store._stream = watch
+            dist = build / "widget" / "dist"
+            dev = _BuildDev(dist)
+            store._dev = lambda: dev
+            store.job = {"values": {}}
+            source = data / "widget.py"
+            source.write_text("x", encoding="utf-8")
+            store._build("widget", source)
+            check(dev.seen.get("root") == build,
+                  f"the build was not staged in the store's own folder: "
+                  f"{dev.seen.get('root')!r} != {build}")
+            check(dev.seen.get("launcher") == build / "widget" / "launcher.py",
+                  f"the launcher was written somewhere else: {dev.seen.get('launcher')!r}")
+            check(Path(streamed.get("cwd", "/")) == build / "widget",
+                  f"PyInstaller ran from elsewhere: {streamed.get('cwd')!r}")
+
+            # the finished program: copied, cleared, marked off, and only then
+            # the rescan, which takes the api away from the running code
+            dist.mkdir(parents=True)
+            (stage / "assets").mkdir(parents=True)
+            (stage / "assets" / "pic.png").write_text("x", encoding="utf-8")
+            (dist / "widget.exe").write_text("x", encoding="utf-8")
+            order: list[str] = []
+            seen_calls: dict = {}
+
+            def reload():
+                seen_calls["calls"] = len(api.calls)
+                order.append("reload")
+                store.shutdown()            # exactly what the app does to us here
+
+            manager = _FakeApp(reload)
+            api.session = manager
+            store._dev = lambda: dev
+            store.job = {"values": {}, "id": "widget"}
+            api.calls.clear()
+            broken: list[str] = []
+            try:
+                store._install_step("widget")
+            except Exception as error:                  # noqa: BLE001 - the crash itself
+                broken.append(f"{type(error).__name__}: {error}")
+            check(not broken, f"the install could not finish itself: {broken}")
+            check(dev.seen.get("staged root") == build
+                  and dev.seen.get("copied") == dist / "widget.exe",
+                  f"the program was looked for outside the store's build: {dev.seen}")
+            check(order == ["reload"] and manager.rescans == 1,
+                  f"the app was not asked to rescan, or was twice: {order} / "
+                  f"{manager.rescans}")
+            paints = [index for index, entry in enumerate(api.calls)
+                      if entry[0] == "tabs.set_widget" and len(entry[1]) >= 4
+                      and entry[1][1] == "list" and entry[1][2] == "rows"]
+            check(paints and paints[0] < seen_calls.get("calls", 0),
+                  f"the table was not repainted before the rescan: {paints} of "
+                  f"{seen_calls.get('calls')}")
+            check(any(entry[0] == "tabs.set_widget" and len(entry[1]) >= 4
+                      and entry[1][1] == "status" and "off" in str(entry[1][3])
+                      for entry in api.calls),
+                  "the status line never said the addon is switched off")
+            check(manager.written == [("widget", False)],
+                  f"the profile was not told to keep it off: {manager.written}")
+            check(not (build / "widget").exists(),
+                  "the build folder was left behind next to the installed program")
+            check(stage.is_dir() and not any(stage.iterdir()),
+                  f"the downloads were left in staging: {list(stage.iterdir())}")
+
+        # a compiled store asks the same two things over its own pipe
+        check("session.rescan_addons" in addon_client.ProcessAPI._POSITIONAL
+              and "session.set_addon_enabled" in addon_client.ProcessAPI._POSITIONAL,
+              "the app calls an install ends with are not passable by a process addon")
+    finally:
+        if saved_env is not None:
+            os.environ["RASCONF_ADDON_DATA"] = saved_env
+        else:
+            os.environ.pop("RASCONF_ADDON_DATA", None)
+        store._dev = real_dev
+        store._stream = real_stream
+        store.job = real_job
+        store.addons_dir = real_addons
+
+
 # --- run it ---
 
 def main() -> int:
@@ -440,6 +738,9 @@ def main() -> int:
     test_bundled_assets(store)
     test_the_generator(store)
     test_the_gate(store)
+    test_the_interpreter(store)
+    test_the_pip_fallback(store)
+    test_the_install(store)
 
     if FAILURES:
         print()

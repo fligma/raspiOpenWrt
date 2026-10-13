@@ -59,9 +59,13 @@ What it gives you:
 - **Addons** - the app's extension system, described below.
 
 Packaging is one PyInstaller command, and the GitHub workflow
-(`.github/workflows/build.yml`) runs it for Windows and Linux on every push
-to `main`, after running every addon's test script; the artifact is
-`berry_manager(.exe)` plus an empty `addons` folder for your own drop-ins.
+(`.github/workflows/build.yml`) runs it for Windows and Linux on a push to
+`main` that changes the app or the addons shipped inside it - after running
+every addon's test script. A push that only brings an addon for the **store**
+just rewrites the store's catalog and builds no executables, and a push that
+touches neither (the web dashboard, the pictures, a README) does nothing at
+all. The artifact is `berry_manager(.exe)` plus an empty `addons` folder for
+your own drop-ins.
 The full documentation - modules, every settings key, HTTPS certificate
 handling, the build - is in
 [utils/update util/README.md](<utils/update util/README.md>).

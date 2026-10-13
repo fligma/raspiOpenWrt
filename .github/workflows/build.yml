@@ -6,7 +6,71 @@ on:
   workflow_dispatch:
 
 jobs:
+  # A push moves one of two things: the program, or the catalog of addons the
+  # store offers. They are built from different folders, and rebuilding both
+  # executables because somebody added an addon to the store buys nothing, just
+  # as a commit for a catalog that did not change buys nothing. So the push is
+  # read first and the other two jobs do only what it actually touched.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      manager: ${{ steps.classify.outputs.manager }}
+      store: ${{ steps.classify.outputs.store }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        # The push is read as a range of commits, so the history has to be here.
+        fetch-depth: 0
+
+    - name: Work out what this push changed
+      id: classify
+      env:
+        BEFORE: ${{ github.event.before }}
+        AFTER: ${{ github.sha }}
+        EVENT: ${{ github.event_name }}
+      run: |
+        manager=false
+        store=false
+        if [ "$EVENT" != push ] || ! git merge-base --is-ancestor "$BEFORE" "$AFTER" 2>/dev/null; then
+          # A manual run asks for everything by name. So does a push whose
+          # starting commit cannot be read - the first on a branch, or one that
+          # rewrote history: guessing small there would skip a build that was
+          # needed, and nobody would notice.
+          manager=true
+          store=true
+          echo "No commit range to read: everything counts as changed."
+        else
+          files=$(git -c core.quotePath=false diff --name-only "$BEFORE" "$AFTER")
+          if [ -z "$files" ]; then
+            echo "This push carries no file changes."
+          else
+            echo "$files"
+            while IFS= read -r file; do
+              case "$file" in
+                # The catalog is made of the store's addons, their pictures,
+                # their tests, and the tool that writes index.json from them.
+                "utils/update util/addon.store/"*) store=true ;;
+                "utils/update util/tools/gen_addon_store_index.py") store=true ;;
+                # The program is made of everything else under it - the app,
+                # the addons that ship inside it, its assets, its
+                # requirements - and of this workflow, so a change to the
+                # recipe is proved by the build it just described. Anything
+                # outside these is in neither list: a push of the web
+                # dashboard, or of a README, builds nothing at all.
+                "utils/update util/"*|.github/workflows/build.yml) manager=true ;;
+              esac
+            done <<< "$files"
+          fi
+        fi
+        echo "manager=$manager" >> "$GITHUB_OUTPUT"
+        echo "store=$store" >> "$GITHUB_OUTPUT"
+        echo "rebuild the program: $manager"
+        echo "rewrite the catalog: $store"
+
   catalog:
+    needs: changes
+    if: needs.changes.outputs.store == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -41,7 +105,14 @@ jobs:
         fi
 
   build:
-    needs: catalog
+    # The catalog is a needed job only so that a push carrying both halves does
+    # not package the program while the catalog is still being committed. A
+    # catalog that had nothing to rewrite has not failed, so it must not stop a
+    # build either: only the push deciding that the program moved may do that.
+    needs: [changes, catalog]
+    if: >-
+      needs.changes.outputs.manager == 'true' &&
+      (needs.catalog.result == 'success' || needs.catalog.result == 'skipped')
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

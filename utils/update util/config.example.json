@@ -32,6 +32,7 @@
         "SSH",
         "Web",
         "LuCI",
+        "Addon store",
         "Web installer"
       ],
       "terminal_font_size": 10,
@@ -49,7 +50,7 @@
       "addons": {
         "berry": { "enabled": true, "settings": {} },
         "addon_store": { "enabled": true, "settings": {} },
-        "web_installer": { "enabled": false, "settings": {} }
+        "web_installer": { "enabled": true, "settings": {} }
       },
       "quick_commands": [
         { "label": "Show version", "command": "cat /etc/openwrt_release" }

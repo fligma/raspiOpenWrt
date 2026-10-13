@@ -182,6 +182,8 @@ class ProcessAPI:
         "config.path": (),
         "ui.pick_color": ("title", "initial"),
         "session.web_url": ("tab",),
+        "session.rescan_addons": (),
+        "session.set_addon_enabled": ("addon_id", "enabled"),
         "peers.info": ("addon_id",),
         "peers.send": ("addon_id", "data"),
     }
