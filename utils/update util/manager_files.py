@@ -102,6 +102,8 @@ class FileViewsMixin:
         self.disconnect_button.setEnabled(not busy and self.sftp_connected)
 
     def operation_succeeded(self) -> None:
+        if getattr(self, "_closing", False):
+            return                     # the app is going down; no news needed
         if not self.connections_enabled():
             # The master switch went off while the connect was in flight.
             self.shared_conn.close()
@@ -109,6 +111,8 @@ class FileViewsMixin:
         self.mark_shared_connected()
 
     def operation_failed(self, message: str) -> None:
+        if getattr(self, "_closing", False):
+            return                     # a cancel at close is not worth a dialog
         self.statusBar().showMessage("Connection failed (SFTP)", 5000)
         self.log("Error: " + message)
         self.sftp_connected = False
@@ -116,6 +120,8 @@ class FileViewsMixin:
         QMessageBox.critical(self, "SFTP connection failed", message)
 
     def operation_finished(self) -> None:
+        if getattr(self, "_closing", False):
+            return                     # the window keeps no buttons to free
         self.set_busy(False)
         if self.worker is not None:
             self.worker.deleteLater()

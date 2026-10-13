@@ -9,6 +9,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import posixpath
+import threading
 from typing import Any
 
 from PyQt6.QtCore import QEvent, QObject, QSize, QTimer, Qt
@@ -1034,12 +1035,18 @@ class BerryManager(
         self._maybe_persist_order()
         self.save_current_profile_edits()
         self.addon_event("shutdown")
-        if self.reboot_worker is not None and self.reboot_worker.isRunning():
-            self.reboot_worker.cancel()
-            self.reboot_worker.wait(1500)
+        # No thread may outlive the window: Qt aborts the process when a
+        # QThread is destroyed mid-run, and a restart is exactly the close
+        # that happens over live work - a connect in flight, a quick
+        # command, a shell or a reboot watch. Each gets a polite ask, a
+        # bounded wait and only then the hard stop; the closing flag keeps
+        # their signals from popping dialogs or reconnecting meanwhile.
+        self._stop_thread(self.worker)
+        self._stop_thread(self.exec_worker)
+        if self.reboot_worker is not None:
+            self._stop_thread(self.reboot_worker, self.reboot_worker.cancel)
         if self.shell_worker is not None:
-            self.shell_worker.stop()
-            self.shell_worker.wait(1500)
+            self._stop_thread(self.shell_worker, self.shell_worker.stop)
         if self.addon_dev is not None:
             self.addon_dev.shutdown()         # no build child outlives the app
         # Addons last before the window goes: stopping a process bridge pumps
@@ -1049,8 +1056,33 @@ class BerryManager(
         self.addons.shutdown_all()
         self.addons.bus.dead = True           # late jobs only reach deleted widgets
         self._quiesce_web_views()
-        self.shared_conn.close()
+        self._close_shared_conn()
         super().closeEvent(event)
+
+    def _close_shared_conn(self) -> None:
+        """Close the shared session without ever letting its internals
+        outstall the shutdown: paramiko can block in close (joining threads
+        that a killed worker left behind), and a dying app must not wait."""
+        closer = threading.Thread(target=self.shared_conn.close,
+                                  daemon=True, name="conn-closer")
+        closer.start()
+        closer.join(3)
+
+    @staticmethod
+    def _stop_thread(thread: QObject | None, ask: Any = None) -> None:
+        """Bring one worker thread down for good: polite ask, interruption,
+        a bounded wait, and terminate only as the last resort."""
+        if thread is None or not thread.isRunning():
+            return
+        if callable(ask):
+            try:
+                ask()
+            except Exception:
+                pass
+        thread.requestInterruption()
+        if not thread.wait(6000):
+            thread.terminate()
+            thread.wait(1500)
 
     def _quiesce_web_views(self) -> None:
         """Stop every embedded page loading before the window is torn down."""
@@ -1642,7 +1674,7 @@ class BerryManager(
         box = QMessageBox(self)
         box.setWindowTitle("About Berry")
         box.setText(
-            "<b>Berry Manager V1.5.4</b><br>"
+            "<b>Berry Manager V1.5.5</b><br>"
             "Manage Router & Interfaces.<br>"
             'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'

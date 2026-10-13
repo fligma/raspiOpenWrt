@@ -152,8 +152,14 @@ class SharedConnection:
             return exec_remote(self.client, command, timeout)
 
     def close(self) -> None:
-        with self.lock:
+        # A bounded grab: a connect killed mid-run can leave this lock held,
+        # and the closing app must not wait on a thread that no longer is.
+        if not self.lock.acquire(True, timeout=5):
+            return
+        try:
             self._close_locked()
+        finally:
+            self.lock.release()
 
     def _close_locked(self) -> None:
         for handle in (self.sftp, self.client):
@@ -180,11 +186,17 @@ class SharedSessionWorker(QThread):
         self.settings = settings
 
     def run(self) -> None:
+        if self.isInterruptionRequested():
+            return                 # the app closed while this was queued
         try:
             self.shared.open(self.settings)
         except Exception as error:
+            if self.isInterruptionRequested():
+                return             # a cancel at close is not an error news
             self.failed.emit(str(error) or type(error).__name__)
         else:
+            if self.isInterruptionRequested():
+                return
             self.succeeded.emit()
 
 
@@ -368,6 +380,8 @@ class RemoteExecWorker(QThread):
         try:
             client = create_ssh_client(self.settings)
             for command in self.commands:
+                if self.isInterruptionRequested():
+                    return         # the app is closing; run nothing more
                 self.log.emit(f"$ {command}")
                 code, out, err = exec_remote(client, command, timeout=_coerce_int(self.settings.get("ssh_timeout"), 12, 3, 300) * 3)
                 if out.strip():

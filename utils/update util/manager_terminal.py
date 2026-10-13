@@ -207,6 +207,8 @@ class TerminalMixin:
         self.shell_connect_button.setEnabled(False)
 
     def shell_connected(self) -> None:
+        if getattr(self, "_closing", False):
+            return
         self.terminal.write_local("SSH shell connected.\n")
         self.shell_disconnect_button.setEnabled(True)
         self.terminal.setFocus()
@@ -214,10 +216,14 @@ class TerminalMixin:
         self.addon_event("ssh_connected", host=self.host_input.text().strip())
 
     def shell_failed(self, message: str) -> None:
+        if getattr(self, "_closing", False):
+            return                     # a stop at close is not worth a dialog
         self.terminal.write_local(f"SSH error: {message}\n")
         QMessageBox.critical(self, "SSH terminal failed", message)
 
     def shell_disconnected(self) -> None:
+        if getattr(self, "_closing", False):
+            return                     # the whole window goes down anyway
         self.terminal.write_local("SSH shell disconnected.\n")
         self.shell_connect_button.setEnabled(True)
         self.shell_disconnect_button.setEnabled(False)
@@ -320,12 +326,16 @@ class TerminalMixin:
         self.statusBar().showMessage(message)
 
     def on_reboot_back(self) -> None:
+        if getattr(self, "_closing", False):
+            return                     # must not open a fresh shell mid-close
         self.statusBar().showMessage("Device is back online", 5000)
         self.log("Device is back online after reboot")
         if self.app_config.get("ssh_enabled", True):
             self.connect_shell()
 
     def reboot_watch_finished(self) -> None:
+        if getattr(self, "_closing", False):
+            return
         if self.reboot_worker is not None:
             self.reboot_worker.deleteLater()
             self.reboot_worker = None
