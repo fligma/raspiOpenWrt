@@ -30,6 +30,8 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
+import subprocess
 import sys
 from typing import Any, Callable
 
@@ -304,3 +306,258 @@ def take_config_value(store: dict, key: str) -> Any:
     if not isinstance(node, dict):
         return None
     return node.pop(parts[-1], None)
+
+
+# --- child processes whose whole tree must die with them ---
+#
+# ``Popen.terminate/kill`` only reach the direct child. A PyInstaller onefile
+# addon is two processes - a bootloader and the real program it spawns - so
+# killing the first orphans the second, and a crash of the app leaves it behind
+# the same way. These helpers put every child somewhere the OS can take the
+# whole tree down at once: a job object on Windows, whose last handle closing
+# kills everything inside it (even when this app dies without cleaning up),
+# and its own session on POSIX, where one signal reaches the group.
+
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.windll.kernel32
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                  ctypes.c_void_p, ctypes.c_uint]
+    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, ctypes.c_uint]
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+
+    _TH32CS_SNAPPROCESS = 0x00000002
+    _PROCESS_TERMINATE = 0x0001
+    _INVALID_HANDLE = wintypes.HANDLE(-1).value
+
+    class _PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [("ReadOperationCount", ctypes.c_uint64),
+                    ("WriteOperationCount", ctypes.c_uint64),
+                    ("OtherOperationCount", ctypes.c_uint64),
+                    ("ReadTransferCount", ctypes.c_uint64),
+                    ("WriteTransferCount", ctypes.c_uint64),
+                    ("OtherTransferCount", ctypes.c_uint64)]
+
+    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                    ("IoInfo", _IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    _KILL_ON_JOB_CLOSE = 0x2000
+    _JobObjectExtendedLimitInformation = 2
+    _JOBS: dict[int, Any] = {}        # pid -> job handle, one per child
+
+#: Every child started with ``popen_tree`` and not yet released; the list is
+#: the last line of defence, walked again when this process goes down.
+_TREES: list = []
+
+
+def _job_assign(proc: subprocess.Popen) -> None:
+    """Put a fresh child into a job of its own; failure just means no tree sweep.
+
+    A child already inside the app's own job (a nested job) may refuse to join
+    a second one, so assignment is best-effort: when it fails, crash cleanup of
+    the deep grandchildren is lost, but ``kill_process_tree`` still reaches them
+    by walking the process table.
+    """
+    try:
+        job = _kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = _KILL_ON_JOB_CLOSE
+        ok = _kernel32.SetInformationJobObject(
+            job, _JobObjectExtendedLimitInformation,
+            ctypes.byref(info), ctypes.sizeof(info))
+        assigned = ok and _kernel32.AssignProcessToJobObject(job, int(proc._handle))
+        if assigned:
+            _JOBS[int(proc.pid)] = job
+        else:
+            _kernel32.CloseHandle(job)
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def _win_child_map() -> dict[int, list[int]]:
+    """parent pid -> child pids, read once from the live process table."""
+    children: dict[int, list[int]] = {}
+    snapshot = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if snapshot == _INVALID_HANDLE:
+        return children
+    entry = _PROCESSENTRY32W()
+    entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+    try:
+        more = _kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            parent = int(entry.th32ParentProcessID)
+            children.setdefault(parent, []).append(int(entry.th32ProcessID))
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            more = _kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        _kernel32.CloseHandle(snapshot)
+    return children
+
+
+def _win_descendants(root_pid: int) -> list[int]:
+    """Every process below ``root_pid``, deepest first, ready to reap bottom up."""
+    children = _win_child_map()
+    found: list[int] = []
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for child in children.get(parent, ()):
+            found.append(child)
+            pending.append(child)
+    found.reverse()
+    return found
+
+
+def _win_terminate_pid(pid: int) -> None:
+    handle = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
+    if handle:
+        try:
+            _kernel32.TerminateProcess(handle, 1)
+        except OSError:
+            pass
+        finally:
+            _kernel32.CloseHandle(handle)
+
+
+def popen_tree(command: Any, **kwargs: Any) -> subprocess.Popen:
+    """``subprocess.Popen`` for a child that must never outlive the app.
+
+    Takes the same arguments; the child starts in a place where
+    ``kill_process_tree`` reaches it and everything it spawns.
+    """
+    if os.name != "nt":
+        kwargs.setdefault("start_new_session", True)
+        proc = subprocess.Popen(command, **kwargs)
+        _TREES.append(proc)
+        return proc
+    proc = subprocess.Popen(command, **kwargs)
+    _job_assign(proc)
+    _TREES.append(proc)
+    return proc
+
+
+def _group_signal(proc: subprocess.Popen, sig: int) -> bool:
+    """Signal the child's whole POSIX session; False when only it can be reached."""
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+        return True
+    except OSError:
+        return False
+
+
+def terminate_process_tree(proc: subprocess.Popen) -> None:
+    """Ask the child (and on POSIX its whole group) to go down politely."""
+    if os.name == "nt":
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        return
+    if not _group_signal(proc, signal.SIGTERM):
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+
+
+def kill_process_tree(proc: subprocess.Popen) -> None:
+    """Force the child and everything it spawned down, then reap it."""
+    if os.name == "nt":
+        pid = int(proc.pid)
+        # Read the tree before the parent dies, or the link to the children
+        # is lost: a job that refused a nested child cannot reap it.
+        descendants = _win_descendants(pid)
+        job = _JOBS.get(pid)
+        if job:
+            try:
+                _kernel32.TerminateJobObject(job, 1)
+            except OSError:
+                pass
+        for child in descendants:
+            _win_terminate_pid(child)
+    else:
+        _group_signal(proc, signal.SIGKILL)
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def release_process_tree(proc: subprocess.Popen) -> None:
+    """Forget the child's job handle once it is done; call it in every case.
+
+    A Windows job kills its remaining members when its last handle closes, so
+    this also sweeps up any grandchild the bootloader left behind; on POSIX
+    there is nothing attached to release.
+    """
+    try:
+        _TREES.remove(proc)
+    except ValueError:
+        pass
+    if os.name != "nt":
+        return
+    job = _JOBS.pop(int(proc.pid), None)
+    if job:
+        try:
+            _kernel32.CloseHandle(job)
+        except OSError:
+            pass
+
+
+def kill_all_trees() -> None:
+    """Take down every child this program started and has not let go of.
+
+    Registered at the app's exit, so even a crash or a window closed by
+    force leaves no addon process behind; released children are not here.
+    """
+    for proc in list(_TREES):
+        try:
+            if proc.poll() is None:
+                kill_process_tree(proc)
+            release_process_tree(proc)
+        except Exception:
+            pass
+    _TREES.clear()

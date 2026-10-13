@@ -11,12 +11,14 @@ which Chromium reads when its process starts on the first embedded tab.
 
 from __future__ import annotations
 
+import atexit
 import sys
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
+from addon_common import kill_all_trees
 from manager_browser import set_cert_bypass
 from manager_config import load_app_config
 from manager_const import ICON_FILES, find_asset
@@ -27,6 +29,9 @@ def main() -> int:
     """Build the application, open the window and run it. Returns the exit code."""
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     set_cert_bypass(bool(load_app_config().get("ignore_cert_errors")))
+    # Whatever way this process goes down, no addon child outlives it;
+    # the window's own closing path releases them long before this runs.
+    atexit.register(kill_all_trees)
 
     app = QApplication(sys.argv)
     app.setApplicationName("Berry Manager")

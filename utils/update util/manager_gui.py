@@ -1015,17 +1015,11 @@ class BerryManager(
                          tab=tab_caption(self.tabs.tabBar(), index), index=index)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-
-        self._maybe_persist_order()
-        self.save_current_profile_edits()
-        self.addon_event("shutdown")
-        self.addons.shutdown_all()
-        if self.reboot_worker is not None and self.reboot_worker.isRunning():
-            self.reboot_worker.cancel()
-            self.reboot_worker.wait(1500)
-        if self.shell_worker is not None:
-            self.shell_worker.stop()
-            self.shell_worker.wait(1500)
+        if getattr(self, "_closing", False):
+            event.ignore()                    # already on the way down
+            return
+        # Ask first: cancelling here must not have taken the addons or the
+        # connection down with it.
         if self.worker is not None and self.worker.isRunning():
             answer = QMessageBox.question(
                 self, "Connection in progress",
@@ -1036,8 +1030,39 @@ class BerryManager(
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        self._closing = True
+        self._maybe_persist_order()
+        self.save_current_profile_edits()
+        self.addon_event("shutdown")
+        if self.reboot_worker is not None and self.reboot_worker.isRunning():
+            self.reboot_worker.cancel()
+            self.reboot_worker.wait(1500)
+        if self.shell_worker is not None:
+            self.shell_worker.stop()
+            self.shell_worker.wait(1500)
+        if self.addon_dev is not None:
+            self.addon_dev.shutdown()         # no build child outlives the app
+        # Addons last before the window goes: stopping a process bridge pumps
+        # the event queue while it waits, so an addon mid-request can finish
+        # cleanly instead of stalling this thread; anything still alive after
+        # that is killed with its whole process tree.
+        self.addons.shutdown_all()
+        self.addons.bus.dead = True           # late jobs only reach deleted widgets
+        self._quiesce_web_views()
         self.shared_conn.close()
         super().closeEvent(event)
+
+    def _quiesce_web_views(self) -> None:
+        """Stop every embedded page loading before the window is torn down."""
+        for entry in list(getattr(self, "_web_tab_entries", [])) + \
+                list(getattr(self, "_transient_tab_entries", [])):
+            view = entry.get("view")
+            if view is None:
+                continue
+            try:
+                view.stop()
+            except RuntimeError:
+                pass
 
     # Settings tab
 

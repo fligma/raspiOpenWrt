@@ -36,7 +36,8 @@ import threading
 import time
 from typing import Any, Callable
 
-from PyQt6.QtCore import QObject, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (QCoreApplication, QEventLoop, QObject, Qt, QTimer, QUrl,
+                          pyqtSignal)
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -73,7 +74,9 @@ from addon_api import (
     write_config_json,
 )
 from addon_common import (addon_data_dir, addon_manifest_path, addon_origin,
-                          build_mark, write_build_mark)
+                          build_mark, kill_process_tree, popen_tree,
+                          release_process_tree, terminate_process_tree,
+                          write_build_mark)
 from manager_const import (
     ADDON_DATA_DIR,
     ADDONS_DIR,
@@ -94,14 +97,24 @@ class _Bus(QObject):
 
     def __init__(self) -> None:
         super().__init__()
+        # Set once the window is fully closed: jobs still in flight would
+        # only reach deleted Qt objects, and PyQt aborts on a slot that
+        # raises, so they are dropped quietly from here on.
+        self.dead = False
         self._invoke.connect(self._run)
 
-    @staticmethod
-    def _run(job: Callable[[], Any]) -> None:
-        job()
+    def _run(self, job: Callable[[], Any]) -> None:
+        if self.dead:
+            return
+        try:
+            job()
+        except (RuntimeError, AddonError):
+            pass            # a widget went away mid-delivery while closing
 
     def post(self, job: Callable[[], Any]) -> None:
         """Run `job` on the GUI thread soon, without waiting for it."""
+        if self.dead:
+            return
         if on_gui_thread():
             QTimer.singleShot(0, job)
         else:
@@ -109,6 +122,8 @@ class _Bus(QObject):
 
     def ask(self, job: Callable[[], Any], timeout: float = 1800.0) -> Any:
         """Run `job` on the GUI thread and wait for its result."""
+        if self.dead:
+            raise AddonError("the app is closing")
         if on_gui_thread():
             return job()
         answers: queue.Queue = queue.Queue()
@@ -127,6 +142,18 @@ class _Bus(QObject):
         if kind == "error":
             raise value
         return value
+
+    def pump(self, seconds: float = 0.02) -> None:
+        """Serve queued jobs while the GUI thread has to wait during closing.
+
+        Only for the close path: the window is frozen anyway, and without
+        this a bridge waiting on a child would strand that child's own
+        request on the event queue and freeze the app for whole seconds.
+        """
+        QCoreApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        if seconds:
+            time.sleep(seconds)
 
 
 _ID_CLEAN = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -236,7 +263,10 @@ class ProcessBridge:
         self.command = command
         self.exit_code = None
         self.started_at = time.monotonic()
-        self.proc = subprocess.Popen(
+        # Started in a way that lets the whole tree die with the app: a
+        # compiled onefile addon is a bootloader plus the real program, and
+        # killing only the first leaves the second running.
+        self.proc = popen_tree(
             command,
             cwd=str(self.addon.home),
             stdin=subprocess.PIPE,
@@ -289,25 +319,43 @@ class ProcessBridge:
         return env
 
     def stop(self, grace: float = 3.0) -> None:
-        if self.proc is None:
+        proc = self.proc
+        if proc is None:
             return
         self.stopping = True
         self.write({"op": "shutdown"})
-        try:
-            self.proc.wait(timeout=grace)
-        except subprocess.TimeoutExpired:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=grace)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        # Wait in slices, serving the queue between them: the addon may be
+        # finishing a GUI-thread request right now, and a plain wait on a
+        # frozen GUI thread deadlocks until the reply times out.
+        if not self._wait(proc, grace):
+            # Still busy: closing stdin sends EOF down the pipe, which wakes
+            # every request the addon has pending on a dead answer.
+            self.close_streams()
+            terminate_process_tree(proc)
+            if not self._wait(proc, grace):
+                kill_process_tree(proc)
+        release_process_tree(proc)
+        self.close_streams()
+        self.exit_code = proc.poll()
+
+    def _wait(self, proc: subprocess.Popen, seconds: float) -> bool:
+        """Poll while the closing GUI thread keeps answering this addon."""
+        deadline = time.monotonic() + seconds
+        while proc.poll() is None:
+            if time.monotonic() >= deadline:
+                return False
+            self.mgr.bus.pump()
+        return True
+
+    def close_streams(self) -> None:
+        if self.proc is None:
+            return
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 if stream is not None:
                     stream.close()
             except OSError:
                 pass
-        self.exit_code = self.proc.poll()
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -880,8 +928,7 @@ class AddonManager:
         if addon.kind == "python":
             self._call_hook(addon, "shutdown")
         elif addon.process is not None:
-            addon.process.push({"op": "shutdown"})
-            addon.process.stop()
+            addon.process.stop()          # it writes the shutdown line itself
         self._clean(addon)
         if addon.kind == "python" and addon.module is not None:
             sys.modules.pop(f"rasconf_addon_{safe_identifier(addon.id)}", None)
@@ -927,7 +974,16 @@ class AddonManager:
 
     def shutdown_all(self) -> None:
         for addon in self.loaded():
-            self.unload(addon, reason="app closing")
+            try:
+                self.unload(addon, reason="app closing")
+            except Exception as error:
+                self.log(addon.id, f"closing: {error}", warning=True)
+        # Whatever a broken unload left behind goes down with the app.
+        for addon in self.addons:
+            proc = getattr(addon.process, "proc", None) if addon.process else None
+            if proc is not None and proc.poll() is None:
+                kill_process_tree(proc)
+                release_process_tree(proc)
 
     # --- enabling ---
 

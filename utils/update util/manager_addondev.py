@@ -92,7 +92,11 @@ from addon_common import (
     build_mark,
     config_name,
     jsonable,
+    kill_process_tree,
+    popen_tree,
     read_config_json,
+    release_process_tree,
+    terminate_process_tree,
     write_build_mark,
 )
 from manager_const import (
@@ -1013,7 +1017,9 @@ class _Stream:
     def start(self) -> None:
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
-            self.proc = subprocess.Popen(
+            # A tree-killable child: a PyInstaller run spawns more processes
+            # than the one started here, and all of them must be reachable.
+            self.proc = popen_tree(
                 self.command, cwd=self.cwd, env=self.env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8",
@@ -1033,6 +1039,7 @@ class _Stream:
         for line in self.proc.stdout:
             self.lines.put(line.rstrip("\n"))
         self.code = self.proc.wait()
+        release_process_tree(self.proc)
         self.finished = True
         self.lines.put(None)              # the tab stops draining on this
 
@@ -1051,10 +1058,14 @@ class _Stream:
     def cancel(self) -> None:
         if self.proc is None or self.proc.poll() is not None:
             return
-        try:
-            self.proc.terminate()
-        except OSError:
-            pass
+        terminate_process_tree(self.proc)
+
+    def kill(self) -> None:
+        """Force the whole tree down, for the app's closing path."""
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        kill_process_tree(self.proc)
+        release_process_tree(self.proc)
 
 
 def log_lines(text: str, addon_id: str, warnings_only: bool = False) -> list[str]:
@@ -1226,6 +1237,16 @@ class AddonDevWidget(QWidget):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(REFRESH_MS)
         self.refresh_timer.timeout.connect(self.refresh)
+
+    # --- closing ---
+
+    def shutdown(self) -> None:
+        """The app is going: no build or test child, nor anything it spawned,
+        may be left running behind it."""
+        self.poll_timer.stop()
+        for stream in (self.build, self.test):
+            if stream is not None:
+                stream.kill()
 
     # --- the widgets ---
 

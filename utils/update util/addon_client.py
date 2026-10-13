@@ -201,6 +201,10 @@ class ProcessAPI:
         self.reader: threading.Thread | None = None
         self.dispatcher: threading.Thread | None = None
         self.stopping = threading.Event()
+        # Set the moment the app's pipe closes, before ``stopping``: a request
+        # in flight fails at once instead of waiting out the reply timeout,
+        # so a gone app never leaves this process running.
+        self.app_gone = threading.Event()
         # The app's ``start`` line, kept under its own name so it does not
         # collide with the api.session namespace the addon calls.
         self.launch: dict = {}
@@ -234,6 +238,8 @@ class ProcessAPI:
         """Ask the app to do something and wait for its answer, callbacks kept local under a token."""
         if method in REFUSED:
             raise AddonError(REFUSED[method])
+        if self.app_gone.is_set():
+            raise AddonError("the app closed the pipe")
         names = self._POSITIONAL.get(method, ())
         callback_argument = CALLBACK_ARGS.get(method)
         values: dict = {}
@@ -318,8 +324,20 @@ class ProcessAPI:
                     pass
                 continue
             self.inbox.put(message)
-        # The app closed the pipe: tell the dispatcher, then let it finish.
+        # The app closed the pipe: nothing further will be answered, so fail
+        # every waiting request at once, then tell the dispatcher to finish.
+        self.app_gone.set()
+        self._release_pending("the app closed the pipe")
         self.inbox.put({"op": "shutdown", "reason": "the app closed the pipe"})
+
+    def _release_pending(self, reason: str) -> None:
+        """Hand an error back to every thread still waiting on the app."""
+        while self.pending:
+            _identifier, answers = self.pending.popitem()
+            try:
+                answers.put_nowait(("error", reason))
+            except queue.Full:
+                pass
 
     def dispatch_loop(self) -> None:
         while not self.stopping.is_set():
@@ -371,6 +389,10 @@ class ProcessAPI:
         if op == "shutdown":
             self._fire("shutdown")
             self.schedule.cancel_all()
+            # Anything still in flight will not be answered any more: the app
+            # is tearing the window down around its closing hook.
+            self.app_gone.set()
+            self._release_pending("the app is closing")
             self.stopping.set()
             return
 
