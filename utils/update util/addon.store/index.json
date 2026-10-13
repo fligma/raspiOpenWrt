@@ -28,8 +28,7 @@
       "author": "fligma",
       "description": "Audits installed OpenWrt packages and manages software installation via apk or opkg.",
       "filename": "openwrt_package_manager.py",
-      "test": "test_openwrt_package_manager.py",
-      "status": "new"
+      "test": "test_openwrt_package_manager.py"
     }
   ]
 }
