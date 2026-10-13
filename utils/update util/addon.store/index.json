@@ -19,8 +19,7 @@
       "assets": [
         "openwrtlogsicon.png"
       ],
-      "test": "test_openwrt_logs.py",
-      "status": "updated"
+      "test": "test_openwrt_logs.py"
     },
     {
       "id": "openwrt_package_manager",
