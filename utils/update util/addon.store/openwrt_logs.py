@@ -370,19 +370,17 @@ def _stop(timer: Any) -> None:
 # --- The tabs ---
 
 def _filter_rows(prefix: str, with_device: bool) -> list[dict]:
-    """The two rows of filters both tabs share, ids unique per tab."""
-    row_one = [
+    """A single compact row of filters for both tabs."""
+    row_children = [
         {"kind": "label", "text": "Search:"},
         {"kind": "line", "id": prefix + "search",
-         "placeholder": "Filter log text...", "on": ["changed", "returned"]},
-        {"kind": "label", "text": "Interface:"},
+         "placeholder": "Filter...", "on": ["changed", "returned"]},
+        {"kind": "label", "text": "Iface:"},
         {"kind": "combo", "id": prefix + "iface", "items": ["All"],
          "on": ["changed"]},
-        {"kind": "label", "text": "Process:"},
+        {"kind": "label", "text": "Proc:"},
         {"kind": "combo", "id": prefix + "proc", "items": ["All"],
          "on": ["changed"]},
-    ]
-    row_two = [
         {"kind": "label", "text": "MAC:"},
         {"kind": "combo", "id": prefix + "mac", "items": ["All"],
          "on": ["changed"]},
@@ -391,18 +389,17 @@ def _filter_rows(prefix: str, with_device: bool) -> list[dict]:
          "on": ["changed"]},
     ]
     if with_device:
-        row_two += [
-            {"kind": "label", "text": "Device:"},
+        row_children += [
+            {"kind": "label", "text": "Dev:"},
             {"kind": "combo", "id": prefix + "device", "items": ["All"],
              "on": ["changed"]},
         ]
-    row_two += [
+    row_children += [
         {"kind": "label", "text": "Order:"},
         {"kind": "combo", "id": prefix + "order",
          "items": ["Newest first", "Oldest first"], "on": ["changed"]},
     ]
-    return [{"kind": "row", "children": row_one},
-            {"kind": "row", "children": row_two}]
+    return [{"kind": "row", "children": row_children}]
 
 
 SINGLE_SPEC = {
