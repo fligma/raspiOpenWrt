@@ -24,6 +24,15 @@ A freshly installed addon is written into the active profile's settings as
 switched off, so nothing of it runs until it is turned on in Settings > Addons,
 where its row appears as soon as the app has rescanned the folder.
 
+A program only says what it is once it runs, and the app needs some of that
+before then, so what the addon's source declared is written down as it is
+installed: a ``<id>.json`` beside the program, naming it and listing the
+transports ``api.device`` may hand it, and the addon's ``fields.json`` under
+``addons/_data/<id>``, the copy of its settings form that Settings reads while
+the addon is off. That is also what marks the addon as one the user installed -
+listed under Installed addons, with its own settings like any other drop-in -
+instead of among the addons that came inside the program.
+
 Before the compile, when the store ships a ``test_<id>.py`` for the addon, it is
 fetched too and run against the freshly downloaded ``.py``: a test that does not
 pass stops the install there, so a broken addon is never built. An addon with no
@@ -72,7 +81,8 @@ from typing import Any
 from urllib.parse import quote
 
 # Qt-free contract half: runs standalone and in tests.
-from addon_common import AddonError, config_get, merge_config
+from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_origin,
+                          config_get, jsonable, merge_config, write_config_json)
 
 ADDON = {
     "name": "Berry addon store",
@@ -649,7 +659,8 @@ def _begin(verb: str) -> dict:
     values = merge_config(DEFAULTS, api.config.stored())
     working = True
     job = {"verb": verb, "values": values, "stream": None, "on_ok": None,
-           "fail": "", "lines": [], "harness": None, "widened": False}
+           "fail": "", "lines": [], "harness": None, "widened": False,
+           "details": {}}
     _buttons(False)
     try:
         api.tabs.set_widget(TAB, "log", "value", "")
@@ -776,6 +787,8 @@ def _compile(id_value: str) -> None:
     if why:
         _finish(why, bad=True)
         return
+    # Read before the build, since the source is gone by the time it is installed
+    job["details"] = _details(source)
     names = list(entry.get("assets") or [])
     if entry.get("icon") and entry["icon"] not in names:
         names.append(entry["icon"])
@@ -954,8 +967,85 @@ def _stay_off(id_value: str) -> None:
              f"{error}")
 
 
+def _details(source: Path) -> dict:
+    """What an addon's own source says about it, read without running any of it.
+
+    The downloaded ``.py`` is cleared away as soon as the program is installed,
+    so its manifest and its settings form are taken out of it once, here - the
+    same way the Addon Dev tab reads an addon it has never loaded, with no import
+    and no Qt.
+    """
+    try:
+        return dict(_dev().addon_metadata(source))
+    except Exception as error:              # a dev module that will not answer
+        note(f"the addon's own details could not be read: {error}")
+    return {}
+
+
+def addon_data_folder(id_value: str) -> Path:
+    """``addons/_data/<id>``, the settings folder of some other addon than this.
+
+    The app hands out the store's own folder, and every addon's folder sits
+    beside it, so the folder a fresh install needs is made from the same parent -
+    without this addon's own data ever being in the way.
+    """
+    return addons_dir() / "_data" / clean_id(id_value)
+
+
+def _manifest_values(id_value: str, details: dict, entry: dict) -> dict:
+    """The ``<id>.json`` describing a program the store has just built.
+
+    The addon's own ``ADDON`` dict answers what the app has to know before the
+    program runs, and the catalog's words fill any gap the source leaves.
+    """
+    declared = dict(details.get("manifest") or {})
+    for key in ("name", "version", "author", "description"):
+        if not one_line(declared.get(key)) and one_line(entry.get(key)):
+            declared[key] = one_line(entry.get(key))
+    wanted = [one_line(item).lower() for item in (declared.get("requires") or [])]
+    declared["requires"] = [item for item in dict.fromkeys(wanted)
+                            if item in ("ssh", "sftp")]
+    declared["api"] = declared.get("api") or 1
+    declared["id"] = clean_id(id_value)
+    declared[ORIGIN_KEY] = STORE_ORIGIN
+    return jsonable(declared)
+
+
+def _describe(id_value: str, program: Path, details: dict, entry: dict) -> None:
+    """Write down what an install is, beside it and in its own settings folder.
+
+    Two files come of this: the manifest the app reads an addon's name, version
+    and transports from before the program has run once, and the addon's
+    ``fields.json`` - the form Settings shows while the addon is off, which a
+    running addon writes itself through ``api.config.declare``. An addon that is
+    installed is still installed when neither file can be written, so a failure
+    is said and nothing more.
+    """
+    manifest = _manifest_values(id_value, details, entry)
+    try:
+        write_config_json(program.parent / f"{clean_id(id_value)}.json", manifest)
+    except OSError as error:
+        note(f"{id_value}'s manifest could not be written beside it: {error}")
+    fields = [dict(item) for item in (details.get("fields") or [])
+              if isinstance(item, dict) and item.get("key")]
+    defaults = dict(details.get("defaults") or {})
+    if not fields and not defaults:
+        return                      # the addon keeps no settings: there is no form
+    name = one_line(manifest.get("name")) or id_value
+    folder = addon_data_folder(id_value)
+    try:
+        write_config_json(folder / "fields.json", jsonable({
+            "title": f"{name} - addons/_data/{clean_id(id_value)}/config.json",
+            "fields": fields,
+            "defaults": defaults}))
+        if not (folder / "config.json").is_file():
+            write_config_json(folder / "config.json", jsonable(defaults))
+    except OSError as error:
+        note(f"{id_value}'s settings could not be prepared: {error}")
+
+
 def _install_step(id_value: str) -> None:
-    """Move the fresh program into ``addons/``, then leave it switched off.
+    """Move the fresh program into ``addons/``, say what it is, leave it off.
 
     The rescan that lets the app see the new file re-loads this addon as well,
     which takes the module this code runs in out of the app: the api is gone the
@@ -977,6 +1067,7 @@ def _install_step(id_value: str) -> None:
         _tidy(id_value)
         _finish(f"it could not be put in the addons folder: {error}", bad=True)
         return
+    _describe(id_value, target, job.get("details") or {}, entry_for(id_value) or {})
     _tidy(id_value)
     _stay_off(id_value)
     show_entries()
@@ -1054,10 +1145,20 @@ def install_selected(_checked: bool = False) -> None:
 
 
 def _delete_paths(id_value: str) -> list[Path]:
+    """What an install of this addon left in ``addons`` that delete may take back.
+
+    The program, and the manifest the store wrote beside it: that one only, since
+    a ``<id>.json`` made by the Addon Dev tab or by hand is not the store's to
+    remove. The addon's own ``_data`` settings are left where they are either way.
+    """
     folder = addons_dir()
-    return [candidate for candidate in
-            (folder / f"{id_value}.exe", folder / f"{id_value}.bin", folder / id_value)
-            if candidate.exists()]
+    found = [candidate for candidate in
+             (folder / f"{id_value}.exe", folder / f"{id_value}.bin", folder / id_value)
+             if candidate.exists()]
+    sidecar = folder / f"{clean_id(id_value)}.json"
+    if sidecar.is_file() and addon_origin(folder, id_value) == STORE_ORIGIN:
+        found.append(sidecar)
+    return found
 
 
 def delete_selected(_checked: bool = False) -> None:

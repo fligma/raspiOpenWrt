@@ -83,8 +83,10 @@ HARNESS_DIR = RESOURCE_DIR / "harness" if IS_COMPILED else BASE_DIR
 # when run from outside the folder. In a ``.py`` run this is
 # only a fallback: everything in ``addons`` is bundled anyway
 # (it is what the build stages; see ``Addon.is_bundled``).
-SHIPPED_ADDON_IDS = {"berry", "cert_manager", "web_installer", "openwrt_logs",
-                     "addon_store"}
+# An addon the store installs marks its own manifest instead,
+# so nothing here may claim it: these ids name the files in
+# ``addons`` and nothing published in ``addon.store``.
+SHIPPED_ADDON_IDS = {"berry", "web_installer", "addon_store"}
 
 # Per-addon folder addons/_data/<id>/ holds its config.json
 # and fields.json. The underscore makes the scanner skip it,

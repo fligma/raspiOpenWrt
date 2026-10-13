@@ -339,6 +339,127 @@ def file_manifest(addon: Any) -> dict:
     return read_config_json(target)
 
 
+#: The names an addon may keep its settings form, and its starting values, under.
+_FIELDS_NAMES = ("FIELDS", "CONFIG_FIELDS")
+_DEFAULTS_NAMES = ("DEFAULTS", "CONFIG_DEFAULTS")
+
+
+def _simple_value(node: ast.AST, known: dict) -> Any:
+    """One value as it is written in the file, a name the file gives one included.
+
+    An addon may write ``"maximum": 50000`` or ``"max_rows": MAX_ROWS``; both are
+    plain. Anything that only has a value once the addon runs - a comprehension,
+    a call - is not read, and says so rather than importing anything.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in known:
+            return known[node.id]
+        raise ValueError(f"{node.id} is not given a plain value in the file")
+    if isinstance(node, ast.List):
+        return [_simple_value(item, known) for item in node.elts]
+    if isinstance(node, ast.Tuple):
+        return tuple(_simple_value(item, known) for item in node.elts)
+    if isinstance(node, ast.Set):
+        return {_simple_value(item, known) for item in node.elts}
+    if isinstance(node, ast.Dict):
+        return {_simple_value(key, known): _simple_value(value, known)
+                for key, value in zip(node.keys, node.values) if key is not None}
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _simple_value(node.operand, known)
+        return -value if isinstance(node.op, ast.USub) else +value
+    raise ValueError("this is not a value written out in the file")
+
+
+def _top_assigns(tree: ast.AST) -> list:
+    """The ``NAME = ...`` lines at the top of a parsed file, in the order they sit."""
+    return [node for node in getattr(tree, "body", [])
+            if isinstance(node, ast.Assign)]
+
+
+def _assigned(tree: ast.AST, names: tuple) -> ast.AST | None:
+    """What the first of ``names`` is given at the top of the file, as a node."""
+    for node in _top_assigns(tree):
+        if any(isinstance(target, ast.Name) and target.id in names
+               for target in node.targets):
+            return node.value
+    return None
+
+
+def _names_written(tree: ast.AST) -> dict:
+    """Every name the file gives a plain value, in case a form reads one of them."""
+    known: dict[str, Any] = {}
+    for node in _top_assigns(tree):
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            try:
+                known[target.id] = _simple_value(node.value, known)
+            except (ValueError, TypeError):
+                continue          # a name only worth something once the addon runs
+    return known
+
+
+def _read_entry(keys: list, values: list, known: dict) -> dict:
+    """One dict of a form or a defaults map, with every key it can be given now."""
+    entry: dict[str, Any] = {}
+    for one, two in zip(keys, values):
+        if not isinstance(one, ast.Constant) or not isinstance(one.value, str):
+            continue
+        try:
+            entry[one.value] = _simple_value(two, known)
+        except (ValueError, TypeError):
+            continue          # this one key waits for the addon itself to say it
+    return entry
+
+
+def _read_form(node: ast.AST | None, known: dict) -> list[dict]:
+    """The field dicts an addon declares, one for each entry that names its key.
+
+    A field whose ``choices`` only exists once the addon runs is no reason to lose
+    the field: its label, its kind and its hint are read all the same, and the
+    addon fills in the rest when it is switched on.
+    """
+    if not isinstance(node, ast.List):
+        return []
+    return [entry for entry in (_read_entry(item.keys, item.values, known)
+                                for item in node.elts if isinstance(item, ast.Dict))
+            if entry.get("key")]
+
+
+def _read_map(node: ast.AST | None, known: dict) -> dict:
+    """The defaults an addon declares, dropping only what has no plain value."""
+    if not isinstance(node, ast.Dict):
+        return {}
+    return _read_entry(node.keys, node.values, known)
+
+
+def addon_metadata(source: Path) -> dict:
+    """What an addon's source says about itself: its manifest and its settings.
+
+    A program built from that source cannot answer either until it runs, and the
+    app needs both before then: ``requires`` is what lets ``api.device`` use a
+    transport at all, and the declared fields are the form Settings shows. So the
+    store reads them out of the file, with no import and no Qt, and keeps them
+    beside the program and in the addon's own ``_data`` folder.
+    """
+    try:
+        text = source.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        return {"manifest": {}, "fields": [], "defaults": {}}
+    known = _names_written(tree)
+    return {
+        "manifest": literal_values(text),
+        "fields": _read_form(_assigned(tree, _FIELDS_NAMES), known),
+        "defaults": _read_map(_assigned(tree, _DEFAULTS_NAMES), known),
+    }
+
+
 def write_details(addon: Any, values: dict) -> Path:
     """Save the edited manifest where it is read from. Raises on failure."""
     if getattr(addon, "builtin", False):

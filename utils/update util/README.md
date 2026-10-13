@@ -79,7 +79,10 @@ PyInstaller collect them. Commit a new module with the rest of
 
 `assets/` holds the pictures the program ships with - `icon.png` and
 `icon2.png` for the logo, and the tab marks `defaulttabicon.png`,
-`terminalicon.png`, `openwrtlogsicon.png` and `berryicon.png`. Nothing
+`terminalicon.png` and `berryicon.png`. A store addon's own picture does not
+live here: it is kept with its source in `addon.store/assets/<id>` and packed
+into the program the store builds, so `openwrtlogsicon.png` arrives with the
+install rather than sitting in this folder. Nothing
 hard-codes the folder: `manager_const.find_asset(name)` looks in `assets` beside
 the resources, then the old top-level location, then beside the executable, so
 an existing `icon.png` next to the `.exe` still overrides the built-in one. Add
@@ -210,10 +213,15 @@ hide their own indented options while off.
     reads this when it starts, so the manager offers to restart when you change
     it.
 - **Bundled with the program** and **Installed addons**
-  - The addons that ship inside the app each get their own category here, with
-    their enable switch, their config panel and their connection indicators (see
+  - The addons that ship inside the app - Berry, the Web installer and the Berry
+    addon store - each get their own category here, with their enable switch,
+    their config panel and their connection indicators (see
     below). **Berry** is switched from here, which shows or hides its file tab.
-    Addons you drop in later are listed under **Installed addons**.
+    Addons you drop in later, and the ones the store installs, are listed under
+    **Installed addons**, and a store install is not marked down for where it
+    came from: it gets the same switch, the same *own connection* option and the
+    same config panel as any other, because the store writes a manifest beside
+    the program it built and seeds its settings folder before it is ever started.
 
 ### HTTPS in the embedded tabs
 
@@ -422,12 +430,16 @@ beside the `.exe`, but its source belongs to the build - see
 [Addons inside the built executable](#addons-inside-the-built-executable).
 
 Settings splits addons in two: a **Bundled with the program** category, one
-section per shipped addon, and an **Installed addons** list for the drop-ins.
-Each row carries the addon's enable switch, its version and author, what it said
-about itself, a **Restart** button, and a **Show tab** button when the addon
-opened one. A shipped addon gets the switch, its state and its config panel, plus
-**Show tab** while it has one - but no **Restart**: restarting reads the addon's
-file again, and that file is inside the program.
+section per shipped addon, and an **Installed addons** list for everything that
+came in after the build - a hand-written `.py`, a program built by the Addon Dev
+tab, and an addon the store installed. Each row carries the addon's enable
+switch, its version and author, what it said about itself, a **Restart**
+button, an **own connection** switch where the addon asked for a transport, and
+a **Show tab** button when the addon opened one. A shipped addon gets the
+switch, its state and its config panel, plus **Show tab** while it has one - but
+no **Restart**: restarting reads the addon's file again, and that file is inside
+the program - and no **own connection**, which is the user's choice to make
+about an addon of theirs and not about the program's own.
 Switching an addon off stops it and takes
 away everything it added - its tabs, its menu entries, its timers and its
 listeners - without restarting the app; switching it on starts it again. The
@@ -510,7 +522,7 @@ The object in `init` is the only door into the app:
 | `api.settings` | the addon's own saved dict, per profile: `all`, `get`, `set`, `update`, `pop`, `remove` |
 | `api.config` | its own file in `addons/_data/<id>`: `declare`, `file`, `path()`, `exists()`, `open_folder()`, `schema()`, `defaults()`, `stored()`, `all()`, `get`, `set`, `update`, `pop`, `reset`, `text`, `save_text` |
 | `api.schedule` | `after(seconds, fn)` and `every(seconds, fn)`; both stop with the addon |
-| `api.paths` | `addon`, `data` (a private folder, created on demand), `config` (this addon's config file), `configs` (the addon's own data folder, where that file sits), `base`, `addons`, `assets` (the pictures that ship inside the program), `log` |
+| `api.paths` | `addon`, `data` (a private folder, created on demand), `config` (this addon's config file), `configs` (the addon's own data folder, where that file sits), `base`, `addons`, `assets` (the pictures that ship inside the program - or, for a compiled addon, the ones packed inside it, which the app's folder is the fallback for), `log` |
 | `api.peers` | `list()`, `info(id)`, `send(id, data)` to talk to another addon |
 
 The events are `startup`, `shutdown`, `sftp_connected`, `sftp_disconnected`,
@@ -621,14 +633,17 @@ it loses the mark, says so in the log and leaves the tab working, which is all a
 decoration is worth. An embedded page is left alone: it keeps following the
 favicon the page itself sends, which is set by the device and not by the addon.
 
-Three shipped addons use this: `addons/cert_manager.py` (a trophy),
-`addons/berry.py` (a cluster of drupelets) and `addons/openwrt_logs.py` (a log
+Three addons use this: `addons/berry.py` (a cluster of drupelets),
+`addon.store/cert_manager.py` (a trophy) and `addon.store/openwrt_logs.py` (a log
 page lined in the device colours). Each holds its mark as an SVG string in
 `TAB_ICON` for exactly that reason, and berry and openwrt_logs look for a real
 picture first - `assets/berryicon.png` and `assets/openwrtlogsicon.png`,
 through `api.paths.assets` - and wear their drawing only when the file is not
-there. A tab that never names a mark is not left bare either: it wears the
-program's default tab picture (`assets/defaulttabicon.png`), and the SSH tab
+there - and for an addon installed from the store its picture is there, because
+the build packs it inside the program and a process addon's `api.paths.assets`
+answers with its own bundle first. A tab that never names a mark is not
+left bare either: it wears the program's default tab picture
+(`assets/defaulttabicon.png`), and the SSH tab
 wears `assets/terminalicon.png`. Every tab mark is drawn larger than the bar
 measures it at, so the pictures read clearly without the tabs growing.
 
@@ -833,10 +848,62 @@ set it, the losing copy stays visible in the row's *alternatives*, and a rescan
 starts the one you chose. Because a compiled addon imports only
 `addon_common`, a build needs neither PyQt6 nor paramiko in it.
 
-### Shipped addon: Certificate manager
+### The Berry addon store
 
-`addons/cert_manager.py` is a complete addon rather than a snippet, and it is
-the one that needs the config file above. It adds a **Certificates** tab and a
+`addons/addon_store.py` is the third addon inside the program. Its **Addon
+store** tab reads `index.json` from the `addon.store` folder of this
+repository - so the list of what can be had lives on GitHub and is never baked
+into a build - and shows one row per addon: id, version, name, author, and
+whether it is installed. **Refresh** re-reads the catalog and marks the rows
+*new* and *updated*, **Install** takes the chosen one and **Delete** takes it
+back.
+
+An install is one job at a time, and the tab says what it is doing the whole
+way through:
+
+1. the addon's `.py`, its assets under `addon.store/assets/<id>` and, when the
+   store publishes one, its `test_<id>.py` are downloaded into
+   `addons/_data/addon_store/staging`;
+2. the test is run against the downloaded file, with the modules it imports put
+   on the search path. What the addon itself failed stops the install; a run
+   that never got past importing Qt, or the app's own modules, is this machine's
+   doing and is only said out loud;
+3. PyInstaller builds a one-file program for it, with the
+   `addon_client.serve` launcher behind it and its assets packed inside. When
+   PyInstaller is not installed the store puts it in with `pip` rather than
+   asking you to;
+4. the program lands in `addons/<id>.exe` (an extension-less `addons/<id>.bin`
+   on Linux), the downloads and the build are thrown away, and the addon is
+   written into the active profile as **switched off**, so nothing of it runs
+   until you turn it on;
+5. Settings > Addons is rescanned and its row appears under **Installed
+   addons** with a switch, an *own connection* option and a config panel like
+   any other addon's, waiting to be turned on.
+
+Step 4 also writes down what the addon's own source declared, which is what
+makes that row a full one before the program has ever run: an `addons/<id>.json`
+manifest beside it - `name`, `version`, `author`, `description`, `api`, the
+`ssh`/`sftp` transports `api.device` is allowed to hand it, and an `origin` mark
+saying the store put it there - and its `fields.json` form, with a `config.json`
+seeded from the addon's defaults, under `addons/_data/<id>`. Both are read
+without importing or running any of the addon, since the source is parsed with
+`ast`; both are what **Delete** takes back together with the program, while the
+`_data` folder is left alone, so a reinstall comes home to the settings you had.
+
+That manifest is also why an install is never filed among the bundled addons:
+`manager_const.SHIPPED_ADDON_IDS` names the only three that came inside the
+program, and anything else is treated as the user's own. The repository,
+branch, folder and token all live in `addons/_data/addon_store/config.json`, so
+pointing the store at a fork or a private repository is a config edit, and
+`addon.store/hello_store.py` - a tab, a button and its own published test - is
+the smallest thing that can be listed there.
+
+### Store addon: Certificate manager
+
+`addon.store/cert_manager.py` is a complete addon rather than a snippet, and it
+is the one that needs the config file above. It is not inside the program: it is
+installed from the addon store, which compiles it and leaves its settings form
+filled in before it is ever started. It adds a **Certificates** tab and a
 Tools menu entry, and works on the certificate pair the device's web interface
 serves - `/etc/ssl/mycert.crt` and `/etc/ssl/mycert.key` by default, both names
 and the folder coming from `addons/_data/cert_manager/config.json`.
@@ -889,7 +956,8 @@ openssl for a seven-letter country. Such a value now reads as the blank it meant
 to be, the form starts empty with an example in each box, and saving it back
 fixes the file. Anything else someone typed is left exactly as it is.
 
-`addons/_tests/test_cert_manager.py` covers the text that reaches openssl, the
+`addon.store/_tests/test_cert_manager.py` covers the text that reaches openssl,
+the
 check that refuses a doomed request, the script for each kind of key, both
 failure routes, the tab as Qt builds it and the icon it sends, and **Run test**
 in the Addon Dev tab runs it.
@@ -1073,9 +1141,9 @@ the tab and editor as Qt builds them (the two-page frame, the headers, the
 right-click policy, and the live syntax highlighter on the editor) - and **Run
 test** in the Addon Dev tab runs it.
 
-### Shipped addon: OpenWrt Log Viewer
+### Store addon: OpenWrt Log Viewer
 
-`addons/openwrt_logs.py` adds one tab - **OpenWrt Logs** - with two pages:
+`addon.store/openwrt_logs.py` adds one tab - **OpenWrt Logs** - with two pages:
 **Single device** reads the log of the profile's own host, and **Multi
 device** queries several hosts side by side, each device's rows wearing the
 colour that device was given (the translucent wash is painted by the app, and
@@ -1084,10 +1152,11 @@ wheel as `api.ui.pick_color`). Every line arrives over SSH with one command
 per fetch: the log command, the row cap (50 to 50 000) and the timeout are
 config, and auto-refresh pulls the log again on a timer. Search works two
 ways - highlight the matches, or filter the list down to them - with case
-sensitivity and regular expressions as switches. Like the other shipped
-addons the tab is a spec and every control reports through `on_widget`, so a
-compiled copy runs the same code; `addons/_tests/test_openwrt_logs.py` drives
-it through the stub, including the picture the tab asks to wear.
+sensitivity and regular expressions as switches. Like the other addons the tab
+is a spec and every control reports through `on_widget`, so the program the
+store compiles runs the same code;
+`addon.store/_tests/test_openwrt_logs.py` drives it through the stub, including
+the picture the tab asks to wear.
 
 ### Addons inside the built executable
 
@@ -1114,9 +1183,12 @@ app reads that copy as a set of *shipped* addons:
   still written beside the `.exe`, in the writable `addons/_data/<id>/config.json`, so
   a shipped addon is configured per installation exactly like a dropped-in one.
 - "Shipped" is decided by a stable list, `manager_const.SHIPPED_ADDON_IDS`
-  (`berry`, `cert_manager`, `web_installer`, `openwrt_logs`), on top of the `builtin` flag, so a
+  (`berry`, `web_installer`, `addon_store`), on top of the `builtin` flag, so a
   source checkout - where `HAS_BUILTIN_ADDONS` is off - still groups those addons
-  under **Bundled with the program** rather than the drop-in list.
+  under **Bundled with the program** rather than the drop-in list. The certificate
+  and log addons are not in that list any more: they live in `addon.store` and
+  are installed from the store, which marks what it builds with an `origin` of
+  its own so the app files it under **Installed addons** instead.
 - Two addons of one id cannot both be *the* addon called `mytool`, and a file in
   the folder beats the copy inside the program - it is the one the user can read
   and change. The shipped copy is kept as the row's alternative, and the Addon

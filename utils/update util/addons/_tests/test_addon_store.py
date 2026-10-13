@@ -26,7 +26,11 @@ Three things get looked at:
   stops because this machine lacks them rather than because the addon failed;
 * what an install leaves where: the build staged and then cleared inside the
   store's own ``_data`` folder, the new addon written into the profile as
-  switched off, and the rescan that shuts the store down done last of all.
+  switched off, and the rescan that shuts the store down done last of all;
+* what an install says about itself afterwards: the manifest beside the program
+  that marks it as installed and names the transports it may use, the settings
+  form left in its ``_data`` folder for Settings to show, and the two files
+  Delete is allowed to take back.
 
 No internet, no compiler and no device are needed. Run it from the Test panel,
 or::
@@ -37,6 +41,7 @@ or::
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -841,8 +846,10 @@ class _BuildDev:
 
     _LAUNCHER = _Launcher()
 
-    def __init__(self, dist: Path) -> None:
+    def __init__(self, dist: Path, installs: Path | None = None) -> None:
         self.dist = dist                # where the finished program is said to be
+        self.installs = Path(installs) if installs is not None \
+            else dist / "installed"    # where it is said to be put
         self.seen: dict = {}
 
     @staticmethod
@@ -876,8 +883,17 @@ class _BuildDev:
         return self.dist / f"{addon_id}.exe"
 
     def install_build(self, staged: Path, addon_id: str, onefile: bool) -> Path:
+        """Pretend the program was copied, and say where it now sits.
+
+        The real one writes into ``addons``, and the store speaks about that copy
+        afterwards - so the stand-in puts its pretend file in the folder the test
+        is using, never somewhere relative to whoever runs it.
+        """
         self.seen["copied"] = Path(staged)
-        return Path("addons") / f"{addon_id}.exe"
+        self.installs.mkdir(parents=True, exist_ok=True)
+        target = self.installs / f"{addon_id}.exe"
+        target.write_text("x", encoding="utf-8")
+        return target
 
 
 class _FakeApp:
@@ -933,7 +949,7 @@ def test_the_install(store: Any) -> None:
                 streamed["cwd"] = cwd
             store._stream = watch
             dist = build / "widget" / "dist"
-            dev = _BuildDev(dist)
+            dev = _BuildDev(dist, addons)
             store._dev = lambda: dev
             store.job = {"values": {}, "harness": ROOT}
             source = data / "widget.py"
@@ -967,7 +983,12 @@ def test_the_install(store: Any) -> None:
             manager = _FakeApp(reload)
             api.session = manager
             store._dev = lambda: dev
-            store.job = {"values": {}, "id": "widget", "harness": ROOT}
+            store.job = {"values": {}, "id": "widget", "harness": ROOT,
+                         "details": {"manifest": {"name": "Widget",
+                                                  "requires": ["ssh", "serial"]},
+                                     "fields": [{"key": "size", "label": "Size"},
+                                                {"label": "keyless"}, "junk"],
+                                     "defaults": {"size": 10}}}
             api.calls.clear()
             broken: list[str] = []
             try:
@@ -998,6 +1019,40 @@ def test_the_install(store: Any) -> None:
             check(stage.is_dir() and not any(stage.iterdir()),
                   f"the downloads were left in staging: {list(stage.iterdir())}")
 
+            # and it said what it had installed, in the two places the app looks
+            keeps = store.addon_data_folder("widget")
+            check(keeps == addons / "_data" / "widget",
+                  f"the settings were not prepared in the addon's own folder: "
+                  f"{keeps}")
+            sidecar = json.loads((addons / "widget.json").read_text(encoding="utf-8"))
+            check(sidecar.get(store.ORIGIN_KEY) == store.STORE_ORIGIN,
+                  f"the manifest did not say where the addon came from: {sidecar}")
+            check(sidecar.get("requires") == ["ssh"],
+                  f"the transports were not kept to the ones the app knows: "
+                  f"{sidecar.get('requires')}")
+            check(sidecar.get("name") == "Widget" and sidecar.get("id") == "widget"
+                  and sidecar.get("api") == 1,
+                  f"the addon did not describe itself as its source does: {sidecar}")
+            schema = json.loads((keeps / "fields.json").read_text(encoding="utf-8"))
+            check(schema.get("fields") == [{"key": "size", "label": "Size"}],
+                  f"the settings form kept more or less than the addon declared: "
+                  f"{schema.get('fields')}")
+            check(schema.get("defaults") == {"size": 10},
+                  f"the form came without the values to start from: {schema}")
+            check(str(schema.get("title", "")).endswith(
+                  "addons/_data/widget/config.json"),
+                  f"the form's heading does not name the file it writes: {schema}")
+            check(json.loads((keeps / "config.json").read_text(encoding="utf-8"))
+                  == {"size": 10},
+                  "the addon's config file was not started from its defaults")
+            gone = sorted(path.name for path in store._delete_paths("widget"))
+            check(gone == ["widget.exe", "widget.json"],
+                  f"delete does not take an install back whole: {gone}")
+            (addons / "hand.exe").write_text("x", encoding="utf-8")
+            (addons / "hand.json").write_text('{"name": "Hand"}', encoding="utf-8")
+            check([path.name for path in store._delete_paths("hand")] == ["hand.exe"],
+                  "a manifest the store never wrote was taken back with it")
+
         # a compiled store asks the same two things over its own pipe
         check("session.rescan_addons" in addon_client.ProcessAPI._POSITIONAL
               and "session.set_addon_enabled" in addon_client.ProcessAPI._POSITIONAL,
@@ -1011,6 +1066,39 @@ def test_the_install(store: Any) -> None:
         store._stream = real_stream
         store.job = real_job
         store.addons_dir = real_addons
+
+
+# --- nine: what an install says about an addon it cannot ask ---
+
+def test_the_manifest(store: Any) -> None:
+    """The manifest written beside a fresh program, from the source and the catalog.
+
+    A compiled addon only reports itself once it is running, and the app has to
+    know before then what the addon is called and whether it may connect at all,
+    so what the source declared is taken first and the catalog fills the gaps.
+    """
+    print("\n12. an install's own manifest, from the source and the catalog")
+    details = {"manifest": {"name": "Widget",
+                            "requires": ["ssh", "SFTP", "serial", "ssh"],
+                            "description": ""},
+               "fields": [{"key": "a"}], "defaults": {"a": 1}}
+    entry = {"name": "From the catalog", "version": "2.1", "author": "fligma",
+             "description": "The catalog's words"}
+    made = store._manifest_values("widget", details, entry)
+    check(made["requires"] == ["ssh", "sftp"],
+          f"the transports were not cleaned, made new and kept to the known ones: "
+          f"{made.get('requires')}")
+    check(made["name"] == "Widget" and made["version"] == "2.1"
+          and made["author"] == "fligma"
+          and made["description"] == "The catalog's words",
+          f"the catalog did not fill what the source left blank: {made}")
+    check(made["id"] == "widget" and made["api"] == 1
+          and made[store.ORIGIN_KEY] == store.STORE_ORIGIN,
+          f"an install was not marked as one: {made}")
+    quiet = store._manifest_values("odd-id", {}, {})
+    check(quiet == {"requires": [], "api": 1, "id": "odd_id",
+                    store.ORIGIN_KEY: store.STORE_ORIGIN},
+          f"an addon that declares nothing gained inventions: {quiet}")
 
 
 # --- run it ---
@@ -1035,6 +1123,7 @@ def main() -> int:
     test_the_interpreter(store)
     test_the_pip_fallback(store)
     test_the_install(store)
+    test_the_manifest(store)
 
     if FAILURES:
         print()

@@ -173,6 +173,41 @@ def addon_schema_path(addon_id: str) -> Path:
     return addon_data_dir(addon_id) / "fields.json"
 
 
+#: The manifest key that says where an addon came from. An addon the store
+#: installs is described by its own file next to the program, so it travels with
+#: the addon and keeps its answer even when copied elsewhere.
+ORIGIN_KEY = "origin"
+
+#: What the addon store writes there for the addons it installs.
+STORE_ORIGIN = "addon store"
+
+#: The names a compiled addon's manifest is looked for under, in that order.
+MANIFEST_NAMES = ("addon.json", "manifest.json")
+
+
+def addon_manifest_path(home: Path, addon_id: str) -> Path | None:
+    """The manifest file that describes an addon, or ``None`` when it has none.
+
+    A program built from an addon's source carries its details in a file beside
+    it: ``<id>.json`` next to a loose ``<id>.exe``, or ``addon.json`` inside a
+    folder addon.
+    """
+    folder = Path(home)
+    for name in (f"{config_name(addon_id)}.json",) + MANIFEST_NAMES:
+        candidate = folder / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def addon_origin(home: Path, addon_id: str) -> str:
+    """Where an addon came from, as its own manifest says; empty when it says nothing."""
+    path = addon_manifest_path(home, addon_id)
+    if path is None:
+        return ""
+    return str(read_config_json(path).get(ORIGIN_KEY) or "").strip()
+
+
 def addon_build_path() -> Path:
     """config/_build.json: what the Addon Dev tab recorded, one file for every addon keyed by id; only the manager touches it."""
     return app_config_dir() / "_build.json"

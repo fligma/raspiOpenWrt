@@ -96,16 +96,26 @@ per-profile notes), `api.schedule`, `api.peers` (addons talking to each
 other) and `api.session`/`api.paths` make up the full surface - each is
 documented with examples in the app README's **Addons** chapter.
 
-Four addons ship inside the program and are switched on and off in Settings:
+Three addons ship inside the program and are switched on and off under
+**Bundled with the program** in Settings:
 
 - **Berry** - the file manager: device and local pages in one tab, with a
   syntax-coloured editor.
-- **OpenWrt Logs** - system log viewer, single or several devices at a time,
-  with per-device colours, search and auto-refresh.
-- **Certificate manager** - reads, checks and reissues the dashboard's
-  TLS certificate with `openssl` over SSH.
 - **Web installer** - installs this repository's `src/www_rasconf` onto the
   device from GitHub, with a plan table before anything is written.
+- **Berry addon store** - the store itself: reads the catalog published in
+  `utils/update util/addon.store`, then downloads, tests and compiles any
+  addon listed there into a program of its own in `addons`.
+
+Everything else comes from that store - **Certificate manager**, **OpenWrt
+Log Viewer**, **Hello from the store** - and an install is not a second-class
+addon. The store writes an `addons/<id>.json` manifest beside the program it
+built (its name, version, author and the transports it needs) and seeds its
+settings form, so the moment it is switched on it sits under **Installed
+addons** in Settings with the same switch, restart, own-connection option and
+config panel as the bundled ones. Deleting it from the store takes the program
+and that manifest back and leaves `addons/_data/<id>` alone, so a reinstall
+keeps your settings.
 
 The **Addon Dev** tab (Tools > Addon Dev) works on addon files themselves:
 read the manifest and source, run a generated test script against a recording
@@ -117,7 +127,7 @@ app reads it back without a restart.
 
 ```
 src/www_rasconf/     the web dashboard deployed to the device
-utils/update util/   Berry Manager: the desktop app and its shipped addons
+utils/update util/   Berry Manager: the desktop app, its bundled addons and the addon store
 fresh_install/       OpenWrt factory image for a fresh Pi
 media/               logo and screenshots
 .github/workflows/   the Windows + Linux build pipeline

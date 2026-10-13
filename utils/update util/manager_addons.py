@@ -72,7 +72,8 @@ from addon_api import (
     read_config_json,
     write_config_json,
 )
-from addon_common import addon_data_dir, build_mark, write_build_mark
+from addon_common import (addon_data_dir, addon_manifest_path, addon_origin,
+                          build_mark, write_build_mark)
 from manager_const import (
     ADDON_DATA_DIR,
     ADDONS_DIR,
@@ -145,6 +146,7 @@ class Addon:
         self.home = home                  # its folder (data, sidecar manifest)
         self.kind = kind                  # "python" or "process"
         self.builtin = bool(builtin)   # shipped inside the program
+        self.origin = addon_origin(home, addon_id)   # what its manifest says
         self.name = addon_id
         self.version = ""
         self.author = ""
@@ -172,15 +174,36 @@ class Addon:
 
     @property
     def is_bundled(self) -> bool:
-        """True when the addon came with the program rather than got dropped in."""
-        if self.builtin or self.id in SHIPPED_ADDON_IDS:
+        """True when the addon came with the program rather than got dropped in.
+
+        A program the addon store installed says so in its own manifest, and that
+        answer holds in a checkout and in a build alike: it is what the user put
+        in, however much its id matches an addon the source also carries.
+        """
+        if self.builtin:
+            return True
+        if self.origin:
+            return False
+        if self.id in SHIPPED_ADDON_IDS:
             return True
         if getattr(sys, "frozen", False):
+            return False
+        if self.kind == "process" and not self.has_source_beside():
+            # A program with no source of the same name next to it was built
+            # here or installed here: neither is part of what the app ships.
             return False
         try:
             return ADDONS_DIR.resolve() in self.source.resolve().parents
         except OSError:
             return False
+
+    def has_source_beside(self) -> bool:
+        """Whether the file or folder this program was built from is next to it."""
+        try:
+            folder = self.source.resolve().parent
+        except OSError:
+            return False
+        return (folder / f"{self.id}.py").is_file() or (folder / self.id).is_dir()
 
 
 class ProcessBridge:
@@ -518,6 +541,7 @@ class AddonManager:
                     continue
                 addon = self._addon_from(candidate, builtin)
                 if addon is not None:
+                    self.preview_manifest(addon)
                     found.append(addon)
         return found
 
@@ -530,16 +554,22 @@ class AddonManager:
 
     def _ordered(self, first: Addon, second: Addon) -> tuple[Addon, Addon]:
         """Which of two same-id addons runs, and which one is the alternative."""
-        # A copy the user dropped in wins over a shipped one, whatever the
-        # build mark says: the mark is about a file's form, not the folder.
-        if first.builtin != second.builtin:
-            return (second, first) if first.builtin else (first, second)
         source = next((item for item in (first, second) if item.kind == "python"), first)
         compiled = next((item for item in (first, second)
                          if item.kind == "process" and item is not source), second)
-        prefer = str(build_mark(source.id).get("prefer") or "source").lower()
-        if prefer in ("compiled", "program", "exe") and compiled.kind == "process":
+        prefer = str(build_mark(source.id).get("prefer") or "").lower()
+        # The Addon Dev tab's choice is a decision about this machine's build, so
+        # it is honoured before any rule about which copy reads as a drop-in.
+        if prefer in ("compiled", "program", "exe", "process") \
+                and compiled.kind == "process":
             return compiled, source
+        if prefer == "source" and source.kind == "python":
+            return source, compiled
+        # A copy the user dropped in, or had the store install, wins over one that
+        # came inside the program: asking for it is the newer decision. The build
+        # mark says nothing about which folder a file belongs to.
+        if first.is_bundled != second.is_bundled:
+            return (second, first) if first.is_bundled else (first, second)
         return source, compiled
 
     def _addon_from(self, candidate: Path, builtin: bool = False) -> Addon | None:
@@ -610,6 +640,8 @@ class AddonManager:
             "error": addon.error,
             "kind": addon.kind,
             "builtin": bool(addon.builtin),
+            "origin": addon.origin,
+            "bundled": bool(addon.is_bundled),
             "enabled": bool(addon.enabled),
             "requires": list(addon.requires),
             "own_connection": bool(addon.own_connection),
@@ -692,13 +724,19 @@ class AddonManager:
                 self.unload(addon)
         self.refresh_rows()
 
-    def apply_manifest(self, addon: Addon, manifest: dict) -> None:
-        """Copy the manifest fields the addon (or its sidecar file) declared."""
+    def apply_manifest(self, addon: Addon, manifest: dict,
+                       rename: bool = True) -> None:
+        """Copy the manifest fields the addon (or its sidecar file) declared.
+
+        ``rename`` is off only for a preview read before the addon runs: the id is
+        what the whole record is filed under, so it moves when the addon itself
+        moves, at load.
+        """
         for key in ("name", "version", "author", "description", "notes"):
             value = manifest.get(key)
             if value:
                 setattr(addon, key, str(value).strip())
-        if manifest.get("id"):
+        if rename and manifest.get("id"):
             addon.id = safe_identifier(str(manifest["id"]))
         # "requires" names the transports the API will allow; others are dropped.
         value = manifest.get("requires")
@@ -708,19 +746,32 @@ class AddonManager:
             addon.requires = tuple(sorted(
                 {str(part).strip().lower() for part in value} & {"ssh", "sftp"}))
 
+    def preview_manifest(self, addon: Addon) -> None:
+        """What a program's sidecar says about it, read before it has run once.
+
+        A row is built while the addon is still switched off, and a compiled addon
+        cannot report its name, its version or the transports it needs until it is
+        started - so without this an installed addon would sit in Settings as a
+        bare id with no form and no connection choice. The manifest is read again
+        when the addon loads, from whatever describes it by then.
+        """
+        data = self.read_manifest(addon)
+        if not data:
+            return
+        addon.manifest = data
+        self.apply_manifest(addon, data, rename=False)
+
     def read_manifest(self, addon: Addon) -> dict:
-        """A ``<id>.json`` (or ``addon.json``) next to the addon file."""
-        for candidate in (addon.home / f"{addon.id}.json", addon.home / "addon.json",
-                          addon.home / "manifest.json"):
-            if candidate.is_file():
-                try:
-                    data = json.loads(candidate.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as error:
-                    addon.error = f"bad manifest: {error}"
-                    return {}
-                if isinstance(data, dict):
-                    return data
-        return {}
+        """The ``<id>.json`` (or ``addon.json``) next to the addon file."""
+        candidate = addon_manifest_path(addon.home, addon.id)
+        if candidate is None:
+            return {}
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            addon.error = f"bad manifest: {error}"
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def load(self, addon: Addon) -> bool:
         if addon.loaded:
@@ -1407,8 +1458,9 @@ class AddonManager:
         if not installed:
             self.hint.setText(
                 "No drop-in addons. Put an 'addon.py' inside a folder named after "
-                f"the addon, or a .py file, in {ADDONS_DIR} and press Rescan. The "
-                "addons that ship with the program are switched on and off above."
+                f"the addon, or a .py file, in {ADDONS_DIR}, install one from the "
+                "addon store, and press Rescan. The addons that ship with the "
+                "program are switched on and off above."
             )
         if bar is not None:
             bar.setValue(where)
@@ -1510,6 +1562,17 @@ class AddonManager:
             shipped.setWordWrap(True)
             shipped.setStyleSheet("color: #8f8f8f;")
             column.addWidget(shipped)
+        elif addon.origin:
+            cfg = addon_config_path(addon.id)
+            try:
+                shown = cfg.relative_to(BASE_DIR).as_posix()
+            except ValueError:
+                shown = str(cfg)
+            came = QLabel(f"Installed from the {addon.origin}, and put in here with "
+                          f"the other drop-ins. Its own settings are in {shown}.")
+            came.setWordWrap(True)
+            came.setStyleSheet("color: #8f8f8f;")
+            column.addWidget(came)
 
         detail = addon.error or addon.description
         if detail:
