@@ -23,7 +23,7 @@
       "name": "OpenWrt Log Viewer",
       "version": "2.6",
       "author": "fligma",
-      "description": "a single-device log viewerand a multi-device view,colour-coded connections,log by time. The search highlights matching lines,",
+      "description": "a single-device log viewer and a multi-device view,colour-coded connections,log by time. The search highlights matching lines,",
       "filename": "openwrt_logs.py",
       "assets": [
         "openwrtlogsicon.png"
