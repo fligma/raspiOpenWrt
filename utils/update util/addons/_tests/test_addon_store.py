@@ -21,6 +21,9 @@ Three things get looked at:
 * the catalog generator that rebuilds ``index.json`` from the store folder, the
   store's rule that an addon's test is run before it is compiled, which Python
   it is allowed to build with, and how a refused pip install is retried;
+* where the two modules an addon imports come from - the app's own folder, a
+  copy the build carries, or GitHub - and what happens to an install when a test
+  stops because this machine lacks them rather than because the addon failed;
 * what an install leaves where: the build staged and then cleared inside the
   store's own ``_data`` folder, the new addon written into the profile as
   switched off, and the rescan that shuts the store down done last of all.
@@ -358,72 +361,353 @@ class _FakeDev:
     def build_interpreter() -> tuple[str, str]:
         return str(sys.executable), ""
 
+    @staticmethod
+    def harness_dir() -> Path:
+        """A checkout: what an addon imports lies in the app's own folder."""
+        return ROOT
+
+
+class _FrozenDev(_FakeDev):
+    """A program that kept those modules inside its archive and none on disk."""
+
+    @staticmethod
+    def harness_dir():
+        return None
+
 
 def test_the_gate(store: Any) -> None:
     """The store runs an addon's test before compiling, and only compiles a pass."""
     print("\n8. an addon's test is run before it is compiled")
     fresh(store)                        # stands up the stub api the gate talks to
-    real_build = store._build
+    real_build, real_finish = store._build, store._finish
     real_stream = store._stream
     real_dev = store._dev
     real_job = store.job
     built: list = []
+    ended: list = []
     streamed: dict = {}
     try:
         store._dev = lambda: _FakeDev()
-        store.job = {"values": {}}
+        store.job = {"values": {}, "harness": ROOT}
         store._build = lambda id_value, source: built.append((id_value, str(source)))
+        store._finish = lambda text, bad=False: ended.append((str(text), bool(bad)))
 
-        # no test published: straight to the compile, nothing streamed
-        built.clear()
-        store._maybe_test("widget", Path("widget.py"), None)
-        check(built == [("widget", "widget.py")],
-              f"with no test the addon did not compile straight away: {built}")
-
-        # a test exists: it is run first, handed the source and the app's modules;
-        # when it passes the build goes ahead
-        def passing(command, cwd, on_ok, env=None, fail=""):
-            streamed["command"] = command
-            streamed["env"] = env or {}
-            streamed["fail"] = fail
-            on_ok()                     # pretend the test came back clean
-        store._stream = passing
-        built.clear()
-        streamed.clear()
-        with tempfile.TemporaryDirectory() as where:
-            src = Path(where) / "widget.py"
+        with tempfile.TemporaryDirectory() as box:
+            src = Path(box) / "widget.py"
             src.write_text("x", encoding="utf-8")
-            test = Path(where) / "test_widget.py"
+            test = Path(box) / "test_widget.py"
             test.write_text("x", encoding="utf-8")
-            store._maybe_test("widget", src, test)
-        check(streamed.get("command", [None, None])[1] == str(test),
-              f"the thing run was not the test: {streamed.get('command')}")
-        check(streamed["env"].get("RASCONF_ADDON_SOURCE") == str(src),
-              "the downloaded addon was not handed to the test")
-        check(str(_FakeDev.BASE_DIR) in streamed["env"].get("PYTHONPATH", ""),
-              "the app's modules were not on the test's path")
-        check("test" in streamed["fail"].lower(),
-              f"a failed test would not have said so: {streamed['fail']!r}")
-        check(built == [("widget", str(src))],
-              f"a passing test did not go on to compile: {built}")
 
-        # a test that does not pass never reaches the compile
-        def failing(command, cwd, on_ok, env=None, fail=""):
-            pass                        # the real one would _finish; on_ok unused
-        store._stream = failing
-        built.clear()
-        with tempfile.TemporaryDirectory() as where:
-            src = Path(where) / "widget.py"
-            src.write_text("x", encoding="utf-8")
-            test = Path(where) / "test_widget.py"
-            test.write_text("x", encoding="utf-8")
+            # no test published: straight to the compile, nothing streamed
+            built.clear()
+            store._maybe_test("widget", src, None)
+            check(built == [("widget", str(src))],
+                  f"with no test the addon did not compile straight away: {built}")
+
+            # a test exists: it is run first, handed the source and the modules an
+            # addon imports to reach the app; when it passes the build goes ahead
+            def passing(command, cwd, on_ok, env=None, fail="", on_bad=None):
+                streamed["command"] = command
+                streamed["cwd"] = cwd
+                streamed["env"] = env or {}
+                streamed["fail"] = fail
+                on_ok()                     # pretend the test came back clean
+            store._stream = passing
+            built.clear()
+            streamed.clear()
             store._maybe_test("widget", src, test)
-        check(not built, "a test that did not pass still compiled the addon")
+            check(streamed.get("command", [None, None])[1] == str(test),
+                  f"the thing run was not the test: {streamed.get('command')}")
+            check(streamed["env"].get("RASCONF_ADDON_SOURCE") == str(src),
+                  "the downloaded addon was not handed to the test")
+            check(str(ROOT) in streamed["env"].get("PYTHONPATH", ""),
+                  f"the modules an addon imports were not on the test's path: "
+                  f"{streamed['env'].get('PYTHONPATH')!r}")
+            check(str(streamed.get("cwd")) == str(ROOT),
+                  f"the test did not run beside the modules it imports: "
+                  f"{streamed.get('cwd')!r}")
+            check("test" in streamed["fail"].lower(),
+                  f"a failed test would not have said so: {streamed['fail']!r}")
+            check(built == [("widget", str(src))],
+                  f"a passing test did not go on to compile: {built}")
+
+            # a test that does not pass never reaches the compile
+            def failing(command, cwd, on_ok, env=None, fail="", on_bad=None):
+                pass                        # the real one would _finish; on_ok unused
+            store._stream = failing
+            built.clear()
+            store._maybe_test("widget", src, test)
+            check(not built, "a test that did not pass still compiled the addon")
+
+            # with nothing to run it against, the install is not held up for it
+            store.job = {"values": {}, "harness": None}
+            built.clear()
+            streamed.clear()
+            store._maybe_test("widget", src, test)
+            check(built == [("widget", str(src))],
+                  f"a test that cannot be run here stopped the install: {built}")
+            check(not streamed, f"something was run with no harness: {streamed}")
+
+            # a run that stops is sorted by what it stopped on: this machine's
+            # missing modules prove nothing about the addon, and must not refuse
+            # an install; everything else, including a real FAIL, does
+            def stopping(command, cwd, on_ok, env=None, fail="", on_bad=None):
+                if callable(on_bad):
+                    on_bad()
+            store._stream = stopping
+            for label, tail, may_build in (
+                    ("a missing Qt", ["Traceback (most recent call last):",
+                                      "ModuleNotFoundError: No module named 'PyQt6'"],
+                     True),
+                    ("a missing app module",
+                     ["ModuleNotFoundError: No module named 'addon_client'"], True),
+                    # a fetched harness is the contract's Qt-free half, so a test
+                    # that wants the app's widgets never gets to the addon either
+                    ("the app's Qt half",
+                     ["ModuleNotFoundError: No module named 'addon_api'"], True),
+                    ("a missing module of its own",
+                     ["ModuleNotFoundError: No module named 'widget_thing'"], False),
+                    ("a failing check", ["FAIL: the tab did not appear"], False),
+                    ("a crash", ["ZeroDivisionError: division by zero"], False)):
+                built.clear()
+                ended.clear()
+                store.job = {"values": {}, "harness": ROOT, "lines": list(tail)}
+                store._maybe_test("widget", src, test)
+                check(bool(built) == may_build,
+                      f"a test that stopped for {label} should have "
+                      f"{'compiled anyway' if may_build else 'been refused'}: "
+                      f"built={built} ended={ended}")
+                check(may_build or (ended and ended[-1][1]),
+                      f"a test that stopped for {label} was not reported as a stop: "
+                      f"{ended}")
+
+            # the reading of a traceback's tail, on its own
+            for lines, want in ((["nothing here"], ""),
+                                (["ModuleNotFoundError: No module named 'paramiko'"],
+                                 "paramiko"),
+                                (["ModuleNotFoundError: No module named 'PyQt6.QtWidgets'"],
+                                 "PyQt6"),
+                                (["ModuleNotFoundError: No module named 'widget'"], "")):
+                store.job = {"values": {}, "lines": list(lines)}
+                check(store._machine_missing() == want,
+                      f"{lines} was read as {store._machine_missing()!r}, not {want!r}")
+            # what the harness folder holds counts too, whatever it is called
+            other = Path(box) / "harnesscopy"
+            other.mkdir()
+            (other / "myappthing.py").write_text("x", encoding="utf-8")
+            for harness, name, want in ((other, "myappthing", "myappthing"),
+                                        (other, "requests", ""),
+                                        (Path(box) / "nowhere", "myappthing", "")):
+                store.job = {"values": {}, "harness": harness,
+                             "lines": [f"ModuleNotFoundError: No module named '{name}'"]}
+                check(store._machine_missing() == want,
+                      f"{name} was read as {store._machine_missing()!r} with "
+                      f"{harness.name} as the harness, not {want!r}")
+            store.job = None
+            check(store._machine_missing() == "",
+                  "a missing module was named with no job in hand")
     finally:
         store._build = real_build
+        store._finish = real_finish
         store._stream = real_stream
         store._dev = real_dev
         store.job = real_job
+
+
+def test_the_harness(store: Any) -> None:
+    """Where the two modules an addon imports come from, and what is built with them.
+
+    A test and a compiled launcher both ``import addon_client``, and the Python
+    doing that work only reads what lies on disk: a checkout has the two in its
+    own folder, a build made by the current workflow carries a copy, and a program
+    built before that has to fetch them from the repository the addons come from -
+    from above the store folder, where the app's own files sit. Those two are all
+    a build needs and less than a test wants, so a run that stops on the app's
+    other modules asks for them and tries the test once more.
+    """
+    print("\n8b. the modules an addon imports are found, or fetched")
+    fresh(store)
+    real_dev, real_fetch = store._dev, store._fetch_file
+    real_job, real_finish = store.job, store._finish
+    real_build, real_stream = store._build, store._stream
+    saved_data = os.environ.get("RASCONF_ADDON_DATA")
+    fetched: list = []
+    try:
+        with tempfile.TemporaryDirectory() as box:
+            os.environ["RASCONF_ADDON_DATA"] = str(Path(box) / "data")
+            store.job = {"values": dict(store.DEFAULTS)}
+
+            def write(values: dict, remote: str, target: Path,
+                      folder: str | None = None) -> str:
+                fetched.append((remote, folder))
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+                Path(target).write_text("# fetched\n", encoding="utf-8")
+                return ""
+            store._fetch_file = write
+
+            check(store.app_folder(dict(store.DEFAULTS)) == "utils/update util",
+                  f"the app's folder was not read off the store path: "
+                  f"{store.app_folder(dict(store.DEFAULTS))!r}")
+            check(store.app_folder({"store_path": "addons"}) == "",
+                  "a store folder at the repository root made a folder out of nothing")
+            check(store.raw_address(dict(store.DEFAULTS), "addon_client.py",
+                                    store.app_folder(dict(store.DEFAULTS)))
+                  == "/fligma/raspiOpenWrt/main/utils/update%20util/addon_client.py",
+                  f"the app's own folder did not survive the address: "
+                  f"{store.raw_address(dict(store.DEFAULTS), 'addon_client.py', 'utils/update util')!r}")
+
+            # a checkout answers with its own folder and downloads nothing
+            store._dev = lambda: _FakeDev()
+            check(store.harness_folder(dict(store.DEFAULTS)) == ROOT,
+                  "a checkout's own folder was not taken for the modules an addon "
+                  "imports")
+            check(not fetched, f"a checkout still fetched: {fetched}")
+
+            # a program with nothing on disk asks for both, from the app's folder
+            store._dev = lambda: _FrozenDev()
+            found = store.harness_folder(dict(store.DEFAULTS))
+            check([name for name, _folder in fetched] == list(store.HARNESS_FILES),
+                  f"both modules were not fetched: {fetched}")
+            check({folder for _name, folder in fetched} == {store.app_folder(store.DEFAULTS)},
+                  f"the modules were looked for in the store folder, not the app's: "
+                  f"{fetched}")
+            check(found == store.staging() / "harness",
+                  f"the fetched modules were put somewhere odd: {found!r}")
+
+            # and when the fetch stops, so does the answer: nothing is half-there
+            fetched.clear()
+            store._fetch_file = lambda values, remote, target, folder=None: (
+                "GitHub answered 404" if remote == store.HARNESS_FILES[1] else "")
+            check(store.harness_folder(dict(store.DEFAULTS)) is None,
+                  "a harness that could not be fetched was still handed to a build")
+
+            # a fetched pair is what a build needs, not what a test wants: a run
+            # that stops on one of the app's other modules gets the rest fetched
+            # and is run again over the wider folder
+            narrow = store.staging() / "harness"
+            narrow.mkdir(parents=True, exist_ok=True)
+            src = Path(box) / "widget.py"
+            src.write_text("x", encoding="utf-8")
+            test = Path(box) / "test_widget.py"
+            test.write_text("x", encoding="utf-8")
+            runs: list = []
+            built: list = []
+            stopped: list = []
+
+            def twice(command, cwd, on_ok, env=None, fail="", on_bad=None):
+                runs.append(str((env or {}).get("PYTHONPATH", "")))
+                if len(runs) == 1:
+                    store.job["lines"] = ["ModuleNotFoundError: "
+                                          "No module named 'addon_api'"]
+                    if callable(on_bad):
+                        on_bad()
+                else:
+                    on_ok()
+            store._fetch_file = write
+            store._stream = twice
+            store._build = lambda id_value, source: built.append(str(source))
+            store._finish = lambda text, bad=False: stopped.append((str(text), bad))
+            fetched.clear()
+            store.job = {"values": dict(store.DEFAULTS), "harness": narrow,
+                         "lines": [], "widened": False}
+            store._maybe_test("widget", src, test)
+            check(len(runs) == 2, f"the test was not run a second time: {runs}")
+            check(all(run == str(narrow) for run in runs),
+                  f"a retry did not use the fetched harness: {runs}")
+            check("addon_api.py" in [name for name, _folder in fetched],
+                  f"the app's other modules were not asked for: "
+                  f"{[name for name, _f in fetched]}")
+            check((narrow / "addon_api.py").is_file(),
+                  "the widened harness holds no addon_api")
+            check(built == [str(src)] and not stopped,
+                  f"a test that passed after the widening did not compile: "
+                  f"{built} {stopped}")
+
+            # a repository with nothing more to give is asked once: the install
+            # then goes ahead on what the run could not disprove
+            runs.clear()
+            built.clear()
+            stopped.clear()
+            store._fetch_file = lambda values, remote, target, folder=None: "404"
+
+            def again_bad(command, cwd, on_ok, env=None, fail="", on_bad=None):
+                runs.append(1)
+                store.job["lines"] = ["ModuleNotFoundError: "
+                                      "No module named 'addon_api'"]
+                if callable(on_bad):
+                    on_bad()
+            store._stream = again_bad
+            store.job = {"values": dict(store.DEFAULTS), "harness": narrow,
+                         "lines": [], "widened": False}
+            store._maybe_test("widget", src, test)
+            check(len(runs) == 1,
+                  f"a widening that fetched nothing ran the test again: {runs}")
+            check(built == [str(src)] and not stopped,
+                  f"a test that cannot be run stopped the install: {built} {stopped}")
+
+            # a build is only worth starting when those modules can be read: with
+            # no harness in the job it is refused before PyInstaller is asked
+            def no_build(command, cwd, on_ok, env=None, fail="", on_bad=None):
+                raise AssertionError("a build was started with nothing to import")
+            store._stream = no_build
+            store._build = real_build            # the store's own refusal, not a fake
+            store._fetch_file = real_fetch
+            store._dev = lambda: _FakeDev()
+            ended: list = []
+            store._finish = lambda text, bad=False: ended.append((str(text), bool(bad)))
+            store.job = {"values": {}, "harness": None}
+            store._build("widget", Path(box) / "widget.py")
+            check(ended and ended[-1][1] and "talk to the app" in ended[-1][0],
+                  f"a build with no modules to import was started anyway: {ended}")
+    finally:
+        store._dev = real_dev
+        store._fetch_file = real_fetch
+        store._finish = real_finish
+        store._build = real_build
+        store._stream = real_stream
+        store.job = real_job
+        if saved_data is not None:
+            os.environ["RASCONF_ADDON_DATA"] = saved_data
+        else:
+            os.environ.pop("RASCONF_ADDON_DATA", None)
+
+    try:
+        import manager_addondev as dev
+    except Exception as error:                      # noqa: BLE001 - app modules
+        look(f"manager_addondev is not importable here: {error}")
+        return
+    ready = dev.harness_dir()
+    check(ready is not None and all((ready / name).is_file()
+                                    for name in store.HARNESS_FILES),
+          f"this checkout's own modules were not found on disk: {ready!r}")
+    ok, why = dev.app_modules_ready()
+    check(ok and not why, f"a checkout was told it cannot build an addon: {why!r}")
+    saved_harness = dev.harness_dir
+    try:
+        dev.harness_dir = lambda: None
+        with tempfile.TemporaryDirectory() as box:
+            other = Path(box) / "fetched"
+            command = dev.build_command(Path(box) / "launcher.py", "widget",
+                                        {"onefile": True, "console": True,
+                                         "icon": False, "hidden": ""},
+                                        root=Path(box), paths=[other])
+            paths = [command[index + 1] for index, part in enumerate(command)
+                     if part == "--paths"]
+            check(paths and not (set(paths) & {str(Path(box))}),
+                  f"the modules an addon imports are not on the build's path: {paths}")
+            check(str(other) in paths and str(dev.BASE_DIR) in paths,
+                  f"neither the fetched folder nor the app's own is on the path: {paths}")
+            twice = dev.build_command(Path(box) / "launcher.py", "widget",
+                                      {"onefile": True, "console": True,
+                                       "icon": False, "hidden": ""},
+                                      root=Path(box),
+                                      paths=[other, other, dev.BASE_DIR])
+            counts = [twice[index + 1] for index, part in enumerate(twice)
+                      if part == "--paths"]
+            check(len(counts) == len(set(counts)),
+                  f"a folder named twice went on the path twice: {counts}")
+    finally:
+        dev.harness_dir = saved_harness
 
 
 # --- seven: the interpreter it builds with, and the pip that fills it ---
@@ -566,6 +850,10 @@ class _BuildDev:
         return str(sys.executable), ""
 
     @staticmethod
+    def harness_dir() -> Path:
+        return ROOT
+
+    @staticmethod
     def module_name(source: Path) -> str:
         return source.stem
 
@@ -575,9 +863,11 @@ class _BuildDev:
 
     def build_command(self, launcher: Path, addon_id: str, options: dict,
                       source: Path | None = None,
-                      root: Path | None = None) -> list[str]:
+                      root: Path | None = None,
+                      paths: list | tuple = ()) -> list[str]:
         self.seen["root"] = root
         self.seen["launcher"] = Path(launcher)
+        self.seen["paths"] = [str(Path(folder)) for folder in paths]
         return ["py", "-m", "PyInstaller", str(launcher)]
 
     def staged_name(self, addon_id: str, onefile: bool,
@@ -645,7 +935,7 @@ def test_the_install(store: Any) -> None:
             dist = build / "widget" / "dist"
             dev = _BuildDev(dist)
             store._dev = lambda: dev
-            store.job = {"values": {}}
+            store.job = {"values": {}, "harness": ROOT}
             source = data / "widget.py"
             source.write_text("x", encoding="utf-8")
             store._build("widget", source)
@@ -654,6 +944,9 @@ def test_the_install(store: Any) -> None:
                   f"{dev.seen.get('root')!r} != {build}")
             check(dev.seen.get("launcher") == build / "widget" / "launcher.py",
                   f"the launcher was written somewhere else: {dev.seen.get('launcher')!r}")
+            check(dev.seen.get("paths") == [str(ROOT)],
+                  f"the build was not told where the modules a launcher imports are: "
+                  f"{dev.seen.get('paths')!r}")
             check(Path(streamed.get("cwd", "/")) == build / "widget",
                   f"PyInstaller ran from elsewhere: {streamed.get('cwd')!r}")
 
@@ -674,7 +967,7 @@ def test_the_install(store: Any) -> None:
             manager = _FakeApp(reload)
             api.session = manager
             store._dev = lambda: dev
-            store.job = {"values": {}, "id": "widget"}
+            store.job = {"values": {}, "id": "widget", "harness": ROOT}
             api.calls.clear()
             broken: list[str] = []
             try:
@@ -738,6 +1031,7 @@ def main() -> int:
     test_bundled_assets(store)
     test_the_generator(store)
     test_the_gate(store)
+    test_the_harness(store)
     test_the_interpreter(store)
     test_the_pip_fallback(store)
     test_the_install(store)

@@ -22,6 +22,13 @@ one-file build exactly as they are in a source checkout.
 `--add-data="_addon_bundle:addons"` does the same for the addons that ship with
 the program: the folder is staged by the workflow out of `addons` and lands
 inside the archive under the name `manager_const.BUILTIN_ADDONS_DIR` reads.
+`--add-data="_addon_harness:harness"` packs a plain copy of `addon_common.py`
+and `addon_client.py` - the two modules an addon imports to reach the app -
+where `manager_const.HARNESS_DIR` points at it. They have to lie on disk: the
+Python that compiles or tests an addon is a process of its own, outside this
+archive, and cannot read what is packed inside it. A program built before that
+copy existed fetches the two files from the repository the addons come from, so
+installing an addon does not depend on which build you happen to be running.
 
 The QtWebEngine modules are imported inside a `try`, so the source scanner
 cannot see them; that is what the two `--hidden-import` options are for. Their
@@ -55,7 +62,10 @@ the program: `addon.store/_tests` is run by the same packaging step. A new
 addon on its own is proved when somebody installs it - the store fetches
 `test_<id>.py` beside the source and runs it before spending a minute
 compiling - and the catalog itself is generated from the manifest in the file,
-which needs no import of the addon.
+which needs no import of the addon. A test that never got as far as the addon -
+a Python with no PyQt6 in it, or a program whose copy of the modules an addon
+imports could not be found - says so and compiles anyway; only what the addon
+itself failed stops an install.
 
 PyQt6-WebEngine is optional. If it is not installed, the Web Interface and
 LuCI tabs show the URL and an "Open in browser" button instead of an embedded
@@ -739,9 +749,11 @@ works on their files goes away.
 
 What the built program cannot do, it says rather than tries: the addons that
 came inside the `.exe` are listed and their source is shown as it is, with every
-field read-only, and **Compile**/**Test** explain that a packaged program has
-nothing to build with until a Python interpreter is found on the path (or the
-app is run from a checkout).
+field read-only, and **Compile**/**Test** explain that there is nothing to build
+with until a Python interpreter is found on the path. The modules an addon
+imports are no longer such a reason: a build made by the current workflow
+carries a plain copy of them, and one that does not is pointed at the addon
+store, which fetches them.
 
 The table on top is the runtime's own list - id, name, version, whether the
 addon is imported or running as a process (with its pid), whether it loaded or
@@ -798,10 +810,15 @@ Linux, or the whole folder of a `--onedir` build at `addons/<id>/` with its
 program named `addon.bin`. `build_command` and `staged_name` take a `root=` for
 an addon that builds things of its own, which is how the addon store stages its
 work inside `addons/_data/addon_store/build` instead of in the dev tab's folder,
-and clears it as soon as the program is installed. PyInstaller is **not** needed
-to run the app - only to build an addon, and it has to be installed in the
-interpreter the source runs from (`python -m pip install pyinstaller`); the
-Compile pane says so, with the exact command, instead of failing.
+and clears it as soon as the program is installed. Every build is also given
+`--paths` for the folder holding `addon_common.py` and `addon_client.py`, since
+the launcher it compiles imports both - `build_command` takes a `paths=` for a
+caller that keeps its own copy, which is how the addon store builds with the two
+files it fetched when the program it runs inside has none on disk. PyInstaller
+is **not** needed to run the app - only to build an addon, and it has to be
+installed in the interpreter the source runs from
+(`python -m pip install pyinstaller`); the Compile pane says so, with the exact
+command, instead of failing.
 
 `addons/_build` and the programs a build leaves in `addons` are Git-ignored, the
 same way the config and data folders are: they belong to one machine. The test

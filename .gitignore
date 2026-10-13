@@ -28,3 +28,5 @@ utils/update util/addons/*/_internal/
 # The folder the CI build stages the shipped addons in before packing them
 # inside the executable.
 utils/update util/_addon_bundle/
+# And the plain copy of the modules an addon imports, packed the same way.
+utils/update util/_addon_harness/

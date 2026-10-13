@@ -327,12 +327,12 @@ class BerryManager(
         self.timeout_input.setRange(3, 300)
         self.timeout_input.setValue(int(self.app_config.get("ssh_timeout", 12)))
         self.timeout_input.setSuffix(" s")
-        self.connect_button = QPushButton("Connect (SFTP)")
+        self.connect_button = QPushButton("Connect")
         self.connect_button.setObjectName("primaryAction")
         self.connect_button.clicked.connect(self.connect_remote)
-        self.disconnect_button = QPushButton("Disconnect (SFTP)")
+        self.disconnect_button = QPushButton("Disconnect")
         self.disconnect_button.setObjectName("dangerAction")
-        self.disconnect_button.setToolTip("Close the SFTP session and disable remote actions until you reconnect")
+        self.disconnect_button.setToolTip("Close the session and disable remote actions until you reconnect")
         self.disconnect_button.setEnabled(False)
         self.disconnect_button.clicked.connect(self.disconnect_remote)
 
@@ -1617,7 +1617,7 @@ class BerryManager(
         box = QMessageBox(self)
         box.setWindowTitle("About Berry")
         box.setText(
-            "<b>Berry Manager V1.5.2</b><br>"
+            "<b>Berry Manager V1.5.3</b><br>"
             "Manage Router & Interfaces.<br>"
             'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'

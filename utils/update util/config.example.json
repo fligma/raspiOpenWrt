@@ -45,7 +45,7 @@
       "luci_url": "http://192.168.12.1/",
       "web_tabs": [
         { "name": "Web", "ip": "", "port": 8989, "path": "/cgi-bin/index.py", "scheme": "http" },  
-        { "name": "LuCI", "ip": "", "port": 80, "path": "/", "scheme": "http" }
+        { "name": "LuCI", "ip": "", "port": 443, "path": "/", "scheme": "https" }
       ],
       "addons": {
         "berry": { "enabled": true, "settings": {} },

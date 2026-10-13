@@ -72,6 +72,13 @@ ADDONS_DIR = BASE_DIR / "addons"
 BUILTIN_ADDONS_DIR = RESOURCE_DIR / "addons"
 HAS_BUILTIN_ADDONS = IS_COMPILED and BUILTIN_ADDONS_DIR != ADDONS_DIR
 
+# The two modules an addon imports to reach the app. Compiling and testing an
+# addon run in a Python of their own, outside this program, and can only read
+# what lies on disk: a checkout has them in its own folder, and a build carries
+# a copy of them beside the addons it packs.
+HARNESS_FILES = ("addon_common.py", "addon_client.py")
+HARNESS_DIR = RESOURCE_DIR / "harness" if IS_COMPILED else BASE_DIR
+
 # Addons the source ships with, named so they stay known even
 # when run from outside the folder. In a ``.py`` run this is
 # only a fallback: everything in ``addons`` is bundled anyway

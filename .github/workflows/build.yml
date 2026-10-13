@@ -224,6 +224,30 @@ jobs:
         Write-Output "addons packed into the program:"
         Get-ChildItem -Path $stage -Recurse -Name
 
+    - name: Stage the modules an addon imports
+      shell: pwsh
+      working-directory: "utils/update util"
+      run: |
+        # Compiling and testing an addon run in a Python of their own, outside
+        # the archive, and read addon_client and addon_common off disk: a built
+        # program that kept them only inside itself could never build an addon
+        # that talks to it. So a plain copy travels with the build, and the
+        # program points at it as manager_const.HARNESS_DIR. The app's other
+        # modules go along for the same reason: a published addon test imports
+        # addon_api to build real widgets, and without it the test says nothing
+        # either way - the store notes that and compiles anyway.
+        $harness = "_addon_harness"
+        if (Test-Path $harness) { Remove-Item -Recurse -Force $harness }
+        New-Item -ItemType Directory -Force -Path $harness | Out-Null
+        foreach ($name in @("addon_common.py", "addon_client.py")) {
+          if (-not (Test-Path $name -PathType Leaf)) {
+            Write-Error "$name is not there to pack"; exit 1
+          }
+        }
+        Copy-Item -Path *.py -Destination $harness -Force
+        Write-Output "modules packed for a build and a test to read:"
+        Get-ChildItem -Path $harness -Recurse -Name
+
     - name: Build with PyInstaller (Windows)
       if: runner.os == 'Windows'
       working-directory: "utils/update util"
@@ -231,7 +255,7 @@ jobs:
       run: >
         pyinstaller --noconfirm --onefile --windowed --icon="assets\icon.png"
         --add-data="assets;assets" --add-data="config.example.json;."
-        --add-data="_addon_bundle;addons"
+        --add-data="_addon_bundle;addons" --add-data="_addon_harness;harness"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
         berry_manager.py
 
@@ -241,7 +265,7 @@ jobs:
       run: >
         pyinstaller --noconfirm --onefile --windowed --icon="assets/icon.png"
         --add-data="assets:assets" --add-data="config.example.json:."
-        --add-data="_addon_bundle:addons"
+        --add-data="_addon_bundle:addons" --add-data="_addon_harness:harness"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
         --hidden-import=secretstorage --hidden-import=jeepney
         berry_manager.py

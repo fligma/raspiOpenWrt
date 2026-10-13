@@ -5,8 +5,9 @@ The tab is switched from Settings like any other. In a source checkout an addon
 is a ``.py`` file there to be read, edited, tested and compiled. In a packaged
 program the same panels still list every addon, show its log lines and its
 processes, and open the sources that ship inside it - but a file that came with
-the build cannot be written back, and Compile and Test need the app's own
-modules on disk, which a packaged program keeps inside itself. Both say so
+the build cannot be written back. Building and testing an addon run in a Python
+of their own and import the app's protocol modules from disk, which is why a
+build carries a plain copy of them; a program built without that copy says so
 rather than start something that cannot finish.
 
 Five things live here:
@@ -100,6 +101,8 @@ from manager_const import (
     ADDON_TEST_DIR,
     ADDONS_DIR,
     BASE_DIR,
+    HARNESS_DIR,
+    HARNESS_FILES,
     ICON_FILES,
     IS_COMPILED,
     LOG_FILE,
@@ -729,13 +732,27 @@ def forget_interpreter() -> None:
     _READY.clear()
 
 
+def harness_dir() -> Path | None:
+    """Where the modules an addon imports lie on disk, or nothing.
+
+    ``addon_common`` and ``addon_client`` are what a launcher and a test script
+    import to reach the app. In a checkout they sit in the app's own folder; in
+    a built program they are inside the archive unless the build packed a plain
+    copy, and the Python that builds cannot read the archive.
+    """
+    return HARNESS_DIR if all((HARNESS_DIR / name).is_file()
+                              for name in HARNESS_FILES) else None
+
+
 def app_modules_ready() -> tuple[bool, str]:
     """Whether the app's modules lie on disk, where a build and a test look."""
-    if not IS_COMPILED or (BASE_DIR / "addon_client.py").is_file():
+    if harness_dir() is not None:
         return True, ""
-    return False, ("the packaged program keeps addon_client inside itself, so "
-                   "nothing outside it can build or test an addon. Run Berry "
-                   "Manager from a source checkout to compile or test")
+    return False, ("this program has no copy of the modules an addon imports "
+                   "(addon_client, addon_common) where a build and a test can "
+                   "read them. Run Berry Manager from a source checkout, use a "
+                   "build that packed them, or install the addon from the "
+                   "addon store, which fetches them")
 
 
 def _has_pyinstaller_here() -> bool:
@@ -817,8 +834,14 @@ def staged_name(addon_id: str, onefile: bool,
 
 def build_command(launcher: Path, addon_id: str, options: dict,
                   source: Path | None = None,
-                  root: Path | None = None) -> list[str]:
-    """The PyInstaller line for a build staged inside ``<root>/<id>``."""
+                  root: Path | None = None,
+                  paths: list | tuple = ()) -> list[str]:
+    """The PyInstaller line for a build staged inside ``<root>/<id>``.
+
+    ``paths`` adds folders holding the modules the launcher imports, for a
+    caller that keeps its own copy of them: the store fetches the app's two
+    when the program it runs inside has none on disk.
+    """
     work = build_root(root) / addon_id
     where, _why = build_interpreter()
     command = [
@@ -836,9 +859,13 @@ def build_command(launcher: Path, addon_id: str, options: dict,
         command += ["--icon", str(icon)]
     for local, dest in (options.get("add_data") or ()):      # files packed into the build
         command += ["--add-data", os.pathsep.join([str(local), str(dest)])]
-    folders = [BASE_DIR]
+    folders, seen = [], set()
+    for folder in [harness_dir() or BASE_DIR, *paths,
+                   *([source.parent] if source is not None else [])]:
+        if str(folder) not in seen:
+            seen.add(str(folder))
+            folders.append(Path(folder))
     if source is not None:
-        folders.append(source.parent)
         command += ["--hidden-import", module_name(source)]
     for folder in folders:
         command += ["--paths", str(folder)]

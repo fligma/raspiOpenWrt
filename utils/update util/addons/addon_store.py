@@ -27,7 +27,20 @@ where its row appears as soon as the app has rescanned the folder.
 Before the compile, when the store ships a ``test_<id>.py`` for the addon, it is
 fetched too and run against the freshly downloaded ``.py``: a test that does not
 pass stops the install there, so a broken addon is never built. An addon with no
-test published is compiled as it is.
+test published is compiled as it is, and so is one whose test cannot start on
+this machine - a run that never got past importing Qt, or the app's own modules,
+says nothing about the addon, and only what the addon itself failed is held
+against it.
+
+Both the test and the program built from an addon import two of the app's own
+modules, and a program that came out of PyInstaller keeps them inside itself,
+where the Python doing the building cannot read them. So the store finds them on
+disk - in the app's folder in a checkout, in the copy a build packs beside the
+addons - and, when neither is there, fetches those two files from the same
+repository and ref as the addon. Without them nothing could be built: a program
+that cannot talk to the app is not an addon. A fetched pair is only what a build
+needs, not what a test needs, so when a test stops on one of the app's other
+modules the rest of them are fetched too and the test is run again.
 
 Deleting one takes that compiled program (or folder) back out of ``addons/`` and
 rescans, leaving the addon's own ``_data`` settings where they are.
@@ -83,6 +96,26 @@ entries: list[dict] = []    # the catalog read last time
 
 #: A module name PyInstaller can import: anything else becomes an underscore.
 _SAFE = re.compile(r"[^A-Za-z0-9_]")
+
+#: What an addon's launcher, and a published test, import from the app.
+HARNESS_FILES = ("addon_common.py", "addon_client.py")
+
+#: The app's other modules, by the name a test imports them under. A published
+#: test reaches for the Qt half of them to build real widgets, and only a
+#: checkout, or a build that packed its source, can answer for these.
+_APP = ("addon_api", "berry_manager", "manager_addondev", "manager_addons",
+        "manager_browser", "manager_config", "manager_const", "manager_files",
+        "manager_gui", "manager_net", "manager_term", "manager_terminal",
+        "manager_widgets")
+
+#: A test that cannot import one of these got nowhere, and that is this
+#: machine's doing rather than the addon's: the harness above, the app's own
+#: modules beside it, and what those need in turn.
+_MACHINE = ("addon_client", "addon_common", "PyQt6", "paramiko", "keyring",
+            "secretstorage", "jeepney")
+
+#: How a Python says an import failed, out of a traceback's last line.
+_MISSING = re.compile(r"No module named ['\"]([^'\"]+)['\"]")
 
 # --- what can be configured, and what it starts out as ---
 
@@ -313,14 +346,32 @@ def _drop_http() -> None:
     _fetchers.clear()
 
 
-def raw_address(values: dict, filename: str) -> str:
-    """The raw.githubusercontent path for one file in the store folder."""
+def app_folder(values: dict) -> str:
+    """The folder the app's own modules are in: the store folder's parent.
+
+    ``store_path`` points at the folder of addons; the files an addon imports
+    sit one level above it, and a store folder at the repository's own root
+    leaves nothing above it to name.
+    """
+    folder = one_line(config_get(values, "store_path",
+                                 DEFAULTS["store_path"])).strip("/")
+    return folder.rsplit("/", 1)[0] if "/" in folder else ""
+
+
+def raw_address(values: dict, filename: str, folder: str | None = None) -> str:
+    """The raw.githubusercontent path for one file, in the store folder or another.
+
+    ``folder`` stands in for the configured store folder when the file is not in
+    it, which is how the two modules an addon's test and its program import are
+    reached above the store.
+    """
     owner = quote(safe_segment(config_get(values, "owner", DEFAULTS["owner"])))
     repo = quote(safe_segment(config_get(values, "repo", DEFAULTS["repo"])))
     ref = quote(one_line(config_get(values, "ref", "main")).strip("/"), safe="-./_")
-    folder = safe_segment(config_get(values, "store_path",
-                                     DEFAULTS["store_path"])).strip("/")
-    whole = "/".join(part for part in (folder, safe_segment(filename)) if part)
+    where = (one_line(folder) if folder is not None else
+             config_get(values, "store_path", DEFAULTS["store_path"]))
+    whole = "/".join(part for part in (safe_segment(where).strip("/"),
+                                       safe_segment(filename)) if part)
     return f"/{owner}/{repo}/{ref}/{quote(whole)}"
 
 
@@ -422,6 +473,73 @@ def work_dir() -> Path:
     folder = Path(api.paths.data) / "build"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def harness_folder(values: dict) -> Path | None:
+    """A folder holding the modules an addon imports, or nothing.
+
+    ``addon_common`` and ``addon_client`` are what the launcher written for a
+    compiled addon, and every published test, import in order to reach the app.
+    In a source checkout they lie in the app's own folder, and a build made by
+    the current workflow carries a copy inside it. A program built before that
+    keeps them only in its archive, where the Python doing the building cannot
+    read them, so for that one case the two files are fetched from the same
+    repository and ref as the addon, into the staging folder they are cleared
+    from afterwards.
+    """
+    try:
+        ready = _dev().harness_dir()
+    except Exception as error:                 # a dev module that will not import
+        note(f"the app's own modules could not be looked for: {error}")
+        ready = None
+    if ready is not None:
+        return Path(ready)
+    folder = staging() / "harness"
+    for name in HARNESS_FILES:
+        why = _fetch_file(values, name, folder / name, app_folder(values))
+        if why:
+            note(f"the modules an addon imports could not be fetched "
+                 f"({name}): {why}")
+            return None
+    return folder
+
+
+def _harness_was_fetched() -> bool:
+    """Whether the harness in hand came out of the download folder.
+
+    That is the one case where it holds only the two files an addon needs for a
+    build, because they were fetched: a harness found on disk is the app's own
+    folder and already holds everything a test could import.
+    """
+    if job is None or job.get("harness") is None:
+        return False
+    try:
+        return Path(str(job["harness"])).is_relative_to(staging())
+    except (OSError, ValueError):
+        return False
+
+
+def _widen_harness(values: dict) -> bool:
+    """Fetch the app's other modules into a fetched harness; whether any arrived.
+
+    A published test imports the app's Qt half to build real widgets, and the two
+    files an addon needs to talk to the app are only its Qt-free half. What the
+    repository does not have is said and left out: a harness of one file more is
+    still worth running the test over.
+    """
+    if job is None or job.get("harness") is None:
+        return False
+    folder = Path(str(job["harness"]))
+    got = False
+    for name in _APP:
+        target = folder / f"{name}.py"
+        if target.is_file():
+            continue
+        if _fetch_file(values, target.name, target, app_folder(values)):
+            note(f"{target.name} was not there to fetch")
+        else:
+            got = True
+    return got
 
 
 def _reset_staging() -> None:
@@ -531,7 +649,7 @@ def _begin(verb: str) -> dict:
     values = merge_config(DEFAULTS, api.config.stored())
     working = True
     job = {"verb": verb, "values": values, "stream": None, "on_ok": None,
-           "fail": ""}
+           "fail": "", "lines": [], "harness": None, "widened": False}
     _buttons(False)
     try:
         api.tabs.set_widget(TAB, "log", "value", "")
@@ -568,6 +686,7 @@ def _stream(command: list[str], cwd: Path | None, on_ok: Any,
         job["on_ok"] = on_ok
         job["fail"] = fail
         job["on_bad"] = on_bad
+        job["lines"] = []
     _poll_stream()
 
 
@@ -581,6 +700,9 @@ def _poll_stream() -> None:
     for line in stream.drain(400):
         if line is not None:
             note(line)
+            job.setdefault("lines", []).append(line)
+    if len(job.get("lines") or ()) > 120:
+        del job["lines"][:-120]        # a step only ever reads back its own tail
     if not stream.finished:
         if api is None:
             return
@@ -619,9 +741,10 @@ def _ensure_python() -> str:
     return str(where)
 
 
-def _fetch_file(values: dict, remote: str, target: Path) -> str:
+def _fetch_file(values: dict, remote: str, target: Path,
+                folder: str | None = None) -> str:
     """One store file down into ``target``; empty text on success, else why it stopped."""
-    path = raw_address(values, remote)
+    path = raw_address(values, remote, folder)
     try:
         status, body = _http(values).get("raw.githubusercontent.com", path)
     except (http.client.HTTPException, OSError) as error:
@@ -672,21 +795,29 @@ def _compile(id_value: str) -> None:
             _finish(f"the addon's test could not be fetched: {why}", bad=True)
             return
         test_path = staging() / test_name
+    job["harness"] = harness_folder(values)
     _maybe_test(id_value, source, test_path)
 
 
 def _maybe_test(id_value: str, source: Path, test_path: Path | None) -> None:
     """Run the addon's own test before spending a build on it; skip it when none.
 
-    The test is handed the downloaded ``.py`` through ``RASCONF_ADDON_SOURCE`` and
-    the app's modules through ``PYTHONPATH``, so it runs against the very copy
-    that is about to be compiled. A non-zero result ends the job; the compile
-    only happens when the test passes, or when there is no test to run.
+    The test is handed the downloaded ``.py`` through ``RASCONF_ADDON_SOURCE``
+    and the modules it imports through ``PYTHONPATH``, so it runs against the
+    very copy that is about to be compiled. A result the addon itself failed
+    ends the job; a run that never got as far as the addon is only said out loud,
+    because it proved nothing either way. The build goes ahead when there is no
+    test published, no way to run one, or a test that passed.
     """
     if job is None:
         return
     if test_path is None or not test_path.is_file():
         say("no test is published for this addon; compiling as it is")
+        _build(id_value, source)
+        return
+    harness = job.get("harness")
+    if harness is None:
+        say("the addon's test cannot be run here; compiling as it is")
         _build(id_value, source)
         return
     dev = _dev()
@@ -696,20 +827,91 @@ def _maybe_test(id_value: str, source: Path, test_path: Path | None) -> None:
         return
     env = dict(os.environ)
     had = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(dev.BASE_DIR) + (os.pathsep + had if had else "")
+    env["PYTHONPATH"] = str(harness) + (os.pathsep + had if had else "")
     env["RASCONF_ADDON_SOURCE"] = str(source)      # the copy just downloaded
     env["QT_QPA_PLATFORM"] = "offscreen"           # a test may build real widgets
     say(f"running {test_path.name} before compiling...")
-    _stream([str(where), str(test_path)], dev.BASE_DIR,
+    _stream([str(where), str(test_path)], Path(harness),
             lambda: _build(id_value, source), env=env,
-            fail="the addon's own test did not pass, so it was not compiled")
+            fail="the addon's own test did not pass, so it was not compiled",
+            on_bad=lambda: _test_said_nothing(id_value, source, test_path))
+
+
+def _test_said_nothing(id_value: str, source: Path,
+                       test_path: Path | None) -> None:
+    """Sort a test that stopped into the addon's fault and this machine's.
+
+    A published test imports the app's protocol and, for its widget checks, Qt,
+    and the machine's own Python is not obliged to have either. A run that died
+    on one of those imports never reached the addon, so it is no reason to refuse
+    an install. Anything else it stopped for is, and is ended on.
+
+    Dying on one of the app's own modules is worth one retry, because it may be
+    the harness that is short rather than the Python: when the modules were
+    fetched rather than found, the rest of the app is asked for and the test is
+    run again against a harness that can hold the whole thing up.
+    """
+    missing = _machine_missing()
+    if not missing:
+        _finish("the addon's own test did not pass, so it was not compiled",
+                bad=True)
+        return
+    if (missing in _APP and test_path is not None
+            and not job.get("widened") and _harness_was_fetched()):
+        note(f"the test wants {missing}, which a fetched harness does not hold: "
+             "asking for the app's other modules and running it again")
+        job["widened"] = True
+        say(f"fetching the app's other modules to run {test_path.name} properly...")
+        if _widen_harness(job.get("values") or {}):
+            _maybe_test(id_value, source, test_path)
+            return
+    note(f"the test could not start: this Python has no {missing}, so nothing "
+         "was proved about the addon either way")
+    say("the addon's test cannot be run here; compiling as it is")
+    _build(id_value, source)
+
+
+def _machine_missing() -> str:
+    """The module a run could not import, when its own tail says it was one of
+    the test's rather than the addon's; nothing when it says something else.
+
+    What counts as the test's own is the app and its dependencies: the names
+    above, and every module the harness folder holds - a checkout's answer is
+    the whole app, a fetched folder is only the two files an addon imports.
+    """
+    if job is None:
+        return ""
+    own = set(_MACHINE) | set(_APP)
+    harness = job.get("harness")
+    if harness is not None:
+        try:
+            own |= {path.stem for path in Path(harness).glob("*.py")}
+        except OSError as error:                  # a folder that cannot be read
+            note(f"the harness folder could not be listed: {error}")
+    for line in reversed(list(job.get("lines") or [])):
+        found = _MISSING.search(str(line))
+        if not found:
+            continue
+        name = found.group(1).split(".")[0]
+        return name if name in own else ""
+    return ""
 
 
 def _build(id_value: str, source: Path) -> None:
-    """Write a launcher and run PyInstaller over the staged source and its assets."""
+    """Write a launcher and run PyInstaller over the staged source and its assets.
+
+    The launcher imports the app's two modules, so the build is only worth
+    starting when they can be read from disk: the folder that holds them is put
+    on the search path with the addon's own.
+    """
     if job is None:
         return
     dev = _dev()
+    harness = job.get("harness")
+    if harness is None:
+        _finish("the modules an addon imports could not be reached, so a program "
+                "built here could not talk to the app", bad=True)
+        return
     root = work_dir()
     work = root / id_value
     try:
@@ -729,7 +931,8 @@ def _build(id_value: str, source: Path) -> None:
         icon_name = entry.get("icon") or ""
         icon = assets / icon_name if icon_name else None
         options["icon"] = str(icon) if (icon is not None and icon.is_file()) else True
-    command = dev.build_command(launcher, id_value, options, source, root=root)
+    command = dev.build_command(launcher, id_value, options, source, root=root,
+                                paths=[Path(harness)])
     say(f"compiling {id_value} with PyInstaller...")
     note("$ " + " ".join(command))
     _stream(command, work, lambda: _install_step(id_value))
