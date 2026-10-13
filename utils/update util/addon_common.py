@@ -43,7 +43,7 @@ class AddonError(RuntimeError):
     """Anything that stops an addon's work, already written in readable words."""
 
 
-def guard(callback: Callable, *arguments, reporter=None):
+def guard(callback: Callable, *arguments: Any, reporter: Callable[[str], Any] | None = None) -> Any:
     """Run addon code and keep its mistakes in the log instead of the app."""
     try:
         return callback(*arguments)
@@ -57,7 +57,7 @@ def guard(callback: Callable, *arguments, reporter=None):
     return None
 
 
-def jsonable(value):
+def jsonable(value: Any) -> Any:
     """Reduce an API result to what can cross a process boundary as JSON."""
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -70,17 +70,10 @@ def jsonable(value):
     return str(value)
 
 
-# ---------------------------------------------------------------------------
-# What an addon said about itself
-# ---------------------------------------------------------------------------
+# --- what an addon said about itself ---
 
-def manifest_from(module) -> dict:
-    """The manifest of a Python addon module.
-
-    Either one ``ADDON`` (or ``MANIFEST``) dict, or the loose ``NAME``,
-    ``VERSION``, ``AUTHOR`` and ``DESCRIPTION`` constants, with the first line
-    of the module docstring as the description when nothing else gave one.
-    """
+def manifest_from(module: Any) -> dict:
+    """The manifest of a Python addon module: one ADDON/MANIFEST dict, or the loose NAME/VERSION/AUTHOR/DESCRIPTION constants."""
     declared = getattr(module, "ADDON", None) or getattr(module, "MANIFEST", None)
     if isinstance(declared, dict):
         manifest = dict(declared)
@@ -100,9 +93,7 @@ def manifest_from(module) -> dict:
     return manifest
 
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
+# --- paths ---
 
 _ID_CLEAN = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -113,11 +104,7 @@ def config_name(addon_id: str) -> str:
 
 
 def _from_environment(variable: str) -> Path | None:
-    """A folder or file the app told this process about, created on the way.
-
-    A name without a suffix is a folder and gets made, because a fresh checkout
-    has no data folders until somebody writes into one.
-    """
+    """A folder or file the app told this process about; a name without a suffix is made, since a fresh checkout has none."""
     raw = str(os.environ.get(variable, "")).strip()
     if not raw:
         return None
@@ -131,13 +118,7 @@ def _from_environment(variable: str) -> Path | None:
 
 
 def _app_or_sibling(attribute: str, tail: str) -> Path:
-    """The app's own layout, either through ``manager_const`` or beside this file.
-
-    ``attribute`` is the name of the folder in ``manager_const`` and ``tail`` the
-    same folder under a different roof: a compiled addon has no app to ask, but
-    it does sit next to the one that started it, so ``addons/<tail>`` means the
-    same thing there.
-    """
+    """The app's own layout through manager_const, or beside this file for a compiled addon with no app to ask."""
     try:
         import manager_const
     except ImportError:
@@ -148,11 +129,7 @@ def _app_or_sibling(attribute: str, tail: str) -> Path:
 
 
 def _top_or_sibling(attribute: str, tail: str) -> Path:
-    """A folder at the program's own root, through ``manager_const`` or beside it.
-
-    The ``_app_or_sibling`` shape, for the folders that live next to the program
-    rather than under ``addons`` - now only the manager's own ``config`` folder.
-    """
+    """A folder at the program's own root through manager_const, or beside it; the _app_or_sibling shape for folders not under addons."""
     try:
         import manager_const
     except ImportError:
@@ -163,12 +140,7 @@ def _top_or_sibling(attribute: str, tail: str) -> Path:
 
 
 def app_config_dir() -> Path:
-    """The manager's own ``config`` folder, created on the way.
-
-    It holds the profile config, the command history and the log, and now the
-    one shared addon build record. Only the app reads or writes it, so it comes
-    straight from ``manager_const`` (or beside the program in a bare run).
-    """
+    """The manager's own config folder, created on the way; it holds the profile config, history, log and the shared build record."""
     path = Path(_from_environment("RASCONF_APP_CONFIG_DIR")
                 or _top_or_sibling("CONFIG_DIR", "config"))
     try:
@@ -179,23 +151,12 @@ def app_config_dir() -> Path:
 
 
 def addon_data_root() -> Path:
-    """``addons/_data``, the parent of every addon's own folder.
-
-    A plain path, not made here: the config writers create their parent on the
-    way, and the scanner skips a leading-underscore name so this is never
-    mistaken for an addon.
-    """
+    """addons/_data, the parent of every addon's own folder; a plain path, not made here."""
     return Path(_app_or_sibling("ADDON_DATA_DIR", "_data"))
 
 
 def addon_data_dir(addon_id: str) -> Path:
-    """The addon's own working folder, ``addons/_data/<id>``.
-
-    The app tells a running addon process where its folder is through
-    ``RASCONF_ADDON_DATA``; the app itself and a bare test resolve the same
-    place from ``manager_const`` (or beside the program). A plain path - made on
-    demand by ``write_config_json``, not here.
-    """
+    """The addon's own working folder, addons/_data/<id>; from RASCONF_ADDON_DATA, or resolved from manager_const."""
     raw = str(os.environ.get("RASCONF_ADDON_DATA", "")).strip()
     if raw:
         return Path(raw)
@@ -207,25 +168,13 @@ def addon_config_path(addon_id: str) -> Path:
     return addon_data_dir(addon_id) / "config.json"
 
 
-def addon_schema_path(addon_id: str):
-    """The side copy of an addon's field descriptions.
-
-    Kept beside the config in the addon's own folder so Settings can still show
-    the tidy form for an addon that is switched off, and so the file the user
-    edits stays free of noise.
-    """
+def addon_schema_path(addon_id: str) -> Path:
+    """The side copy of an addon's field descriptions, kept beside the config so Settings can show the form for a switched-off addon."""
     return addon_data_dir(addon_id) / "fields.json"
 
 
 def addon_build_path() -> Path:
-    """``config/_build.json``: what the Addon Dev tab recorded.
-
-    One file for every addon, keyed by id: which copy of an addon to run when
-    both a ``.py`` and a compiled program of that name are in the folder, where
-    the last build went and when it was made. The runtime reads it, the Dev tab
-    writes it, and nothing an addon does ever touches it - so it lives in the
-    manager's own ``config`` folder rather than beside the addons.
-    """
+    """config/_build.json: what the Addon Dev tab recorded, one file for every addon keyed by id; only the manager touches it."""
     return app_config_dir() / "_build.json"
 
 
@@ -252,9 +201,7 @@ def write_build_mark(addon_id: str, values: dict) -> dict:
     return record
 
 
-# ---------------------------------------------------------------------------
-# Reading and writing one config dict
-# ---------------------------------------------------------------------------
+# --- reading and writing one config dict ---
 
 def read_config_json(path: Path) -> dict:
     """A config file as a dict; missing or broken reads as empty."""
@@ -276,11 +223,7 @@ def write_config_json(path: Path, values: dict) -> None:
 
 
 def merge_config(defaults: dict | None, stored: dict | None) -> dict:
-    """The values an addon sees: what the user wrote, filled in with defaults.
-
-    Nested dicts - a subject, a set of options - are merged key by key, so a
-    fresh option added by an updated addon shows up without hiding the rest.
-    """
+    """The values an addon sees: what the user wrote filled in with defaults; nested dicts merge key by key."""
     merged = dict(defaults or {})
     for key, value in (stored or {}).items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -290,7 +233,7 @@ def merge_config(defaults: dict | None, stored: dict | None) -> dict:
     return merged
 
 
-def config_get(values: dict, key: str, default=None) -> Any:
+def config_get(values: dict, key: str, default: Any = None) -> Any:
     """Read ``"subject.CN"`` out of a nested config dict."""
     node = values
     for part in str(key).split("."):
@@ -300,7 +243,7 @@ def config_get(values: dict, key: str, default=None) -> Any:
     return node
 
 
-def put_config_value(store: dict, key: str, value) -> None:
+def put_config_value(store: dict, key: str, value: Any) -> None:
     """``"subject.CN"`` writes into the ``subject`` section, creating it."""
     parts = [part for part in str(key).split(".") if part]
     if not parts:
@@ -315,7 +258,7 @@ def put_config_value(store: dict, key: str, value) -> None:
     node[parts[-1]] = jsonable(value)
 
 
-def take_config_value(store: dict, key: str):
+def take_config_value(store: dict, key: str) -> Any:
     """Remove a dotted key from a config dict and say what went."""
     parts = [part for part in str(key).split(".") if part]
     node = store

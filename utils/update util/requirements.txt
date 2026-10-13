@@ -1,12 +1,14 @@
 paramiko>=3.4,<5
 PyQt6>=6.6,<7
-pathspec>=0.12,<1
 keyring>=24,<26
 PyQt6-WebEngine>=6.11,<7
 
-# Not needed to run the app: only the Addon Dev tab's Compile button uses it,
-# and it calls whatever ``pyinstaller`` is on PATH (or an import of it in this
-# interpreter). Install it in the venv that holds the source checkout.
+# Not needed to run the app: only the Addon Dev tab's Compile button and the
+# Berry addon store use it, and both call whatever ``pyinstaller`` is available
+# to a Python on PATH (or an import of it in this interpreter). The store
+# installs it itself with ``pip`` the first time it has to compile, so a user
+# does not have to. Install it in the venv that holds the source checkout to
+# skip that step.
 #     pip install pyinstaller
 # A compiled addon imports nothing here but addon_common, so it needs neither
 # PyQt6 nor paramiko to be present on the machine it runs on.

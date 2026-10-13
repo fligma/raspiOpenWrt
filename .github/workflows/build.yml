@@ -1,4 +1,4 @@
-name: Build rasconf Manager Executables
+name: Build Berry Manager Executables
 
 on:
   push:
@@ -6,7 +6,42 @@ on:
   workflow_dispatch:
 
 jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Regenerate the addon store catalog
+      working-directory: "utils/update util"
+      run: |
+        # index.json is the catalog the store reads off GitHub at runtime, so it
+        # has to be committed, not just built. Rebuild it from the addons sitting
+        # in addon.store (name, version, author, assets, new/updated marks) and
+        # push it back only when it actually moved. [skip ci] keeps this commit
+        # from re-triggering the very workflow that makes it.
+        python tools/gen_addon_store_index.py
+        git config user.name "github-actions[bot]"
+        git config user.email "4198681+github-actions[bot]@users.noreply.github.com"
+        if [ -n "$(git status --porcelain -- addon.store/index.json)" ]; then
+          git add addon.store/index.json
+          git commit -m "Update addon store catalog [skip ci]"
+          git push
+        else
+          echo "addon.store/index.json was already up to date"
+        fi
+
   build:
+    needs: catalog
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -40,18 +75,22 @@ jobs:
       shell: pwsh
       working-directory: "utils/update util"
       run: |
-        # Every addon's test lives in addons/_tests as test_<id>.py. Run them
-        # here, before anything is packaged: they drive the addon against a
-        # stubbed app offscreen, so no device and no window are involved.
-        # A failing test fails the build. The tests themselves never reach
-        # the executable - the staging step below skips _folders.
+        # Every addon's test lives beside it: the shipped addons in addons/_tests,
+        # the store's in addon.store/_tests, each as test_<id>.py. Run them here,
+        # before anything is packaged: they drive the addon against a stubbed app
+        # offscreen, so no device and no window are involved. A failing test fails
+        # the build. The tests themselves never reach the executable - the staging
+        # step below skips _folders.
         $failed = $false
-        foreach ($test in (Get-ChildItem -Path addons/_tests -Filter test_*.py -File)) {
-          Write-Output "=== $($test.Name)"
-          python $test.FullName
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "FAILED: $($test.Name) (exit $LASTEXITCODE)"
-            $failed = $true
+        foreach ($folder in @("addons/_tests", "addon.store/_tests")) {
+          if (-not (Test-Path $folder -PathType Container)) { continue }
+          foreach ($test in (Get-ChildItem -Path $folder -Filter test_*.py -File)) {
+            Write-Output "=== $($test.Name)"
+            python $test.FullName
+            if ($LASTEXITCODE -ne 0) {
+              Write-Output "FAILED: $($test.Name) (exit $LASTEXITCODE)"
+              $failed = $true
+            }
           }
         }
         if ($failed) { exit 1 }
@@ -123,7 +162,7 @@ jobs:
         --add-data="assets;assets" --add-data="config.example.json;."
         --add-data="_addon_bundle;addons"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
-        rasconf_manager.py
+        berry_manager.py
 
     - name: Build with PyInstaller (Linux)
       if: runner.os == 'Linux'
@@ -134,7 +173,7 @@ jobs:
         --add-data="_addon_bundle:addons"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
         --hidden-import=secretstorage --hidden-import=jeepney
-        rasconf_manager.py
+        berry_manager.py
 
     - name: Ship the drop-in addons folder
       shell: pwsh
@@ -161,9 +200,9 @@ jobs:
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: rasconf_manager-${{ runner.os }}
+        name: berry_manager-${{ runner.os }}
         path: |
-          utils/update util/dist/rasconf_manager.exe
-          utils/update util/dist/rasconf_manager
+          utils/update util/dist/berry_manager.exe
+          utils/update util/dist/berry_manager
           utils/update util/dist/addons/
         retention-days: 7

@@ -20,26 +20,41 @@ from PyQt6.QtWidgets import (
 )
 
 from manager_config import save_command_history
-from manager_widgets import StringListDialog
+from manager_widgets import StringListDialog, terminal_tab_icon
 from manager_net import RebootWaitWorker, RemoteExecWorker, SSHShellWorker
 from manager_term import TerminalScreen
 
 
 if TYPE_CHECKING:
-    from manager_gui import RasconfManager
+    from manager_gui import BerryManager
 
 
 class TerminalMixin:
     """The SSH terminal tab, mixed into the main window.
 
     Every method here runs on the main window; the attributes it uses are set up
-    by :class:`manager_gui.RasconfManager`, the class that mixes this in.
+    by :class:`manager_gui.BerryManager`, the class that mixes this in.
     """
 
     def build_ssh_tab(self) -> None:
         ssh_page = QWidget()
         ssh_layout = QVBoxLayout(ssh_page)
         terminal_actions = QHBoxLayout()
+        # The SSH connect/disconnect pair lives here rather than in the
+        # connection panel: the tab that shows the shell is the place to open
+        # and close it.
+        self.shell_connect_button = QPushButton("Connect (SSH)")
+        self.shell_connect_button.setObjectName("primaryAction")
+        self.shell_connect_button.setToolTip(
+            "Open the interactive shell with the profile's credentials "
+            "(Settings > Connection)"
+        )
+        self.shell_connect_button.clicked.connect(self.connect_shell)
+        self.shell_disconnect_button = QPushButton("Disconnect (SSH)")
+        self.shell_disconnect_button.setObjectName("dangerAction")
+        self.shell_disconnect_button.setToolTip("Close the SSH terminal session")
+        self.shell_disconnect_button.setEnabled(False)
+        self.shell_disconnect_button.clicked.connect(self.disconnect_shell)
         clear_button = QPushButton("Clear")
         clear_button.clicked.connect(self.clear_terminal)
         self.reboot_button = QPushButton("Reboot device")
@@ -54,6 +69,8 @@ class TerminalMixin:
         self.reboot_cancel_button.setToolTip("Stop waiting for the device to come back")
         self.reboot_cancel_button.setEnabled(False)
         self.reboot_cancel_button.clicked.connect(self.cancel_reboot_watch)
+        terminal_actions.addWidget(self.shell_connect_button)
+        terminal_actions.addWidget(self.shell_disconnect_button)
         terminal_actions.addWidget(clear_button)
         terminal_actions.addWidget(self.reboot_button)
         terminal_actions.addWidget(self.reboot_cancel_button)
@@ -79,7 +96,10 @@ class TerminalMixin:
             lambda title: self.tabs.setTabToolTip(self.tabs.indexOf(self.ssh_page), title) if title else None
         )
         ssh_layout.addWidget(self.terminal, 1)
-        self.tabs.addTab(ssh_page, "SSH")
+        index = self.tabs.addTab(ssh_page, "SSH")
+        # The terminal names itself with its own picture, straight from the
+        # assets folder (see manager_widgets.terminal_tab_icon).
+        self.tabs.setTabIcon(index, terminal_tab_icon())
         self.ssh_page = ssh_page
 
     def rebuild_quick_bar(self) -> None:
@@ -147,6 +167,10 @@ class TerminalMixin:
         self.terminal.clear()
 
     def connect_shell(self, _checked: bool = False) -> None:
+        if not self.connections_enabled():
+            self.terminal.write_local(
+                "Connections are switched off (Settings > Connection).\n")
+            return
         if self.shell_worker is not None and self.shell_worker.isRunning():
             return
         settings = self.current_settings()
@@ -213,9 +237,7 @@ class TerminalMixin:
         if self.shell_worker is not None:
             self.shell_worker.stop()
 
-    # ------------------------------------------------------------------
-    # Reboot watch - wait out a reboot, then retry until the device answers
-    # ------------------------------------------------------------------
+    # --- reboot watch ---
 
     REBOOT_COMMAND_PATTERN = re.compile(r"^(?:sudo\s+)?(?:busybox\s+)?(?:reboot|shutdown\s+-r)\b")
 

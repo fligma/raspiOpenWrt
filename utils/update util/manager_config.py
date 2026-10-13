@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""Reading, migrating and writing config.json plus the saved command history.
+"""Reading, migrating and writing the profile files plus the saved history.
 
 Everything the manager writes to its own root lives in the ``config`` folder
-(see ``manager_const.CONFIG_DIR``): the profile config, the command history,
+(see ``manager_const.CONFIG_DIR``): the profile files, the command history,
 the activity log and the shared addon build record. The folder is created on
 the way up, and a loose file left beside the program from an older layout is
 moved into it, so an existing installation keeps its settings.
 
-config.json v2 stores one record per profile and every record holds the
-complete set of settings (connection details, tabs, backups, terminal...).
-The app always works from the profile named by ``active_profile``; the old
-flat layout, where the active profile's values were mirrored to top-level
-keys, is folded into that shape on first load, so upgrading a file keeps
-every user value.
+Layout v3: every profile lives in its own ``{profile}.json`` holding the
+complete set of settings (connection details, tabs, backups, terminal...),
+and ``config.json`` keeps only the index - the profile order, each profile's
+file and which one is active. The app always works from the profile named by
+the index. Older files - the flat layout, or v2 where every profile lived in
+one config.json - are folded into this shape on first load and written back
+once, so upgrading an installation keeps every user value.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from manager_const import (
@@ -37,24 +39,27 @@ from manager_const import (
     UI_ZOOM_MIN,
 )
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
-# Keys that describe the file layout, never the settings of a profile.
+# Layout keys, never a profile's settings.
 _STRUCTURAL_KEYS = ("config_version", "profiles", "active_profile")
 
-# In-memory store built at load/import time: every full profile plus the
-# name of the active one. The GUI works on a plain copy of the active
-# profile and writes it back through save_app_config_static().
-_STORE: dict = {"active": "", "profiles": []}
+# Chars a profile name can't put in a filename, plus the
+# Windows device names that still collide - both go to _.
+_FILE_BAD = set('<>:"/\\|?*') | {chr(code) for code in range(32)}
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
+                   *(f"COM{n}" for n in range(1, 10)),
+                   *(f"LPT{n}" for n in range(1, 10))}
+
+# Store at load: full profiles, active name, and files.
+# GUI edits a copy, writes back via save_app_config_static().
+_STORE: dict = {"active": "", "profiles": [], "files": {}}
 
 
-# ---------------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------------
+# --- small helpers ---
 
-def _coerce_int(value, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
-    """Turn anything read from JSON into an int inside [minimum, maximum].
-    """
+def _coerce_int(value: Any, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    """Turn anything read from JSON into an int inside [minimum, maximum]."""
     try:
         result = int(value)
     except (TypeError, ValueError):
@@ -66,68 +71,57 @@ def _coerce_int(value, default: int, minimum: int | None = None, maximum: int | 
     return result
 
 
-def _deep_copy(value):
+def _deep_copy(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
 
-# ---------------------------------------------------------------------------
-# Value normalisation - run on every full profile so the UI can trust it
-# ---------------------------------------------------------------------------
+# --- value normalisation (the UI can trust it) ---
 
 def _normalize_values(config: dict) -> dict:
     """Type-check and clamp every settings key of one complete config."""
-    # A config that predates the tab list keeps its old addresses by rebuilding
-    # web_tabs from the legacy web_port/web_path/luci_url keys.
+    # Pre-tab-list config keeps old addresses: rebuild web_tabs
+    # from legacy web_port/web_path/luci_url.
     if not isinstance(config.get("web_tabs"), list):
         config = _migrate_web_tabs(config)
     config = _normalize_web_tabs(config)
     config = _normalize_addons(config)
 
-    # A source path from another machine is useless - fall back to the repo,
-    # then to the home directory, so the local tree is never empty by accident.
+    # A source path from another machine is useless; fall back to
+    # the repo, then home, so the local tree is never empty.
     if not config.get("source") or not Path(str(config["source"])).is_dir():
         if DEFAULT_SOURCE.is_dir():
             config["source"] = str(DEFAULT_SOURCE)
         else:
             config["source"] = str(Path.home())
 
-    # Clamp the numeric settings and coerce the free-text ones to str.
+    # Clamp numbers, coerce free-text to str.
     config["ssh_timeout"] = _coerce_int(config.get("ssh_timeout"), 12, 3, 300)
     config["terminal_font_size"] = _coerce_int(config.get("terminal_font_size"), 10, 6, 24)
-    # The interface zoom is kept as a sane percentage; the rungs it may sit on
-    # are the window's business (see manager_const.step_zoom).
+    # Zoom is a sane percentage; the rungs are the window's
+    # business (see manager_const.step_zoom).
     config["ui_zoom"] = _coerce_int(config.get("ui_zoom"), UI_ZOOM_DEFAULT, UI_ZOOM_MIN, UI_ZOOM_MAX)
     config["max_log_lines"] = _coerce_int(config.get("max_log_lines"), 500, 50, 10000)
     config["terminal_history_limit"] = _coerce_int(config.get("terminal_history_limit"), 500, 20, 5000)
     config["web_port"] = _coerce_int(config.get("web_port"), 8989, 1, 65535)
-    config["keep_last_n_backups"] = _coerce_int(config.get("keep_last_n_backups"), 5, 0, 100)
     config["reboot_wait_seconds"] = _coerce_int(config.get("reboot_wait_seconds"), 30, 0, 600)
     config["reboot_retry_interval"] = _coerce_int(config.get("reboot_retry_interval"), 10, 1, 300)
     config["port"] = _coerce_int(config.get("port"), DEFAULT_PROFILE["port"], 1, 65535)
-    config["default_tab"] = str(config.get("default_tab", "SFTP"))
+    config["default_tab"] = str(config.get("default_tab", "Berry"))
     config["host"] = str(config.get("host", DEFAULT_PROFILE["host"]))
     config["username"] = str(config.get("username", DEFAULT_PROFILE["username"]))
     config["key_file"] = str(config.get("key_file", ""))
     config["remote_root"] = str(config.get("remote_root", DEFAULT_PROFILE["remote_root"]))
     config["source"] = str(config.get("source", DEFAULT_PROFILE["source"]))
-    config["backup_directory"] = str(config.get("backup_directory", "/tmp/rasconf_backups"))
-    config["local_backup_directory"] = str(config.get("local_backup_directory", str(BASE_DIR / "backups")))
     config["luci_url"] = str(config.get("luci_url", "http://192.168.1.1/"))
     config["web_path"] = str(config.get("web_path", "/cgi-bin/index.py"))
 
-    # List-valued settings must stay lists of strings.
-    for key in ("deploy_ignore", "post_deploy_commands"):
-        value = config.get(key)
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            config[key] = []
-
-    # The saved tab order is a list of tab titles; anything else is dropped so
-    # the app falls back to its built-in arrangement.
+    # Tab order is a list of titles; else dropped so the app
+    # falls back to its built-in arrangement.
     order = config.get("tab_order")
     if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
         config["tab_order"] = []
 
-    # Quick commands are {label, command} pairs; anything without a command is dropped.
+    # Quick commands are {label, command} pairs; else dropped.
     quick = config.get("quick_commands")
     if not isinstance(quick, list):
         quick = []
@@ -137,9 +131,9 @@ def _normalize_values(config: dict) -> dict:
             sanitized_quick.append({"label": str(entry.get("label", entry["command"])), "command": str(entry["command"])})
     config["quick_commands"] = sanitized_quick
 
-    # The single auto-connect switch became per-protocol ones. The old behavior
-    # connected over SFTP first and only fell back to SSH when SFTP was off, so
-    # seed accordingly before the legacy key is dropped.
+    # One auto-connect switch became per-protocol ones. The old
+    # behavior tried SFTP first, SSH only if SFTP was off; seed
+    # that way before dropping the legacy key.
     legacy_auto = config.get("auto_connect")
     if legacy_auto is not None and "auto_connect_sftp" not in config and "auto_connect_ssh" not in config:
         if config.get("sftp_enabled", True):
@@ -150,6 +144,7 @@ def _normalize_values(config: dict) -> dict:
 
     for key in (
         "show_hidden_files",
+        "master_connection",
         "auto_connect_sftp",
         "auto_connect_ssh",
         "use_alt_icon",
@@ -164,17 +159,16 @@ def _normalize_values(config: dict) -> dict:
     ):
         config[key] = bool(config.get(key, DEFAULT_APP_CONFIG[key]))
 
-    # The old single "backup before deploy" switch became two independent ones;
-    # it seeds the remote backup flag and is then removed.
-    legacy_backup = config.get("backup_before_deploy")
-    config["remote_backup_enabled"] = bool(
-        config.get("remote_backup_enabled", legacy_backup if legacy_backup is not None else False)
-    )
-    config["local_backup_enabled"] = bool(config.get("local_backup_enabled", False))
-    config["mirror_delete_remote"] = bool(config.get("mirror_delete_remote", False))
-    config["mirror_delete_local"] = bool(config.get("mirror_delete_local", False))
     config["logging_enabled"] = bool(config.get("logging_enabled", True))
-    config.pop("backup_before_deploy", None)
+
+    # The deploy era wrote these; nothing reads them now, so old
+    # profile files are cleaned of them on load.
+    for key in ("deploy_ignore", "post_deploy_commands",
+                "backup_directory", "local_backup_directory", "keep_last_n_backups",
+                "remote_backup_enabled", "local_backup_enabled",
+                "mirror_delete_remote", "mirror_delete_local",
+                "backup_before_deploy", "confirm_destructive"):
+        config.pop(key, None)
 
     # Structural keys never belong inside a profile record.
     for key in _STRUCTURAL_KEYS:
@@ -182,14 +176,10 @@ def _normalize_values(config: dict) -> dict:
     return config
 
 
-# ---------------------------------------------------------------------------
-# Profile store: migration to the v2 shape and access to the active profile
-# ---------------------------------------------------------------------------
+# --- profile store: migration and active access ---
 
 def _complete_profile(raw: dict, base: dict) -> dict:
-    """Build one full profile: the shared base values, overridden by whatever
-    the record itself stores, then normalised. Never invents defaults over
-    existing user data."""
+    """Build one full profile: base values overridden by the record, then normalised; never defaults over user data."""
     prof = _deep_copy(base)
     prof.update({k: v for k, v in raw.items() if k not in _STRUCTURAL_KEYS})
     name = str(raw.get("name") or "").strip()
@@ -208,23 +198,40 @@ def _unique_name(name: str, taken: set[str]) -> str:
     return candidate
 
 
+def _profile_filename(name: str, taken: set[str]) -> str:
+    """The file one profile owns (``{profile}.json``), through Windows rules; a clash gets a counter."""
+    cleaned = "".join("_" if ch in _FILE_BAD else ch for ch in str(name).strip())
+    cleaned = cleaned.rstrip(" .")
+    if cleaned.upper() in _RESERVED_NAMES:
+        cleaned = "_" + cleaned
+    stem = cleaned or "Profile"
+    candidate = stem
+    counter = 1
+    # `taken` holds names with extension (callers track disk),
+    # so the clash check must compare the same shape.
+    while (candidate + ".json").lower() in taken:
+        counter += 1
+        candidate = f"{stem} {counter}"
+    return candidate + ".json"
+
+
 def _build_store(config: dict) -> None:
-    """Fold any supported file layout into the v2 store (full profiles)."""
+    """Fold any supported layout into the store (full profiles); v2 and flat here, v3 by ``_build_store_v3``."""
     raw_profiles = config.get("profiles")
     if not isinstance(raw_profiles, list):
         raw_profiles = []
 
-    if config.get("config_version") == CONFIG_VERSION:
+    if config.get("config_version") == 2:
         base = _normalize_values(_deep_copy(DEFAULT_APP_CONFIG))
         raw_list = raw_profiles
     else:
-        # Legacy flat layout: the top-level keys are the settings of the file
-        # (mirrored from the active profile). They become the shared starting
-        # point for every profile so no stored value is replaced by a default.
+        # Legacy flat layout: top-level keys are the file's settings
+        # (mirrored from active). They become the shared start for
+        # every profile so no stored value is replaced by a default.
         base = _deep_copy(DEFAULT_APP_CONFIG)
         base.update({k: v for k, v in config.items() if k not in _STRUCTURAL_KEYS})
-        # The retired single switches must be judged on the raw file, because
-        # the merged base already contains the newer keys they seed.
+        # Retired single switches must be judged on the raw file:
+        # the merged base already holds the newer keys they seed.
         legacy_auto = config.get("auto_connect")
         if legacy_auto is not None and "auto_connect_sftp" not in config and "auto_connect_ssh" not in config:
             if base.get("sftp_enabled", True):
@@ -232,10 +239,6 @@ def _build_store(config: dict) -> None:
             elif base.get("ssh_enabled", True):
                 base["auto_connect_ssh"] = bool(legacy_auto)
         base.pop("auto_connect", None)
-        legacy_backup = config.get("backup_before_deploy")
-        if legacy_backup is not None and "remote_backup_enabled" not in config:
-            base["remote_backup_enabled"] = bool(legacy_backup)
-        base.pop("backup_before_deploy", None)
         base = _normalize_values(base)
         raw_list = raw_profiles
 
@@ -250,9 +253,9 @@ def _build_store(config: dict) -> None:
         profiles.append(prof)
 
     if not profiles:
-        # Either a plain flat file with no profile list, or an unreadable one.
-        # Wrap the shared settings into a single default profile, keeping the
-        # legacy connection values instead of the shipped defaults.
+        # A flat file with no profile list, or an unreadable one:
+        # wrap the shared settings into one default profile, keeping
+        # the legacy connection values over the shipped defaults.
         first = _deep_copy(base)
         first["name"] = _unique_name(str(config.get("active_profile") or DEFAULT_PROFILE["name"]), taken)
         profiles = [first]
@@ -262,6 +265,50 @@ def _build_store(config: dict) -> None:
         active = profiles[0]["name"]
     _STORE["profiles"] = profiles
     _STORE["active"] = active
+    # Files are worked out on first write; this branch has none.
+    _STORE["files"] = {}
+
+
+def _build_store_v3(index: dict) -> bool:
+    """Read the v3 layout (index + one file per profile). False if not a usable index; a missing profile file is rebuilt from defaults."""
+    raw_entries = index.get("profiles")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        return False
+    base = _normalize_values(_deep_copy(DEFAULT_APP_CONFIG))
+    profiles: list[dict] = []
+    files: dict[str, str] = {}
+    taken_names: set[str] = set()
+    used_files: set[str] = {"config.json"}
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name or name in taken_names:
+            continue
+        fname = str(entry.get("file") or "").strip()
+        # Only a plain file name is trusted; a path in the index, or
+        # a clash with a profile already read, is re-derived.
+        if not fname or Path(fname).name != fname or fname.lower() in used_files:
+            fname = _profile_filename(name, used_files)
+        used_files.add(fname.lower())
+        try:
+            loaded = json.loads((CONFIG_DIR / fname).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = None
+        prof = _complete_profile(loaded if isinstance(loaded, dict) else {}, base)
+        prof["name"] = name
+        taken_names.add(name)
+        files[name] = fname
+        profiles.append(prof)
+    if not profiles:
+        return False
+    active = index.get("active_profile")
+    if active not in taken_names:
+        active = profiles[0]["name"]
+    _STORE["profiles"] = profiles
+    _STORE["active"] = active
+    _STORE["files"] = files
+    return True
 
 
 def _working_copy() -> dict:
@@ -289,8 +336,7 @@ def set_active_profile(name: str) -> dict:
 
 
 def create_profile(name: str, working: dict) -> dict:
-    """Clone the given settings into a new profile, activate it and return
-    the fresh working copy. The name is de-duplicated if needed."""
+    """Clone these settings into a new profile, activate it, and return the fresh working copy."""
     prof = _deep_copy(working)
     prof = _normalize_values(prof)
     taken = {p["name"] for p in _STORE["profiles"]}
@@ -322,8 +368,7 @@ def rename_profile(old: str, new: str) -> bool:
 
 
 def delete_profile(name: str) -> dict | None:
-    """Remove one profile; the first remaining one becomes active if needed.
-    Returns the new working copy, or None when nothing could be deleted."""
+    """Remove one profile; first remaining becomes active if needed. Returns the new copy or None."""
     if len(_STORE["profiles"]) <= 1 or not any(p["name"] == name for p in _STORE["profiles"]):
         return None
     _STORE["profiles"] = [p for p in _STORE["profiles"] if p["name"] != name]
@@ -333,17 +378,10 @@ def delete_profile(name: str) -> dict | None:
     return _working_copy()
 
 
-# ---------------------------------------------------------------------------
-# Web tabs: url building, migration from the legacy keys, and normalisation
-# ---------------------------------------------------------------------------
+# --- web tabs: url, migration, normalisation ---
 
 def web_tab_url(tab: dict, default_host: str) -> str:
-    """Build the URL for one configurable tab.
-
-    A blank ip means "follow the active profile host", so a tab can track the
-    device the user is connected to. The port is omitted when it already matches
-    the scheme default to keep the address tidy.
-    """
+    """URL for one tab. Blank ip follows the active host; the port is dropped when it matches the scheme default."""
     scheme = str(tab.get("scheme") or "http").lower()
     host = str(tab.get("ip") or "").strip() or (default_host or "127.0.0.1")
     port = _coerce_int(tab.get("port"), 80, 1, 65535)
@@ -390,12 +428,7 @@ def _normalize_web_tabs(config: dict) -> dict:
 
 
 def _migrate_web_tabs(config: dict) -> dict:
-    """Seed web_tabs from the legacy web_port/web_path/luci_url keys.
-
-    Only used when a config predates the tab list, so an existing setup
-    keeps its exact addresses: the Web Interface follows the profile host, while
-    LuCI keeps whatever host its stored URL pointed at.
-    """
+    """Seed web_tabs from legacy web_port/web_path/luci_url, used only for a pre-tab-list config so addresses are kept."""
     luci = urlparse(str(config.get("luci_url", "http://192.168.1.1/")))
     luci_host = luci.hostname or ""
     luci_port = luci.port or (443 if luci.scheme == "https" else 80)
@@ -419,17 +452,10 @@ def _migrate_web_tabs(config: dict) -> dict:
     return config
 
 
-# ---------------------------------------------------------------------------
-# Addons: which ones this profile runs, and the data they keep there
-# ---------------------------------------------------------------------------
+# --- addons: which run, and their data ---
 
 def _normalize_addons(config: dict) -> dict:
-    """Keep the addon section a plain id -> {enabled, settings} mapping.
-
-    Ids that no longer have a file in the addons folder are left alone: the
-    addon may have been renamed or put back later, and its stored settings are
-    the addon's business, not something to guess at here.
-    """
+    """Keep addons a plain id -> {enabled, own_connection, settings} map; unknown ids kept, each off and on the main connection by default."""
     raw = config.get("addons")
     if not isinstance(raw, dict):
         raw = {}
@@ -441,31 +467,26 @@ def _normalize_addons(config: dict) -> dict:
         record = value if isinstance(value, dict) else {}
         settings = record.get("settings")
         cleaned[addon_id] = {
-            "enabled": bool(record.get("enabled", True)),
+            "enabled": bool(record.get("enabled", False)),
+            "own_connection": bool(record.get("own_connection", False)),
             "settings": settings if isinstance(settings, dict) else {},
         }
     config["addons"] = cleaned
     return config
 
 
-# ---------------------------------------------------------------------------
-# Loading, saving and transporting the whole file
-# ---------------------------------------------------------------------------
+# --- load, save, transport ---
 
 def _prepare_config_dir() -> None:
-    """Make the config folder and move the loose files into it.
-
-    Older layouts wrote ``config.json``, ``command_history.json`` and the log
-    straight beside the program. The folder is created before anything reads
-    or writes those paths, and a loose file is moved in only when the new
-    location is still empty, so nothing is ever overwritten."""
+    """Make the config folder and move loose files in (only into empty slots), picking up the old log name too."""
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
     for old, new in ((BASE_DIR / "config.json", APP_CONFIG_FILE),
                      (BASE_DIR / "command_history.json", HISTORY_FILE),
-                     (BASE_DIR / "rasconf_manager.log", LOG_FILE)):
+                     (BASE_DIR / "rasconf_manager.log", LOG_FILE),
+                     (CONFIG_DIR / "rasconf_manager.log", LOG_FILE)):
         if old.is_file() and not new.exists():
             try:
                 old.replace(new)
@@ -474,15 +495,10 @@ def _prepare_config_dir() -> None:
 
 
 def load_app_config() -> dict:
-    """Load config.json (or the shipped example), build the profile store and
-    return the active profile's settings as a plain working dict.
-
-    The result always has the full set of keys with sane, type-checked values,
-    so the rest of the app can read the dict without defensive get() calls.
-    """
+    """Load config, build the store, return the active profile as a working dict; older layouts fold in and are written back once."""
     _prepare_config_dir()
     config: dict = {}
-    # A real config wins over the example; if neither parses we keep defaults.
+    # Real config beats the example; if neither parses, defaults.
     for config_path in (APP_CONFIG_FILE, APP_CONFIG_EXAMPLE_FILE):
         if not config_path.is_file():
             continue
@@ -494,41 +510,70 @@ def load_app_config() -> dict:
             config = loaded
             break
 
-    _build_store(config)
-
-    # First run: write what we worked out so the user has a file to edit.
-    if not APP_CONFIG_FILE.is_file():
+    if config.get("config_version") == CONFIG_VERSION and _build_store_v3(config):
+        pass                      # the files are already in the new layout
+    else:
+        _build_store(config)
+        # First run or older layout: write back once as the index
+        # plus one file per profile.
         persist_store()
 
     return _working_copy()
 
 
 def import_app_config(loaded: dict) -> dict:
-    """Replace the store from an imported document (any supported layout)
-    and return the new working copy. Nothing is written until the app saves."""
-    _build_store(loaded if isinstance(loaded, dict) else {})
+    """Replace the store from an imported document (any layout); nothing is written until save."""
+    loaded = loaded if isinstance(loaded, dict) else {}
+    if loaded.get("config_version") == CONFIG_VERSION and _build_store_v3(loaded):
+        return _working_copy()
+    _build_store(loaded)
     return _working_copy()
 
 
 def export_document() -> dict:
-    """The whole store as a JSON-safe document, for exporting."""
-    return _deep_copy(_document())
-
-
-def _document() -> dict:
+    """The whole store as one portable v2 document; a single exported file restores everything on import."""
     return {
-        "config_version": CONFIG_VERSION,
+        "config_version": 2,
         "active_profile": _STORE["active"],
-        "profiles": _STORE["profiles"],
+        "profiles": _deep_copy(_STORE["profiles"]),
     }
 
 
 def persist_store() -> None:
-    """Write config.json. Failures are ignored - a read-only folder must not
-    stop the app, the settings simply do not survive the session."""
+    """Write the store: index in config.json, one file per profile; failures ignored so a read-only folder can't stop the app."""
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        APP_CONFIG_FILE.write_text(json.dumps(_document(), indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return
+    entries = []
+    used_files: set[str] = {"config.json"}
+    for prof in _STORE["profiles"]:
+        name = prof["name"]
+        fname = _STORE["files"].get(name) or _profile_filename(name, used_files)
+        _STORE["files"][name] = fname
+        used_files.add(fname.lower())
+        try:
+            (CONFIG_DIR / fname).write_text(json.dumps(prof, indent=2) + "\n",
+                                            encoding="utf-8")
+        except OSError:
+            pass
+        entries.append({"name": name, "file": fname})
+    # A renamed or deleted profile leaves its file; sweep it.
+    # Only files this app wrote are tracked, so a hand-placed json
+    # is never touched.
+    for gone in [n for n in _STORE["files"]
+                 if n not in {p["name"] for p in _STORE["profiles"]}]:
+        stale = _STORE["files"].pop(gone)
+        try:
+            (CONFIG_DIR / stale).unlink(missing_ok=True)
+        except OSError:
+            pass
+    index = {"config_version": CONFIG_VERSION,
+             "active_profile": _STORE["active"],
+             "profiles": entries}
+    try:
+        APP_CONFIG_FILE.write_text(json.dumps(index, indent=2) + "\n",
+                                   encoding="utf-8")
     except OSError:
         pass
 
@@ -548,9 +593,7 @@ def save_app_config_static(config: dict) -> None:
     persist_store()
 
 
-# ---------------------------------------------------------------------------
-# Terminal command history (separate file, shared by all profiles)
-# ---------------------------------------------------------------------------
+# --- command history (separate file, shared) ---
 
 def load_command_history() -> list[str]:
     try:

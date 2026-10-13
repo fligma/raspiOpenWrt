@@ -20,7 +20,7 @@ The namespaces on ``api``
     Identity and the shared log. Log lines are prefixed with the addon name.
 
 ``api.session``
-    Everything the current rasconf Manager session knows:
+    Everything the current Berry Manager session knows:
     ``profile()`` (active profile, never the password), ``settings()``,
     ``status()`` (host/port/user/remote root plus which protocols are up),
     ``tabs()``, ``current_tab()``, ``version()``, ``app_stylesheet()`` (already
@@ -29,18 +29,23 @@ The namespaces on ``api``
 
 ``api.device``
     SSH and SFTP.
-    ``run(command, timeout=30)`` -> ``{"code", "out", "err"}`` (runs in the
-    background and waits; use ``run_async(command, on_done)`` from ``init``),
+    ``run(command, timeout=30, device=None)`` -> ``{"code", "out", "err"}`` (runs in
+    the background and waits; use ``run_async(command, on_done)`` from ``init``),
     ``shell_send(line)`` writes to the live terminal tab,
     ``ensure_connected("ssh"|"sftp")``, ``is_connected()``.
+    ``device`` on ``run``/``run_async``/``open`` is a one-off dict of connection
+    details (``host``, ``port``, ``username``, ``password``, ``key_file``,
+    ``remote_root``): the call reaches that machine instead of the profile,
+    for any addon that talks to several devices - one API call, so it stores
+    nothing and never moves the app's own session; addons shipped with the
+    program may use it too. ``bind()`` stays the drop-in-only door.
     Files: ``list()``, ``exists()``, ``stat()``, ``read_text()``,
     ``read_bytes()``, ``write_text()``, ``write_bytes()``, ``mkdir()``,
     ``remove()``, ``rename()``, ``upload()``, ``download()`` - each takes
-    ``outside_root=True`` to reach above the profile's deploy directory
+    ``outside_root=True`` to reach above the profile's remote folder
     (``/etc/ssl`` and the like); without it a path stays inside that folder.
     ``open()`` is a context manager yielding a live ``Connection`` with
     ``.client`` / ``.sftp`` (raw paramiko) for anything not covered above.
-    ``deploy(dry_run=False)`` runs the app's own deploy so the UI updates.
 
 ``api.tabs``
     ``add_web_tab(name, url=None, ip="", port=80, path="/", scheme="http")``
@@ -104,14 +109,18 @@ A JSON object describing one widget, recursively:
 
 ``{"kind": "column", "children": [...]}`` - containers: ``column``/``row``,
 ``grid``, ``form``, ``group`` (``text`` = title), ``scroll``, ``splitter``,
-``tabs`` (``text`` per child is the tab label).
+``tabs`` (one sub-page per child, the child's ``label`` its caption; move
+between the sub-pages with ``set_widget(tab, id, "current", n)`` and read the
+visible one back with ``widget_value(tab, id, "index")``).
 ``label``, ``button``, ``line``, ``multi`` (plain text edit), ``check``,
 ``combo``, ``list``, ``tree``, ``table``, ``progress``, ``spin``, ``slider``,
 ``spacer``, ``web`` - all take ``id``, ``text``, ``tooltip``, ``style``
 (a stylesheet, so an addon can style its own tab), ``enabled``, ``visible``,
 ``font_size`` (drawn at the interface zoom), ``items``, ``value``,
 ``placeholder``, ``checked``, ``minimum``,
-``maximum``, ``columns``, ``word_wrap``, ``readonly``, ``multi``.
+``maximum``, ``columns``, ``word_wrap``, ``readonly``, ``multi``, ``expand``
+(claim the width its row or column leaves over, so one status line can stretch
+while its neighbours keep the room their text needs).
 ``value`` sets whatever the kind holds: text, the chosen entry, the number, or
 the tick for a ``check``; ``widget_value`` reads it back the same way.
 A ``multi`` may name a ``highlight`` language (``python``, ``json``, ``html``,
@@ -120,6 +129,13 @@ A ``multi`` may name a ``highlight`` language (``python``, ``json``, ``html``,
 ``on`` lists the events sent back to the addon: ``clicked``, ``toggled``,
 ``changed``, ``returned``, ``selected`` and, for a ``table``/``tree``/``list``,
 ``context`` (a right-click, carrying the text of the row under the cursor).
+``rows`` on a ``table``/``tree`` takes a list of cell lists, or of dicts:
+``{"cells": [...], "color": "#rrggbb", "background": "...", "overlay": "..."}``
+- the colours ride along with the row, so one line can wear the colour of its
+own device, and an overlay (a search highlight) can wash over it without
+hiding it. A table paints its rows through its own delegate: the app sheet
+names ``::item`` colours, and a stylesheet colour would otherwise win over
+every per-item brush and drop all of this on the floor.
 """
 
 from __future__ import annotations
@@ -134,8 +150,27 @@ from urllib.parse import urlparse
 import stat as stat_module
 from typing import Any, Callable
 
-from PyQt6.QtCore import QEventLoop, Qt, QTimer, QUrl, QThread, QRegularExpression
-from PyQt6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
+from PyQt6.QtCore import (
+    QEventLoop,
+    QModelIndex,
+    Qt,
+    QTimer,
+    QUrl,
+    QThread,
+    QRegularExpression,
+)
+from PyQt6.QtGui import (
+    QBrush,
+    QColor,
+    QAction,
+    QFont,
+    QIcon,
+    QPainter,
+    QPen,
+    QPixmap,
+    QSyntaxHighlighter,
+    QTextCharFormat,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -147,6 +182,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QMenu,
@@ -156,9 +192,13 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSizePolicy,
     QSpinBox,
     QDoubleSpinBox,
     QSplitter,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -193,6 +233,7 @@ from manager_const import (
     zoom_size,
 )
 from manager_net import create_ssh_client, exec_remote, remote_join, safe_relative_path
+from manager_widgets import tab_caption
 
 try:  # the web kinds are inert when QtWebEngine is not installed
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -204,8 +245,8 @@ except ImportError:
 POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="addon")
 
 
-def _timeout(seconds, default: float = 30.0) -> float:
-    """Clamp an addon-supplied timeout to something sane."""
+def _timeout(seconds: Any, default: float = 30.0) -> float:
+    """Clamp an addon-supplied timeout."""
     try:
         value = float(seconds)
     except (TypeError, ValueError):
@@ -213,13 +254,8 @@ def _timeout(seconds, default: float = 30.0) -> float:
     return min(max(value, 1.0), 600.0)
 
 
-def _await(future: concurrent.futures.Future, timeout: float):
-    """Wait for a pooled task without freezing the interface.
-
-    On the GUI thread a private event loop runs while the task is in flight -
-    the same trick a modal dialog uses - so the window keeps painting. From any
-    other thread a plain blocking wait is right.
-    """
+def _await(future: concurrent.futures.Future, timeout: float) -> Any:
+    """Wait for a pooled task without freezing the interface; on the GUI thread a private event loop runs while the task is in flight."""
     if on_gui_thread():
         loop = QEventLoop()
         future.add_done_callback(lambda _future: loop.quit())
@@ -246,31 +282,83 @@ def on_gui_thread() -> bool:
     return app is not None and QThread.currentThread() is app.thread()
 
 
-# ---------------------------------------------------------------------------
-# Addon configuration files: addons/_data/<id>/config.json
-# ---------------------------------------------------------------------------
-# Read, write, merge and dotted-key helpers for those files live in
-# addon_common, together with the path of the file itself, so the same code
-# serves the app, a compiled addon and an addon's own test script. They are
-# imported at the top of this module and stay reachable as addon_api.*.
+# --- addon config files: the Qt-free helpers live in addon_common ---
 
-
-# ---------------------------------------------------------------------------
-# Declarative widgets
-# ---------------------------------------------------------------------------
+# --- declarative widgets ---
 
 _LAYPOUT_KINDS = {
     "column": QVBoxLayout, "vbox": QVBoxLayout, "row": QHBoxLayout, "hbox": QHBoxLayout,
 }
 
 
-def build_spec(spec: dict, registry: dict[str, QWidget] | None = None,
-               events: Callable[[str, str, dict], None] | None = None):
-    """Turn a spec dict into a QWidget, filling `registry` with id -> widget.
+#: Row shades for the table delegate, which paints rows by hand.
+_ROW_BASE = QColor("#212121")
+_ROW_ALT = QColor("#1a1a1a")
+_ROW_HOVER = QColor("#2c2c2c")
+_ROW_SELECTED = QColor("#6b1730")
+_ROW_TEXT = QColor("#e0e0e0")
+_ROW_TEXT_SELECTED = QColor("#ffffff")
 
-    `events(name, event, payload)` is wired to whatever the spec asked for with
-    ``on``, which is how a non-Qt addon learns that its button was pressed.
-    """
+#: Extra slot a row dict can carry: a search highlight over the background.
+ROW_OVERLAY_ROLE = Qt.ItemDataRole.UserRole + 11
+
+
+class _RowStyleDelegate(QStyledItemDelegate):
+    """Paint table rows by hand so an addon's own colours survive the app sheet."""
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem,
+              index: QModelIndex) -> None:
+        painter.save()
+        rect = option.rect
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        alternate = bool(
+            option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
+        base = (_ROW_SELECTED if selected else _ROW_HOVER if hover
+                else _ROW_ALT if alternate else _ROW_BASE)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for brush in (QBrush(base), index.data(Qt.ItemDataRole.BackgroundRole),
+                      index.data(ROW_OVERLAY_ROLE)):
+            if isinstance(brush, QBrush):
+                painter.setBrush(brush)
+                painter.drawRect(rect)
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        if text:
+            fore = index.data(Qt.ItemDataRole.ForegroundRole)
+            colour = (fore.color() if isinstance(fore, QBrush)
+                      else _ROW_TEXT_SELECTED if selected else _ROW_TEXT)
+            painter.setPen(colour)
+            painter.setFont(option.font)
+            box = rect.adjusted(zoom_size(4), 0, -zoom_size(4), 0)
+            elided = painter.fontMetrics().elidedText(
+                text, Qt.TextElideMode.ElideRight, box.width())
+            painter.drawText(
+                box, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                elided)
+        painter.restore()
+
+
+def _swatch_icon(colour: QColor) -> QIcon:
+    """The chip at the end of a ``color`` line; grey when the hex is bad."""
+    side = max(12, zoom_size(16))
+    canvas = QPixmap(side, side)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    fill = colour if colour.isValid() else QColor("#808080")
+    painter.setPen(QPen(fill.darker(160), max(1, side // 12)))
+    painter.setBrush(fill)
+    painter.drawRoundedRect(1, 1, side - 2, side - 2,
+                            side * 0.28, side * 0.28)
+    painter.end()
+    icon = QIcon(canvas)
+    return icon
+
+
+def build_spec(spec: dict, registry: dict[str, QWidget] | None = None,
+               events: Callable[[str, str, dict], None] | None = None
+               ) -> tuple[QWidget, dict[str, QWidget]]:
+    """Turn a spec dict into a QWidget, filling `registry` with id -> widget."""
     registry = {} if registry is None else registry
     widget = _build_one(spec, registry, events)
     if widget is None:
@@ -278,7 +366,8 @@ def build_spec(spec: dict, registry: dict[str, QWidget] | None = None,
     return widget, registry
 
 
-def _apply_common(widget: QWidget, spec: dict, registry: dict, events) -> None:
+def _apply_common(widget: QWidget, spec: dict, registry: dict,
+                  events: Callable[[str, str, dict], None] | None) -> None:
     identifier = spec.get("id")
     if identifier:
         registry[str(identifier)] = widget
@@ -288,9 +377,16 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict, events) -> None:
         widget.setPlaceholderText(str(spec["placeholder"]))
     if spec.get("word_wrap") is not None and hasattr(widget, "setWordWrap"):
         widget.setWordWrap(bool(spec["word_wrap"]))
+    if spec.get("expand") and hasattr(widget, "setSizePolicy"):
+        # Take the slack of the row or column it sits in: a long line then wraps
+        # inside the room that is actually left, instead of being squeezed by a
+        # spacer and cut off.
+        policy = widget.sizePolicy()
+        policy.setHorizontalPolicy(policy.Policy.Expanding)
+        widget.setSizePolicy(policy)
     if spec.get("checked") is not None and hasattr(widget, "setChecked"):
         widget.setChecked(bool(spec["checked"]))
-    # A combo or a list is filled first so "value" can then pick from it.
+    # Fill a combo or list first so "value" can pick from it.
     if spec.get("items") is not None and hasattr(widget, "addItems"):
         widget.clear()
         widget.addItems([str(item) for item in (spec["items"] or [])])
@@ -308,7 +404,7 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict, events) -> None:
         widget.setVisible(bool(spec["visible"]))
     if spec.get("font_size"):
         font = widget.font()
-        # The addon's own size, drawn at the zoom the interface is using.
+        # The addon's size drawn at the interface zoom.
         font.setPointSize(zoom_size(int(spec["font_size"])))
         widget.setFont(font)
     wanted = spec.get("on")
@@ -316,7 +412,8 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict, events) -> None:
         _connect_events(widget, wanted, str(identifier or ""), events)
 
 
-def _connect_events(widget, wanted, identifier: str, events) -> None:
+def _connect_events(widget: QWidget, wanted: Any, identifier: str,
+                    events: Callable[[str, str, dict], None]) -> None:
     """Send ``{tab, id, event}`` back to the addon for each listed interaction."""
     names = [str(name) for name in (wanted if isinstance(wanted, list) else [wanted])]
     emit = lambda event: events(identifier, event, {})
@@ -341,10 +438,8 @@ def _connect_events(widget, wanted, identifier: str, events) -> None:
         elif isinstance(widget, QCheckBox):
             widget.toggled.connect(lambda on: events(identifier, "changed", {"checked": bool(on)}))
     if "context" in names:
-        # Right-click. The listing's policy is set where it is built, so this
-        # signal fires; the text of the row under the cursor is sent along so
-        # the addon knows what was clicked without a second round trip. A menu
-        # is then shown from the addon with ``api.ui.choose``.
+        # Right-click: the row's text is sent along so the addon needs no
+        # second round trip; it shows its menu with ``api.ui.choose``.
         if isinstance(widget, QTreeWidget):
             widget.customContextMenuRequested.connect(
                 lambda pos: events(identifier, "context", {"text": _context_text(
@@ -366,7 +461,7 @@ def _connect_events(widget, wanted, identifier: str, events) -> None:
                 lambda item, _col=0: events(identifier, "selected", {"text": item.text(0)}))
 
 
-def _context_text(item) -> str:
+def _context_text(item: Any) -> str:
     """The first-column label of the row a right-click landed on, or nothing."""
     if item is None:
         return ""
@@ -376,17 +471,7 @@ def _context_text(item) -> str:
     return str(getattr(item, "text", "") or "")
 
 
-# ---------------------------------------------------------------------------
-# Syntax highlighting for a ``multi`` (an editor tab)
-#
-# The highlighter lives here, in the app process, next to the QPlainTextEdit it
-# decorates. An addon - imported or compiled - only names a language in its spec
-# (``"highlight": "python"``) or changes it later (``set_widget(tab, id,
-# "highlight", "json")``); the colors are chosen for the dark editor background
-# the app uses. Rules are matched line by line, which is enough to shade
-# keywords, strings, comments and numbers for the handful of languages a config
-# file, a shell script or a web page is written in.
-# ---------------------------------------------------------------------------
+# --- syntax highlighting for a ``multi``: an addon only names a language ---
 
 def _hl_format(color: str, bold: bool = False, italic: bool = False) -> QTextCharFormat:
     fmt = QTextCharFormat()
@@ -399,6 +484,7 @@ def _hl_format(color: str, bold: bool = False, italic: bool = False) -> QTextCha
 
 
 def _py_keywords() -> str:
+    """Python keyword pattern."""
     words = ("False None True and as assert async await break class continue def "
              "del elif else except finally for from global if import in is lambda "
              "nonlocal not or pass raise return try while with yield match case")
@@ -406,6 +492,7 @@ def _py_keywords() -> str:
 
 
 def _js_keywords() -> str:
+    """JavaScript keyword pattern."""
     words = ("break case catch class const continue debugger default delete do else "
              "export extends finally for function if import in instanceof let new "
              "return super switch this throw try typeof var void while with yield")
@@ -481,8 +568,7 @@ _LANG_RULES: dict[str, list[tuple[str, str, bool, bool]]] = {
     ],
 }
 
-# Extensions an editor tab maps onto a language, so opening a file picks the
-# right colors by itself.
+# Extensions an editor tab maps onto a language.
 _EXT_LANG = {
     ".py": "python", ".pyw": "python",
     ".json": "json", ".js": "javascript", ".mjs": "javascript",
@@ -503,7 +589,7 @@ def language_for_name(path: str) -> str:
 class RegexHighlighter(QSyntaxHighlighter):
     """A QSyntaxHighlighter driven by the regular-expression rules above."""
 
-    def __init__(self, document, language: str = ""):
+    def __init__(self, document: Any, language: str = "") -> None:
         super().__init__(document)
         self._rules: list[tuple[QRegularExpression, QTextCharFormat]] = []
         self.set_language(language)
@@ -531,7 +617,7 @@ class RegexHighlighter(QSyntaxHighlighter):
                 self.setFormat(found.capturedStart(), found.capturedLength(), fmt)
 
 
-def _attach_highlighter(widget, language: str) -> None:
+def _attach_highlighter(widget: QPlainTextEdit, language: str) -> None:
     """Give a ``multi`` its highlighter, once, then keep the language current."""
     highlighter = getattr(widget, "_addon_highlighter", None)
     if highlighter is None:
@@ -541,7 +627,7 @@ def _attach_highlighter(widget, language: str) -> None:
         highlighter.set_language(language)
 
 
-def _make_layout(parent: QWidget, kind: str):
+def _make_layout(parent: QWidget, kind: str) -> QLayout:
     if kind in ("column", "vbox"):
         layout = QVBoxLayout(parent)
     elif kind in ("row", "hbox"):
@@ -558,7 +644,8 @@ def _make_layout(parent: QWidget, kind: str):
     return layout
 
 
-def _build_one(spec: dict, registry: dict, events) -> QWidget | None:
+def _build_one(spec: dict, registry: dict,
+               events: Callable[[str, str, dict], None] | None) -> QWidget | None:
     kind = str(spec.get("kind") or "").lower()
     children = spec.get("children") or []
 
@@ -566,6 +653,10 @@ def _build_one(spec: dict, registry: dict, events) -> QWidget | None:
         holder = QWidget()
         layout = _make_layout(holder, kind)
         _fill_children(layout, children, kind, spec, registry, events)
+        if kind in ("row", "hbox"):
+            # A row hugs its contents so free space falls to the table below.
+            holder.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                 QSizePolicy.Policy.Fixed)
         _apply_common(holder, spec, registry, events)
         return holder
 
@@ -600,6 +691,8 @@ def _build_one(spec: dict, registry: dict, events) -> QWidget | None:
             widget = _build_one(child, registry, events)
             if widget is not None:
                 splitter.addWidget(widget)
+        if spec.get("sizes"):               # starting shares, e.g. [3, 2]
+            splitter.setSizes([int(s) for s in spec["sizes"]])
         _apply_common(splitter, spec, registry, events)
         return splitter
 
@@ -632,6 +725,30 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         return QPushButton()
     if kind == "line":
         return QLineEdit()
+    if kind == "color":
+        # A hex line with the colour wheel behind its swatch; still a plain
+        # QLineEdit, so "value" reads and writes it like any other line.
+        line = QLineEdit()
+        action = line.addAction(_swatch_icon(QColor("#808080")),
+                                QLineEdit.ActionPosition.TrailingPosition)
+        action.setToolTip("Open the colour wheel - the hex fills itself")
+
+        def open_wheel() -> None:
+            picked = ""
+            try:
+                from manager_widgets import ColorWheelDialog
+
+                picked = ColorWheelDialog.get_colour(line.text(), line,
+                                                     "Choose a colour")
+            except Exception:                    # no wheel, no fuss
+                pass
+            if picked:
+                line.setText(picked)
+
+        action.triggered.connect(open_wheel)
+        line.textChanged.connect(lambda text: action.setIcon(_swatch_icon(
+            QColor(str(text).strip() or "not a colour"))))
+        return line
     if kind == "multi":
         edit = QPlainTextEdit()
         edit.setReadOnly(bool(spec.get("readonly", False)))
@@ -664,9 +781,29 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
     if kind == "table":
         table = QTreeWidget()
         table.setRootIsDecorated(False)
-        table.setHeaderLabels([str(name) for name in spec.get("columns") or [""]])
+        names = [str(name) for name in spec.get("columns") or [""]]
+        table.setHeaderLabels(names)
         table.setAlternatingRowColors(True)
-        table.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header = table.header()
+        # By default every column shares the width equally; "stretch" hands
+        # the slack to one column (or several) and "col_widths" gives the rest
+        # starting widths, so a long log line is not elided into nothing.
+        stretch = spec.get("stretch")
+        if stretch is None:
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        else:
+            flexible = {int(i) for i in
+                        (stretch if isinstance(stretch, (list, tuple)) else [stretch])}
+            widths = list(spec.get("col_widths") or [])
+            for column in range(len(names)):
+                if column in flexible:
+                    header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+                    continue
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+                if column < len(widths):
+                    table.setColumnWidth(column, zoom_size(int(widths[column])))
+        table.setMouseTracking(True)          # so a row knows the mouse is over it
+        table.setItemDelegate(_RowStyleDelegate(table))
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         return table
     if kind == "progress":
@@ -696,7 +833,9 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
     return None
 
 
-def _fill_children(layout, children, kind, spec, registry, events) -> None:
+def _fill_children(layout: QLayout, children: list, kind: str, spec: dict,
+                   registry: dict, events: Callable[[str, str, dict], None] | None
+                   ) -> None:
     """Add every child spec to `layout`, honouring grid cells and form labels."""
     if layout is None:
         return
@@ -718,15 +857,14 @@ def _fill_children(layout, children, kind, spec, registry, events) -> None:
         layout.addStretch(1)
 
 
-def apply_widget_property(widget: QWidget, prop: str, value) -> None:
+def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
     """One ``set_widget`` operation, shared by the Python and the process API."""
     text = "" if value is None else str(value)
     if prop in ("text", "html"):
         if hasattr(widget, "setText"):
             widget.setText(text)
         elif hasattr(widget, "setPlainText"):
-            # A plain text edit has no setText, so without this an addon could
-            # read its viewer back but never fill it.
+            # A plain text edit has no setText.
             widget.setPlainText(text)
     elif prop == "append":
         if hasattr(widget, "appendPlainText"):
@@ -744,9 +882,7 @@ def apply_widget_property(widget: QWidget, prop: str, value) -> None:
     elif prop == "enabled":
         widget.setEnabled(bool(value))
     elif prop == "highlight":
-        # Syntax colors for an editor. The highlighter lives beside the widget in
-        # the app process, so naming a language here is all an addon has to do -
-        # imported or compiled alike.
+        # Syntax colors: naming a language is all an addon has to do.
         if hasattr(widget, "document"):
             _attach_highlighter(widget, str(value or ""))
     elif prop == "visible":
@@ -754,8 +890,7 @@ def apply_widget_property(widget: QWidget, prop: str, value) -> None:
     elif prop == "checked":
         widget.setChecked(bool(value))
     elif prop == "value":
-        # "value" means the state of the control, whatever kind it is: ticked,
-        # the number, the chosen entry or the text.
+        # "value" is the state of the control, whatever kind it is.
         if isinstance(widget, QCheckBox):
             widget.setChecked(bool(value))
         elif isinstance(widget, (QSpinBox, QSlider, QProgressBar)):
@@ -773,14 +908,11 @@ def apply_widget_property(widget: QWidget, prop: str, value) -> None:
         if hasattr(widget, "setMaximum"):
             widget.setMaximum(limit)
         elif hasattr(widget, "setRange"):
-            # ``minimum`` is a method, not a number: asking for the attribute
-            # hands out the bound function, which setRange then refuses.
+            # ``minimum`` is a method, not a number.
             floor = widget.minimum() if callable(getattr(widget, "minimum", None)) else 0
             widget.setRange(min(floor, limit), limit)
     elif prop == "format":
-        # What a progress bar writes inside itself. Qt expands ``%p``, ``%v`` and
-        # ``%m`` in the text, so an addon can say what it is doing as well as how
-        # far through it is.
+        # Qt expands ``%p``, ``%v`` and ``%m`` in a progress bar's text.
         if hasattr(widget, "setFormat"):
             widget.setFormat(text)
         elif hasattr(widget, "setText"):
@@ -790,15 +922,17 @@ def apply_widget_property(widget: QWidget, prop: str, value) -> None:
         if hasattr(widget, "setHeaderLabels"):
             widget.setHeaderLabels(items)
         elif hasattr(widget, "clear") and hasattr(widget, "addItems"):
-            current = widget.currentText()
+            # A combo keeps its choice; a list widget has no currentText.
+            current = widget.currentText() if hasattr(widget, "currentText") else None
             widget.clear()
             widget.addItems(items)
-            if current in items:
+            if current is not None and current in items:
                 widget.setCurrentText(current)
         elif hasattr(widget, "clear"):
             widget.clear()
             widget.addItems(items)
-    elif prop == "current":
+    elif prop in ("current", "index"):
+        # Which page a ``tabs`` container shows, or a list's picked row.
         if hasattr(widget, "setCurrentRow"):
             widget.setCurrentRow(int(value or 0))
         elif hasattr(widget, "setCurrentIndex"):
@@ -807,15 +941,43 @@ def apply_widget_property(widget: QWidget, prop: str, value) -> None:
         if hasattr(widget, "clear"):
             widget.clear()
         for row in value or []:
-            cells = row if isinstance(row, (list, tuple)) else [row]
+            # A row is a list of cells, or a dict carrying colours:
+            # ``{"cells": [...], "color": "#rrggbb", "background": "...",
+            #   "overlay": "..."}`` - painted by the table's delegate.
+            cells, fore, back, over = row, None, None, None
+            if isinstance(row, dict):
+                cells = row.get("cells", row.get("row", ""))
+                fore = row.get("color", row.get("foreground"))
+                back = row.get("background", row.get("bg"))
+                over = row.get("overlay", row.get("highlight"))
+            cells = cells if isinstance(cells, (list, tuple)) else [cells]
             item = QTreeWidgetItem([str(cell) for cell in cells])
+            for column, cell in enumerate(cells):
+                # Qt elides a wide cell; the tooltip carries the whole text.
+                item.setToolTip(column, str(cell))
+            for colour, paint in ((fore, item.setForeground),
+                                  (back, item.setBackground)):
+                if not colour:
+                    continue
+                tint = QColor(str(colour))
+                if not tint.isValid():
+                    continue
+                brush = QBrush(tint)
+                for column in range(len(cells)):
+                    paint(column, brush)
+            if over:
+                tint = QColor(str(over))
+                if tint.isValid():
+                    brush = QBrush(tint)
+                    for column in range(len(cells)):
+                        item.setData(column, ROW_OVERLAY_ROLE, brush)
             widget.addTopLevelItem(item)
     elif prop == "clear":
         if hasattr(widget, "clear"):
             widget.clear()
 
 
-def read_widget_value(widget: QWidget, what: str = "value"):
+def read_widget_value(widget: QWidget, what: str = "value") -> Any:
     """The counterpart of :func:`apply_widget_property`."""
     numeric = (QSpinBox, QDoubleSpinBox, QSlider, QProgressBar)
     if what == "text":
@@ -846,8 +1008,11 @@ def read_widget_value(widget: QWidget, what: str = "value"):
                 out.append(text(0) if callable(text) else str(item))
             return out
         return None
-    # A spin box and a progress bar answer to text() as well, and that is the
-    # formatted label ("3", "5%") rather than the number the addon set.
+    if what in ("index", "current"):
+        # The page a ``tabs`` container shows, or a combo's entry.
+        current = getattr(widget, "currentIndex", None)
+        return int(current()) if callable(current) else None
+    # Spin boxes and progress bars answer to text() with the formatted label.
     if isinstance(widget, numeric):
         return int(widget.value())
     for name in ("currentText", "text", "toPlainText", "value"):
@@ -860,18 +1025,16 @@ def read_widget_value(widget: QWidget, what: str = "value"):
     return None
 
 
-# ---------------------------------------------------------------------------
-# The namespaces on api
-# ---------------------------------------------------------------------------
+# --- the namespaces on api ---
 
 class SessionAPI:
     """What the app currently knows: profile, settings, connection state."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._api = api
 
     @property
-    def _win(self):
+    def _win(self) -> QWidget:
         return self._api.win
 
     def profile(self) -> dict:
@@ -890,6 +1053,8 @@ class SessionAPI:
 
     def status(self) -> dict:
         shell = self._win.shell_worker
+        shared = getattr(self._win, "shared_conn", None)
+        live = bool(shared.active()) if shared is not None else False
         return jsonable({
             "profile": self._win.app_config.get("name", ""),
             "host": self._win.host_input.text().strip(),
@@ -897,8 +1062,12 @@ class SessionAPI:
             "username": self._win.username_input.text().strip(),
             "remote_root": self._win.remote_root_input.text().strip(),
             "source": str(self._win.app_config.get("source", "")),
-            "sftp_connected": bool(self._win.sftp_connected),
-            "ssh_connected": bool(shell is not None and shell.isRunning()),
+            "sftp_connected": bool(self._win.sftp_connected or live),
+            "ssh_connected": bool((shell is not None and shell.isRunning()) or live),
+            # The master switch, and whether the SharedConnection is open now.
+            "connections_enabled": bool(getattr(
+                self._win, "connections_enabled", lambda: True)()),
+            "main_connection_open": live,
             "web_port": int(self._win.app_config.get("web_port", 8989)),
             "busy": bool(getattr(self._win, "worker", None) is not None
                          and self._win.worker.isRunning()),
@@ -909,64 +1078,63 @@ class SessionAPI:
         return web_tab_url(tab or {}, self._win.app_config.get("host", "192.168.1.1"))
 
     def tabs(self) -> list[str]:
+        """Every open tab by its full name, not the elided caption."""
         widget = self._win.tabs
-        return [widget.tabText(index) for index in range(widget.count())]
+        reader = getattr(widget, "tabBar", None)
+        bar = reader() if callable(reader) else None
+        if bar is None:
+            return [widget.tabText(index) for index in range(widget.count())]
+        return [tab_caption(bar, index) for index in range(widget.count())]
 
     def current_tab(self) -> str:
-        return self._win.tabs.currentText()
+        """The tab on show by its full name; empty while none is."""
+        widget = self._win.tabs
+        index = widget.currentIndex()
+        if index < 0:
+            return ""
+        reader = getattr(widget, "tabBar", None)
+        bar = reader() if callable(reader) else None
+        if bar is None:
+            return widget.tabText(index)
+        return tab_caption(bar, index)
 
     def version(self) -> str:
-        return "1.4"
+        return "1.9"
 
     def app_stylesheet(self) -> str:
-        """The dark theme the app runs under, for an addon that wants to match.
-
-        Handed over already multiplied by the interface zoom, so an addon that
-        pastes it into its own widgets gets the sizes the window is drawing."""
+        """The app's dark theme, already scaled to the interface zoom."""
         return scaled_sheet(APP_STYLESHEET)
 
     def zoom(self) -> int:
-        """The density the interface is drawn at, in percent (100 is as shipped).
-
-        View > Zoom in/out changes it. An addon that sizes anything by hand can
-        multiply it by ``zoom() / 100`` to keep pace with the rest of the window.
-        """
+        """The interface density in percent; 100 is as shipped."""
         return current_zoom()
 
     def app_icon(self) -> str:
-        """The logo the program wears right now, as a path; empty if it has none.
-
-        View > Alternate icon switches between the two pictures the build ships,
-        and the toolbar, the window, the taskbar and the About box all ask the
-        window for the current one. This is that answer, so an addon can use the
-        same mark - or call ``api.tabs.use_app_icon`` and have it followed for
-        it.
-        """
+        """The logo the program wears now, as a path; empty if none."""
         return app_icon_path(self._win)
 
 
 class Connection:
     """A live SSH/SFTP pair, handed out by ``api.device.open()``."""
 
-    def __init__(self, client, sftp, remote_root: str):
+    def __init__(self, client: Any, sftp: Any, remote_root: str,
+                 gate: Callable[[str], None] | None = None) -> None:
         self.client = client
         self.sftp = sftp
         self.remote_root = remote_root
+        self._gate = gate
 
-    def run(self, command: str, timeout: int = 30):
+    def run(self, command: str, timeout: int = 30) -> dict:
+        if self._gate is not None:
+            self._gate("ssh")
         return exec_remote(self.client, command, timeout)
 
     def remote(self, path: str = "", outside_root: bool = False) -> str:
         return resolve_remote(self.remote_root, path, outside_root)
 
 
-def resolve_remote(root: str, path, outside_root: bool = False) -> str:
-    """Map an addon path onto the device, keeping it inside the deploy folder.
-
-    A relative path is always below the profile's remote root. An absolute one
-    is accepted only when it stays under that root, unless the caller passes
-    ``outside_root=True``.
-    """
+def resolve_remote(root: str, path: Any, outside_root: bool = False) -> str:
+    """Map an addon path onto the device, keeping it under the remote root."""
     text = "" if path is None else str(path)
     root = root.rstrip("/") or "/"
     if not text:
@@ -982,43 +1150,126 @@ def resolve_remote(root: str, path, outside_root: bool = False) -> str:
 class DeviceAPI:
     """SSH commands and SFTP files, always off the GUI thread."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._api = api
+        # A device this addon bound for itself, or None to follow the profile.
+        self._bound: dict | None = None
 
     @property
-    def _win(self):
+    def _win(self) -> QWidget:
         return self._api.win
 
-    def _settings(self) -> dict:
-        settings = self._win.current_settings(silent=True)
-        if settings is None:
-            raise AddonError("the profile has no complete connection details")
+    def _settings(self, override: dict | None = None) -> dict:
+        """Connection details: profile, bound device and override, in order."""
+        base = self._win.current_settings(silent=True)
+        settings = dict(base) if base else {}
+        if self._bound:
+            settings.update(self._bound)
+        for key, value in (override or {}).items():
+            if value is not None and value != "":
+                settings[str(key)] = value
+        if not str(settings.get("host", "")).strip():
+            raise AddonError(
+                "no device to connect to: the profile has no host and nothing "
+                "was bound with device.bind()"
+            )
+        if not str(settings.get("username", "")).strip():
+            raise AddonError("no username to connect with")
         if not settings.get("password") and not settings.get("key_file"):
             raise AddonError(
                 "no credentials to use: connect once and tick 'Remember password', "
-                "or save the password in the connection panel first"
+                "or pass a password/key_file with bind() or open(device=...)"
             )
         return settings
+
+    def _check_device(self, device: Any) -> None:
+        """Validate a one-off ``device`` dict; it steers only this call."""
+        if not device:
+            return
+        if not isinstance(device, dict):
+            raise AddonError("device must be a dict of connection details "
+                             "(host, port, username, password, key_file, "
+                             "remote_root)")
 
     def _trace(self, text: str) -> None:
         self._api.log(text)
 
-    def _mark(self, transport: str) -> None:
-        """Tell the manager which transport this call uses, for its Settings dot.
+    def _addon(self) -> Any:
+        """The runtime record for the addon calling, or ``None``."""
+        return getattr(self._api, "_addon", None)
 
-        Never lets a bookkeeping failure reach the addon: the dot is a display
-        convenience, not part of the call's job.
-        """
+    def _guard(self, transport: str) -> None:
+        """Refuse a transport unless the master switch and ``requires`` allow."""
+        win = self._win
+        check = getattr(win, "connections_enabled", None)
+        if callable(check) and not check():
+            raise AddonError(
+                "connections are switched off (Settings > Connection)")
+        addon = self._addon()
+        declared = tuple(getattr(addon, "requires", ()) or ()) if addon is not None else ()
+        if transport not in declared:
+            wanted = sorted(set(declared) | {transport})
+            raise AddonError(
+                f"this addon may not use {transport.upper()}: it has to declare "
+                f"its connection services, e.g. \"requires\": {wanted} "
+                "in its ADDON manifest")
+
+    def _shared(self) -> Any:
+        """The app's main connection when this addon shares it, else ``None``."""
+        addon = self._addon()
+        if addon is not None and not getattr(addon, "is_bundled", False) \
+                and getattr(addon, "own_connection", False):
+            return None
+        return getattr(self._win, "shared_conn", None)
+
+    def _report_shared(self) -> None:
+        """Tell the window the main session came up from a pool thread."""
+        mark = getattr(self._win, "mark_shared_connected", None)
+        if mark is None:
+            return
+        try:
+            self._api._manager.bus.post(mark)
+        except Exception:
+            pass
+
+    def _open_shared(self, settings: dict) -> Any:
+        """Bring the main session up if it is down, and report its state."""
+        shared = self._shared()
+        if shared is None:
+            return None
+        if not shared.active():
+            try:
+                shared.open(settings)
+            except Exception as error:
+                raise AddonError(f"the main connection could not open: {error}")
+            self._report_shared()
+        return shared
+
+    def _mark(self, transport: str) -> None:
+        """Note the transport for the Settings dot; never fails the call."""
         try:
             self._api._manager.mark_transport(self._api._addon, transport)
         except Exception:
             pass
 
-    # --- one-off SSH commands -------------------------------------------
+    # --- one-off SSH commands ---
 
-    def _exec(self, command: str, timeout) -> dict:
-        settings = self._settings()
-        self._trace(f"$ {command}")
+    def _exec(self, command: str, timeout: Any, device: dict | None = None) -> dict:
+        self._check_device(device)
+        settings = self._settings(device)
+        self._trace(f"$ {command}"
+                    + (f" @{settings.get('host')}" if device else ""))
+        # Re-check the gates in the worker thread; they may have moved.
+        self._guard("ssh")
+        if device:
+            # A one-off device never uses the app's session.
+            shared = None
+        else:
+            shared = self._open_shared(settings)
+        if shared is not None:
+            # Main connection: one command on the app's open session.
+            code, out, err = shared.run(command, int(_timeout(timeout)))
+            return {"code": code, "out": out, "err": err}
         client = None
         try:
             client = create_ssh_client(settings)
@@ -1028,23 +1279,28 @@ class DeviceAPI:
                 client.close()
         return {"code": code, "out": out, "err": err}
 
-    def run(self, command: str, timeout=30, block=True):
-        """Run one non-interactive command. Returns ``{"code","out","err"}``,
-        or a Future when ``block`` is False (call ``run_async`` instead)."""
+    def run(self, command: str, timeout: Any = 30, block: bool = True,
+            device: dict | None = None) -> Any:
+        """Run one command as {"code","out","err"}, or a Future if not block; device names a one-off connection instead of the app's session."""
         if not str(command).strip():
             raise AddonError("empty command")
+        self._check_device(device)
+        self._guard("ssh")
         self._mark("ssh")
-        future = POOL.submit(self._exec, command, timeout)
+        future = POOL.submit(self._exec, command, timeout, device)
         if not block:
             return future
         return _await(future, _timeout(timeout))
 
-    def run_async(self, command: str, on_done=None, timeout=30):
+    def run_async(self, command: str, on_done: Callable[[dict], None] | None = None,
+                  timeout: Any = 30, device: dict | None = None) -> Any:
         """``run`` without waiting: ``on_done(result)`` arrives on the GUI thread."""
+        self._check_device(device)
+        self._guard("ssh")
         self._mark("ssh")
-        future = POOL.submit(self._exec, command, timeout)
+        future = POOL.submit(self._exec, command, timeout, device)
         if on_done is not None:
-            def deliver(done):
+            def deliver(done: Any) -> None:
                 try:
                     result = done.result()
                 except Exception as error:
@@ -1056,6 +1312,7 @@ class DeviceAPI:
 
     def shell_send(self, line: str) -> bool:
         """Type into the live terminal tab. False when no shell is open."""
+        self._guard("ssh")
         self._mark("ssh")
         worker = self._win.shell_worker
         if worker is None or not worker.isRunning():
@@ -1065,46 +1322,114 @@ class DeviceAPI:
         return True
 
     def is_connected(self, protocol: str | None = None) -> bool:
-        worker = self._win.shell_worker
+        """Whether a connection this addon could use is up right now."""
+        win = self._win
+        check = getattr(win, "connections_enabled", None)
+        if callable(check) and not check():
+            return False
+        shared = getattr(win, "shared_conn", None)
+        live = bool(shared.active()) if shared is not None else False
+        worker = win.shell_worker
         states = {
-            "sftp": bool(self._win.sftp_connected),
-            "ssh": bool(worker is not None and worker.isRunning()),
+            "sftp": bool(win.sftp_connected or live),
+            "ssh": bool((worker is not None and worker.isRunning()) or live),
         }
         if protocol is None:
             return any(states.values())
         return states.get(str(protocol).lower(), False)
 
+    def mode(self) -> str:
+        """``"main"`` shares the app's session, ``"own"`` connects per call."""
+        addon = self._addon()
+        if addon is not None and not getattr(addon, "is_bundled", False) \
+                and getattr(addon, "own_connection", False):
+            return "own"
+        return "main"
+
+    def set_mode(self, mode: str) -> None:
+        """Switch a drop-in addon between the main and its own connection."""
+        wanted = str(mode).strip().lower()
+        if wanted not in ("main", "own"):
+            raise AddonError("mode must be 'main' or 'own'")
+        addon = self._addon()
+        if addon is None:
+            raise AddonError("no addon runtime to store the choice on")
+        if getattr(addon, "is_bundled", False):
+            raise AddonError("an addon shipped with the program always uses "
+                             "the app's main connection")
+        manager = self._api._manager
+        # The record and the Settings rows live on the GUI thread.
+        manager.bus.post(lambda: manager.set_own_connection(addon.id,
+                                                            wanted == "own"))
+
+    def bind(self, host: str = "", port: Any = None, username: str = "",
+             password: str = "", key_file: str = "",
+             remote_root: str = "") -> dict:
+        """Point this addon's own connection at another device (drop-in only)."""
+        addon = self._addon()
+        if addon is not None and getattr(addon, "is_bundled", False):
+            raise AddonError("an addon shipped with the program always uses "
+                             "the app's main connection; it cannot bind a "
+                             "different device")
+        if addon is not None and not getattr(addon, "own_connection", False):
+            raise AddonError("bind only applies to an addon using its own "
+                             "connection: switch it on in Settings, or call "
+                             "api.device.set_mode('own') first")
+        wanted = str(host or "").strip()
+        if not wanted:
+            raise AddonError("bind needs a host to connect to")
+        bound: dict = {"host": wanted}
+        if port is not None and str(port).strip():
+            bound["port"] = int(port)
+        for key, value in (("username", username), ("password", password),
+                           ("key_file", key_file), ("remote_root", remote_root)):
+            text = str(value or "").strip()
+            if text:
+                bound[key] = text
+        self._bound = bound
+        self._trace(f"bound to {bound['host']}")
+        return jsonable(dict(bound))
+
+    def unbind(self) -> None:
+        """Drop a bound device; the own connection follows the profile again."""
+        self._bound = None
+        self._trace("device binding cleared")
+
     def ensure_connected(self, protocol: str = "sftp") -> bool:
-        """Ask the app to open a session, the same way the buttons do. Returns
-        whether something was already up (so an addon knows whether to wait)."""
+        """Ask the app to connect; returns whether something was already up."""
         kind = str(protocol).lower()
-        if kind == "sftp":
-            already = bool(self._win.sftp_connected)
-            if not already:
+        if kind not in ("sftp", "ssh"):
+            raise AddonError("protocol must be 'sftp' or 'ssh'")
+        self._guard(kind)
+        already = self.is_connected(kind)
+        if not already:
+            if kind == "sftp":
                 self._win.connect_remote()
-            return already
-        if kind == "ssh":
-            worker = self._win.shell_worker
-            already = worker is not None and worker.isRunning()
-            if not already:
+            else:
                 self._win.connect_shell()
-            return already
-        raise AddonError("protocol must be 'sftp' or 'ssh'")
+        return already
 
-    # --- files -----------------------------------------------------------
+    # --- files ---
 
-    def _sftp(self, operation: str, action: Callable, timeout=30):
-        """Open a session, run `action(client, sftp)` in the pool, wait for it."""
+    def _sftp(self, operation: str, action: Callable, timeout: Any = 30) -> Any:
+        """Run `action(client, sftp)` in the pool, on the shared session or a fresh one."""
+        self._guard("sftp")
         self._mark("sftp")
         settings = self._settings()
 
-        def work():
+        def work() -> Any:
+            self._guard("sftp")      # the gates may have moved since submitting
+            self._trace(f"sftp {operation}")
+            shared = self._open_shared(settings)
+            if shared is not None:
+                with shared.lock:
+                    return action(shared.client, shared.sftp,
+                                  settings["remote_root"])
             client = None
             sftp = None
             try:
                 client = create_ssh_client(settings)
                 sftp = client.open_sftp()
-                self._trace(f"sftp {operation}")
                 return action(client, sftp, settings["remote_root"])
             finally:
                 if sftp is not None:
@@ -1115,20 +1440,18 @@ class DeviceAPI:
         return _await(POOL.submit(work), _timeout(timeout))
 
     @contextmanager
-    def open(self, timeout=30):
-        """``with api.device.open() as conn:`` - a session you keep open.
-
-        Blocks while it connects, so use it from a callback or a thread rather
-        than in ``init``.
-        """
+    def open(self, timeout: Any = 30, device: dict | None = None) -> Any:
+        """with api.device.open() as conn: a session you keep open; always its own connection, device overrides the details for it alone."""
+        self._check_device(device)
+        self._guard("sftp")
         self._mark("sftp")
-        settings = self._settings()
+        settings = self._settings(device)
         client = None
         sftp = None
         try:
             client = _await(POOL.submit(create_ssh_client, settings), _timeout(timeout))
             sftp = client.open_sftp()
-            yield Connection(client, sftp, settings["remote_root"])
+            yield Connection(client, sftp, settings["remote_root"], gate=self._guard)
         finally:
             if sftp is not None:
                 sftp.close()
@@ -1138,7 +1461,7 @@ class DeviceAPI:
     def list(self, path: str = "", outside_root: bool = False) -> list[dict]:
         """The device's listing of one directory, relative to the remote root."""
 
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             target = resolve_remote(root, path, outside_root)
             entries = []
             for attribute in sftp.listdir_attr(target):
@@ -1158,7 +1481,7 @@ class DeviceAPI:
         return self._sftp("list", work)
 
     def exists(self, path: str, outside_root: bool = False) -> bool:
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             try:
                 sftp.stat(resolve_remote(root, path, outside_root))
             except OSError:
@@ -1168,7 +1491,7 @@ class DeviceAPI:
         return self._sftp("stat", work)
 
     def stat(self, path: str, outside_root: bool = False) -> dict | None:
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             try:
                 info = sftp.stat(resolve_remote(root, path, outside_root))
             except OSError:
@@ -1183,7 +1506,7 @@ class DeviceAPI:
         return self._sftp("stat", work)
 
     def read_bytes(self, path: str, outside_root: bool = False) -> bytes:
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             with sftp.open(resolve_remote(root, path, outside_root), "rb") as handle:
                 return handle.read()
 
@@ -1197,7 +1520,7 @@ class DeviceAPI:
                     outside_root: bool = False) -> int:
         data = bytes(payload)
 
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             target = resolve_remote(root, path, outside_root)
             if mkdir:
                 _make_dirs(sftp, posixpath.dirname(target))
@@ -1207,12 +1530,12 @@ class DeviceAPI:
 
         return self._sftp("write", work)
 
-    def write_text(self, path: str, text, encoding: str = "utf-8", mkdir: bool = True,
+    def write_text(self, path: str, text: Any, encoding: str = "utf-8", mkdir: bool = True,
                    outside_root: bool = False) -> int:
         return self.write_bytes(path, str(text).encode(encoding), mkdir, outside_root)
 
-    def append_text(self, path: str, text, outside_root: bool = False) -> int:
-        def work(client, sftp, root):
+    def append_text(self, path: str, text: Any, outside_root: bool = False) -> int:
+        def work(client: Any, sftp: Any, root: str) -> Any:
             target = resolve_remote(root, path, outside_root)
             _make_dirs(sftp, posixpath.dirname(target))
             existing = b""
@@ -1229,7 +1552,7 @@ class DeviceAPI:
         return self._sftp("append", work)
 
     def mkdir(self, path: str) -> str:
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             target = resolve_remote(root, path, outside_root=True)
             _make_dirs(sftp, target)
             return target
@@ -1238,7 +1561,7 @@ class DeviceAPI:
 
     def remove(self, path: str, recursive: bool = False,
                outside_root: bool = False) -> bool:
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             target = resolve_remote(root, path, outside_root)
             if target.rstrip("/") == (root.rstrip("/") or "/"):
                 raise AddonError("refusing to remove the remote root itself")
@@ -1254,7 +1577,7 @@ class DeviceAPI:
         return self._sftp("remove", work)
 
     def rename(self, path: str, new_path: str, outside_root: bool = False) -> str:
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             source = resolve_remote(root, path, outside_root)
             target = resolve_remote(root, new_path, outside_root)
             sftp.rename(source, target)
@@ -1262,12 +1585,12 @@ class DeviceAPI:
 
         return self._sftp("rename", work)
 
-    def upload(self, local, remote_path: str, outside_root: bool = False) -> str:
+    def upload(self, local: Any, remote_path: str, outside_root: bool = False) -> str:
         source = Path(str(local)).expanduser()
         if not source.is_file():
             raise AddonError(f"no such local file: {source}")
 
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             target = resolve_remote(root, remote_path or source.name, outside_root)
             _make_dirs(sftp, posixpath.dirname(target))
             sftp.put(str(source), target)
@@ -1275,11 +1598,11 @@ class DeviceAPI:
 
         return self._sftp("upload", work)
 
-    def download(self, remote_path: str, local=None,
+    def download(self, remote_path: str, local: Any = None,
                  outside_root: bool = False) -> str:
         target = Path(str(local or Path(str(remote_path)).name)).expanduser()
 
-        def work(client, sftp, root):
+        def work(client: Any, sftp: Any, root: str) -> Any:
             source = resolve_remote(root, remote_path, outside_root)
             target.parent.mkdir(parents=True, exist_ok=True)
             sftp.get(source, str(target))
@@ -1288,7 +1611,7 @@ class DeviceAPI:
         return self._sftp("download", work)
 
 
-def _make_dirs(sftp, path: str) -> None:
+def _make_dirs(sftp: Any, path: str) -> None:
     """mkdir -p on the device, ignoring the root itself."""
     from manager_net import make_remote_directories
 
@@ -1296,7 +1619,7 @@ def _make_dirs(sftp, path: str) -> None:
         make_remote_directories(sftp, path)
 
 
-def _remove_tree(sftp, directory: str) -> None:
+def _remove_tree(sftp: Any, directory: str) -> None:
     """rm -r on the device, deepest entries first."""
     for attribute in sftp.listdir_attr(directory):
         child = posixpath.join(directory, attribute.filename)
@@ -1310,11 +1633,11 @@ def _remove_tree(sftp, directory: str) -> None:
 class UIAPI:
     """Dialogs, the menu bar and the status line."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._api = api
 
     @property
-    def _win(self):
+    def _win(self) -> QWidget:
         return self._api.win
 
     def information(self, title: str, text: str) -> None:
@@ -1353,6 +1676,23 @@ class UIAPI:
         menu.exec(QCursor.pos())
         return chosen[0] if chosen else None
 
+    def pick_color(self, title: str = "Choose a colour", initial: str = "") -> str:
+        """The app's colour wheel; ``#rrggbb`` or ``""`` when nothing was picked."""
+        try:
+            from manager_widgets import ColorWheelDialog
+
+            return ColorWheelDialog.get_colour(initial, self._win,
+                                               self._titled(title))
+        except Exception:                        # a wheel-less app still asks
+            pass
+        from PyQt6.QtWidgets import QColorDialog
+
+        start = QColor(str(initial))
+        if not str(initial or "").strip() or not start.isValid():
+            start = QColor("#ffb020")
+        colour = QColorDialog.getColor(start, self._win, self._titled(title))
+        return colour.name() if colour.isValid() else ""
+
     def popup(self, title: str, text: str) -> None:
         """A tray-style notice: the status line plus the log."""
         self._win.statusBar().showMessage(str(text), 6000)
@@ -1360,11 +1700,13 @@ class UIAPI:
     def notify(self, text: str, ms: int = 5000) -> None:
         self._win.statusBar().showMessage(str(text), max(500, int(ms)))
 
-    def window(self):
+    def window(self) -> QWidget:
         """The main window. Use sparingly - it is the app itself."""
         return self._win
 
-    def menu_item(self, text: str, callback, menu: str = "Tools", shortcut: str | None = None):
+    def menu_item(self, text: str, callback: Callable[[], None],
+                  menu: str = "Tools",
+                  shortcut: str | None = None) -> QAction:
         """Add an entry to the menu bar for as long as the addon stays enabled."""
         target = self._find_menu(menu)
         action = target.addAction(str(text))
@@ -1376,13 +1718,13 @@ class UIAPI:
         self._api._addon.actions.append((target, action))
         return action
 
-    def remove_menu_item(self, action) -> None:
+    def remove_menu_item(self, action: QAction) -> None:
         for stored_menu, stored in list(self._api._addon.actions):
             if stored is action:
                 stored_menu.removeAction(action)
                 self._api._addon.actions.remove((stored_menu, stored))
 
-    def _find_menu(self, title: str):
+    def _find_menu(self, title: str) -> QMenu:
         wanted = str(title).replace("&", "").strip().lower()
         bar = self._win.menuBar()
         for action in bar.actions():
@@ -1416,7 +1758,7 @@ class UIAPI:
             return values
         return values
 
-    def set_setting_widget(self, widget_or_spec) -> None:
+    def set_setting_widget(self, widget_or_spec: Any) -> None:
         """Extra Settings-tab controls for this addon, under its own switch."""
         self._api._manager.set_setting_widget(self._api._addon, widget_or_spec)
 
@@ -1427,19 +1769,13 @@ class UIAPI:
         return f"{label} - {name}" if name and name.lower() not in label.lower() else label
 
 
-def _is_web_view(widget) -> bool:
-    """True for an embedded page. QtWebEngine is optional, so the type may be
-    missing and ``isinstance`` would refuse ``None`` as its second argument."""
+def _is_web_view(widget: Any) -> bool:
+    """True for an embedded page; QtWebEngine is optional."""
     return QWebEngineView is not None and isinstance(widget, QWebEngineView)
 
 
-def app_icon_path(win) -> str:
-    """The path of the app's own logo, or nothing at all.
-
-    Asked through the window rather than read from the settings, because the
-    window is what knows which of the two pictures is current and where the
-    assets of a program packed with PyInstaller ended up.
-    """
+def app_icon_path(win: Any) -> str:
+    """The app's current logo as a path; the window is what knows it."""
     getter = getattr(win, "current_icon_path", None)
     if not callable(getter):
         return ""
@@ -1449,22 +1785,9 @@ def app_icon_path(win) -> str:
         return ""
 
 
-def build_icon(source, home: Path | None = None):
-    """A tab's mark out of whatever an addon offered as its icon, or ``None``.
-
-    Two forms are understood, told apart by what the text looks like:
-
-    * an SVG document (``<svg ...>``) - plain text all the way, so an addon
-      compiled into a program of its own, with no Qt and nothing beside it, can
-      still draw its own icon and send it across the pipe;
-    * a picture file - an absolute path, or a name beside the addon's own
-      folder, which is what an addon that ships ``icon.png`` uses.
-
-    Anything that cannot be read comes back as ``None`` rather than as a blank
-    icon: a tab whose addon misspoke is still a tab.
-    """
-    from PyQt6.QtCore import QByteArray, Qt
-    from PyQt6.QtGui import QIcon, QPixmap
+def build_icon(source: Any, home: Path | None = None) -> QIcon | None:
+    """A tab's mark out of an SVG document (as text) or a picture file (absolute, or beside the addon's folder); anything unreadable returns None."""
+    from PyQt6.QtCore import QByteArray
 
     text = str("" if source is None else source).strip()
     if not text:
@@ -1488,21 +1811,20 @@ def build_icon(source, home: Path | None = None):
 class TabsAPI:
     """Tabs the addon owns: embedded pages and custom Qt panels."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._api = api
 
     @property
-    def _win(self):
+    def _win(self) -> QWidget:
         return self._api.win
 
     @property
-    def _store(self):
+    def _store(self) -> dict:
         return self._api._addon.tabs
 
     def _before_settings(self) -> int:
-        # The window keeps a gap + Settings pinned at the far right; new tabs
-        # go to the left of that pair. Fall back to "before Settings" (then the
-        # count) for a window or stub that has no such helper.
+        # The window pins a gap + Settings at the far right; new tabs go just
+        # to the left of that pair.
         helper = getattr(self._win, "_content_insert_index", None)
         if callable(helper):
             try:
@@ -1513,7 +1835,7 @@ class TabsAPI:
         index = self._win.tabs.indexOf(page) if page is not None else -1
         return index if index >= 0 else self._win.tabs.count()
 
-    def _index(self, position) -> int:
+    def _index(self, position: Any) -> int:
         """Where to put a new tab: before Settings, unless the addon says otherwise."""
         if position is None:
             return self._before_settings()
@@ -1527,12 +1849,7 @@ class TabsAPI:
 
     def add_web_tab(self, name: str, url: str = "", ip: str = "", port: int = 0,
                     path: str = "", scheme: str = "", position: int | None = None) -> str:
-        """An embedded browser page that belongs to no profile.
-
-        It is not written to config.json, does not appear in Settings > Custom
-        tabs and is not rebuilt when the profile changes; it lives as long as
-        the addon is enabled. Give either a full ``url`` or ip/port/path/scheme.
-        """
+        """An embedded page belonging to no profile: not stored, not rebuilt; give either a full url or ip/port/path/scheme."""
         name = str(name).strip()
         if not name:
             raise AddonError("a tab needs a name")
@@ -1550,17 +1867,7 @@ class TabsAPI:
 
     def add_tab(self, name: str, widget: QWidget | None = None, spec: dict | None = None,
                 style: str = "", position: int | None = None) -> str:
-        """A custom tab: any QWidget, or a widget built from a spec dict.
-
-        Python addons can build whatever they like - pass the widget and set
-        ``style`` with a stylesheet. Process addons use ``spec`` (see the module
-        docstring) and address its parts by ``id`` afterwards.
-
-        The new tab does not steal the view: being switched on, or adding a
-        tab in passing, should not drag the window away from whatever the user
-        was looking at. ``activate`` is there for the moment an addon really
-        does mean to show a tab - a menu entry, a "go there" button.
-        """
+        """A custom tab: any QWidget, or one built from a spec dict; the new tab does not steal the view, use activate to show it."""
         name = str(name).strip()
         if not name:
             raise AddonError("a tab needs a name")
@@ -1596,9 +1903,7 @@ class TabsAPI:
         return True
 
     def _refresh_tab_dots(self) -> None:
-        """Re-put the 's'/'f' transport dots after this addon's tab moved in or
-        out of the bar. The window owns the layout; an addon started before it is
-        complete (or a stub in a test) simply has nothing to refresh."""
+        """Re-put the transport dots after this addon's tab moved in or out."""
         sync = getattr(self._win, "sync_tab_transport_dots", None)
         if callable(sync):
             try:
@@ -1645,12 +1950,12 @@ class TabsAPI:
         elif entry["url_input"] is not None:
             self.navigate(name, entry["url_input"].text())
 
-    def view(self, name: str):
+    def view(self, name: str) -> Any:
         """The QWebEngineView behind a tab, for the full page API."""
         entry = self._store.get(str(name))
         return None if entry is None else entry["view"]
 
-    def widget(self, name: str, identifier: str | None = None):
+    def widget(self, name: str, identifier: str | None = None) -> QWidget | None:
         entry = self._store.get(str(name))
         if entry is None:
             return None
@@ -1658,14 +1963,15 @@ class TabsAPI:
             return entry["page"]
         return entry["registry"].get(str(identifier))
 
-    def set_widget(self, name: str, identifier: str, prop: str = "text", value=None) -> bool:
+    def set_widget(self, name: str, identifier: str, prop: str = "text",
+                   value: Any = None) -> bool:
         widget = self.widget(name, identifier)
         if widget is None:
             return False
         apply_widget_property(widget, str(prop), value)
         return True
 
-    def widget_value(self, name: str, identifier: str, what: str = "value"):
+    def widget_value(self, name: str, identifier: str, what: str = "value") -> Any:
         widget = self.widget(name, identifier)
         if widget is None:
             raise AddonError(f"{name!r} has no widget with id {identifier!r}")
@@ -1699,7 +2005,8 @@ class TabsAPI:
         )
         self._api._manager.bus.post(lambda: view.page().runJavaScript(script))
 
-    def inject_js(self, name: str, code, callback=None) -> None:
+    def inject_js(self, name: str, code: Any,
+                  callback: Callable[[Any], None] | None = None) -> None:
         view = self.view(name)
         if view is None:
             raise AddonError(f"{name!r} is not an embedded page")
@@ -1714,18 +2021,8 @@ class TabsAPI:
             raise AddonError(f"no addon tab called {name!r}")
         entry["page"].setStyleSheet(str(css))
 
-    def set_icon(self, name: str, icon=None) -> bool:
-        """A mark beside the tab's label, as a page's favicon sits in a browser.
-
-        ``icon`` is an SVG document as text or a picture file - see
-        :func:`build_icon` - and nothing at all clears it again. An embedded
-        page keeps doing what the page tells it (the favicon follows every
-        load), so this is for the tabs an addon builds itself. Choosing a mark
-        here also ends any follow of the app's own icon: the addon has said what
-        it wants.
-        """
-        from PyQt6.QtGui import QIcon
-
+    def set_icon(self, name: str, icon: Any = None) -> bool:
+        """A mark beside the tab's label (SVG text or a picture file); None clears; an embedded page keeps following its favicon."""
         entry = self._store.get(str(name))
         if entry is None:
             raise AddonError(f"no addon tab called {name!r}")
@@ -1740,29 +2037,28 @@ class TabsAPI:
                 self._api.log("that tab icon could not be read, so nothing changed")
                 return False
         entry.pop("app_icon", None)
+        if wanted:
+            entry["icon_mark"] = wanted
+        else:
+            entry.pop("icon_mark", None)
         self._win.tabs.setTabIcon(index, mark or QIcon())
+        # The bar hands out the default picture and re-measures captions:
+        # re-fit after this one.
+        reader = getattr(self._win.tabs, "tabBar", None)
+        bar = reader() if callable(reader) else None
+        if bar is not None and hasattr(bar, "refit"):
+            bar.refit()
         return True
 
     def icon(self, name: str) -> bool:
-        """Whether this addon's tab is carrying a mark of its own."""
+        """Whether this addon's tab carries a mark of its own."""
         entry = self._store.get(str(name))
         if entry is None:
             return False
-        index = self._win.tabs.indexOf(entry["page"])
-        return index >= 0 and not self._win.tabs.tabIcon(index).isNull()
+        return bool(entry.get("icon_mark") or entry.get("app_icon"))
 
     def use_app_icon(self, name: str, on: bool = True) -> bool:
-        """Let this tab wear the app's own logo, and go on wearing it.
-
-        View > Alternate icon switches between the two pictures the program
-        ships, and every place one is shown asks the window for the current
-        path. A tab marked here joins them: the window re-marks it in the same
-        call that re-marks its own toolbar, so the addon follows the switch
-        without watching for it. ``on=False`` gives the tab back its own mark or
-        none.
-
-        An embedded page is not marked: what it shows is the device's favicon.
-        """
+        """Let this tab wear the app's logo and keep following it when it swaps; an embedded page is not marked, it shows the device's favicon."""
         entry = self._store.get(str(name))
         if entry is None:
             raise AddonError(f"no addon tab called {name!r}")
@@ -1770,8 +2066,6 @@ class TabsAPI:
             return False
         entry["app_icon"] = bool(on)
         if not on:
-            from PyQt6.QtGui import QIcon
-
             index = self._win.tabs.indexOf(entry["page"])
             if index >= 0:
                 self._win.tabs.setTabIcon(index, QIcon())
@@ -1789,12 +2083,9 @@ def _js_string(text: str) -> str:
     return json.dumps(text)
 
 
-def _tab_definition(url, ip, port, path, scheme) -> dict:
-    """Split a tab request into the shape the browser code expects.
-
-    A full URL is taken apart rather than kept as-is so the tab's Home button
-    and a profile switch still know the device it points at.
-    """
+def _tab_definition(url: Any, ip: Any, port: Any, path: Any,
+                    scheme: Any) -> dict:
+    """Split a tab request into the shape the browser code expects."""
     text = str(url or "").strip()
     if text:
         parsed = urlparse(text if "//" in text else "//" + text)
@@ -1817,14 +2108,14 @@ def _tab_definition(url, ip, port, path, scheme) -> dict:
 class EventsAPI:
     """Subscribe to what the app does."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._api = api
 
-    def on(self, name: str, callback) -> Callable[[], None]:
+    def on(self, name: str, callback: Callable[[dict], None]) -> Callable[[], None]:
         """Register a listener; returns the callable that unregisters it."""
         return self._api._manager.add_listener(str(name), self._api.id, callback)
 
-    def off(self, name: str, callback=None) -> int:
+    def off(self, name: str, callback: Callable[[dict], None] | None = None) -> int:
         return self._api._manager.remove_listener(str(name), self._api.id, callback)
 
     def names(self) -> list[str]:
@@ -1834,7 +2125,7 @@ class EventsAPI:
 class SettingsAPI:
     """The addon's own keys in config.json, saved with the profile."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._api = api
 
     def _record(self) -> dict:
@@ -1843,10 +2134,10 @@ class SettingsAPI:
     def all(self) -> dict:
         return jsonable(dict(self._record().get("settings") or {}))
 
-    def get(self, key: str, default=None):
+    def get(self, key: str, default: Any = None) -> Any:
         return jsonable((self._record().get("settings") or {}).get(str(key), default))
 
-    def set(self, key: str, value) -> None:
+    def set(self, key: str, value: Any) -> None:
         self.update({key: value})
 
     def update(self, values: dict) -> None:
@@ -1856,7 +2147,7 @@ class SettingsAPI:
         record["settings"] = store
         self._api._manager.save_records()
 
-    def pop(self, key: str, default=None):
+    def pop(self, key: str, default: Any = None) -> Any:
         record = self._record()
         store = dict(record.get("settings") or {})
         gone = store.pop(str(key), default)
@@ -1871,21 +2162,16 @@ class SettingsAPI:
 
 
 class ConfigAPI:
-    """The addon's own file in its ``addons/_data/<id>`` folder, shared by every
-    profile.
+    """The addon's own file in ``addons/_data/<id>``, shared by every profile.
 
-    ``api.settings`` keeps an addon's small per-profile notes; this is for the
-    things a user would want to look at and edit themselves - where the
-    certificate lives, what command restarts the web server. Declare the keys
-    once from ``init`` and the app shows them under the addon's name in
-    Settings > Addons.
-    """
+    Declare the keys once from ``init`` and the app shows them in
+    Settings > Addons."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._api = api
         self._addon = api._addon
 
-    # --- the file --------------------------------------------------------
+    # --- the file ---
 
     @property
     def file(self) -> Path:
@@ -1899,24 +2185,16 @@ class ConfigAPI:
         return self.file.is_file()
 
     def open_folder(self) -> None:
-        """Show the addon's own ``addons/_data/<id>`` folder in the file browser."""
-        from PyQt6.QtCore import QUrl
+        """Show the addon's own ``addons/_data/<id>`` folder."""
         from PyQt6.QtGui import QDesktopServices
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(addon_data_dir(self._api.id))))
 
-    # --- what the keys mean ---------------------------------------------
+    # --- what the keys mean ---
 
     def declare(self, fields: list | None = None, defaults: dict | None = None,
                 title: str = "") -> dict:
-        """Register the schema, and write the file with the defaults if missing.
-
-        ``fields`` is a list of ``{"key", "label", "kind", "hint", ...}``, where
-        ``kind`` is ``text``, ``number``, ``bool``, ``choice`` (with ``choices``),
-        ``list`` (one comma-separated line) or ``multiline`` (a box of lines).
-        A nested ``key`` with a dot - ``"subject.CN"`` - reads and writes inside
-        that section. Returns the values the addon should start from.
-        """
+        """Register the schema and write the file with defaults if missing; kind is text/number/bool/choice/list/multiline, a dotted key reads and writes inside that section."""
         clean = []
         for field in fields or []:
             if isinstance(field, dict) and field.get("key"):
@@ -1925,8 +2203,7 @@ class ConfigAPI:
         self._addon.config_defaults = jsonable(dict(defaults or {}))
         self._addon.config_title = str(title or "")
         if clean:
-            # Kept in a side file so the form still shows while the addon is
-            # switched off, and so the user's own file stays free of the schema.
+            # A side file keeps the form showing while the addon is off.
             guard(lambda: write_config_json(
                 addon_schema_path(self._api.id),
                 {"title": self._addon.config_title,
@@ -1947,10 +2224,10 @@ class ConfigAPI:
         stored = getattr(self._addon, "config_defaults", None)
         if stored:
             return jsonable(dict(stored))
-        # Switched off: the copy in the side file is all the app has.
+        # Switched off: the side file is all the app has.
         return jsonable(read_config_json(addon_schema_path(self._api.id)).get("defaults") or {})
 
-    # --- the values ------------------------------------------------------
+    # --- the values ---
 
     def stored(self) -> dict:
         """Exactly what is in the file, with nothing filled in."""
@@ -1960,10 +2237,10 @@ class ConfigAPI:
         """The file over the declared defaults, read fresh from disk."""
         return jsonable(merge_config(self.defaults(), self.stored()))
 
-    def get(self, key: str, default=None):
+    def get(self, key: str, default: Any = None) -> Any:
         return jsonable(config_get(self.all(), str(key), default))
 
-    def set(self, key: str, value) -> None:
+    def set(self, key: str, value: Any) -> None:
         self.update({key: value})
 
     def update(self, values: dict) -> dict:
@@ -1977,9 +2254,9 @@ class ConfigAPI:
 
         return guard(apply, reporter=self._api.error) or {}
 
-    def pop(self, key: str, default=None):
+    def pop(self, key: str, default: Any = None) -> Any:
         """Remove a key so the default applies again."""
-        def apply():
+        def apply() -> Any:
             stored = read_config_json(self.file)
             gone = take_config_value(stored, str(key))
             write_config_json(self.file, stored)
@@ -2024,16 +2301,16 @@ class ConfigAPI:
 class SchedulerAPI:
     """Timers that stop themselves when the addon is switched off."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._api = api
 
-    def after(self, seconds, callback) -> QTimer:
+    def after(self, seconds: Any, callback: Callable[[], None]) -> QTimer:
         return self._start(float(seconds) * 1000.0, callback, False)
 
-    def every(self, seconds, callback) -> QTimer:
+    def every(self, seconds: Any, callback: Callable[[], None]) -> QTimer:
         return self._start(max(100.0, float(seconds) * 1000.0), callback, True)
 
-    def _start(self, ms: float, callback, repeat: bool) -> QTimer:
+    def _start(self, ms: float, callback: Callable[[], None], repeat: bool) -> QTimer:
         timer = QTimer()
         timer.setSingleShot(not repeat)
         timer.timeout.connect(lambda: _call(callback))
@@ -2042,14 +2319,14 @@ class SchedulerAPI:
         return timer
 
 
-def _call(callback) -> None:
+def _call(callback: Callable[[], None]) -> None:
     callback()
 
 
 class PathsAPI:
     """Folders an addon may read and write."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._addon = api._addon
         self._api = api
 
@@ -2089,12 +2366,7 @@ class PathsAPI:
 
     @property
     def assets(self) -> Path:
-        """The pictures that ship inside the program (logos, tab icons).
-
-        Read-only in spirit: a build unpacks them into a temporary folder, so
-        writing there is lost on the next run. An addon that wants a picture of
-        its own keeps it beside its own file.
-        """
+        """The pictures shipped inside the program; read-only in spirit."""
         from manager_const import ASSETS_DIR
 
         return ASSETS_DIR
@@ -2107,7 +2379,7 @@ class PathsAPI:
 class PeersAPI:
     """Look at, and talk to, the other addons."""
 
-    def __init__(self, api: "AddonAPI"):
+    def __init__(self, api: "AddonAPI") -> None:
         self._api = api
 
     def list(self) -> list[str]:
@@ -2120,14 +2392,14 @@ class PeersAPI:
         return jsonable({"id": addon.id, "name": addon.name, "version": addon.version,
                          "enabled": addon.enabled, "kind": addon.kind})
 
-    def send(self, addon_id: str, data=None) -> bool:
+    def send(self, addon_id: str, data: Any = None) -> bool:
         return self._api._manager.deliver(self._api.id, str(addon_id), data)
 
 
 class AddonAPI:
     """The object every addon receives: ``def init(api)``."""
 
-    def __init__(self, manager, addon):
+    def __init__(self, manager: Any, addon: Any) -> None:
         from manager_const import BASE_DIR
 
         self._manager = manager
@@ -2148,14 +2420,14 @@ class AddonAPI:
         self.paths = PathsAPI(self)
         self.peers = PeersAPI(self)
 
-    def log(self, text) -> None:
+    def log(self, text: Any) -> None:
         """Write to the app log under this addon's name."""
         self._manager.log(self.id, str(text))
 
-    def error(self, text) -> None:
+    def error(self, text: Any) -> None:
         self._manager.log(self.id, f"error: {text}", warning=True)
 
-    def call(self, method: str, arguments: dict | None = None):
+    def call(self, method: str, arguments: dict | None = None) -> Any:
         """Invoke an API method by name - the entry point for process addons."""
         parts = str(method).split(".")
         target = self
@@ -2167,8 +2439,7 @@ class AddonAPI:
         if not callable(function):
             raise AddonError(f"no such api method: {method}")
         values = {str(key): value for key, value in (arguments or {}).items()}
-        # A JSON addon names the spec key "id"; Python uses "identifier"
-        # because id() is a builtin, so the two spellings mean the same thing.
+        # A JSON addon names the spec key "id"; Python uses "identifier".
         if "id" in values and "identifier" not in values:
             try:
                 parameters = inspect.signature(function).parameters

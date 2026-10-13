@@ -23,8 +23,9 @@ from __future__ import annotations
 import datetime
 import re
 
-# The Qt-free half of the contract, so this file also runs compiled into a
-# program of its own and inside a test script that never opens a window.
+# Qt-free half: runs compiled alone and in a windowless test.
+from typing import Any
+
 from addon_common import AddonError, config_get, merge_config
 
 ADDON = {
@@ -34,6 +35,7 @@ ADDON = {
     "description": "Shows the certificate on the device and reissues the .crt and "
                    ".key over SSH, with the subject, paths and follow-up commands "
                    "kept in addons/_data/cert_manager/config.json.",
+    "requires": ["ssh"],
     "api": 1,
 }
 
@@ -43,9 +45,7 @@ api = None                  # filled in by init()
 working = False             # one device job at a time
 follow_up = ""              # what to say once the next read has landed
 
-# ---------------------------------------------------------------------------
-# What can be configured, and what it starts out as
-# ---------------------------------------------------------------------------
+# --- what can be configured, and its defaults ---
 
 DEFAULTS = {
     "cert_dir": "/etc/ssl",
@@ -60,9 +60,8 @@ DEFAULTS = {
     "ca_flag": True,
     "backup": True,
     "backup_dir": "",
-    # Blank, on purpose. Words here would be the certificate's subject, not a
-    # hint: an early build kept "Country" and "City" in these slots and openssl
-    # then refused the request (see OLD_SUBJECT_WORDS).
+    # Blank on purpose: words here become the subject, not a hint
+    # (see OLD_SUBJECT_WORDS).
     "subject": {
         "C": "",
         "ST": "",
@@ -92,7 +91,7 @@ FIELDS = [
     {"key": "backup_dir", "label": "Backup folder", "kind": "text",
      "hint": "Blank means beside the certificate", "placeholder": "beside the certificate"},
 
-    # Guidance lives in the hint and the placeholder, never in the value.
+    # Guidance goes in the hint/placeholder, never the value.
     {"key": "subject.C", "label": "Country", "kind": "text",
      "hint": "Two letters and nothing else - GB, NO, DE - or blank. openssl has "
              "room for exactly two characters here and says 'string too long'",
@@ -170,12 +169,9 @@ SUBJECT_LABELS = {"C": "Country", "ST": "State / Province", "L": "Locality",
                   "O": "Organization", "OU": "Organizational unit",
                   "CN": "Common name"}
 
-#: Words an early version of this addon kept in the subject *values*, meaning
-#: them as hints. A config file written then still holds them, and openssl takes
-#: them literally: countryName has room for two characters, so ``C = Country``
-#: died on the device with ``ASN1_mbstring_ncopy:string too long`` after the key
-#: had already been generated. A stored value that is still one of these counts
-#: as the blank it was meant to be.
+#: Words an early build kept as subject values, meant as hints. openssl takes
+#: them literally and the Country is two letters, so they died on the device.
+#: A stored value still one of these counts as the blank it was meant to be.
 OLD_SUBJECT_WORDS = {
     "C": {"Country"},
     "ST": {"State", "State / Province"},
@@ -210,32 +206,26 @@ TAB_ICON = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------------
+# --- small helpers ---
 
 def widget_id(key: str) -> str:
     """A spec id for a config key: dots are not allowed in one."""
     return str(key).replace(".", "_")
 
 
-def one_line(value) -> str:
-    """One safe line of openssl or path text from whatever the form holds.
-
-    Shell punctuation is dropped here on purpose: these values go into a
-    certificate, not into a command.
-    """
+def one_line(value: Any) -> str:
+    """One safe line of openssl/path text; shell punctuation dropped on purpose."""
     text = str("" if value is None else value).strip()
     return _UNSAFE.sub("", text.splitlines()[0] if text else "")
 
 
-def command_line(value) -> str:
+def command_line(value: Any) -> str:
     """One shell command, kept as written - these are meant to be run."""
     text = str("" if value is None else value).strip()
     return text.splitlines()[0].replace("\r", "") if text else ""
 
 
-def clean_list(value) -> list[str]:
+def clean_list(value: Any) -> list[str]:
     """A config value as a list of clean entries, whatever shape it arrived in."""
     if value is None:
         return []
@@ -253,11 +243,7 @@ def quoted(path: str) -> str:
 
 
 def subject_of(values: dict) -> dict:
-    """Every subject field as one clean line, old placeholder words gone.
-
-    Always all six keys, in openssl's order, so a config written through this
-    reads the same shape whatever version wrote it.
-    """
+    """All six subject fields as clean lines in openssl's order, old hint words gone."""
     raw = config_get(values, "subject", {}) or {}
     out: dict[str, str] = {}
     for key in SUBJECT_ORDER:
@@ -267,21 +253,13 @@ def subject_of(values: dict) -> dict:
 
 
 def with_clean_subject(values: dict) -> dict:
-    """``values`` with its subject run through :func:`subject_of`.
-
-    Applied wherever the config is read, so a file left over from the old
-    defaults shows empty boxes to fill in rather than words, and saving it again
-    fixes the file. Nothing is dropped: only a value exactly equal to one of the
-    old words goes away.
-    """
+    """``values`` with its subject run through :func:`subject_of`, so old hint words show blank."""
     copy = dict(values or {})
     copy["subject"] = subject_of(copy)
     return copy
 
 
-# ---------------------------------------------------------------------------
-# The tab
-# ---------------------------------------------------------------------------
+# --- the tab ---
 
 def control_spec(key: str, values: dict) -> dict:
     """The form row for one config key, prefilled with the current value."""
@@ -354,13 +332,7 @@ def tab_spec(values: dict) -> dict:
 
 
 def build_tab() -> None:
-    """The tab as a spec, and its buttons as reports.
-
-    Nothing here holds on to a widget. The app builds the controls in its own
-    process, so the one route a press can take is the ``on_widget`` hook below -
-    which is also how it arrives when the addon is imported into the app, so a
-    compiled copy behaves exactly like a source one.
-    """
+    """The tab as a spec; buttons report through ``on_widget``, so compiled and source match."""
     values = with_clean_subject(api.config.all())
     api.tabs.add_tab(TAB, spec=tab_spec(values), style=TAB_STYLE)
     api.tabs.set_icon(TAB, TAB_ICON)
@@ -382,7 +354,7 @@ def values_of() -> dict:
     return out
 
 
-def read_control(key: str, field: dict):
+def read_control(key: str, field: dict) -> Any:
     kind = str(field.get("kind") or "text")
     try:
         raw = api.tabs.widget_value(TAB, widget_id(key),
@@ -429,9 +401,7 @@ def show_output(result: dict) -> None:
     api.tabs.set_widget(TAB, "viewer", "text", body.strip() or "(the device gave no output)")
 
 
-# ---------------------------------------------------------------------------
-# Reading the device
-# ---------------------------------------------------------------------------
+# --- reading the device ---
 
 def paths(values: dict) -> dict:
     folder = one_line(config_get(values, "cert_dir", DEFAULTS["cert_dir"])) or "/etc/ssl"
@@ -546,9 +516,7 @@ def on_device_read(result: dict) -> None:
         bad="expired" in notice or "WARNING" in (result.get("out") or ""))
 
 
-# ---------------------------------------------------------------------------
-# Reissuing
-# ---------------------------------------------------------------------------
+# --- reissuing ---
 
 def subject_lines(values: dict) -> list[str]:
     """The ``[dn]`` section of the .cnf, blank fields left out."""
@@ -684,12 +652,7 @@ def reissue_script(values: dict) -> str:
 
 
 def issue_problems(values: dict, host: str = "") -> list[str]:
-    """What openssl would refuse about this request, said before it is sent.
-
-    The device answers a bad subject with two lines of key-generation noise and
-    one asn1 complaint, seconds after it started - so the common ones are caught
-    here instead, in words that name the field to fix.
-    """
+    """What openssl would refuse about this request, named per field before it is sent."""
     problems: list[str] = []
     subject = subject_of(values)
     country = subject["C"]
@@ -709,8 +672,7 @@ def issue_problems(values: dict, host: str = "") -> list[str]:
     return problems
 
 
-#: What openssl's complaints about a refused request are usually worth checking,
-#: the specific ones first.
+#: What openssl's refusals are usually worth checking, the specific ones first.
 FAILURES = (
     ("string too long",
      "a subject field is longer than openssl allows - the Country is exactly "
@@ -845,9 +807,7 @@ def on_copy(result: dict) -> None:
     api.log(f"certificate copied to {target}")
 
 
-# ---------------------------------------------------------------------------
-# One job at a time
-# ---------------------------------------------------------------------------
+# --- one job at a time ---
 
 def _buttons(usable: bool) -> None:
     """Grey the buttons out while the device is working, through the app."""
@@ -871,9 +831,7 @@ def _finish() -> None:
     _buttons(True)
 
 
-# ---------------------------------------------------------------------------
-# The hooks the app calls
-# ---------------------------------------------------------------------------
+# --- hooks the app calls ---
 
 def focus_and_read() -> None:
     """The Tools menu entry: go to the tab and read the device."""
@@ -893,7 +851,7 @@ HANDLERS.update({
 })
 
 
-def init(plugin_api) -> None:
+def init(plugin_api: Any) -> None:
     """Build the tab from the saved config."""
     global api
     api = plugin_api
@@ -918,13 +876,7 @@ def shutdown() -> None:
 
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
-    """A control on the tab reported something: run what its button means.
-
-    Every button in the spec says ``"on": ["clicked"]``, so the app calls this
-    with the id it was pressed. It is the only way a click reaches an addon that
-    has been compiled into a program of its own, because the widget itself lives
-    in the app's process and cannot be handed over.
-    """
+    """A tab control reported an event: run its button, the only route a compiled click takes."""
     if str(tab) != TAB or str(event) != "clicked" or working:
         return
     handler = HANDLERS.get(str(identifier))

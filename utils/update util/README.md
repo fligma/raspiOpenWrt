@@ -1,15 +1,15 @@
 ![SCREENSHOT.png](https://raw.githubusercontent.com/fligma/raspiOpenWrt/refs/heads/main/media/SCREENSHOT.png)
-# rasconf Manager
+# Berry Manager
 
-A desktop tool for managing a Raspberry Pi running OpenWrt and the rasconf web
-interface on it. It talks to the device over SSH/SFTP and gives you an
+A desktop tool for managing a Raspberry Pi running OpenWrt and the Rasconf web
+dashboard on it. It talks to the device over SSH/SFTP and gives you an
 interactive terminal, embedded web views, and - through the bundled Berry
 addon - a full file manager.
 
 ## Build the executable
 
 ```
-pyinstaller --noconfirm --onefile --windowed --icon="assets/icon.png" --add-data="assets:assets" --add-data="config.example.json:." --add-data="_addon_bundle:addons" --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore --hidden-import=secretstorage --hidden-import=jeepney rasconf_manager.py
+pyinstaller --noconfirm --onefile --windowed --icon="assets/icon.png" --add-data="assets:assets" --add-data="config.example.json:." --add-data="_addon_bundle:addons" --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore --hidden-import=secretstorage --hidden-import=jeepney berry_manager.py
 ```
 
 On Windows use `;` between the parts of every `--add-data` pair
@@ -52,8 +52,9 @@ PyInstaller collect them. Commit a new module with the rest of
 
 ### Assets
 
-`assets/` holds the pictures the program ships with - `icon.png`,
-`icon2.png` and `berryicon.png` (the mark Berry's tab wears). Nothing
+`assets/` holds the pictures the program ships with - `icon.png` and
+`icon2.png` for the logo, and the tab marks `defaulttabicon.png`,
+`terminalicon.png`, `openwrtlogsicon.png` and `berryicon.png`. Nothing
 hard-codes the folder: `manager_const.find_asset(name)` looks in `assets` beside
 the resources, then the old top-level location, then beside the executable, so
 an existing `icon.png` next to the `.exe` still overrides the built-in one. Add
@@ -69,8 +70,8 @@ Fifteen files, each holding one area of the app:
 
 | Module | Holds |
 | --- | --- |
-| `rasconf_manager.py` | Entry point: Qt application, window icon, startup |
-| `manager_gui.py` | `RasconfManager` - menu, tab shell, connection panel, Settings tab, profiles and credentials, dialog-driven menu actions, log, shutdown |
+| `berry_manager.py` | Entry point: Qt application, window icon, startup |
+| `manager_gui.py` | `BerryManager` - menu, tab shell, connection panel, Settings tab, profiles and credentials, dialog-driven menu actions, log, shutdown |
 | `manager_widgets.py` | Reusable pieces: `ToggleSwitch`, `ToggleGroup`, `CollapseGroup`, `TabTransportDots`, the shared file tree and the popup dialogs |
 | `manager_browser.py` | Embedded web tabs and the HTTPS certificate switch |
 | `manager_files.py` | The lightweight SFTP connection - the connect/disconnect probe, the `sftp_connected` flag and its events (Berry owns the file views) |
@@ -86,7 +87,7 @@ Fifteen files, each holding one area of the app:
 | `manager_const.py` | Paths, defaults and the app stylesheet |
 
 The three device tabs are mixins (`BrowserMixin`, `FileViewsMixin`,
-`TerminalMixin`) that `RasconfManager` inherits alongside `QMainWindow`, so the
+`TerminalMixin`) that `BerryManager` inherits alongside `QMainWindow`, so the
 code of each tab stays in its own file while the window keeps the shared state.
 What the window itself owns - the menu, the Settings tab, the profiles and the
 actions that open a dialog - is in `manager_gui.py`.
@@ -94,15 +95,18 @@ actions that open a dialog - is in `manager_gui.py`.
 ## Configuration file
 
 The manager keeps everything it writes in one `config` folder beside the script
-(`manager_const.CONFIG_DIR`): `config.json`, `command_history.json`,
-`rasconf_manager.log` and the shared addon build record `config/_build.json`. The
-folder is created on the way up, and a loose file left in the program root by an
-older version is moved into it on the first run. The folder is
-Git-ignored; `config.example.json` is the tracked template, written out with a
-complete profile including the default tab order, so copying it gives a working
-starting point rather than a list of empty keys. Existing
-single-host config files are upgraded automatically to the profile format the
-first time you run the new version.
+(`manager_const.CONFIG_DIR`): `config.json` - the profile index - one
+`{profile}.json` holding each profile's complete settings,
+`command_history.json`, `berry_manager.log` and the shared addon build record
+`config/_build.json`. The folder is created on the way up, and a loose file
+left in the program root by an older version is moved into it on the first
+run. The folder is Git-ignored; `config.example.json` is the tracked template,
+written out with a complete profile including the default tab order, so
+copying it gives a working starting point rather than a list of empty keys.
+An older config file - a single flat set of settings, or one with every
+profile written inside it - is folded into the per-profile layout and
+rewritten once the first time the new version runs. Export and import stay
+one self-contained file that carries every profile.
 
 Passwords and private-key passphrases are never written to `config.json`.
 When "Remember password securely" is on, the password is stored in the
@@ -112,10 +116,14 @@ keyed by `user@host:port`.
 ### Profiles
 
 Connection details are grouped into named profiles (host, port, username,
-key, remote directory, source, host-key and remember-password flags). Use the
-profile selector at the top of the window, or the File menu, to create, save,
-rename, and delete profiles. Switching profiles loads its settings, clears the
-password field, and reloads any saved credential.
+key, remote directory, source, host-key and remember-password flags), and
+every profile carries the complete set of settings the app uses - each
+profile is its own `{profile}.json` in the config folder. The selector lives
+in the File menu: **New profile...**, **Load profile** - one clickable entry
+per profile, the active one ticked - **Rename current profile...** and
+**Delete current profile...**. Loading another profile saves what is open
+first, then rebuilds every page from the clicked profile's file; the password
+field is cleared and a stored credential is picked up again.
 
 ### Settings tab
 
@@ -157,7 +165,7 @@ hide their own indented options while off.
 - **File transfer (SFTP)** (always visible)
   - Auto-connect at startup (opens the SFTP connection when the app launches)
   - **Enable logging to file** - when off, nothing is written to
-    `rasconf_manager.log`. While on it exposes the maximum on-screen log lines
+    `berry_manager.log`. While on it exposes the maximum on-screen log lines
     and the log file path. The on-screen pane under the tabs is switched
     separately, in View > **Show log console**.
 - **SSH** (checkable tab)
@@ -230,7 +238,7 @@ answer, so the About box shows whichever icon is selected.
 The same menu has **Show log console** (**Ctrl+Shift+L**), which folds the log
 pane at the bottom of the window away and brings it back. Only the pane is
 hidden: `log()` keeps appending its lines and, while file logging is on,
-nothing is lost from `rasconf_manager.log`, so switching the pane back on shows
+nothing is lost from `berry_manager.log`, so switching the pane back on shows
 what happened while it was out of sight. The tabs above stretch into the freed
 space. The choice is stored per profile in `log_visible` and is applied when the
 window opens.
@@ -253,7 +261,7 @@ is applied when the window opens; nothing needs a restart.
 | `profiles` | List of saved connection profiles |
 | `active_profile` | Name of the profile currently loaded |
 | `ssh_timeout` | Seconds for SSH connect/auth (3-300) |
-| `logging_enabled` | Master switch for writing `rasconf_manager.log` |
+| `logging_enabled` | Master switch for writing `berry_manager.log` |
 | `show_hidden_files` | Include dot-files in Berry's device listing |
 | `auto_connect_sftp` | Open the SFTP connection at startup |
 | `auto_connect_ssh` | Open the SSH terminal at startup (only when the SSH tab is on) |
@@ -281,7 +289,8 @@ Editing `quick_commands` is done through the Tools menu or the button on the
 Settings tab; you no longer need to open the JSON by hand. The deploy keys the
 older versions wrote (`deploy_ignore`, `post_deploy_commands`, the backup,
 mirror and `confirm_destructive` options) are no longer read - Berry browses and
-edits files directly instead of deploying a source tree.
+edits files directly instead of deploying a source tree - and are stripped from
+the profile files when an old config is loaded.
 
 ## Managing files
 
@@ -364,7 +373,7 @@ On older opkg-based OpenWrt releases use `opkg update` then
 ## Addons
 
 An addon is a file you drop next to the program; it extends the app without
-changing it. The folder is `addons` beside `rasconf_manager.py`, or beside the
+changing it. The folder is `addons` beside `berry_manager.py`, or beside the
 `.exe` when the app is built. It is created the first time the app starts (or
 when you press **Open folder** in Settings), so it exists even if you never add
 anything to it.
@@ -587,9 +596,16 @@ it loses the mark, says so in the log and leaves the tab working, which is all a
 decoration is worth. An embedded page is left alone: it keeps following the
 favicon the page itself sends, which is set by the device and not by the addon.
 
-`addons/cert_manager.py` and `addons/berry.py` are the addons that use this, and
-each holds its mark - a trophy, a cluster of drupelets - as an SVG string in
-`TAB_ICON` for exactly that reason.
+Three shipped addons use this: `addons/cert_manager.py` (a trophy),
+`addons/berry.py` (a cluster of drupelets) and `addons/openwrt_logs.py` (a log
+page lined in the device colours). Each holds its mark as an SVG string in
+`TAB_ICON` for exactly that reason, and berry and openwrt_logs look for a real
+picture first - `assets/berryicon.png` and `assets/openwrtlogsicon.png`,
+through `api.paths.assets` - and wear their drawing only when the file is not
+there. A tab that never names a mark is not left bare either: it wears the
+program's default tab picture (`assets/defaulttabicon.png`), and the SSH tab
+wears `assets/terminalicon.png`. Every tab mark is drawn larger than the bar
+measures it at, so the pictures read clearly without the tabs growing.
 
 A tab can instead wear the program's own logo: `api.tabs.use_app_icon(tab)`
 points it at whatever `api.session.app_icon()` returns - the same picture the
@@ -632,7 +648,9 @@ Kinds: `column`, `row`, `grid`, `form`, `group`, `scroll`, `splitter`, `tabs`,
 `progress`, `spin`, `slider`, `spacer`, `web`. Common attributes: `id`, `text`,
 `tooltip`, `style` (a Qt stylesheet, so the addon can theme its own tab),
 `enabled`, `visible`, `font_size`, `items`, `rows`, `value`, `checked`,
-`placeholder`, `readonly`, `minimum`, `maximum`, `columns`, `word_wrap`, and
+`placeholder`, `readonly`, `minimum`, `maximum`, `columns`, `word_wrap`,
+`expand` (claim the width its row or column leaves over - what lets one status
+line stretch across a header instead of being squeezed by a spacer), and
 `format` for a progress bar - the words painted inside it, where Qt expands
 `%p`, `%v` and `%m` into the percentage and the numbers. `on`
 lists the interactions to report back: `clicked`, `toggled`, `changed`,
@@ -723,7 +741,7 @@ never overruled while you are writing it.
 | **Details** | The manifest - name, version, author, description, notes, api - edited as a form, and below it the raw JSON of `addons/_data/<id>/config.json` with Save, Reload and Open. |
 | **Compile** | The source/compiled choice for this id, the PyInstaller options, **Compile addon**, **Cancel**, **Clean staging** and the build output. |
 | **Test** | `addons/_tests/test_<id>.py`: **Create test script** writes it from the template, **Run test** runs it as its own process and shows its output and result. |
-| **Log** | The lines this addon wrote with `api.log`, taken from `rasconf_manager.log`, with a text filter, an *errors only* filter and *follow*. |
+| **Log** | The lines this addon wrote with `api.log`, taken from `berry_manager.log`, with a text filter, an *errors only* filter and *follow*. |
 | **Processes** | The pid, state, exit code, uptime, request count and command line of every addon running as a program; and what the app holds for the imported ones - their tabs, timers, menu entries and event names, plus the threads serving them. |
 
 A table, five panes and the notes under them do not fit into a short window, so
@@ -862,9 +880,18 @@ settings.
 | **Reload from config** | Puts the saved values back into the form |
 | **Stop** | Gives up on the job in hand; what has already gone across stays on the device |
 
-The plan table is the point of the tab: one row per file with its size, what the
-device has of it and what this job means to do - `new`, `already there`,
-`replaced`, `written again` - so an update is read before it is run, and a
+The tab gives the whole width to what the job is doing: a header line carries
+where the files come from and where they land beside a chip that says whether
+the device is connected; a step flow across the top -
+`○ Files → ○ Compare → ○ Backup → ○ Write → ○ Restart → ○ Check` - lights the
+step running now, ticks the ones the route walked and dims the ones this job
+never takes; and three badges count the plan up (*N to write*, *N already
+there*, *N extra on device*) above a notebook of three pages - **Files**, the
+plan table, **Log**, and **Settings**, the form that used to spend half the
+width standing beside the plan in a split.
+The plan table is one row per file with its size, what the device has of it and
+what this job means to do - `new`, `already there`, `replaced`, `written again` -
+the row tinted by that action, so an update is read before it is run, and a
 look-around costs one API call and a download.
 
 - A file whose size matches what is there is left alone (**Leave a file alone
@@ -894,7 +921,8 @@ look-around costs one API call and a download.
   it, so the bar says what is happening and keeps moving while the device thinks;
   the last file of a download no longer lands the job at 95% with four stages
   still to go, and the bar ends full only when the route really is over. The two
-  one-command buttons use the bar the same way. The tab is a spec and its eight
+  one-command buttons use the bar the same way, and the step flow above it
+  follows the route stage by stage. The tab is a spec and its eight
   buttons report through `on_widget`, and a compiled copy of this addon cannot
   hold an SSH session (`device.open` is refused), so the same writing code sends
   each file with `device.upload` instead - one connection per file rather than
@@ -902,7 +930,8 @@ look-around costs one API call and a download.
   program's own icon, so the tab changes together with View > Alternate icon.
 
 `addons/_tests/test_web_installer.py` drives the whole route - the tab built by
-Qt, a real fetch from GitHub, an install against a faked device, the local
+Qt (its notebook, step flow and badges included), a real fetch from GitHub, an
+install against a faked device, the local
 folder, a branch that is not there, and the bar watched stage by stage: that it
 moves for every stage, names each one, never goes backwards and ends full - and
 **Run test** in the Addon Dev tab runs it, skipping the parts that need GitHub
@@ -1009,6 +1038,22 @@ the tab and editor as Qt builds them (the two-page frame, the headers, the
 right-click policy, and the live syntax highlighter on the editor) - and **Run
 test** in the Addon Dev tab runs it.
 
+### Shipped addon: OpenWrt Log Viewer
+
+`addons/openwrt_logs.py` adds one tab - **OpenWrt Logs** - with two pages:
+**Single device** reads the log of the profile's own host, and **Multi
+device** queries several hosts side by side, each device's rows wearing the
+colour that device was given (the translucent wash is painted by the app, and
+the Colour field in the form is a hex box whose swatch opens the same colour
+wheel as `api.ui.pick_color`). Every line arrives over SSH with one command
+per fetch: the log command, the row cap (50 to 50 000) and the timeout are
+config, and auto-refresh pulls the log again on a timer. Search works two
+ways - highlight the matches, or filter the list down to them - with case
+sensitivity and regular expressions as switches. Like the other shipped
+addons the tab is a spec and every control reports through `on_widget`, so a
+compiled copy runs the same code; `addons/_tests/test_openwrt_logs.py` drives
+it through the stub, including the picture the tab asks to wear.
+
 ### Addons inside the built executable
 
 The build packs the addons it finds in `addons` **inside the program**, and the
@@ -1034,7 +1079,7 @@ app reads that copy as a set of *shipped* addons:
   still written beside the `.exe`, in the writable `addons/_data/<id>/config.json`, so
   a shipped addon is configured per installation exactly like a dropped-in one.
 - "Shipped" is decided by a stable list, `manager_const.SHIPPED_ADDON_IDS`
-  (`berry`, `cert_manager`, `web_installer`), on top of the `builtin` flag, so a
+  (`berry`, `cert_manager`, `web_installer`, `openwrt_logs`), on top of the `builtin` flag, so a
   source checkout - where `HAS_BUILTIN_ADDONS` is off - still groups those addons
   under **Bundled with the program** rather than the drop-in list.
 - Two addons of one id cannot both be *the* addon called `mytool`, and a file in
@@ -1057,7 +1102,7 @@ The rest of the frozen path model is unchanged:
   it is what a compiled addon can build against.
 - What an addon may import is what the bundle collected: the standard library,
   PyQt6 (`QtWidgets`/`QtGui`/`QtCore`, plus `QtWebEngineWidgets` when it is
-  installed), `paramiko`, `pathspec` and `keyring`. Anything else - `requests`,
+  installed), `paramiko` and `keyring`. Anything else - `requests`,
   `serial`, a vendor SDK - is not in the `.exe`, so such an addon has to be a
   separate program in the folder rather than a `.py` file.
 - A folder addon's own data files sit beside the `.exe` too, and
@@ -1070,7 +1115,7 @@ that came inside the program, since its settings are not the build's to keep.
 ## Logs
 
 On-screen log lines are capped by `max_log_lines`. While **logging is enabled**
-every message is also appended to `config/rasconf_manager.log`, and
+every message is also appended to `config/berry_manager.log`, and
 you can export the current view with File > Save log to file. Disabling logging
 in Settings stops the file from being written; the on-screen log still updates
 so you keep operation feedback.

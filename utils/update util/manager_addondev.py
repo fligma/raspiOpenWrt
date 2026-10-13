@@ -57,9 +57,10 @@ import sys
 from string import Template
 import threading
 import time
+from typing import Any
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
-from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont
+from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont, QHideEvent, QShowEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -109,20 +110,15 @@ from manager_widgets import tip_on_title
 #: How often the tables ask the runtime what it knows.
 REFRESH_MS = 2000
 
-#: One readable line per row, and the most rows the index asks for before its
-#: own scroll bar takes over. fit_rows() turns these two into a height.
+#: One line per row, and the rows the index shows before it scrolls itself.
 ROW_H = 30
 MAX_ROWS = 12
 
-#: The least room the panes and the text views inside them may be given. The
-#: whole tab lives in a scroll area, so these are floors a short window cannot
-#: squeeze through: it gains a scroll bar instead of clipped text.
+#: Floors for the panes; the tab scrolls rather than clipping text.
 PANES_MIN_H = 380
 VIEW_MIN_H = 150
 
-#: The words a row uses for how an addon is doing, in the shades the rest of the
-#: app already spends on them. Qt's own darkGreen and gray vanish on a #1a1a1a
-#: background, which is why these are spelled out here instead.
+#: State words per row; Qt's darkGreen and gray vanish on a dark background.
 STATE_COLORS = {
     "running": "#23d18b",
     "loaded": "#23d18b",
@@ -131,10 +127,10 @@ STATE_COLORS = {
     "failed": "#ff6b6b",
 }
 
-#: The keys the Details form owns. Everything else in a manifest file stays put.
+#: The keys the Details form owns; the rest of a manifest file stays put.
 DETAIL_KEYS = ("name", "version", "author", "description", "notes")
 
-#: What the panels say about an addon whose file came with the program itself.
+#: What the panels say about an addon that came with the program itself.
 SHIPPED_NOTE = ("Shipped inside the program. Its source is shown as it is, and "
                 "it can only be switched on and off in Settings.")
 
@@ -145,19 +141,13 @@ def monospace(view: QPlainTextEdit) -> QPlainTextEdit:
     font = QFont(_MONO[0], _MONO[1])
     font.setStyleHint(QFont.StyleHint.Monospace)
     view.setFont(font)
-    # An output view keeps its lines: showing them is what the pane exists for,
-    # and the tab scrolls rather than crushing it down to a single row.
+    # An output view keeps its lines; the tab scrolls instead of crushing it.
     view.setMinimumHeight(VIEW_MIN_H)
     return view
 
 
 def note_label(label: QLabel, color: str = "#8f8f8f") -> QLabel:
-    """A grey note under a control, holding the height its wrapped text needs.
-
-    A wrapped label in a squeezed layout is painted one line short of what it
-    says, which reads as missing text rather than as a fault, so it asks for its
-    own hint as a minimum and the scroll area gives the room.
-    """
+    """A grey note under a control, holding the height its wrapped text needs."""
     label.setStyleSheet(f"color: {color};")
     label.setWordWrap(True)
     label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
@@ -169,12 +159,8 @@ def module_name(source: Path) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", source.stem) or "addon"
 
 
-def _display_path(value) -> str:
-    """An addon's config file shown relative to the program, for a label.
-
-    Falls back to the whole path when it is not under ``BASE_DIR`` (a different
-    root entirely), so the label never shows a half-cut location.
-    """
+def _display_path(value: Any) -> str:
+    """A config path shown relative to the program, or whole if it is outside."""
     path = Path(value)
     try:
         return path.relative_to(BASE_DIR).as_posix()
@@ -182,7 +168,7 @@ def _display_path(value) -> str:
         return str(path)
 
 
-def human_size(size) -> str:
+def human_size(size: Any) -> str:
     text = float(size or 0)
     for unit in ("B", "KB", "MB"):
         if text < 1024:
@@ -191,7 +177,7 @@ def human_size(size) -> str:
     return f"{text:.1f} MB"
 
 
-def duration(seconds) -> str:
+def duration(seconds: Any) -> str:
     if seconds is None:
         return ""
     value = max(0, int(float(seconds)))
@@ -202,13 +188,9 @@ def duration(seconds) -> str:
     return f"{value // 3600}h {(value % 3600) // 60}m"
 
 
-def make_table(headers, stretch=None, widths=None) -> QTableWidget:
-    """A list the way this tab draws all of them.
-
-    No row numbers, one whole row picked at a time, nothing typed into it, and
-    rows high enough and light enough to read - the shades come from the app
-    stylesheet, which is also what keeps Qt from painting its white default.
-    """
+def make_table(headers: list[str], stretch: int | None = None,
+               widths: dict | None = None) -> QTableWidget:
+    """A list the way this tab draws all of them: whole rows, nothing typed in."""
     table = QTableWidget(0, len(headers))
     table.setHorizontalHeaderLabels(list(headers))
     header = table.horizontalHeader()
@@ -228,21 +210,13 @@ def make_table(headers, stretch=None, widths=None) -> QTableWidget:
     table.setAlternatingRowColors(True)
     table.setWordWrap(False)
     table.setShowGrid(False)
-    # Wide with the window, but no taller than the rows inside it: fit_rows()
-    # settles that, and an Expanding height would have the tab ask for room it
-    # is not using.
+    # Wide with the window, no taller than its rows; fit_rows() settles that.
     table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     return table
 
 
 def fit_rows(table: QTableWidget, cap: int = MAX_ROWS) -> None:
-    """The exact height for the rows a table holds, up to ``cap``.
-
-    Called after every refill. A list of two addons takes two lines rather than
-    the six its default hint asks for, so the scroll area around the tab is
-    never given a taller document than its contents; past the cap the table
-    scrolls its own rows.
-    """
+    """The exact height for the rows a table holds, up to ``cap``."""
     rows = min(max(table.rowCount(), 1), cap)
     head = table.horizontalHeader().sizeHint().height()
     edge = 2 * (table.frameWidth() + 1)
@@ -256,9 +230,7 @@ def state_color(state: str) -> QBrush:
     return QBrush(QColor(STATE_COLORS.get(str(state), "#e0e0e0")))
 
 
-# ---------------------------------------------------------------------------
-# Reading and writing a manifest
-# ---------------------------------------------------------------------------
+# --- reading and writing a manifest ---
 
 _ADDON_LITERAL = re.compile(r"^[ \t]*ADDON[ \t]*=[ \t]*\{", re.MULTILINE)
 
@@ -268,14 +240,8 @@ def has_addon_literal(text: str) -> bool:
     return bool(_ADDON_LITERAL.search(text or ""))
 
 
-def manifest_target(addon) -> Path:
-    """The file the Details form writes for this addon.
-
-    A Python addon that carries an ``ADDON`` dict is its own manifest, and the
-    app applies that dict after the sidecar file, so writing anywhere else would
-    be silently overridden. Everything else - a compiled program, or a source
-    file that keeps its details in comments - gets a ``<id>.json`` beside it.
-    """
+def manifest_target(addon: Any) -> Path:
+    """The file the Details form writes: the addon itself, or a sidecar json."""
     if addon.kind == "python":
         try:
             text = addon.source.read_text(encoding="utf-8", errors="replace")
@@ -286,13 +252,8 @@ def manifest_target(addon) -> Path:
     return addon.home / f"{addon.id}.json"
 
 
-def manifest_values(addon) -> dict:
-    """What the Details form starts from.
-
-    The file on disk wins: an addon that is switched off keeps its ``ADDON``
-    dict unread in the runtime record, where the name is only the identifier, -
-    and a form that showed that would write it back over the real name.
-    """
+def manifest_values(addon: Any) -> dict:
+    """What the Details form starts from; the file on disk wins."""
     values = {key: str(getattr(addon, key, "") or "") for key in DETAIL_KEYS}
     values["api"] = str(addon.manifest.get("api") or "")
     stored = file_manifest(addon)
@@ -307,11 +268,7 @@ def manifest_values(addon) -> dict:
 
 
 def format_literal(values: dict) -> str:
-    """The ``ADDON = {...}`` block, one key per line, in the order an author types.
-
-    A key the form does not own is written as it came, so an addon that keeps
-    something else in its manifest does not lose it when a name is edited.
-    """
+    """The ``ADDON = {...}`` block, one key per line; unowned keys ride along."""
     owned = DETAIL_KEYS + ("api",)
     lines = ["ADDON = {"]
     for key in owned + tuple(item for item in values if item not in owned):
@@ -368,14 +325,8 @@ def literal_values(text: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def file_manifest(addon) -> dict:
-    """What the addon's own files say about it, whether or not it is loaded.
-
-    An addon that is switched off has never been read by the app, so its record
-    carries the identifier where its name should be. The Details form goes to
-    the file for that reason: a form showing the identifier would otherwise
-    write it back over the name the author chose.
-    """
+def file_manifest(addon: Any) -> dict:
+    """What the addon's own files say about it, whether or not it is loaded."""
     target = manifest_target(addon)
     if target == addon.source:
         try:
@@ -385,7 +336,7 @@ def file_manifest(addon) -> dict:
     return read_config_json(target)
 
 
-def write_details(addon, values: dict) -> Path:
+def write_details(addon: Any, values: dict) -> Path:
     """Save the edited manifest where it is read from. Raises on failure."""
     if getattr(addon, "builtin", False):
         raise AddonError(SHIPPED_NOTE)
@@ -428,9 +379,7 @@ def _write_text(target: Path, text: str) -> None:
     os.replace(temporary, target)
 
 
-# ---------------------------------------------------------------------------
-# What the tab writes: an addon, its test, its launcher
-# ---------------------------------------------------------------------------
+# --- what the tab writes: an addon, its test, its launcher ---
 
 _ADDON_SOURCE = Template('''#!/usr/bin/env python3
 """$title
@@ -439,7 +388,7 @@ $description
 
 Written by the Addon Dev tab. Everything the addon needs from the app comes
 through ``api``, and nothing here touches Qt, so the same file runs imported
-into rasconf Manager and compiled into a program of its own: the tab is built
+into Berry Manager and compiled into a program of its own: the tab is built
 from a declarative spec and its button is reported back through ``on_widget``.
 """
 
@@ -452,6 +401,8 @@ ADDON = {
     "version": "$version",
     "author": "$author",
     "description": "$description",
+    # The transports api.device may use; leave the key out if never.
+    "requires": ["ssh", "sftp"],
     "api": 1,
 }
 
@@ -510,7 +461,7 @@ def build_tab(values: dict) -> None:
     })
 
 
-def init(plugin_api) -> None:
+def init(plugin_api: Any) -> None:
     """The entry point: declare the config, then build what the addon shows."""
     global api
     api = plugin_api
@@ -549,6 +500,7 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
 
 
 def on_connected(payload: dict) -> None:
+    """The device came up."""
     if api is not None:
         say("the device is reachable")
 
@@ -591,7 +543,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-#: The folder rasconf Manager and addon_client live in, two levels up from here.
+#: The folder Berry Manager and addon_client live in, two levels up.
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
@@ -601,7 +553,7 @@ SOURCE = ROOT / "addons" / "$id.py"
 FAILURES: list[str] = []
 
 
-def check(condition, text: str) -> None:
+def check(condition: Any, text: str) -> None:
     """One thing the addon has to do; all of them are reported, not just the first."""
     if not condition:
         FAILURES.append(text)
@@ -663,8 +615,7 @@ import os
 import sys
 
 for _descriptor, _mode in ((1, "w"), (2, "w")):
-    # A --windowed build has no streams of its own. The app handed this process
-    # a pipe anyway, so reopen the descriptor rather than lose the protocol.
+    # A --windowed build has no streams; reopen the pipe rather than lose it.
     if getattr(sys, "stdout" if _descriptor == 1 else "stderr", None) is None:
         try:
             stream = os.fdopen(_descriptor, _mode, buffering=1, encoding="utf-8")
@@ -680,12 +631,9 @@ if __name__ == "__main__":
 ''')
 
 
-# ---------------------------------------------------------------------------
-# PyInstaller
-# ---------------------------------------------------------------------------
+# --- PyInstaller ---
 
-#: Which interpreter can build and test, and whether it has PyInstaller: both
-#: cost something to ask, and neither changes while the app is running.
+#: Which interpreter can build, and whether it has PyInstaller (costly to ask).
 _READY: dict[str, tuple[bool, str]] = {}
 
 
@@ -705,12 +653,7 @@ def pyinstaller_ready() -> tuple[bool, str]:
 
 
 def build_interpreter() -> tuple[str | None, str]:
-    """The Python to build an addon or run a test script with.
-
-    Running from source, that is the interpreter the app itself runs on. A
-    packaged program is not a Python installation - it looks for one on the
-    path, and says what to do when there is none.
-    """
+    """The Python to build or test with: ours, or one found on the path."""
     if not IS_COMPILED:
         return sys.executable, ""
     for name in ("python3", "python"):
@@ -722,16 +665,11 @@ def build_interpreter() -> tuple[str | None, str]:
 
 
 def app_modules_ready() -> tuple[bool, str]:
-    """Whether the app's own modules lie on disk, where a build and a test look.
-
-    A generated launcher imports ``addon_client``, and so does every test
-    script. Running from source those files are beside the app; packaged, they
-    are inside the executable and no external interpreter can reach them.
-    """
+    """Whether the app's modules lie on disk, where a build and a test look."""
     if not IS_COMPILED or (BASE_DIR / "addon_client.py").is_file():
         return True, ""
     return False, ("the packaged program keeps addon_client inside itself, so "
-                   "nothing outside it can build or test an addon. Run rasconf "
+                   "nothing outside it can build or test an addon. Run Berry "
                    "Manager from a source checkout to compile or test")
 
 
@@ -755,7 +693,7 @@ def _has_pyinstaller(where: str) -> bool:
     return done.returncode == 0
 
 
-def buildable(addon) -> tuple[bool, str]:
+def buildable(addon: Any) -> tuple[bool, str]:
     """Whether this one addon could be compiled here, and why not if it cannot."""
     if not str(addon.source).endswith(".py"):
         return False, "this addon is already a program"
@@ -776,6 +714,24 @@ def icon_for_build() -> Path | None:
     return None
 
 
+def icon_choice(icon: Any) -> Path | None:
+    """The ``--icon`` file for a build: a named one that is usable, the app's, or none.
+
+    ``icon`` is ``True`` for the program's own mark, ``False``/empty for none, or
+    a path an addon brought with it (a store addon's own icon). A named icon that
+    is missing or the wrong shape falls back to the app's, so a build never dies
+    over a bad picture.
+    """
+    if not icon:
+        return None
+    if icon is True:
+        return icon_for_build()
+    path = Path(icon)
+    if path.is_file() and path.suffix.lower() in (".ico", ".icns", ".png"):
+        return path
+    return icon_for_build()
+
+
 def staged_name(addon_id: str, onefile: bool) -> Path:
     """Where PyInstaller puts the program before it is copied into ``addons``."""
     folder = ADDON_BUILD_DIR / addon_id / ("dist" if onefile else Path("dist") / addon_id)
@@ -784,12 +740,7 @@ def staged_name(addon_id: str, onefile: bool) -> Path:
 
 def build_command(launcher: Path, addon_id: str, options: dict,
                   source: Path | None = None) -> list[str]:
-    """The PyInstaller line, staged inside ``addons/_build/<id>``.
-
-    The addon is imported by name in the launcher, so it is also named as a
-    hidden import: the module is found through ``--paths``, which an analysis of
-    a generated file cannot work out on its own.
-    """
+    """The PyInstaller line for a build staged inside ``addons/_build/<id>``."""
     work = ADDON_BUILD_DIR / addon_id
     where, _why = build_interpreter()
     command = [
@@ -802,9 +753,11 @@ def build_command(launcher: Path, addon_id: str, options: dict,
     ]
     command.append("--onefile" if options.get("onefile", True) else "--onedir")
     command.append("--console" if options.get("console", True) else "--windowed")
-    icon = icon_for_build() if options.get("icon", True) else None
+    icon = icon_choice(options.get("icon", True))
     if icon is not None:
         command += ["--icon", str(icon)]
+    for local, dest in (options.get("add_data") or ()):      # files packed into the build
+        command += ["--add-data", os.pathsep.join([str(local), str(dest)])]
     folders = [BASE_DIR]
     if source is not None:
         folders.append(source.parent)
@@ -818,16 +771,13 @@ def build_command(launcher: Path, addon_id: str, options: dict,
 
 
 class _Stream:
-    """One child process, its output as lines, and a way to stop it.
+    """One child process, its output as lines, and a way to stop it."""
 
-    Nothing is touched from the worker thread but the queue: the tab drains that
-    from a timer, so a build or a test can never block or repaint the window
-    from the wrong thread.
-    """
-
-    def __init__(self, command: list[str], cwd: Path | None = None):
+    def __init__(self, command: list[str], cwd: Path | None = None,
+                 env: dict | None = None) -> None:
         self.command = list(command)
         self.cwd = str(cwd) if cwd is not None else str(BASE_DIR)
+        self.env = env                                  # None keeps the parent's
         self.lines: queue.Queue = queue.Queue()
         self.proc: subprocess.Popen | None = None
         self.reader: threading.Thread | None = None
@@ -838,7 +788,8 @@ class _Stream:
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
             self.proc = subprocess.Popen(
-                self.command, cwd=self.cwd, stdout=subprocess.PIPE,
+                self.command, cwd=self.cwd, env=self.env,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                 errors="replace", bufsize=1, creationflags=flags)
         except OSError as error:
@@ -859,7 +810,7 @@ class _Stream:
         self.finished = True
         self.lines.put(None)              # the tab stops draining on this
 
-    def drain(self, limit: int = 400) -> list:
+    def drain(self, limit: int = 400) -> list[Any]:
         out: list = []
         while len(out) < limit:
             try:
@@ -893,22 +844,16 @@ def log_lines(text: str, addon_id: str, warnings_only: bool = False) -> list[str
     return out
 
 
-# ---------------------------------------------------------------------------
-# The "New addon..." dialog
-# ---------------------------------------------------------------------------
+# --- the "New addon..." dialog ---
 
 class NewAddonDialog(QDialog):
-    """Ask for the header, write the addon and its test script.
-
-    Only the identifier is really needed: it names the file, the tab and the
-    config file, and the app's addon id is derived from it. Everything else is
-    the manifest the app then shows in Settings.
-    """
+    """Ask for the header, then write the addon and its test script."""
 
     #: What may become a file name that Python can also import.
     CLEAN = re.compile(r"[^A-Za-z0-9_]+")
 
-    def __init__(self, parent=None, known=()):
+    def __init__(self, parent: QWidget | None = None,
+                 known: Any = ()) -> None:
         super().__init__(parent)
         self.known = {str(item) for item in known}
         self.setWindowTitle("New addon")
@@ -1005,20 +950,12 @@ class NewAddonDialog(QDialog):
         }
 
 
-# ---------------------------------------------------------------------------
-# The tab itself
-# ---------------------------------------------------------------------------
+# --- the tab itself ---
 
 class AddonDevWidget(QWidget):
-    """The Addon Dev panel: one addon selected at a time, five views of it.
+    """The Addon Dev panel: one addon selected at a time, five views of it."""
 
-    The table on top is the index the runtime keeps (``describe_all``); the
-    panels below read and change that one addon's files. Everything is refreshed
-    from the runtime rather than from a copy, so a change made in Settings, in an
-    editor or by the addon itself shows up on the next tick.
-    """
-
-    def __init__(self, window):
+    def __init__(self, window: Any) -> None:
         super().__init__()
         self.win = window
         self.mgr = window.addons
@@ -1027,10 +964,8 @@ class AddonDevWidget(QWidget):
         self.test: _Stream | None = None
         self._loading = False
 
-        # A table, five panes and a good many notes do not fit into a short
-        # window, and squeezing them left text clipped. Everything is built
-        # into one widget inside a scroll area, so it takes the height it needs
-        # and the tab scrolls for whatever the window has not got.
+        # A table, five panes and many notes do not fit a short window, so all
+        # of it lives in one scroll area and takes the height it needs.
         self.body = QWidget()
         root = QVBoxLayout(self.body)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1066,7 +1001,7 @@ class AddonDevWidget(QWidget):
         self.refresh_timer.setInterval(REFRESH_MS)
         self.refresh_timer.timeout.connect(self.refresh)
 
-    # --- the widgets ------------------------------------------------------
+    # --- the widgets ---
 
     def _build_index(self) -> QWidget:
         holder = QWidget()
@@ -1149,7 +1084,7 @@ class AddonDevWidget(QWidget):
             ("Save details", "Write the manifest back to the file named above",
              self.save_details),
             ("Reload", "Fill the form again from what is on disk", self.reload_details),
-            ("Open manifest", "Edit it outside rasconf Manager", self.open_manifest),
+            ("Open manifest", "Edit it outside Berry Manager", self.open_manifest),
             ("Open source", "The addon's own code", self.open_source),
         ):
             button = QPushButton(text)
@@ -1182,7 +1117,7 @@ class AddonDevWidget(QWidget):
             ("Save config", "Write the JSON above, and tell the addon it changed",
              self.save_config),
             ("Reload", "Read the file again, dropping unsaved edits", self.reload_config),
-            ("Open file", "Edit it outside rasconf Manager", self.open_config),
+            ("Open file", "Edit it outside Berry Manager", self.open_config),
         ):
             button = QPushButton(text)
             button.setToolTip(tip)
@@ -1242,7 +1177,7 @@ class AddonDevWidget(QWidget):
             "either way, and a build without a console may lose the protocol pipe")
         self.icon_check = QCheckBox("app icon")
         self.icon_check.setChecked(True)
-        self.icon_check.setToolTip("Use rasconf Manager's icon when it is a format "
+        self.icon_check.setToolTip("Use Berry Manager's icon when it is a format "
                                    "PyInstaller accepts (.ico / .icns)")
         self.prefer_check = QCheckBox("run the compiled copy when it is ready")
         for button in (self.onefile_check, self.console_check, self.icon_check,
@@ -1315,7 +1250,7 @@ class AddonDevWidget(QWidget):
         self.run_test_button.setToolTip("Run it with this interpreter and show its output")
         self.run_test_button.clicked.connect(self.run_test)
         self.open_test_button = QPushButton("Open test")
-        self.open_test_button.setToolTip("Edit it outside rasconf Manager")
+        self.open_test_button.setToolTip("Edit it outside Berry Manager")
         self.open_test_button.clicked.connect(self.open_test)
         self.test_folder_button = QPushButton("Open folder")
         self.test_folder_button.setToolTip("addons/_tests")
@@ -1405,18 +1340,18 @@ class AddonDevWidget(QWidget):
         layout.addWidget(second, 1)
         return page
 
-    # --- the index --------------------------------------------------------
+    # --- the index ---
 
-    def showEvent(self, event) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         self.refresh_timer.start()
         self.refresh()
         super().showEvent(event)
 
-    def hideEvent(self, event) -> None:
+    def hideEvent(self, event: QHideEvent) -> None:
         self.refresh_timer.stop()
         super().hideEvent(event)
 
-    def current(self):
+    def current(self) -> Any:
         return self.mgr.find(self.selected)
 
     def refresh(self) -> None:
@@ -1430,7 +1365,7 @@ class AddonDevWidget(QWidget):
             state = "failed" if row["error"] else ("running" if row["loaded"] else "off")
             runs = ("process" if row["kind"] == "process" else "imported")
             if row.get("builtin"):
-                # One that came with the program rather than one that was dropped in.
+                # Came with the program, not dropped in.
                 runs += " shipped"
             if process:
                 runs += f" pid {process.get('pid') or '?'}"
@@ -1448,8 +1383,7 @@ class AddonDevWidget(QWidget):
         target = wanted if any(row["id"] == wanted for row in rows) \
             else (rows[0]["id"] if rows else "")
         if target and target == self.selected:
-            # Same addon: only the parts that change on their own are touched,
-            # so a half-typed manifest is never overruled by a refresh tick.
+            # Same addon: only the parts that change on their own are touched.
             self.touch()
         else:
             self.select(target)
@@ -1536,7 +1470,7 @@ class AddonDevWidget(QWidget):
         finally:
             self._loading = False
 
-    def _load_run_panels(self, info: dict, addon) -> None:
+    def _load_run_panels(self, info: dict, addon: Any) -> None:
         """The parts of the Run and Compile panels that depend on what is there."""
         shipped = bool(info.get("builtin"))
         copies = {str(item["kind"]): item for item in
@@ -1554,8 +1488,7 @@ class AddonDevWidget(QWidget):
             button.blockSignals(False)
         self.runs_note.setText(SHIPPED_NOTE if shipped
                                else self._runs_text(info, compiled, source))
-        # The form shows what a shipped addon says about itself, and stops there:
-        # the file is inside the program, so there is nothing to write back to.
+        # A shipped addon's file is inside the program: nothing to write back to.
         for field in (self.name_input, self.version_input, self.author_input,
                       self.description_input, self.notes_input, self.api_input):
             field.setReadOnly(shipped)
@@ -1577,8 +1510,7 @@ class AddonDevWidget(QWidget):
             self.build_note.setText(f"PyInstaller from {where or sys.executable}")
             self.build_note.setStyleSheet("color: #8f8f8f;")
 
-        # A test script is run by a Python of its own, which has to be able to
-        # import the app's addon protocol - so the same two things decide it.
+        # A test runs under its own Python, which must reach the addon protocol.
         path = self.test_file(addon)
         self.test_path.setText(str(path))
         self.create_test_button.setText("Rewrite test script" if path.is_file()
@@ -1599,7 +1531,7 @@ class AddonDevWidget(QWidget):
             self.test_note.setStyleSheet("color: #8f8f8f;")
 
     @staticmethod
-    def _runs_text(info: dict, compiled, source) -> str:
+    def _runs_text(info: dict, compiled: dict | None, source: dict | None) -> str:
         if not compiled:
             return (f"Only the source is there: {info['source']}. Compiling puts a "
                     "program beside it under the same id, and the choice appears here.")
@@ -1626,7 +1558,7 @@ class AddonDevWidget(QWidget):
         self.process_table.setRowCount(0)
         self.holdings_table.setRowCount(0)
 
-    # --- details ----------------------------------------------------------
+    # --- details ---
 
     def save_details(self) -> None:
         addon = self.current()
@@ -1699,7 +1631,7 @@ class AddonDevWidget(QWidget):
         if addon is not None:
             self.mgr.open_config_file(addon.id)
 
-    # --- running one addon ------------------------------------------------
+    # --- running one addon ---
 
     def _set_enabled(self, on: bool) -> None:
         if self._loading:
@@ -1747,7 +1679,7 @@ class AddonDevWidget(QWidget):
     def open_path(path: Path) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-    # --- new addon --------------------------------------------------------
+    # --- new addon ---
 
     def new_addon(self) -> None:
         dialog = NewAddonDialog(self, [row["id"] for row in self.mgr.describe_all()])
@@ -1787,10 +1719,10 @@ class AddonDevWidget(QWidget):
         return written
 
     @staticmethod
-    def test_file(addon) -> Path:
+    def test_file(addon: Any) -> Path:
         return ADDON_TEST_DIR / f"test_{config_name(addon.id)}.py"
 
-    # --- test -------------------------------------------------------------
+    # --- test ---
 
     def create_test(self) -> None:
         addon = self.current()
@@ -1832,7 +1764,7 @@ class AddonDevWidget(QWidget):
         if addon is not None:
             self.open_path(self.test_file(addon))
 
-    # --- compile ----------------------------------------------------------
+    # --- compile ---
 
     def _prefer_changed(self, _on: bool = False) -> None:
         if self._loading:
@@ -1856,7 +1788,7 @@ class AddonDevWidget(QWidget):
             self.build_log.setPlainText(
                 f"This addon cannot be compiled here.\n\n{why}")
             return
-        # Release the file the copy step needs to overwrite, and any old process.
+        # Release the file the copy step overwrites, and any old process.
         if addon.loaded and addon.kind == "process":
             self.mgr.unload(addon, reason="rebuilding")
         identifier = config_name(addon.id)
@@ -1959,7 +1891,7 @@ class AddonDevWidget(QWidget):
         self.test_note.setText("passed" if ok else f"failed (code {stream.code})")
         self.test_note.setStyleSheet("color: #23d18b;" if ok else "color: #ffb020;")
 
-    # --- log and processes ------------------------------------------------
+    # --- log and processes ---
 
     def reset_log(self) -> None:
         self.log_view.setPlainText("")
@@ -2038,14 +1970,7 @@ def write_test(addon_id: str, tab: str = "") -> Path:
 
 
 def install_build(staged: Path, addon_id: str, onefile: bool) -> Path:
-    """Move the build result where the runtime looks for it.
-
-    One file goes to ``addons/<id>.exe`` (or an extension-less executable on
-    Linux, where the exec bit is what makes it an addon). A folder build has to
-    keep ``_internal`` next to its program, so the whole tree goes to
-    ``addons/<id>/`` and the program is named the way the scanner expects to
-    find it there.
-    """
+    """Move the build result where the runtime looks: ``addons/<id>.exe`` or ``addons/<id>/``."""
     if onefile:
         target = ADDONS_DIR / f"{addon_id}{ADDON_EXECUTABLE_SUFFIX}"
         if target.is_dir():

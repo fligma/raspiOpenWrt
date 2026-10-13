@@ -9,9 +9,10 @@ from datetime import datetime
 import json
 from pathlib import Path
 import posixpath
+from typing import Any
 
-from PyQt6.QtCore import QEvent, QSize, QTimer, Qt
-from PyQt6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QTextCursor
+from PyQt6.QtCore import QEvent, QObject, QSize, QTimer, Qt
+from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QKeySequence, QPixmap, QResizeEvent, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +27,7 @@ from PyQt6.QtWidgets import (
     QLayout,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -78,21 +80,25 @@ from manager_net import (
     RebootWaitWorker,
     RemoteExecWorker,
     SSHShellWorker,
-    SftpWorker,
+    SharedConnection,
+    SharedSessionWorker,
     credential_id,
 )
 from manager_terminal import TerminalMixin
 from manager_widgets import (
     CollapseGroup,
     RightPinnedTabBar,
+    RightPinnedTabWidget,
     TabTransportDots,
     ToggleGroup,
     ToggleSwitch,
+    settings_tab_icon,
+    tab_caption,
     tip_on_title,
 )
 
 
-class RasconfManager(
+class BerryManager(
     BrowserMixin,
     FileViewsMixin,
     TerminalMixin,
@@ -109,17 +115,15 @@ class RasconfManager(
     by the AddonManager in manager_addons.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.worker: SftpWorker | None = None
+        self.worker: SharedSessionWorker | None = None
         self.shell_worker: SSHShellWorker | None = None
         self.exec_worker: RemoteExecWorker | None = None
         self.reboot_worker: RebootWaitWorker | None = None
+        self.shared_conn = SharedConnection()
         self.app_config = load_app_config()
-        # Created empty: the addons are only read once the tabs they can use exist.
         self.addons = AddonManager(self)
-        # What the embedded browser in this process was actually started with;
-        # the certificate switch cannot change until the app restarts.
         self._cert_bypass_session = cert_bypass_active()
         self.current_term_color = "#e0e0e0"
         self.term_partial = ""
@@ -131,7 +135,7 @@ class RasconfManager(
         self.terminal_history_pos = len(self.terminal_history)
         self.connected_once = False
         self.sftp_connected = False
-        self.setWindowTitle("rasconf Manager")
+        self.setWindowTitle("Berry Manager")
         self.resize(1180, 780)
 
         self.build_menu()
@@ -139,22 +143,16 @@ class RasconfManager(
         self.apply_runtime_settings()
         self.apply_window_icon()
 
-        # The window is complete, so addons may now start: their init() adds
-        # tabs to it and every event from here on reaches their listeners too.
         self.addons.reload()
         self.addons.start_done()
-        # Now that every addon's tab is in place, put the transport dots on the
-        # tabs that own a connection (the SSH terminal and each addon's tab).
         self.sync_tab_transport_dots()
-        # Record the built-in arrangement once (before any saved order is applied)
-        # so Settings > Reset can restore it, then lay the tabs out as remembered.
         self._natural_tab_order = self.capture_tab_order()
         self._apply_remembered_order()
         self._select_default_tab()
 
         want_sftp_auto = bool(self.app_config.get("auto_connect_sftp")) and self.app_config.get("sftp_enabled", True)
         want_ssh_auto = bool(self.app_config.get("auto_connect_ssh")) and self.app_config.get("ssh_enabled", True)
-        if want_sftp_auto or want_ssh_auto:
+        if self.connections_enabled() and (want_sftp_auto or want_ssh_auto):
             if want_sftp_auto:
                 QTimer.singleShot(400, self.connect_remote)
             if want_ssh_auto:
@@ -168,6 +166,10 @@ class RasconfManager(
         self.action_new_profile.setShortcut(QKeySequence("Ctrl+Shift+N"))
         self.action_new_profile.triggered.connect(self.new_profile)
         file_menu.addAction(self.action_new_profile)
+
+        self.profile_menu = QMenu("Load profile", self)
+        self.profile_menu.aboutToShow.connect(self.refresh_profile_menu)
+        file_menu.addMenu(self.profile_menu)
 
         self.action_rename_profile = QAction("Rename current profile...", self)
         self.action_rename_profile.triggered.connect(self.rename_current_profile)
@@ -210,10 +212,6 @@ class RasconfManager(
         edit_menu.addAction(self.action_clear_history)
 
         view_menu = menubar.addMenu("&View")
-        # The whole interface is drawn at one percentage, so these walk that
-        # number up and down: the text, the spacing, the buttons and the
-        # terminal's own font all move together (Settings > Terminal font size
-        # still sets the terminal's base size on top of it).
         self.action_zoom_in = QAction("Zoom in", self)
         self.action_zoom_in.setShortcuts(
             [QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
@@ -241,8 +239,6 @@ class RasconfManager(
         self.action_log_console.setToolTip(
             "Hide or show the log pane at the bottom of the window. Logging goes "
             "on while it is out of sight, so nothing is missed.")
-        # The saved state is applied before the handler is wired up, so building
-        # the menu never writes the config file (same order as Alternate icon).
         self.action_log_console.setChecked(
             bool(self.app_config.get("log_visible", True)))
         self.action_log_console.toggled.connect(self.toggle_log_console)
@@ -265,9 +261,6 @@ class RasconfManager(
         self.action_edit_quick = QAction("Edit quick commands...", self)
         self.action_edit_quick.triggered.connect(self.edit_quick_commands)
         tools_menu.addAction(self.action_edit_quick)
-        # Addon development is a Settings switch rather than a build flag: a
-        # packaged program can list the addons it ships and read their sources,
-        # and the switch decides whether the tab and this entry are shown at all.
         tools_menu.addSeparator()
         self.action_addon_dev = QAction("Addon Dev", self)
         self.action_addon_dev.setShortcut(QKeySequence("Ctrl+Shift+A"))
@@ -286,35 +279,15 @@ class RasconfManager(
         root_layout.setContentsMargins(10, 10, 10, 10)
         root_layout.setSpacing(8)
 
-        profile_bar = QHBoxLayout()
-        profile_bar.addWidget(QLabel("Profile:"))
-        self.profile_combo = QComboBox()
-        self.profile_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.profile_combo.currentIndexChanged.connect(self.on_profile_changed)
-        profile_bar.addWidget(self.profile_combo, 1)
-        for label, slot in (
-            ("New", self.new_profile),
-            ("Save", self.save_current_profile_edits),
-            ("Rename", self.rename_current_profile),
-            ("Delete", self.delete_current_profile),
-        ):
-            btn = QPushButton(label)
-            btn.clicked.connect(slot)
-            profile_bar.addWidget(btn)
-        root_layout.addLayout(profile_bar)
-
-        # Connection settings live inside the Settings tab, and so do the live
-        # connection indicators now (Settings > Advanced connection settings):
-        # the header carries nothing but the logo.
-        self.header_icon = QLabel()
-        self.header_icon.setToolTip("Rasconf Manager")
-        header_row = QHBoxLayout()
-        header_row.addWidget(self.header_icon)
-        header_row.addStretch(1)
-        root_layout.addLayout(header_row)
-
-        connection_group = QGroupBox("Connection settings")
-        connection_layout = QGridLayout(connection_group)
+        connection_group = ToggleGroup(
+            "Connection", bool(self.app_config.get("master_connection", True)),
+            body="box",
+            tip="The master switch. Off closes every connection and stops any "
+                "addon from connecting, with the app's session or its own; on "
+                "lets the Connect buttons and the addons work again.",
+        )
+        credentials = QWidget()
+        connection_layout = QGridLayout(credentials)
         connection_layout.setHorizontalSpacing(10)
         connection_layout.setVerticalSpacing(8)
         self.host_input = QLineEdit(str(self.app_config["host"]))
@@ -362,15 +335,6 @@ class RasconfManager(
         self.disconnect_button.setToolTip("Close the SFTP session and disable remote actions until you reconnect")
         self.disconnect_button.setEnabled(False)
         self.disconnect_button.clicked.connect(self.disconnect_remote)
-        self.shell_connect_button = QPushButton("Connect (SSH)")
-        self.shell_connect_button.setObjectName("primaryAction")
-        self.shell_connect_button.setToolTip("Uses the same credentials as the SFTP connection")
-        self.shell_connect_button.clicked.connect(self.connect_shell)
-        self.shell_disconnect_button = QPushButton("Disconnect (SSH)")
-        self.shell_disconnect_button.setObjectName("dangerAction")
-        self.shell_disconnect_button.setToolTip("Close the SSH terminal session")
-        self.shell_disconnect_button.setEnabled(False)
-        self.shell_disconnect_button.clicked.connect(self.disconnect_shell)
 
         pw_row = QHBoxLayout()
         pw_row.addWidget(self.password_input, 1)
@@ -395,54 +359,45 @@ class RasconfManager(
         connection_layout.addWidget(QLabel("Timeout"), 4, 2)
         connection_layout.addWidget(self.timeout_input, 4, 3)
         conn_actions = QHBoxLayout()
-        conn_actions.addWidget(self.shell_connect_button)
-        conn_actions.addWidget(self.shell_disconnect_button)
         conn_actions.addWidget(self.connect_button)
         conn_actions.addWidget(self.disconnect_button)
         connection_layout.addWidget(self.trust_host_checkbox, 5, 0, 1, 2)
         connection_layout.addLayout(conn_actions, 5, 2, 1, 2)
-        # The group is not put in the root layout any more; build_settings_tab
-        # drops it at the top of the Settings page (see that method).
+        connection_group.body_layout.addWidget(credentials)
+
+        connection_group.switch.toggled.connect(self.on_master_connection_toggled)
+
         self.connection_group = connection_group
 
-        self.tabs = QTabWidget()
-        # A custom bar lets the Settings tab be pinned to the far right, detached
-        # from the reorderable tabs, by an elastic gap tab (see RightPinnedTabBar).
+        self.tabs = RightPinnedTabWidget()
+
         self.tabs.setTabBar(RightPinnedTabBar())
         self.tabs.tabBar().setExpanding(False)
         self.tabs.tabBar().setUsesScrollButtons(False)
-        self.tabs.setMovable(True)          # tabs may be dragged into any order
+        self.tabs.setMovable(True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        # QTabBar has no public "tab moved" signal, so the bar is watched for the
-        # mouse release that finishes a drag; the order is then persisted.
+
         self._order_tab_bar = self.tabs.tabBar()
         self._order_tab_bar.installEventFilter(self)
+
+        self.tabs.tabCountChanged.connect(self._on_tab_count_changed)
         root_layout.addWidget(self.tabs, 1)
 
         self.build_ssh_tab()
-        self._web_tab_entries = []  # each: {page, url_input, view, tab}
-        self._transient_tab_entries = []  # browser tabs an addon opened
+        self._web_tab_entries = []
+        self._transient_tab_entries = []
         self.build_web_tabs()
         self.build_settings_tab()
-        # The Addon Dev tab follows the Settings switch, and is only built when
-        # the switch asks for it: a program started with the tab switched off
-        # never reads the index or starts the panels' timers.
+
         self.addon_dev = None
         self.ensure_addon_dev_tab()
 
-        # The Settings tab is pinned to the far right, detached from the
-        # reorderable tabs by an elastic empty 'gap' tab (see RightPinnedTabBar).
-        # It is created last, once every content tab exists, so new tabs added
-        # later still land to its left (see _content_insert_index).
         self._gap_page = QWidget()
         self.tabs.addTab(self._gap_page, "")
         self.tabs.tabBar().setTabEnabled(self.tabs.indexOf(self._gap_page), False)
         self._sync_pinned_settings()
         self._stretch_tab_bar()
 
-        # The log console lives as an always-present bottom pane under the tabs
-        # (the SFTP tab that used to hold it is gone), so log() works whatever
-        # tab is showing.
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setMaximumHeight(130)
@@ -466,24 +421,18 @@ class RasconfManager(
         self.setMinimumSize(640, 420)
         self.apply_zoom()
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("Choose a profile, then connect to the device")
+        self.statusBar().showMessage("Pick a profile from File > Load profile, then connect to the device")
         self.load_saved_password()
-        self.refresh_profile_combo()
+        self.refresh_profile_menu()
 
     def ensure_main_tabs(self) -> None:
-        """Add or remove the SSH core tab to match its enabled flag. Berry is an
-        addon tab (shown by its Settings category); custom browser tabs and
-        Settings are always present."""
+        """Add or remove the SSH core tab to match its enabled flag; Berry/browser/Settings handled elsewhere."""
         ssh_on = bool(self.app_config.get("ssh_enabled", True))
         self._set_main_tab(self.ssh_page, "SSH", ssh_on, 0)
         self.update_connection_ui()
 
     def _content_insert_index(self) -> int:
-        """Where a new content tab belongs: just left of the pinned group.
-
-        The gap tab and Settings are always the two rightmost tabs, so a tab an
-        addon or a profile adds is put before the gap, keeping it among the
-        reorderable tabs rather than detached out at the right edge."""
+        """Where a new content tab belongs: just left of the pinned gap + Settings pair."""
         gap = getattr(self, "_gap_page", None)
         if gap is not None:
             index = self.tabs.indexOf(gap)
@@ -497,11 +446,7 @@ class RasconfManager(
         return self.tabs.count()
 
     def _sync_pinned_settings(self) -> None:
-        """Snap the gap and Settings tabs back to the far right, in that order.
-
-        Called after any reorder, add or remove so the pinned pair can never be
-        dragged into the movable group; then the gap tab's width is recomputed
-        so Settings sits flush against the right edge."""
+        """Snap the gap and Settings tabs back to the far right, in that order, then recompute the gap width."""
         bar = self.tabs.tabBar()
         gap = getattr(self, "_gap_page", None)
         settings = getattr(self, "settings_page", None)
@@ -520,20 +465,35 @@ class RasconfManager(
             if hasattr(bar, "set_gap_index"):
                 bar.set_gap_index(gi)
 
+    def _on_tab_count_changed(self, _count: int) -> None:
+        """A tab was added or removed: defer a tick, then re-pin the gap and Settings pair."""
+        if getattr(self, "_gap_page", None) is None:
+            return
+        QTimer.singleShot(0, self._repin_settings)
+
+    def _repin_settings(self) -> None:
+        """Re-sync the pinned pair after a deferred count change (see
+        :meth:`_on_tab_count_changed`). No-op once the window is closing."""
+        if getattr(self, "_gap_page", None) is None:
+            return
+        if self.tabs.indexOf(self._gap_page) < 0:
+            return
+        self._sync_pinned_settings()
+        self._stretch_tab_bar()
+
+    def restore_tab_layout(self) -> None:
+        """Put every tab back in its saved position and re-pin Settings (called after the addon manager reloads)."""
+        self._apply_remembered_order()
+        self._repin_settings()
+
     def update_connection_ui(self) -> None:
-        """Hide the connect/disconnect buttons, the transport status line and the
-        remote directory line of any disabled protocol, and name the panel
-        toggle after the enabled ones. When both are off the connection panel and
-        the advanced status category both disappear."""
+        """Match the Connection panel's lines and buttons to what is on, following the profile settings."""
+        master_on = self.connections_enabled()
         sftp_on = bool(self.app_config.get("sftp_enabled", True))
         ssh_on = bool(self.app_config.get("ssh_enabled", True))
         self.connect_button.setVisible(sftp_on)
         self.disconnect_button.setVisible(sftp_on)
-        self.shell_connect_button.setVisible(ssh_on)
-        self.shell_disconnect_button.setVisible(ssh_on)
-        # The remote directory only means something to the SFTP tab: with
-        # SSH alone there is nothing here to open or deploy into, and the
-        # surviving line (timeout) belongs to both protocols.
+
         self.remote_dir_label.setVisible(sftp_on)
         self.remote_root_input.setVisible(sftp_on)
         self.sftp_caption.setVisible(sftp_on)
@@ -542,14 +502,31 @@ class RasconfManager(
         self.ssh_caption.setVisible(ssh_on)
         self.ssh_dot.setVisible(ssh_on)
         self.ssh_state_label.setVisible(ssh_on)
-        # The connection widgets now live in the Settings tab; with both
-        # transports switched off there is no connection left to report on, so
-        # the panel and the category under it both go away.
-        any_on = sftp_on or ssh_on
-        self.connection_group.setVisible(any_on)
-        advanced = getattr(self, "connection_advanced", None)
-        if advanced is not None:
-            advanced.setVisible(any_on)
+ 
+        self.shell_connect_button.setEnabled(master_on)
+
+    def connections_enabled(self) -> bool:
+        """The master switch: is the app allowed to talk to the device at all?"""
+        return bool(self.app_config.get("master_connection", True))
+
+    def on_master_connection_toggled(self, checked: bool) -> None:
+        """The master switch: off tears down both sessions and blocks all connecting; on connects nothing by itself."""
+        self.app_config["master_connection"] = bool(checked)
+        self.save_app_config()
+        if not checked:
+            self.close_all_connections()
+        self.update_connection_ui()
+        self.log("Connections enabled" if checked else "Connections switched off")
+        self.addon_event("connections_enabled" if checked else "connections_disabled")
+
+    def close_all_connections(self) -> None:
+        """Take both main sessions down (the master switch went off)."""
+        if self.shell_worker is not None and self.shell_worker.isRunning():
+            self.shell_worker.stop()
+        if self.worker is not None and self.worker.isRunning():
+            return
+        self.shared_conn.close()
+        self.mark_shared_closed("connections are switched off")
 
     def _set_main_tab(self, page: QWidget, title: str, want: bool, desired_index: int) -> None:
         current = self.tabs.indexOf(page)
@@ -571,13 +548,7 @@ class RasconfManager(
         return bool(self.app_config.get("addon_dev_enabled", True))
 
     def ensure_addon_dev_tab(self) -> None:
-        """Add or drop the Addon Dev tab to match the Settings switch.
-
-        The tab sits in front of Settings, where the tabs an addon opens go too.
-        Switching off keeps the widget alive but hidden: a build or a test that
-        is still running has its output read on the next tick back, and nothing
-        is lost by turning the page off and on again.
-        """
+        """Add or drop the Addon Dev tab to match the Settings switch; off keeps the widget alive but hidden."""
         want = self.addon_dev_wanted()
         if want and self.addon_dev is None:
             self.addon_dev = AddonDevWidget(self)
@@ -596,22 +567,15 @@ class RasconfManager(
         self.ensure_addon_dev_tab()
         self.apply_log_console_visibility()
         self._reload_default_tab_combo(select=self.app_config.get("default_tab", "Berry"))
-        # The tab order is applied only once the addons have loaded (see
-        # __init__ and reload_ui_from_config); here just pick the start tab.
         self._select_default_tab()
         self.rebuild_quick_bar()
 
-    def _icon_path(self, filename: str):
+    def _icon_path(self, filename: str) -> Path | None:
         """Resolve a shipped icon from the assets folder."""
         return find_asset(filename)
 
-    def current_icon_path(self):
-        """The logo the View > Alternate icon switch points at right now.
-
-        Every place the picture is shown - the toolbar, the window icon, the
-        taskbar and the About dialog - asks this one method, so the two icons
-        stay the same everywhere.
-        """
+    def current_icon_path(self) -> Path | None:
+        """The logo View > Alternate icon points at now; every place that shows it asks this one method."""
         primary, alternate = ICON_FILES
         wanted = alternate if bool(self.app_config.get("use_alt_icon")) else primary
         return self._icon_path(wanted) or self._icon_path(primary)
@@ -635,11 +599,10 @@ class RasconfManager(
         """Show the selected icon in the top toolbar and as the window icon."""
         manager = getattr(self, "addons", None)
         if manager is not None:
-            # Addon tabs that asked to wear the program's own mark change here,
-            # in the same breath as the toolbar does.
+
             try:
                 manager.refresh_app_icons()
-            except Exception as error:              # an addon never wins over the window
+            except Exception as error:
                 self.log(f"addon tab icons: {error}")
         path = self.current_icon_path()
         if path is None:
@@ -649,7 +612,7 @@ class RasconfManager(
         QApplication.setWindowIcon(icon)
         self.paint_header_logo()
 
-    # Interface zoom ------------------------------------------------------
+    # Interface zoom
 
     def ui_zoom(self) -> int:
         """The saved density of the whole interface, in percent."""
@@ -678,16 +641,7 @@ class RasconfManager(
         self.statusBar().showMessage(f"Interface zoom: {percent}%", 3000)
 
     def apply_zoom(self) -> None:
-        """Draw every part of the window at the saved zoom.
-
-        The stylesheet's px and pt sizes are multiplied, and so is the one font
-        no sheet can reach - the terminal's. The rest of the sizes that are
-        handed to Qt in code rather than through a sheet (the log pane's height,
-        the toolbar logo, a toggle switch's track, an addon dot's own small
-        sheet) ask :mod:`manager_const` for the zoom in force, which is set here
-        first, so anything built afterwards comes out at the same size as what
-        is already on screen.
-        """
+        """Draw every part of the window at the saved zoom, multiplying the sheet's px/pt and the terminal font."""
         percent = set_zoom(self.ui_zoom())
         self.setStyleSheet(scaled_sheet(APP_STYLESHEET, percent))
         pane = getattr(self, "log_output", None)
@@ -698,20 +652,13 @@ class RasconfManager(
             font.setPointSize(self.terminal_points())
             self.terminal.set_font(font)
         self.paint_header_logo()
-        # The dots in the tab bar carry their own sheet, and are rebuilt whole.
+
         if hasattr(self, "tabs"):
             self.zoom_tab_icons(percent)
             self.sync_tab_transport_dots()
 
     def zoom_tab_icons(self, percent: int) -> None:
-        """Scale the pictures the tabs wear, the addon icons among them.
-
-        A tab icon's size comes from the style rather than from the app
-        stylesheet, so no sheet multiplication reaches it. The size the style
-        asks for is remembered the first time through - before anything has been
-        set - and every later pass is multiplied from that baseline, so 100%
-        stays exactly as shipped.
-        """
+        """Scale the tab icons (addon ones included) from the style's baseline, so 100% matches as shipped."""
         bar = self.tabs.tabBar()
         base = getattr(self, "_tab_icon_base", None)
         if base is None:
@@ -720,6 +667,9 @@ class RasconfManager(
         side = zoom_size(base, percent)
         bar.setIconSize(QSize(side, side))
 
+        if hasattr(bar, "refit"):
+            bar.refit()
+
     def toggle_log_console(self, shown: bool) -> None:
         """View > Show log console: fold the bottom log pane away, or bring it back."""
         self.app_config["log_visible"] = bool(shown)
@@ -727,12 +677,7 @@ class RasconfManager(
         self.save_app_config()
 
     def apply_log_console_visibility(self) -> None:
-        """Match the bottom log pane to the View switch.
-
-        Only the widget is hidden: ``log()`` keeps appending and the log file
-        keeps its lines, so bringing the pane back shows what happened while it
-        was away. The tabs above stretch into the freed space on their own.
-        """
+        """Match the bottom log pane to the View switch; only the widget hides, logging continues."""
         pane = getattr(self, "log_output", None)
         if pane is not None:
             pane.setVisible(bool(self.app_config.get("log_visible", True)))
@@ -745,14 +690,14 @@ class RasconfManager(
     def set_fullscreen(self, enabled: bool) -> None:
         self.showFullScreen() if enabled else self.showNormal()
 
-    def changeEvent(self, event) -> None:
+    def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "action_fullscreen"):
             self.action_fullscreen.blockSignals(True)
             self.action_fullscreen.setChecked(self.isFullScreen())
             self.action_fullscreen.blockSignals(False)
         super().changeEvent(event)
 
-    def resizeEvent(self, event) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._stretch_tab_bar()
 
@@ -766,9 +711,7 @@ class RasconfManager(
             bar.setMinimumWidth(max(0, self.tabs.width() - 4))
 
     def fit_window_to_screen(self) -> None:
-        """One-time startup guard: shrink the window only if the default size is
-        larger than the screen. It never repositions the window and is not called
-        on panel toggle, so the window does not jump around or resize itself."""
+        """One-time startup guard: shrink the window only if the default size exceeds the screen; never repositions it."""
         screen = QApplication.primaryScreen()
         if screen is None:
             return
@@ -809,17 +752,16 @@ class RasconfManager(
         }
 
     def _live_transport_states(self) -> dict[str, bool]:
-        """The app's current SSH/SFTP connection state, read live."""
+        """The app's live SSH/SFTP state; one open main session lights both dots since it carries both transports."""
         shell = self.shell_worker
+        shared = self.shared_conn.active()
         return {
-            "sftp": bool(self.sftp_connected),
-            "ssh": bool(shell is not None and shell.isRunning()),
+            "sftp": bool(self.sftp_connected or shared),
+            "ssh": bool((shell is not None and shell.isRunning()) or shared),
         }
 
     def _transport_tab_pages(self) -> set[QWidget]:
-        """The tabs that carry the transport dots: the SSH terminal and each
-        addon's own (non-web) tab. Web pages keep to the favicon the device
-        sends, and the log/Settings tabs have no connection of their own."""
+        """The tabs that carry transport dots: the SSH terminal and each addon's non-web tab."""
         pages: set[QWidget] = set()
         ssh = getattr(self, "ssh_page", None)
         if ssh is not None and self.tabs.indexOf(ssh) >= 0:
@@ -836,15 +778,7 @@ class RasconfManager(
         return pages
 
     def sync_tab_transport_dots(self) -> None:
-        """Put an 's'/'f' transport dot beside each tab that owns a connection.
-
-        Runs from :meth:`set_status_dot` when a connection comes up or goes down,
-        whenever an addon's tab is added or removed, and once the addons have
-        loaded. The dots are rebuilt on every pass rather than recoloured in
-        place: ``setTabButton`` hands the widget's ownership to the tab bar, so a
-        stored reference is not reliable across tab changes - rebuilding and
-        holding the fresh ones in ``self._tab_dots`` keeps them alive and correct.
-        """
+        """Put an s/f dot beside each tab that owns a connection; rebuilt every pass since setTabButton takes ownership."""
         wanted = self._transport_tab_pages()
         live = self._live_transport_states()
         bar = self.tabs.tabBar()
@@ -859,32 +793,34 @@ class RasconfManager(
                 bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, dots)
         self._tab_dots = keep
 
-    # Tab order ---------------------------------------------------------------
+        if hasattr(bar, "refit"):
+            bar.refit()
+
+    # Tab order
 
     def capture_tab_order(self) -> list[str]:
         """The titles of the reorderable tabs, left to right. The pinned gap and
         Settings tabs are always last and never moved, so they are left out."""
         gap = getattr(self, "_gap_page", None)
         settings = getattr(self, "settings_page", None)
+        bar = self.tabs.tabBar()
         titles = []
         for i in range(self.tabs.count()):
             widget = self.tabs.widget(i)
             if widget is gap or widget is settings:
                 continue
-            titles.append(self.tabs.tabText(i))
+            titles.append(tab_caption(bar, i))
         return titles
 
     def apply_tab_order(self, order: list[str] | None) -> None:
-        """Drag the tabs into ``order`` (a list of titles). Titles that are not
-        open are skipped, so a disabled addon leaves a gap that the remaining
-        tabs close up; a tab missing from ``order`` keeps its place at the end."""
+        """Drag the tabs into order (titles); missing titles are skipped and an omitted tab stays last."""
         if not order:
             return
         bar = self.tabs.tabBar()
         target = 0
         for title in order:
             current = next(
-                (i for i in range(target, self.tabs.count()) if self.tabs.tabText(i) == title),
+                (i for i in range(target, self.tabs.count()) if tab_caption(bar, i) == title),
                 None,
             )
             if current is None:
@@ -894,9 +830,7 @@ class RasconfManager(
             target += 1
 
     def _apply_remembered_order(self) -> None:
-        """Reorder the tabs to the stored arrangement when remembering is on.
-        Does nothing until the built-in order has been captured, so it is safe
-        to call while the window (or a profile) is still being assembled."""
+        """Reorder to the stored arrangement when remembering is on; no-op until the built-in order is captured."""
         if getattr(self, "_natural_tab_order", None) is None:
             return
         if bool(self.app_config.get("remember_tab_order", True)):
@@ -906,8 +840,9 @@ class RasconfManager(
     def _select_default_tab(self, title: str | None = None) -> None:
         """Show the configured start tab, falling back to the first one."""
         wanted = title or self.app_config.get("default_tab", "Berry")
+        bar = self.tabs.tabBar()
         for i in range(self.tabs.count()):
-            if self.tabs.tabText(i) == wanted:
+            if tab_caption(bar, i) == wanted:
                 self.tabs.setCurrentIndex(i)
                 return
         if self.tabs.currentIndex() < 0 and self.tabs.count():
@@ -939,8 +874,7 @@ class RasconfManager(
             return
         if not bool(self.app_config.get("remember_tab_order", True)):
             return
-        # A drag may have shifted the pinned tabs; snap them back before reading
-        # the order so Settings is never stored inside the movable group.
+
         self._sync_pinned_settings()
         order = self.capture_tab_order()
         if order != (self.app_config.get("tab_order") or []):
@@ -956,21 +890,15 @@ class RasconfManager(
         self.save_app_config()
         self.log("Tab order will be remembered" if checked else "Tab order will not be remembered")
 
-    def eventFilter(self, obj, event) -> bool:
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is getattr(self, "_order_tab_bar", None) \
                 and event.type() == QEvent.Type.MouseButtonRelease:
-            # The bar has already applied the move by the time the button is
-            # released; defer to the next tick so the tab list reads correctly.
+
             QTimer.singleShot(0, self._maybe_persist_order)
         return super().eventFilter(obj, event)
 
     def set_status_dot(self, which: str, mode: str) -> None:
-        """Light or put out the app's own transport dot, in Settings > Advanced.
-
-        The two dots used to sit in the window header where they were always on
-        show; they now live in the folded category under the connection panel,
-        next to the words that say what each connection is doing.
-        """
+        """Light or put out the app's own transport dot; they live under the connection panel now."""
         dot = self.ssh_dot if which == "ssh" else self.sftp_dot
         word = self.ssh_state_label if which == "ssh" else self.sftp_state_label
         online = mode == "online"
@@ -983,10 +911,7 @@ class RasconfManager(
             self.connected_once = True
         dot.style().unpolish(dot)
         dot.style().polish(dot)
-        # Every addon that uses this transport shows the same live state: on its
-        # own row in the addon panel, and in the list under the two indicators.
         self.addons.refresh_connection_dots()
-        # And so does the 's'/'f' dot on the SSH tab and every addon's tab.
         self.sync_tab_transport_dots()
 
     def _transport_state_part(self, transport: str, states: dict[str, bool]) -> QWidget:
@@ -1009,15 +934,7 @@ class RasconfManager(
         return wrap
 
     def refresh_connection_overview(self) -> None:
-        """List the running addons in Settings > Advanced, with what each uses.
-
-        A line names one addon and then, for every transport it has actually
-        exercised (see ``AddonManager.mark_transport``), says whether that
-        connection is open or closed right now. Rebuilt rather than patched on
-        every refresh: the set of addons changes as they are switched on and off,
-        and a fresh widget is the only way to be sure none of them survives their
-        own unload.
-        """
+        """List running addons in Settings > Advanced with each declared transport's state and which connection it uses."""
         layout = getattr(self, "connection_overview_layout", None)
         if layout is None:
             return
@@ -1039,16 +956,24 @@ class RasconfManager(
             row = QHBoxLayout()
             row.setSpacing(12)
             row.addWidget(QLabel(addon.name or addon.id))
+            declared = tuple(getattr(addon, "requires", ()) or ())
             used = [transport for transport in ("ssh", "sftp")
-                    if bool(getattr(addon, f"uses_{transport}", False))]
+                    if transport in declared]
             if used:
                 for transport in used:
                     row.addWidget(self._transport_state_part(transport, states))
+                own = bool(getattr(addon, "own_connection", False))
+                mode = QLabel("own connection" if own else "main connection")
+                mode.setStyleSheet("color: #8f8f8f;")
+                mode.setToolTip(
+                    "This addon opens a fresh connection for every call." if own
+                    else "This addon shares the app's main SSH/SFTP session.")
+                row.addWidget(mode)
             else:
-                quiet = QLabel("no connection used yet")
+                quiet = QLabel("no connection declared")
                 quiet.setStyleSheet("color: #6a6a6a;")
-                quiet.setToolTip("This addon has read no file and run no command "
-                                 "on the device since it started.")
+                quiet.setToolTip("This addon has not declared any transport under "
+                                 '\"requires\" in its manifest, so it cannot connect.')
                 row.addWidget(quiet)
             row.addStretch(1)
             wrap = QWidget()
@@ -1073,10 +998,8 @@ class RasconfManager(
             cursor.removeSelectedText()
             cursor.deleteChar()
 
-    def addon_event(self, name: str, payload: dict | None = None, **extra) -> None:
-        """Tell the addons what just happened. Never lets a broken addon, or an
-        app started without the manager, reach the caller. The details may be
-        passed as a dict or as keywords - both spellings mean the same thing."""
+    def addon_event(self, name: str, payload: dict | None = None, **extra: Any) -> None:
+        """Tell the addons what happened; never lets a broken addon or manager-less app reach the caller."""
         manager = getattr(self, "addons", None)
         if manager is None:
             return
@@ -1088,11 +1011,11 @@ class RasconfManager(
             self.log(f"addon event '{name}' failed: {error}")
 
     def _on_tab_changed(self, index: int) -> None:
-        self.addon_event("tab_changed", tab=self.tabs.tabText(index), index=index)
+        self.addon_event("tab_changed",
+                         tab=tab_caption(self.tabs.tabBar(), index), index=index)
 
-    def closeEvent(self, event) -> None:
-        # Capture the arrangement one last time, in case a drag finished without
-        # the mouse being released over the tab bar.
+    def closeEvent(self, event: QCloseEvent) -> None:
+
         self._maybe_persist_order()
         self.save_current_profile_edits()
         self.addon_event("shutdown")
@@ -1105,17 +1028,18 @@ class RasconfManager(
             self.shell_worker.wait(1500)
         if self.worker is not None and self.worker.isRunning():
             answer = QMessageBox.question(
-                self, "Transfer in progress",
-                "A file operation is still running. Abort and close?",
+                self, "Connection in progress",
+                "The main connection is still being made. Abort and close?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        self.shared_conn.close()
         super().closeEvent(event)
 
-    # Settings tab ------------------------------------------------------------
+    # Settings tab
 
     def _make_toggle_group(self, title: str, checked: bool) -> tuple[ToggleGroup, QFormLayout]:
         """A toggle-headed group whose indented form body hides when off."""
@@ -1137,24 +1061,15 @@ class RasconfManager(
         vbox = QVBoxLayout(inner)
         vbox.setSpacing(16)
 
-        # --- Connection settings (moved here from the top of the window) ---
-        # The widgets are built in build_ui and simply parented into the page, so
-        # every connect/disconnect handler keeps working unchanged.
-        connection_group = getattr(self, "connection_group", None)
-        if connection_group is not None:
-            vbox.addWidget(connection_group)
+        connection_group = self.connection_group
+        panel_body = connection_group.body_layout
 
-        # --- Advanced connection settings (folded until someone wants it) ---
-        # The two indicators the window header used to carry live here, next to
-        # the words that spell their state out, and under them one line per
-        # running addon saying which transport it has used and whether that
-        # connection is open or closed right now.
-        advanced = CollapseGroup(
-            "Advanced connection settings",
+        status_group = CollapseGroup(
+            "Connection status",
             tip="Read-only: the program's own SSH and SFTP state, and what every "
                 "running addon has connected with. Nothing here changes a setting.",
         )
-        advanced_body = advanced.body_layout
+        status_body = status_group.body_layout
 
         self.ssh_caption = QLabel("SSH")
         self.ssh_caption.setStyleSheet("color: #aaaaaa;")
@@ -1182,101 +1097,32 @@ class RasconfManager(
         status_row.addStretch(1)
         status_wrap = QWidget()
         status_wrap.setLayout(status_row)
-        advanced_body.addWidget(status_wrap)
+        status_body.addWidget(status_wrap)
 
         heading = QLabel("Running addons")
         heading.setStyleSheet("color: #8f8f8f;")
-        advanced_body.addWidget(heading)
+        status_body.addWidget(heading)
         self.connection_overview = QWidget()
         self.connection_overview_layout = QVBoxLayout(self.connection_overview)
         self.connection_overview_layout.setContentsMargins(0, 0, 0, 0)
         self.connection_overview_layout.setSpacing(4)
-        advanced_body.addWidget(self.connection_overview)
-        self.connection_advanced = advanced
-        vbox.addWidget(advanced)
-        self.refresh_connection_overview()
+        status_body.addWidget(self.connection_overview)
 
-        # --- Startup & defaults (always shown) ---
-        startup_group = QGroupBox("Startup & defaults")
-        startup_form = QFormLayout(startup_group)
-        startup_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        startup_form.setHorizontalSpacing(12)
-        startup_form.setVerticalSpacing(8)
+        ssh_box = QGroupBox("SSH terminal")
+        tip_on_title(ssh_box,
+            "Options for the SSH terminal. Switching SSH off altogether is the "
+            "job of the switch in this panel's header.")
+        ssh_body = QVBoxLayout(ssh_box)
+        ssh_body.setContentsMargins(16, 12, 12, 10)
+        ssh_body.setSpacing(8)
 
-        self.default_tab_combo = QComboBox()
-        self.default_tab_combo.setToolTip("Tab selected when the app starts (only visible tabs are listed).")
-        startup_form.addRow("Default tab", self.default_tab_combo)
-
-        self.tab_order_check = ToggleSwitch("Remember tab order")
-        self.tab_order_check.setToolTip(
-            "Keep the tabs in the order you drag them into, next time the app "
-            "starts. Turn off to use the built-in order on every launch."
+        self.ssh_tab_check = ToggleSwitch("Show the SSH terminal tab")
+        self.ssh_tab_check.setToolTip(
+            "Add or remove the SSH terminal tab. The protocol stays available "
+            "to the API and the addons either way."
         )
-        self.tab_order_check.setChecked(bool(self.app_config.get("remember_tab_order", True)))
-        self.tab_order_check.toggled.connect(self._on_tab_order_toggled)
-        startup_form.addRow(self.tab_order_check)
-
-        order_row = QHBoxLayout()
-        save_order_btn = QPushButton("Save current order")
-        save_order_btn.setToolTip("Store the tabs exactly as they are arranged now.")
-        save_order_btn.clicked.connect(self.save_tab_order_now)
-        reset_order_btn = QPushButton("Reset to default order")
-        reset_order_btn.clicked.connect(self.reset_tab_order)
-        order_row.addWidget(save_order_btn)
-        order_row.addWidget(reset_order_btn)
-        order_row.addStretch(1)
-        order_wrap = QWidget()
-        order_wrap.setLayout(order_row)
-        startup_form.addRow("Tab order", order_wrap)
-
-        self.addon_dev_check = ToggleSwitch("Show the Addon Dev tab")
-        self.addon_dev_check.setToolTip(
-            "The page that lists every addon with its logs and processes, reads and "
-            "edits its files, and turns a .py addon into a program of its own. The "
-            "same entry appears under Tools. Switching it off takes the tab away; "
-            "switching addons on and off is done in Settings > Addons below."
-        )
-        self.addon_dev_check.setChecked(self.addon_dev_wanted())
-        self.addon_dev_check.toggled.connect(self._on_addon_dev_toggled)
-        startup_form.addRow(self.addon_dev_check)
-        vbox.addWidget(startup_group)
-
-        # --- File transfer (SFTP) connection settings (always shown) ---
-        # The SFTP tab is gone - Berry browses files over this connection - but
-        # the connection itself and the app log still need a home here. Berry's
-        # own on/off switch lives under "Bundled with the program" below.
-        sftp_category = QGroupBox("File transfer (SFTP)")
-        tip_on_title(sftp_category,
-            "The connection Berry uses to browse files on the device. Turning the "
-            "Berry tab on or off is done under Bundled with the program below.")
-        sftp_body = QVBoxLayout(sftp_category)
-        sftp_body.setContentsMargins(16, 12, 12, 10)
-        sftp_body.setSpacing(8)
-
-        self.sftp_auto_connect_check = ToggleSwitch("Auto-connect at startup")
-        self.sftp_auto_connect_check.setToolTip("Open the SFTP connection automatically when the app starts.")
-        self.sftp_auto_connect_check.setChecked(bool(self.app_config.get("auto_connect_sftp", False)))
-        sftp_body.addWidget(self.sftp_auto_connect_check)
-
-        self.logging_group, log_form = self._make_toggle_group(
-            "Enable logging to file", bool(self.app_config.get("logging_enabled", True))
-        )
-        self.max_log_spin = QSpinBox()
-        self.max_log_spin.setRange(50, 10000)
-        self.max_log_spin.setValue(int(self.app_config.get("max_log_lines", 500)))
-        log_form.addRow("Max lines kept on screen", self.max_log_spin)
-        log_path_label = QLabel(str(LOG_FILE))
-        log_path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        log_path_label.setStyleSheet("color: #aaaaaa;")
-        log_form.addRow("Log file", log_path_label)
-        sftp_body.addWidget(self.logging_group)
-        vbox.addWidget(sftp_category)
-
-        # --- SSH tab (can be switched off) and its related settings ---
-        self.ssh_group, ssh_body = self._make_category(
-            "SSH", bool(self.app_config.get("ssh_enabled", True)),
-            "Show the SSH terminal tab. Untick to hide it.",
-        )
+        self.ssh_tab_check.setChecked(bool(self.app_config.get("ssh_enabled", True)))
+        ssh_body.addWidget(self.ssh_tab_check)
 
         self.ssh_auto_connect_check = ToggleSwitch("Auto-connect at startup")
         self.ssh_auto_connect_check.setToolTip("Open the SSH terminal automatically when the app starts.")
@@ -1321,9 +1167,83 @@ class RasconfManager(
         edit_quick_btn = QPushButton("Edit quick commands...")
         edit_quick_btn.clicked.connect(self.edit_quick_commands)
         ssh_body.addWidget(edit_quick_btn)
-        vbox.addWidget(self.ssh_group)
+        panel_body.addWidget(ssh_box)
 
-        # --- Custom browser tabs (always shown, cannot be switched off) ---
+        sftp_box = QGroupBox("File transfer (SFTP)")
+        tip_on_title(sftp_box,
+            "The connection Berry uses to browse files on the device. Turning the "
+            "Berry tab on or off is done under Bundled with the program below.")
+        sftp_body = QVBoxLayout(sftp_box)
+        sftp_body.setContentsMargins(16, 12, 12, 10)
+        sftp_body.setSpacing(8)
+
+        self.sftp_auto_connect_check = ToggleSwitch("Auto-connect at startup")
+        self.sftp_auto_connect_check.setToolTip("Open the SFTP connection automatically when the app starts.")
+        self.sftp_auto_connect_check.setChecked(bool(self.app_config.get("auto_connect_sftp", False)))
+        sftp_body.addWidget(self.sftp_auto_connect_check)
+        panel_body.addWidget(sftp_box)
+
+        panel_body.addWidget(status_group)
+        vbox.addWidget(connection_group)
+        self.refresh_connection_overview()
+
+        startup_group = QGroupBox("Startup & defaults")
+        startup_form = QFormLayout(startup_group)
+        startup_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        startup_form.setHorizontalSpacing(12)
+        startup_form.setVerticalSpacing(8)
+
+        self.default_tab_combo = QComboBox()
+        self.default_tab_combo.setToolTip("Tab selected when the app starts (only visible tabs are listed).")
+        startup_form.addRow("Default tab", self.default_tab_combo)
+
+        self.tab_order_check = ToggleSwitch("Remember tab order")
+        self.tab_order_check.setToolTip(
+            "Keep the tabs in the order you drag them into, next time the app "
+            "starts. Turn off to use the built-in order on every launch."
+        )
+        self.tab_order_check.setChecked(bool(self.app_config.get("remember_tab_order", True)))
+        self.tab_order_check.toggled.connect(self._on_tab_order_toggled)
+        startup_form.addRow(self.tab_order_check)
+
+        order_row = QHBoxLayout()
+        save_order_btn = QPushButton("Save current order")
+        save_order_btn.setToolTip("Store the tabs exactly as they are arranged now.")
+        save_order_btn.clicked.connect(self.save_tab_order_now)
+        reset_order_btn = QPushButton("Reset to default order")
+        reset_order_btn.clicked.connect(self.reset_tab_order)
+        order_row.addWidget(save_order_btn)
+        order_row.addWidget(reset_order_btn)
+        order_row.addStretch(1)
+        order_wrap = QWidget()
+        order_wrap.setLayout(order_row)
+        startup_form.addRow("Tab order", order_wrap)
+
+        self.addon_dev_check = ToggleSwitch("Show the Addon Dev tab")
+        self.addon_dev_check.setToolTip(
+            "The page that lists every addon with its logs and processes, reads and "
+            "edits its files, and turns a .py addon into a program of its own. The "
+            "same entry appears under Tools. Switching it off takes the tab away; "
+            "switching addons on and off is done in Settings > Addons below."
+        )
+        self.addon_dev_check.setChecked(self.addon_dev_wanted())
+        self.addon_dev_check.toggled.connect(self._on_addon_dev_toggled)
+        startup_form.addRow(self.addon_dev_check)
+
+        self.logging_group, log_form = self._make_toggle_group(
+            "Enable logging to file", bool(self.app_config.get("logging_enabled", True))
+        )
+        self.max_log_spin = QSpinBox()
+        self.max_log_spin.setRange(50, 10000)
+        self.max_log_spin.setValue(int(self.app_config.get("max_log_lines", 500)))
+        log_form.addRow("Max lines kept on screen", self.max_log_spin)
+        log_path_label = QLabel(str(LOG_FILE))
+        log_path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        log_path_label.setStyleSheet("color: #aaaaaa;")
+        log_form.addRow("Log file", log_path_label)
+        startup_form.addRow(self.logging_group)
+        vbox.addWidget(startup_group)
+
         tabs_category = QGroupBox("Custom tabs")
         tip_on_title(tabs_category, "Embedded browser tabs. These are always shown.")
         tabs_body = QVBoxLayout(tabs_category)
@@ -1359,9 +1279,6 @@ class RasconfManager(
         self._update_cert_bypass_state()
         vbox.addWidget(tabs_category)
 
-        # --- Addons: the ones shipped with the program, then the drop-ins ---
-        # Build the installed list first so its layout exists when the bundled
-        # container is created and the rows are split between the two.
         installed_widget = self.addons.build_settings_widget()
         bundled_widget = self.addons.build_bundled_widget()
         vbox.addWidget(bundled_widget)
@@ -1378,22 +1295,23 @@ class RasconfManager(
 
         self.tabs.addTab(page, "Settings")
         self.settings_page = page
+
+        self.tabs.tabBar().setTabIcon(self.tabs.indexOf(page), settings_tab_icon())
         self._reload_tabs_combo()
         self._reload_default_tab_combo(select=self.app_config.get("default_tab", "Berry"))
-        # Unticking the SSH category hides the terminal tab right away. (The
-        # Berry tab is switched from its own bundled category.)
-        self.ssh_group.toggled.connect(self._on_tab_category_toggled)
+
+        self.ssh_tab_check.toggled.connect(self._on_tab_category_toggled)
 
     def _reload_default_tab_combo(self, select: str | None = None) -> None:
         """List every real tab as the possible startup tab, keeping the choice."""
         chosen = select or self.default_tab_combo.currentText() or self.app_config.get("default_tab", "Berry")
         self.default_tab_combo.blockSignals(True)
         self.default_tab_combo.clear()
-        # The empty gap tab (which pins Settings to the right) is not a real page
-        # and must not be offered as a startup tab; every named tab still is.
+
+        bar = self.tabs.tabBar()
         self.default_tab_combo.addItems(
-            [self.tabs.tabText(i) for i in range(self.tabs.count())
-             if self.tabs.tabText(i).strip()]
+            [tab_caption(bar, i) for i in range(self.tabs.count())
+             if tab_caption(bar, i).strip()]
         )
         idx = self.default_tab_combo.findText(chosen)
         self.default_tab_combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -1406,7 +1324,7 @@ class RasconfManager(
         self.app_config["terminal_font_size"] = self.terminal_font_spin.value()
         self.app_config["max_log_lines"] = self.max_log_spin.value()
         self.app_config["logging_enabled"] = self.logging_group.isChecked()
-        self.app_config["ssh_enabled"] = self.ssh_group.isChecked()
+        self.app_config["ssh_enabled"] = self.ssh_tab_check.isChecked()
         self.app_config["reboot_wait_seconds"] = self.reboot_wait_spin.value()
         self.app_config["reboot_retry_interval"] = self.reboot_retry_spin.value()
         self.app_config["reboot_auto_watch"] = self.reboot_auto_watch_check.isChecked()
@@ -1420,13 +1338,13 @@ class RasconfManager(
         self.refresh_web_tab_urls()
         self.log("Settings applied")
         self.addon_event("settings_applied")
-        # Last, because it can close this instance and start a new one.
+
         self._sync_cert_bypass()
 
     def _on_tab_category_toggled(self, _checked: bool = False) -> None:
-        """Persist the SSH category state and show/hide the terminal tab. (The
+        """Persist the SSH tab switch state and show/hide the terminal tab. (The
         Berry tab is switched from its own bundled addon category.)"""
-        self.app_config["ssh_enabled"] = self.ssh_group.isChecked()
+        self.app_config["ssh_enabled"] = self.ssh_tab_check.isChecked()
         self.save_app_config()
         self.ensure_main_tabs()
         self._apply_remembered_order()
@@ -1439,26 +1357,33 @@ class RasconfManager(
         self.ensure_addon_dev_tab()
         self._apply_remembered_order()
 
-    # Profiles and credentials ------------------------------------------------
+    # Profiles and credentials
 
-    def refresh_profile_combo(self) -> None:
-        self.profile_combo.blockSignals(True)
-        self.profile_combo.clear()
-        for name in profile_names():
-            self.profile_combo.addItem(name)
-        idx = self.profile_combo.findText(active_profile_name())
-        self.profile_combo.setCurrentIndex(max(0, idx))
-        self.profile_combo.blockSignals(False)
-
-    def on_profile_changed(self, index: int) -> None:
-        if index < 0:
+    def refresh_profile_menu(self) -> None:
+        """Rebuild File > Load profile: one entry per profile, the active one ticked."""
+        menu = getattr(self, "profile_menu", None)
+        if menu is None:
             return
-        name = self.profile_combo.itemText(index)
+        menu.clear()
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        current = active_profile_name()
+        names = profile_names()
+        for name in names:
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.setToolTip("Load this profile's connection details and settings")
+            action.triggered.connect(lambda _=False, text=name: self.load_profile(text))
+            group.addAction(action)
+        if not names:
+            empty = menu.addAction("(no profiles)")
+            empty.setEnabled(False)
+
+    def load_profile(self, name: str) -> None:
         if not name or name == active_profile_name():
             return
-        # Every profile now carries the full settings, so switching means
-        # flushing the current widgets, swapping the working dict and
-        # reloading the whole UI from the newly active profile.
+
         self.save_current_profile_edits()
         self.app_config = set_active_profile(name)
         self.reload_ui_from_config()
@@ -1475,15 +1400,13 @@ class RasconfManager(
         self.remote_root_input.setText(str(cfg.get("remote_root", DEFAULT_PROFILE["remote_root"])))
         self.timeout_input.setValue(int(cfg.get("ssh_timeout", 12)))
         self.trust_host_checkbox.setChecked(bool(cfg.get("trust_unknown_host", False)))
-        # Changing this checkbox saves/removes the stored credential, so it
-        # must not react while the widgets are being repopulated.
+
         self.remember_password_checkbox.blockSignals(True)
         self.remember_password_checkbox.setChecked(bool(cfg.get("remember_password", False)))
         self.remember_password_checkbox.blockSignals(False)
         self.password_input.clear()
         self.load_saved_password()
 
-        # Settings tab widgets mirror the profile's settings section.
         self.sftp_auto_connect_check.setChecked(bool(cfg.get("auto_connect_sftp", False)))
         self.ssh_auto_connect_check.setChecked(bool(cfg.get("auto_connect_ssh", False)))
         self.logging_group.setChecked(bool(cfg.get("logging_enabled", True)))
@@ -1493,34 +1416,38 @@ class RasconfManager(
         self.reboot_retry_spin.setValue(int(cfg.get("reboot_retry_interval", 10)))
         self.reboot_auto_watch_check.setChecked(bool(cfg.get("reboot_auto_watch", True)))
         self.cert_bypass_check.setChecked(bool(cfg.get("ignore_cert_errors", False)))
-        # The switch's own handler adds and removes the tab. A profile reload
-        # does that itself further down, so the signal is silenced here.
+
         self.addon_dev_check.blockSignals(True)
         self.addon_dev_check.setChecked(bool(cfg.get("addon_dev_enabled", True)))
         self.addon_dev_check.blockSignals(False)
-        # Its handler saves the current arrangement, so silence it while loading.
+
         self.tab_order_check.blockSignals(True)
         self.tab_order_check.setChecked(bool(cfg.get("remember_tab_order", True)))
         self.tab_order_check.blockSignals(False)
-        # The profile may want the opposite certificate setting; keep the saved
-        # intent in the environment but let this session finish untouched.
+
         set_cert_bypass(bool(cfg.get("ignore_cert_errors")))
         self._update_cert_bypass_state()
         self.action_alt_icon.setChecked(bool(cfg.get("use_alt_icon", False)))
-        # Each profile decides whether the bottom log pane is showing; setting
-        # the switch applies it and re-persists the flag.
+
         self.action_log_console.setChecked(bool(cfg.get("log_visible", True)))
-        # This fires _on_tab_category_toggled, which is harmless: it just
-        # re-persists the flag and refreshes the tabs done below anyway.
-        self.ssh_group.setChecked(bool(cfg.get("ssh_enabled", True)))
+
+        self.ssh_tab_check.setChecked(bool(cfg.get("ssh_enabled", True)))
+
+        master_switch = self.connection_group.switch
+        master_wanted = bool(cfg.get("master_connection", True))
+        master_switch.blockSignals(True)
+        master_switch.setChecked(master_wanted)
+        master_switch.blockSignals(False)
+        self.connection_group.body_widget.setVisible(master_wanted)
+        if not self.connections_enabled():
+            self.close_all_connections()
 
         self.rebuild_web_tabs()
         self._reload_tabs_combo()
         self.apply_runtime_settings()
         self.refresh_web_tab_urls()
         self.save_app_config()
-        # Each profile decides which addons it runs, and an addon that adds a
-        # tab needs to see the new host right away.
+
         self.addons.reconcile()
         self._apply_remembered_order()
         self._select_default_tab()
@@ -1535,10 +1462,9 @@ class RasconfManager(
             QMessageBox.warning(self, "Duplicate", "A profile with that name already exists.")
             return
         self.save_current_profile_edits()
-        # A new profile starts as an exact copy of the current one, settings
-        # included, and becomes the active profile right away.
+
         self.app_config = create_profile(name, self.app_config)
-        self.refresh_profile_combo()
+        self.refresh_profile_menu()
         self.reload_ui_from_config()
         self.log(f"Created profile '{active_profile_name()}' from the current settings")
 
@@ -1552,7 +1478,7 @@ class RasconfManager(
             QMessageBox.warning(self, "Duplicate", "Another profile already has that name.")
             return
         if rename_profile(current, name):
-            self.refresh_profile_combo()
+            self.refresh_profile_menu()
             self.log(f"Profile renamed to '{name}'")
 
     def delete_current_profile(self) -> None:
@@ -1571,11 +1497,11 @@ class RasconfManager(
         working = delete_profile(current)
         if working is not None:
             self.app_config = working
-        self.refresh_profile_combo()
+        self.refresh_profile_menu()
         self.reload_ui_from_config()
         self.log(f"Deleted profile '{current}'")
 
-    def save_current_profile_edits(self, _value=None) -> None:
+    def save_current_profile_edits(self, _value: object = None) -> None:
         cfg = self.app_config
         cfg["host"] = self.host_input.text().strip() or DEFAULT_PROFILE["host"]
         cfg["port"] = self.port_input.value()
@@ -1586,11 +1512,11 @@ class RasconfManager(
         cfg["remember_password"] = self.remember_password_checkbox.isChecked()
         self.save_app_config()
 
-    def save_app_config(self, _value=None) -> None:
+    def save_app_config(self, _value: object = None) -> None:
         self.app_config["ssh_timeout"] = self.timeout_input.value()
         save_app_config_static(self.app_config)
 
-    def save_runtime_settings(self, _value=None) -> None:
+    def save_runtime_settings(self, _value: object = None) -> None:
         self.app_config["ssh_timeout"] = self.timeout_input.value()
         self.save_app_config()
 
@@ -1639,7 +1565,7 @@ class RasconfManager(
             self.key_input.setText(path)
             self.save_current_profile_edits()
 
-    # Menu actions that open a dialog -----------------------------------------
+    # Menu actions that open a dialog
 
     def export_config(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -1670,14 +1596,14 @@ class RasconfManager(
             QMessageBox.critical(self, "Import failed", "File does not contain a JSON object.")
             return
         self.app_config = import_app_config(loaded)
-        self.refresh_profile_combo()
+        self.refresh_profile_menu()
         self.reload_ui_from_config()
         QMessageBox.information(self, "Imported", "Configuration replaced from file.")
 
     def save_log_to_file(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self, "Save log",
-            str(BASE_DIR / f"rasconf_log-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"),
+            str(BASE_DIR / f"berry_log-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"),
             "Text files (*.txt);;All files (*)",
         )
         if not path:
@@ -1689,9 +1615,9 @@ class RasconfManager(
 
     def show_about(self) -> None:
         box = QMessageBox(self)
-        box.setWindowTitle("About Rasconf Manager")
+        box.setWindowTitle("About Berry")
         box.setText(
-            "<b>Rasconf Manager V1.4.3</b><br>"
+            "<b>Berry Manager V1.5.1</b><br>"
             "Manage Router & Interfaces.<br>"
             'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'

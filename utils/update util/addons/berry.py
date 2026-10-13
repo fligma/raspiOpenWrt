@@ -1,40 +1,13 @@
 #!/usr/bin/env python3
 """Berry: an SFTP and local file manager with a notepad-style editor.
 
-One ``Berry`` window-tab holds a file view with two pages - **Device** (the
-*current profile*'s own SSH/SFTP connection) and **Local** (this computer). Each
-page lists name, size, type, modified time and path - the device page adds mode
-too - and each has a typed address bar, Up, Home, a Places bookmark box, a live
-filter, a sort that keeps folders on top and a show-hidden switch. Double-click
-walks into a folder; every other action is in a slim bar above the listing and,
-for most of them, in the right-click menu on a row.
-
-Editing a file opens a **notepad-like tab of its own** (``Berry Editor``): a big
-text area with syntax colors for json, python, html, css, javascript and ini.
-The text lives in memory - the file is not touched until **Save**, which writes
-it back (over SFTP on the device, to disk locally) and closes the tab; **Close**
-discards; **Reload** re-reads. A language box re-shades the text on the fly.
-
-Copy and paste bridge the two pages. Copy on one and paste on the other moves
-bytes over SFTP - a local file pasted on the device is uploaded, a device file
-pasted on the local page is downloaded - while pasting on the page it came from
-copies it in place (``cp -a`` on the device, a real file copy here). The local
-page also uploads its selected file straight to the device folder that is open.
-
-Nothing about the layout is hardcoded that a user might want to change: the
-starting folders on both sides, the bookmarks, the show-hidden and sort defaults,
-whether deletes ask first, the size at which the editor warns, where downloads
-land and the limits on ``find`` all live in ``addons/_data/berry/config.json``, shown
-as a form under this addon's name in Settings > Addons and editable as plain
-JSON anywhere.
-
-Everything is built from declarative specs and every control - buttons, the
-address bar, the filter, the sort, the listings and their right-clicks, and the
-editor - reports back through ``on_widget``, so the same file works imported into
-the app and compiled into a program of its own by the Addon Dev tab. The
-blocking ``device`` calls run in the app's thread pool while a private event loop
-keeps the window painting and buttons greyed, so a big listing or a large upload
-never freezes the interface.
+One ``Berry`` tab holds a file view with a **Device** page (the current
+profile's SSH/SFTP connection) and a **Local** page. Editing a file opens a
+``Berry Editor`` tab whose text stays in memory until Save; copy and paste
+bridge the two pages over SFTP. Every control is a declarative spec reporting
+through ``on_widget``, so the same file runs imported or compiled, and the
+slow device calls go through the app's thread pool. The settings live in
+``addons/_data/berry/config.json``.
 """
 
 from __future__ import annotations
@@ -46,11 +19,11 @@ import re
 import shlex
 import shutil
 import stat as stat_module
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-# The Qt-free half of the contract, so this file also runs compiled into a
-# program of its own and inside a test script that never opens a window.
-from addon_common import AddonError
+from addon_common import AddonError        # the Qt-free half of the contract
 
 ADDON = {
     "name": "Berry file manager",
@@ -62,20 +35,21 @@ ADDON = {
                    "rename, move, delete, chmod, upload, download, find, copy and "
                    "paste - most of it from a right-click menu, all configured in "
                    "addons/_data/berry/config.json.",
+    "requires": ["ssh", "sftp"],
     "api": 1,
 }
 
-TAB = "Berry"                 # the window tab; its file view has Device/Local pages
-TAB_EDITOR = "Berry Editor"   # the notepad-like tab, opened when a file is edited
+TAB = "Berry"                 # the tab with the Device and Local pages
+TAB_EDITOR = "Berry Editor"   # the editor tab, opened on Edit
 
 DEVICE = "device"
 LOCAL = "local"
 
-api = None                    # filled in by init()
-working = False               # one job at a time
-clip = None                   # {"side","path","name","directory"} for copy/paste
-editing = None                # {"side","path","text","detected"} while the editor is open
-_places_guard = False         # set while repopulating a Places combo
+api: Any = None               # set by init()
+working: bool = False         # one job at a time
+clip: dict | None = None      # {"side","path","name","directory"}
+editing: dict | None = None   # {"side","path","text","detected"}
+_places_guard: bool = False   # set while repopulating a Places combo
 
 STATE: dict[str, dict] = {}
 
@@ -85,7 +59,7 @@ def _fresh_state() -> dict:
 
 
 def pid(side: str, name: str) -> str:
-    """A spec id on the Berry tab - device ids start with 'd', local with 'l'."""
+    """Spec id on the tab: 'd' device, 'l' local."""
     return ("l" if side == LOCAL else "d") + str(name)
 
 
@@ -98,12 +72,11 @@ def base_of_id(identifier: str) -> str:
 
 
 def st(side: str) -> dict:
+    """One page's own state."""
     return STATE.setdefault(str(side), _fresh_state())
 
 
-# ---------------------------------------------------------------------------
-# What can be configured, and what it starts out as
-# ---------------------------------------------------------------------------
+# --- what can be configured, and what it starts out as ---
 
 DEFAULTS = {
     "start_path": "",
@@ -162,8 +135,7 @@ GROUPS = [
 SORT_LABELS = {"name": "Name", "size": "Size", "mtime": "Modified", "type": "Type"}
 SORT_KEYS = {label: value for value, label in SORT_LABELS.items()}
 
-# The editor's language box: friendly labels, the key the highlighter wants, and
-# which files get which colors by themselves.
+# Editor language box: labels, colour key, extension defaults.
 LANG_ITEMS = ["auto", "Python", "JSON", "HTML", "CSS", "JavaScript", "Bash", "INI", "None"]
 LANG_KEY = {"Python": "python", "JSON": "json", "HTML": "html", "CSS": "css",
             "JavaScript": "javascript", "Bash": "bash", "INI": "ini", "None": ""}
@@ -213,21 +185,16 @@ EDITOR_ICON = (
     '</svg>'
 )
 
-#: The picture the tab wears when the user has put one in the assets folder.
+# Picture the tab wears if the assets folder has one.
 TAB_ICON_FILE = "berryicon.png"
 
 
 def tab_icon() -> str:
-    """What to mark the Berry tab with: the shipped picture, else the drawing.
-
-    ``assets/berryicon.png`` is the mark when it is there - a picture the app
-    builds alongside itself, so a user can drop their own in and restart. Without
-    it the tab draws its own drupelets, which needs nothing beside the addon and
-    so keeps working in a build that shipped no picture."""
+    """The shipped picture if the assets folder has one, else the drawn mark."""
     folder = None
     try:
         folder = api.paths.assets
-    except (AddonError, AttributeError, TypeError):    # no api in a bare import
+    except (AddonError, AttributeError, TypeError):    # no api on a bare import
         folder = None
     if folder is None:
         return TAB_ICON
@@ -243,12 +210,10 @@ def tab_icon() -> str:
 SHQ = shlex.quote
 
 
-# ---------------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------------
+# --- small helpers ---
 
-def _cfg(key: str, default=None):
-    """One config value, read fresh from the file over the defaults."""
+def _cfg(key: str, default: Any = None) -> Any:
+    """One config value, read fresh over the defaults."""
     if api is None:
         return config_default(key, default)
     try:
@@ -258,8 +223,8 @@ def _cfg(key: str, default=None):
     return default if value is None else value
 
 
-def config_default(key: str, default=None):
-    """A key straight out of DEFAULTS, dotted included, for when there is no api."""
+def config_default(key: str, default: Any = None) -> Any:
+    """A key out of DEFAULTS, dotted included, when there is no api."""
     node = DEFAULTS
     for part in str(key).split("."):
         if not isinstance(node, dict) or part not in node:
@@ -281,7 +246,7 @@ def _places(side: str) -> list[str]:
 
 
 def default_root() -> str:
-    """Where the device page starts: the configured path, else the profile's."""
+    """Where the device page starts."""
     text = str(_cfg("start_path", "") or "").strip()
     if text:
         return posixpath.normpath(text)
@@ -294,7 +259,7 @@ def default_root() -> str:
 
 
 def default_local_root() -> str:
-    """Where the local page starts: the configured folder, else your home."""
+    """Where the local page starts."""
     text = str(_cfg("local_start", "") or "").strip() or "~"
     try:
         return str(Path(text).expanduser().resolve())
@@ -306,22 +271,24 @@ def start_side(side: str) -> str:
     return default_local_root() if side == LOCAL else default_root()
 
 
-def _read(identifier: str, what: str = "value"):
+def _read(identifier: str, what: str = "value") -> Any:
+    """A control on the Berry tab, read back."""
     try:
         return api.tabs.widget_value(TAB, identifier, what)
     except AddonError:
         return None
 
 
-def _read_editor(identifier: str, what: str = "value"):
+def _read_editor(identifier: str, what: str = "value") -> Any:
+    """A control on the editor tab, read back."""
     try:
         return api.tabs.widget_value(TAB_EDITOR, identifier, what)
     except AddonError:
         return None
 
 
-def _sz(n) -> str:
-    """A byte count as something short a human can read."""
+def _sz(n: Any) -> str:
+    """A byte count as short readable text."""
     try:
         n = int(n or 0)
     except (TypeError, ValueError):
@@ -333,7 +300,8 @@ def _sz(n) -> str:
     return f"{n:.1f}P"
 
 
-def _t(ts) -> str:
+def _t(ts: Any) -> str:
+    """Epoch seconds as a date, or ''."""
     try:
         ts = int(ts or 0)
     except (TypeError, ValueError):
@@ -355,7 +323,7 @@ def _kind(entry: dict) -> str:
 
 
 def _mode(entry: dict) -> str:
-    """``0644 rw-r--r--`` out of a st_mode and the directory/link flags."""
+    """``0644 rw-r--r--`` out of st_mode and the flags."""
     try:
         m = int(entry.get("mode") or 0)
     except (TypeError, ValueError):
@@ -371,13 +339,11 @@ def _mode(entry: dict) -> str:
 
 
 def language_for(path: str) -> str:
-    """The editor language a file's extension implies, or '' for none."""
+    """The editor language an extension implies, '' for none."""
     return EXT_LANG.get(posixpath.splitext(str(path or ""))[1].lower(), "")
 
 
-# ---------------------------------------------------------------------------
-# Path handling, told apart by side
-# ---------------------------------------------------------------------------
+# --- paths, told apart by side ---
 
 def _norm(side: str, text: str) -> str:
     return (os.path if side == LOCAL else posixpath).normpath(text)
@@ -399,9 +365,7 @@ def _isabs(side: str, text: str) -> bool:
     return os.path.isabs(text) if side == LOCAL else str(text).startswith("/")
 
 
-# ---------------------------------------------------------------------------
-# The Berry tab: a Device page and a Local page, each a file manager
-# ---------------------------------------------------------------------------
+# --- the Berry tab: a Device page and a Local page ---
 
 def _nav_row(side: str) -> dict:
     children = [
@@ -474,12 +438,12 @@ def _page(side: str, label: str) -> dict:
 
 
 def berry_spec() -> dict:
-    """The Berry tab: one file view with a Device page and a Local page."""
+    """One file view with a Device page and a Local page."""
     return {"kind": "tabs", "children": [_page(DEVICE, "Device"), _page(LOCAL, "Local")]}
 
 
 def editor_spec(language: str) -> dict:
-    """The notepad-like editor tab, shaded for ``language``."""
+    """The editor tab, shaded for ``language``."""
     return {"kind": "column", "children": [
         {"kind": "row", "children": [
             {"kind": "label", "id": "ed-path", "text": "", "word_wrap": True,
@@ -507,7 +471,7 @@ def editor_spec(language: str) -> dict:
 
 
 def build_tab() -> None:
-    """The Berry tab from a spec; every control reports back through ``on_widget``."""
+    """Build the tab; every control reports through ``on_widget``."""
     STATE.setdefault(DEVICE, _fresh_state())
     STATE.setdefault(LOCAL, _fresh_state())
     st(DEVICE)["btns"] = [pid(DEVICE, b) for b in
@@ -519,11 +483,10 @@ def build_tab() -> None:
     api.tabs.set_icon(TAB, tab_icon())
 
 
-# ---------------------------------------------------------------------------
-# Status, progress and the one-job gate
-# ---------------------------------------------------------------------------
+# --- status, progress and the one-job gate ---
 
 def say(text: str, side: str = DEVICE, bad: bool = False) -> None:
+    """One line on a page's status label."""
     try:
         api.tabs.set_widget(TAB, pid(side, "status"), "text", str(text))
         api.tabs.set_widget(TAB, pid(side, "status"), "style",
@@ -534,6 +497,7 @@ def say(text: str, side: str = DEVICE, bad: bool = False) -> None:
 
 
 def editor_say(text: str, bad: bool = False) -> None:
+    """One line on the editor's status label."""
     try:
         api.tabs.set_widget(TAB_EDITOR, "ed-status", "text", str(text))
         api.tabs.set_widget(TAB_EDITOR, "ed-status", "style",
@@ -544,6 +508,7 @@ def editor_say(text: str, bad: bool = False) -> None:
 
 
 def _buttons(usable: bool) -> None:
+    """Grey out, or back, every page button."""
     for side in (DEVICE, LOCAL):
         for identifier in st(side).get("btns", []):
             try:
@@ -553,6 +518,7 @@ def _buttons(usable: bool) -> None:
 
 
 def _start(text: str, side: str) -> None:
+    """A job begins: say so and lock the pages."""
     global working
     working = True
     say(text + "...", side=side)
@@ -560,12 +526,13 @@ def _start(text: str, side: str) -> None:
 
 
 def _finish() -> None:
+    """The job is over; the pages answer again."""
     global working
     working = False
     _buttons(True)
 
 
-def _busy(side: str, text: str, action) -> bool:
+def _busy(side: str, text: str, action: Callable[[], None]) -> bool:
     """Run one job with the buttons greyed; report any failure."""
     if api is None or working:
         return False
@@ -585,12 +552,10 @@ def _busy(side: str, text: str, action) -> bool:
     return ok
 
 
-# ---------------------------------------------------------------------------
-# Listing both sides
-# ---------------------------------------------------------------------------
+# --- listing both sides ---
 
 def _list_local(path: str) -> list[dict]:
-    """The folder ``path`` on this computer, in the shape the device list uses."""
+    """A folder here, in the shape the device list uses."""
     entries: list[dict] = []
     with os.scandir(path) as it:
         for dirent in it:
@@ -612,6 +577,7 @@ def _list_local(path: str) -> list[dict]:
 
 
 def _fetch(side: str, path: str) -> list[dict]:
+    """List a folder on either side."""
     if side == LOCAL:
         return _list_local(path)
     return api.device.list(path, outside_root=True)
@@ -633,7 +599,7 @@ def navigate(side: str, path: str) -> None:
 
 
 def refresh(side: str, _checked: bool = False) -> None:
-    """Re-list the folder on show and paint the table."""
+    """Re-list the folder on show."""
     if api is None:
         return
     s = st(side)
@@ -643,7 +609,7 @@ def refresh(side: str, _checked: bool = False) -> None:
     if working:
         return
 
-    def action():
+    def action() -> None:
         s["entries"] = _fetch(side, s["cwd"])
 
     if _busy(side, f"listing {s['cwd']}", action):
@@ -651,7 +617,8 @@ def refresh(side: str, _checked: bool = False) -> None:
         say(f"{len(s['entries'])} item(s) in {s['cwd']}", side=side)
 
 
-def _sort_key_for(kind: str):
+def _sort_key_for(kind: str) -> Callable[[dict], Any]:
+    """The sort key for one column."""
     if kind == "size":
         return lambda e: int(e.get("size") or 0)
     if kind == "mtime":
@@ -662,7 +629,7 @@ def _sort_key_for(kind: str):
 
 
 def render(side: str) -> None:
-    """Filter, sort and paint the current listing into the table."""
+    """Filter, sort and paint the listing into the table."""
     if api is None:
         return
     s = st(side)
@@ -684,9 +651,6 @@ def render(side: str) -> None:
             continue
         items.append(entry)
 
-    # Sort by the chosen key (descending if asked), then let the folders float
-    # to the top: Python's sort is stable, so the chosen order survives inside
-    # each of the two groups.
     items.sort(key=_sort_key_for(kind), reverse=desc)
     items.sort(key=lambda e: 0 if e.get("directory") else 1)
 
@@ -714,7 +678,7 @@ def _entry(side: str, name: str) -> dict | None:
 
 
 def on_activate(side: str, name: str) -> None:
-    """Double-click: walk into a folder, open a file in the editor tab."""
+    """Double-click: into a folder, or the editor for a file."""
     entry = _entry(side, name)
     if entry is None:
         return
@@ -724,9 +688,7 @@ def on_activate(side: str, name: str) -> None:
         open_editor(side, entry)
 
 
-# ---------------------------------------------------------------------------
-# Reading and writing text on either side
-# ---------------------------------------------------------------------------
+# --- reading and writing text on either side ---
 
 def _read_file(side: str, path: str) -> str:
     if side == LOCAL:
@@ -742,6 +704,7 @@ def _write_file(side: str, path: str, text: str) -> None:
 
 
 def _editor_open() -> bool:
+    """Is the editor tab up right now?"""
     try:
         return bool(api.tabs.exists(TAB_EDITOR))
     except AddonError:
@@ -749,7 +712,7 @@ def _editor_open() -> bool:
 
 
 def _confirm_discard() -> bool:
-    """True if it is safe to drop what is in the editor (no changes, or agreed)."""
+    """True when nothing would be lost."""
     current = _read_editor("ed-body", "value")
     if current is None or editing is None or str(current) == editing.get("text", ""):
         return True
@@ -759,7 +722,7 @@ def _confirm_discard() -> bool:
 
 
 def open_editor(side: str, entry: dict) -> None:
-    """Read a file into memory and open it in the notepad-like editor tab."""
+    """Read a file into memory and open it in the editor tab."""
     global editing
     if api is None or entry is None or entry.get("directory"):
         return
@@ -772,7 +735,7 @@ def open_editor(side: str, entry: dict) -> None:
 
     holder: dict = {}
 
-    def action():
+    def action() -> None:
         holder["text"] = _read_file(side, path)
 
     if not _busy(side, f"reading {name}", action):
@@ -790,7 +753,7 @@ def open_editor(side: str, entry: dict) -> None:
 
 
 def save_editor(_checked: bool = False) -> None:
-    """Write the in-memory text back to the file and close the editor."""
+    """Write the in-memory text back and close."""
     if api is None or editing is None:
         return
     side = editing["side"]
@@ -798,7 +761,7 @@ def save_editor(_checked: bool = False) -> None:
     text = str(_read_editor("ed-body", "value") or "")
     name = _base(side, path)
 
-    def action():
+    def action() -> None:
         _write_file(side, path, text)
 
     if _busy(side, f"saving {name}", action):
@@ -809,7 +772,7 @@ def save_editor(_checked: bool = False) -> None:
 
 
 def reload_editor(_checked: bool = False) -> None:
-    """Discard edits and re-read the file into the editor."""
+    """Discard edits and re-read the file."""
     if api is None or editing is None:
         return
     if not _confirm_discard():
@@ -818,7 +781,7 @@ def reload_editor(_checked: bool = False) -> None:
     path = editing["path"]
     holder: dict = {}
 
-    def action():
+    def action() -> None:
         holder["text"] = _read_file(side, path)
 
     if _busy(side, f"reloading {_base(side, path)}", action):
@@ -828,7 +791,7 @@ def reload_editor(_checked: bool = False) -> None:
 
 
 def close_editor(force: bool = False) -> None:
-    """Close the editor tab; ask first if there are unsaved edits."""
+    """Close the editor tab, asking first if there are edits."""
     global editing
     if api is None:
         return
@@ -839,7 +802,7 @@ def close_editor(force: bool = False) -> None:
 
 
 def set_editor_language(label: str) -> None:
-    """The language box changed: re-shade the editor text."""
+    """The language box changed: re-shade the text."""
     if api is None or editing is None:
         return
     language = editing.get("detected", "") if label == "auto" else LANG_KEY.get(label, "")
@@ -849,9 +812,7 @@ def set_editor_language(label: str) -> None:
         pass
 
 
-# ---------------------------------------------------------------------------
-# File system operations, told apart by side
-# ---------------------------------------------------------------------------
+# --- file system operations, told apart by side ---
 
 def _exists(side: str, path: str) -> bool:
     if side == LOCAL:
@@ -887,6 +848,7 @@ def _rename(side: str, src: str, dst: str) -> None:
 
 
 def new_folder(side: str, _checked: bool = False) -> None:
+    """Make a folder in the page's own cwd."""
     if api is None:
         return
     name = api.ui.input("New folder", "Folder name:", default="")
@@ -894,7 +856,7 @@ def new_folder(side: str, _checked: bool = False) -> None:
         return
     target = _norm(side, _join(side, st(side)["cwd"], name.strip()))
 
-    def action():
+    def action() -> None:
         _mkdir(side, target)
 
     if _busy(side, f"creating {target}", action):
@@ -903,6 +865,7 @@ def new_folder(side: str, _checked: bool = False) -> None:
 
 
 def new_file(side: str, _checked: bool = False) -> None:
+    """Make an empty file in the page's own cwd."""
     if api is None:
         return
     name = api.ui.input("New file", "File name:", default="")
@@ -915,7 +878,7 @@ def new_file(side: str, _checked: bool = False) -> None:
         say("nothing was written", side=side)
         return
 
-    def action():
+    def action() -> None:
         if side == LOCAL:
             Path(target).write_text("", encoding="utf-8")
         else:
@@ -927,6 +890,7 @@ def new_file(side: str, _checked: bool = False) -> None:
 
 
 def do_rename(side: str, entry: dict | None) -> None:
+    """Rename, or move to a full path, refusing to collide."""
     if api is None:
         return
     entry = entry or selected(side)
@@ -947,7 +911,7 @@ def do_rename(side: str, entry: dict | None) -> None:
         say(f"{target} already exists; nothing was moved", side=side, bad=True)
         return
 
-    def action():
+    def action() -> None:
         _rename(side, source, target)
 
     if _busy(side, f"moving {entry.get('name')}", action):
@@ -956,6 +920,7 @@ def do_rename(side: str, entry: dict | None) -> None:
 
 
 def do_delete(side: str, entry: dict | None) -> None:
+    """Delete a row, a folder with what is inside it."""
     if api is None:
         return
     entry = entry or selected(side)
@@ -971,7 +936,7 @@ def do_delete(side: str, entry: dict | None) -> None:
         say("delete cancelled", side=side)
         return
 
-    def action():
+    def action() -> None:
         _remove(side, path, is_dir)
 
     if _busy(side, f"deleting {entry.get('name')}", action):
@@ -982,6 +947,7 @@ def do_delete(side: str, entry: dict | None) -> None:
 
 
 def do_chmod(side: str, entry: dict | None) -> None:
+    """Set an octal mode on a device file."""
     if api is None or side == LOCAL:
         return
     entry = entry or selected(side)
@@ -1001,7 +967,7 @@ def do_chmod(side: str, entry: dict | None) -> None:
         return
     holder: dict = {}
 
-    def action():
+    def action() -> None:
         result = api.device.run(f"chmod {value} {SHQ(path)}", timeout=30)
         holder["code"] = int(result.get("code") or 0)
         holder["err"] = str(result.get("err") or "")
@@ -1015,13 +981,14 @@ def do_chmod(side: str, entry: dict | None) -> None:
 
 
 def show_note(title: str, body: str) -> None:
-    """A read-only modal with a block of text (info / df / find)."""
+    """A read-only modal holding a block of text."""
     api.ui.dialog({"kind": "column", "children": [
         {"kind": "multi", "id": "note", "readonly": True, "value": body or "(nothing)"}]},
         title=title)
 
 
 def do_info(side: str, entry: dict | None) -> None:
+    """Stat a row and show what came back."""
     if api is None:
         return
     entry = entry or selected(side)
@@ -1042,7 +1009,7 @@ def do_info(side: str, entry: dict | None) -> None:
 
     holder: dict = {}
 
-    def action():
+    def action() -> None:
         result = api.device.run(
             f"ls -ld {SHQ(path)} 2>&1; echo; stat {SHQ(path)} 2>&1", timeout=30)
         holder["out"] = str(result.get("out") or "")
@@ -1053,11 +1020,12 @@ def do_info(side: str, entry: dict | None) -> None:
 
 
 def do_disk(side: str = DEVICE, _checked: bool = False) -> None:
+    """Show the device's df -h."""
     if api is None or side == LOCAL:
         return
     holder: dict = {}
 
-    def action():
+    def action() -> None:
         holder["out"] = str(api.device.run("df -h 2>&1", timeout=30).get("out") or "")
 
     if _busy(side, "reading disk usage", action):
@@ -1065,6 +1033,7 @@ def do_disk(side: str = DEVICE, _checked: bool = False) -> None:
 
 
 def do_find(side: str = DEVICE, _checked: bool = False) -> None:
+    """Find by name below the current folder, within the config's limits."""
     if api is None or side == LOCAL:
         return
     pattern = api.ui.input("Find files", "Name contains (below the current folder):",
@@ -1079,7 +1048,7 @@ def do_find(side: str = DEVICE, _checked: bool = False) -> None:
                f"| head -n {min(max(maximum, 1), 5000)}")
     holder: dict = {}
 
-    def action():
+    def action() -> None:
         holder["out"] = str(api.device.run(command, timeout=60).get("out") or "")
 
     if _busy(side, f"finding *{pattern}* under {st(side)['cwd']}", action):
@@ -1090,6 +1059,7 @@ def do_find(side: str = DEVICE, _checked: bool = False) -> None:
 
 
 def copy_path(side: str, entry: dict | None = None) -> None:
+    """Show, and log, a row's full path."""
     if api is None:
         return
     entry = entry or selected(side)
@@ -1099,11 +1069,10 @@ def copy_path(side: str, entry: dict | None = None) -> None:
     say(path, side=side)
 
 
-# ---------------------------------------------------------------------------
-# Copy / paste (across the pages it transfers over SFTP; on one it copies)
-# ---------------------------------------------------------------------------
+# --- copy and paste ---
 
 def do_copy(side: str, entry: dict | None) -> None:
+    """Fill the clip from a row; nothing moves yet."""
     global clip
     entry = entry or selected(side)
     if entry is None:
@@ -1116,6 +1085,7 @@ def do_copy(side: str, entry: dict | None) -> None:
 
 
 def _confirm_overwrite(side: str, target: str) -> bool:
+    """Ask before a paste lands on something already there."""
     if not _exists(side, target):
         return True
     return api.ui.question("Paste", f"{target} already exists.\nOverwrite it?",
@@ -1123,6 +1093,7 @@ def _confirm_overwrite(side: str, target: str) -> bool:
 
 
 def do_paste(side: str, _checked: bool = False) -> None:
+    """Put the clip into this folder, across the pages or in place."""
     if api is None:
         return
     if not clip:
@@ -1139,7 +1110,7 @@ def do_paste(side: str, _checked: bool = False) -> None:
     is_dir = clip["directory"]
     same = side == clip["side"]
 
-    def action():
+    def action() -> None:
         if same:
             if side == LOCAL:
                 if is_dir:
@@ -1158,12 +1129,10 @@ def do_paste(side: str, _checked: bool = False) -> None:
         refresh(side)
 
 
-# ---------------------------------------------------------------------------
-# Transfers
-# ---------------------------------------------------------------------------
+# --- transfers ---
 
 def upload_typed(side: str, _checked: bool = False) -> None:
-    """Device page: send a file from this computer into the current folder."""
+    """Device page: send a local file into the current folder."""
     if api is None or side == LOCAL:
         return
     raw = api.ui.input("Upload a file", "Path of a file on this computer:", default="")
@@ -1182,7 +1151,7 @@ def upload_typed(side: str, _checked: bool = False) -> None:
         return
     holder: dict = {}
 
-    def action():
+    def action() -> None:
         holder["n"] = source.stat().st_size
         api.device.upload(str(source), target, outside_root=True)
 
@@ -1192,7 +1161,7 @@ def upload_typed(side: str, _checked: bool = False) -> None:
 
 
 def upload_selected_to_device(_checked: bool = False) -> None:
-    """Local page: send its selected file into the device folder that is open."""
+    """Local page: send the selected file to the open device folder."""
     if api is None:
         return
     entry = selected(LOCAL)
@@ -1214,7 +1183,7 @@ def upload_selected_to_device(_checked: bool = False) -> None:
     clip = {"side": "local", "path": source,
            "name": str(entry.get("name") or ""), "directory": False}
 
-    def action():
+    def action() -> None:
         api.device.upload(source, target, outside_root=True)
 
     if _busy(LOCAL, f"uploading {entry.get('name')}", action):
@@ -1223,7 +1192,7 @@ def upload_selected_to_device(_checked: bool = False) -> None:
 
 
 def download_typed(side: str, entry: dict | None = None) -> None:
-    """Device page: save a device file onto this computer."""
+    """Device page: save a device file here."""
     if api is None or side == LOCAL:
         return
     entry = entry or selected(side)
@@ -1248,16 +1217,14 @@ def download_typed(side: str, entry: dict | None = None) -> None:
         say("download cancelled", side=side)
         return
 
-    def action():
+    def action() -> None:
         api.device.download(path, str(destination), outside_root=True)
 
     if _busy(side, f"downloading {name}", action):
         say(f"saved {name} to {destination} ({_sz(entry.get('size'))})", side=side)
 
 
-# ---------------------------------------------------------------------------
-# The right-click / Actions menu
-# ---------------------------------------------------------------------------
+# --- the right-click / Actions menu ---
 
 MENU_LABELS = {
     "open": "Open", "edit": "Edit", "rename": "Rename / Move",
@@ -1270,7 +1237,7 @@ MENU_LABELS = {
 
 
 def menu_for(side: str, entry: dict | None) -> list[tuple[str, str]]:
-    """The action list offered on a right-click, set by page and row kind."""
+    """The right-click actions for a page and a row kind."""
     local = side == LOCAL
     ids: list[str] = []
     if entry is not None:
@@ -1301,7 +1268,7 @@ def menu_for(side: str, entry: dict | None) -> list[tuple[str, str]]:
 
 
 def run_action(side: str, ident: str, entry: dict | None) -> None:
-    """One menu choice, applied to ``entry`` (or the page when there is none)."""
+    """One menu choice, applied to ``entry`` or the page."""
     if ident == "open":
         if entry and entry.get("directory"):
             navigate(side, str(entry.get("path") or ""))
@@ -1342,7 +1309,7 @@ def run_action(side: str, ident: str, entry: dict | None) -> None:
 
 
 def open_menu(side: str, entry: dict | None = None) -> None:
-    """Show the page's actions as a menu at the pointer, then run the pick."""
+    """Show the page's actions as a menu, then run the pick."""
     if api is None or working:
         return
     items = menu_for(side, entry)
@@ -1356,6 +1323,7 @@ def open_menu(side: str, entry: dict | None = None) -> None:
 
 
 def go_up(side: str) -> None:
+    """One folder up from the page's own root."""
     here = st(side)["cwd"]
     if not here:
         return
@@ -1366,9 +1334,7 @@ def go_up(side: str) -> None:
     navigate(side, parent or (here if side == LOCAL else "/"))
 
 
-# ---------------------------------------------------------------------------
-# Wiring
-# ---------------------------------------------------------------------------
+# --- wiring ---
 
 CLICK_BASE = {
     "go": lambda side: navigate(side, _read(pid(side, "path"), "value")),
@@ -1435,14 +1401,8 @@ def _browse_event(side: str, base: str, event: str, payload: dict) -> None:
 
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
-    """A control reported something, on the Berry tab or on the editor tab.
-
-    Every button is declared ``"on": ["clicked"]`` and every edit box and listing
-    names the interactions it cares about, so the app calls this with the tab it
-    lives on and the spec id - the one route that also works when the addon has
-    been compiled into a program of its own, where the widgets live in the app's
-    process and cannot be handed over.
-    """
+    """A control on either tab reported something. The one route that also
+    works when the addon is compiled and the widgets live in the app."""
     if api is None:
         return
     identifier = str(identifier)
@@ -1464,11 +1424,10 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
             return
 
 
-# ---------------------------------------------------------------------------
-# The hooks the app calls
-# ---------------------------------------------------------------------------
+# --- the hooks the app calls ---
 
 def focus_berry(_checked: bool = False) -> None:
+    """The Tools menu entry: show the tab and list the empty page."""
     if api is None:
         return
     api.tabs.activate(TAB)
@@ -1476,8 +1435,8 @@ def focus_berry(_checked: bool = False) -> None:
     navigate(side, st(side)["cwd"] or start_side(side))
 
 
-def init(plugin_api) -> None:
-    """Build the Berry tab from the saved config."""
+def init(plugin_api: Any) -> None:
+    """Build the tab from the saved config."""
     global api, STATE
     api = plugin_api
     STATE = {DEVICE: _fresh_state(), LOCAL: _fresh_state()}
@@ -1500,6 +1459,7 @@ def start() -> None:
 
 
 def shutdown() -> None:
+    """Let go of everything this addon held."""
     global api, clip, editing, STATE
     if api is not None:
         try:
@@ -1513,6 +1473,7 @@ def shutdown() -> None:
 
 
 def _sync_chrome(side: str) -> None:
+    """Re-apply the config to one page's boxes."""
     global _places_guard
     _places_guard = True
     try:
@@ -1531,7 +1492,7 @@ def _sync_chrome(side: str) -> None:
 
 
 def on_config(payload: dict) -> None:
-    """The config changed in Settings: make both pages match the file."""
+    """The config changed in Settings: make both pages match."""
     if api is None or str(payload.get("addon") or "") != api.id:
         return
     _sync_chrome(DEVICE)
@@ -1540,7 +1501,7 @@ def on_config(payload: dict) -> None:
 
 
 def on_profile_changed(payload: dict) -> None:
-    """A different device is selected: drop the device page to its own start."""
+    """A different device: drop the device page to its own start."""
     if api is None:
         return
     st(DEVICE)["cwd"] = default_root()

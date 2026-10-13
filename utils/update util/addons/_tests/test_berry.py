@@ -37,10 +37,11 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")      # widgets, no window
 
-#: The folder rasconf Manager and addon_client live in, two levels up from here.
+#: The folder Berry Manager and addon_client live in, two levels up from here.
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
@@ -65,7 +66,7 @@ LISTING = [
 ]
 
 
-def check(condition, text: str) -> None:
+def check(condition: object, text: str) -> None:
     """One thing the addon has to do; all of them are reported, not just the first."""
     if not condition:
         FAILURES.append(text)
@@ -76,9 +77,7 @@ def look(text: str) -> None:
     print(f"       {text}")
 
 
-# ---------------------------------------------------------------------------
-# The api object the addon is handed
-# ---------------------------------------------------------------------------
+# --- the api object the addon is handed ---
 
 class Api(addon_client.StubAPI):
     """A stub device that answers, a form that holds, and tabs that open/close.
@@ -91,7 +90,7 @@ class Api(addon_client.StubAPI):
     open-then-close dance is exercised for real.
     """
 
-    def __init__(self, *args, remote_root=REMOTE_ROOT, **named):
+    def __init__(self, *args: Any, remote_root: str = REMOTE_ROOT, **named: Any) -> None:
         super().__init__(*args, **named)
         self.remote_root = remote_root
         self.form: dict = {}
@@ -107,7 +106,7 @@ class Api(addon_client.StubAPI):
         self.choose = None                 # what api.ui.choose is answered with
         self.dialog_result = None          # what api.ui.dialog is answered with
 
-    def default(self, method, arguments, named):
+    def default(self, method: str, arguments: Any, named: Any) -> Any:
         ask = lambda key, fallback=None: self.argument(method, key, arguments, named, fallback)
         if method == "device.list":
             return [dict(entry) for entry in self.listing]
@@ -175,7 +174,7 @@ class Api(addon_client.StubAPI):
                     out.append(arguments[3] if len(arguments) > 3 else None)
         return out
 
-    def last_set(self, identifier: str, prop: str):
+    def last_set(self, identifier: str, prop: str) -> Any:
         values = self.sets(identifier, prop)
         return values[-1] if values else None
 
@@ -198,17 +197,17 @@ def fresh(saved: dict | None = None) -> Api:
     return api
 
 
-def rows(api: Api, side=None) -> list:
+def rows(api: Api, side: Any = None) -> list:
     side = berry.DEVICE if side is None else side
     painted = api.last_set(berry.pid(side, "files"), "rows") or []
     return [[str(cell) for cell in row] for row in painted]
 
 
-def names(api: Api, side=None) -> list:
+def names(api: Api, side: Any = None) -> list:
     return [row[0] for row in rows(api, side)]
 
 
-def at(api: Api, path: str = "/etc", side=None, **form_over) -> None:
+def at(api: Api, path: str = "/etc", side: Any = None, **form_over: Any) -> None:
     """Put a page on a folder, with the given control states, and paint it."""
     side = berry.DEVICE if side is None else side
     api.listing = [dict(entry) for entry in LISTING]
@@ -222,7 +221,7 @@ def at(api: Api, path: str = "/etc", side=None, **form_over) -> None:
     berry.render(side)
 
 
-def at_local(api: Api, root: Path, **form_over) -> None:
+def at_local(api: Api, root: Path, **form_over: Any) -> None:
     """Point the local page at a real folder, set the controls and paint it."""
     berry.st(berry.LOCAL)["cwd"] = str(root)
     berry.st(berry.LOCAL)["entries"] = berry._list_local(str(root))
@@ -234,9 +233,7 @@ def at_local(api: Api, root: Path, **form_over) -> None:
     berry.render(berry.LOCAL)
 
 
-# ---------------------------------------------------------------------------
-# One: the little formatters
-# ---------------------------------------------------------------------------
+# --- one: the little formatters ---
 
 def test_formatting() -> None:
     print("\n1. how a listing is painted")
@@ -260,9 +257,7 @@ def test_formatting() -> None:
           "the extension -> language map is wrong")
 
 
-# ---------------------------------------------------------------------------
-# Two: the id routing (one tab, two pages)
-# ---------------------------------------------------------------------------
+# --- two: id routing (one tab, two pages) ---
 
 def test_routing() -> None:
     print("\n2. a prefixed id maps back to a page and a control")
@@ -280,9 +275,7 @@ def test_routing() -> None:
           "the Berry tab is not a Device/Local page frame")
 
 
-# ---------------------------------------------------------------------------
-# Three: sorting, filtering and hidden files (device page)
-# ---------------------------------------------------------------------------
+# --- three: sorting, filtering, hidden files ---
 
 def test_render() -> None:
     print("\n3. sorting, filtering and hidden files")
@@ -323,9 +316,7 @@ def test_render() -> None:
           and passwd_row[5] == "/etc/passwd", f"a file row is not the whole row: {passwd_row}")
 
 
-# ---------------------------------------------------------------------------
-# Four: navigation on the device
-# ---------------------------------------------------------------------------
+# --- four: navigation on the device ---
 
 def test_navigation() -> None:
     print("\n4. navigating the device")
@@ -360,9 +351,7 @@ def test_navigation() -> None:
           f"the editor is not tracking the opened file: {berry.editing}")
 
 
-# ---------------------------------------------------------------------------
-# Five: the in-memory editor - nothing is written until Save
-# ---------------------------------------------------------------------------
+# --- five: the in-memory editor (Save writes) ---
 
 def test_editor() -> None:
     print("\n5. the notepad editor: in memory until Save")
@@ -430,9 +419,7 @@ def test_editor() -> None:
     check(berry.editing["text"] == "fresh read\n", "Reload did not update the tracked text")
 
 
-# ---------------------------------------------------------------------------
-# Six: the actions, and the paths they address
-# ---------------------------------------------------------------------------
+# --- six: the actions and the paths they address ---
 
 def test_actions() -> None:
     print("\n6. acting on a selection (device)")
@@ -490,9 +477,7 @@ def test_actions() -> None:
     check(api.times("device.run") == before, "a bad octal mode still ran a chmod")
 
 
-# ---------------------------------------------------------------------------
-# Seven: transfers and the read-only tools (device)
-# ---------------------------------------------------------------------------
+# --- seven: transfers and read-only tools ---
 
 def test_transfers_and_tools() -> None:
     print("\n7. uploads, downloads and the read-only tools")
@@ -543,9 +528,7 @@ def test_transfers_and_tools() -> None:
           f"info did not ask ls -ld and stat: {info_command!r}")
 
 
-# ---------------------------------------------------------------------------
-# Eight: the right-click / Actions menu
-# ---------------------------------------------------------------------------
+# --- eight: the right-click / Actions menu ---
 
 def test_menus() -> None:
     print("\n8. what the right-click menu offers, and what a pick runs")
@@ -576,7 +559,7 @@ def test_menus() -> None:
           and not any(ident == "download" for _lab, ident in local_menu),
           "the local menu must upload to the device, not chmod/download")
 
-    # Right-clicking a row and picking Delete runs it on THAT row, not the selection.
+    # Right-clicking a row and picking Delete acts on THAT row, not the selection.
     at(api, "/etc", files=[])                 # nothing selected
     api.choose = "Delete"
     api.answer_yes = True
@@ -586,9 +569,7 @@ def test_menus() -> None:
           == "/etc/hosts", f"right-click delete acted on the wrong row: {rm}")
 
 
-# ---------------------------------------------------------------------------
-# Nine: the local page, on a real temporary folder
-# ---------------------------------------------------------------------------
+# --- nine: the local page on a temp folder ---
 
 def test_local_page() -> None:
     print("\n9. the local page on a real folder")
@@ -644,9 +625,7 @@ def test_local_page() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
-# ---------------------------------------------------------------------------
-# Ten: copy / paste across the pages
-# ---------------------------------------------------------------------------
+# --- ten: copy / paste across the pages ---
 
 def test_copy_paste() -> None:
     print("\n10. copy and paste across the two pages")
@@ -718,11 +697,9 @@ def test_copy_paste() -> None:
     check(api.times("device.upload") == before, "a folder was uploaded as a file")
 
 
-# ---------------------------------------------------------------------------
-# Eleven: the tab and the editor, as Qt builds them
-# ---------------------------------------------------------------------------
+# --- eleven: the tab and editor, as Qt builds them ---
 
-def test_the_tabs(app) -> None:
+def test_the_tabs(app: Any) -> None:
     print("\n11. the tab and the editor, built by Qt from their specs")
     import addon_api
     from PyQt6.QtCore import Qt
@@ -807,11 +784,9 @@ def test_the_tabs(app) -> None:
     berry.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# Twelve: the marks beside the tab labels
-# ---------------------------------------------------------------------------
+# --- twelve: the marks beside the tab labels ---
 
-def test_the_marks(app) -> None:
+def test_the_marks(app: Any) -> None:
     """The drupelets and the page-and-pencil: what the addon sends, and its shape."""
     print("\n12. the tabs' marks")
     api = fresh()
@@ -845,18 +820,10 @@ def test_the_marks(app) -> None:
         look("no Qt here, so the drawing itself is not checked")
 
 
-# ---------------------------------------------------------------------------
-# Zero: it stands on its own - Berry owns the file tab now
-# ---------------------------------------------------------------------------
+# --- zero: Berry owns the file tab ---
 
 def test_loads_standalone() -> None:
-    """The app has no built-in SFTP tab any more, so Berry must supply it.
-
-    Loading and initializing the addon should give the window its own ``Berry``
-    tab through the tabs API, with no help from a core file-transfer page: what
-    the removed SFTP tab used to do is now entirely the addon's job. If init ever
-    leans on an app-side tab that no longer exists, this is where we notice.
-    """
+    """Berry must supply the file tab the app no longer builds, adding exactly one on its own."""
     print("\n0. Berry loads as the file tab, on its own")
     api = fresh()
     check("Berry" in api.open_tabs,
@@ -867,7 +834,7 @@ def test_loads_standalone() -> None:
           f"init should add exactly one Berry tab, saw {added}")
 
 
-# ---------------------------------------------------------------------------
+# --- run it ---
 
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):

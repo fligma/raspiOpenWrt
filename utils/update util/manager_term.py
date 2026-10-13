@@ -18,12 +18,13 @@ arrives from the device.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (QColor, QFocusEvent, QFont, QFontMetrics, QKeyEvent,
+                         QMouseEvent, QPaintEvent, QPainter, QResizeEvent,
+                         QWheelEvent)
 from PyQt6.QtWidgets import QApplication, QScrollBar, QSizePolicy, QWidget
 
-# The colours. Sixteen named entries start the palette, the usual 6x6x6 cube
-# and grey ramp follow, and the two defaults match the rest of the app.
+# Colours: 16 named, then the 6x6x6 cube and grey ramp; defaults match the app.
 DEFAULT_FG = "#e0e0e0"
 DEFAULT_BG = "#1e1e1e"
 SELECTION_COLOR = QColor(70, 130, 200, 100)
@@ -36,8 +37,7 @@ HISTORY_MAX = 2000          # rows kept above the screen when nothing is full-sc
 # Cell attributes, packed into one int per cell.
 BOLD, DIM, ITALIC, UNDERLINE, BLINK, REVERSE, HIDDEN, STRIKE = (1, 2, 4, 8, 16, 32, 64, 128)
 
-# Colours inside a cell: -1 means "whatever the default is", 0..255 a palette
-# index, and anything above that one packed rrggbb value with 256 added.
+# Cell colours: -1 default, 0..255 palette index, above that packed rrggbb+256.
 
 
 def _palette() -> list[QColor]:
@@ -66,7 +66,7 @@ def _cell_color(value: int, default: QColor) -> QColor:
     return QColor((packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF)
 
 
-def _blank_cell(fg: int = -1, bg: int = -1, flags: int = 0):
+def _blank_cell(fg: int = -1, bg: int = -1, flags: int = 0) -> tuple:
     return (" ", fg, bg, flags)
 
 
@@ -82,7 +82,7 @@ class TerminalScreen(QWidget):
     bell = pyqtSignal()
     title_changed = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(False)
@@ -134,9 +134,7 @@ class TerminalScreen(QWidget):
         self._select_to: tuple[int, int] | None = None
         self.title = ""
 
-    # ------------------------------------------------------------------
-    # size and fonts
-    # ------------------------------------------------------------------
+    # --- size and fonts ---
 
     def grid_size(self) -> tuple[int, int]:
         return self.cols, self.rows
@@ -158,7 +156,7 @@ class TerminalScreen(QWidget):
     def sizeHint(self) -> QSize:
         return QSize(self.cols * self._cw, self.rows * self._ch)
 
-    def resizeEvent(self, event) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         self._refit()
         super().resizeEvent(event)
 
@@ -185,9 +183,7 @@ class TerminalScreen(QWidget):
         self._update_bar()
         self.update()
 
-    # ------------------------------------------------------------------
-    # feeding output
-    # ------------------------------------------------------------------
+    # --- feeding output ---
 
     def feed(self, text: str) -> None:
         """One chunk of device output. The view follows it if it was at bottom."""
@@ -211,7 +207,7 @@ class TerminalScreen(QWidget):
         self._update_bar()
         self.update()
 
-    # the parser, one character at a time ---------------------------------
+    # --- the parser, one character at a time ---
 
     def _step(self, ch: str) -> None:
         state = self._state
@@ -322,9 +318,7 @@ class TerminalScreen(QWidget):
             self.title = body
             self.title_changed.emit(body)
 
-    # ------------------------------------------------------------------
-    # the CSI dictionary
-    # ------------------------------------------------------------------
+    # --- the CSI dictionary ---
 
     def _numbers(self) -> list[int]:
         out = []
@@ -456,9 +450,7 @@ class TerminalScreen(QWidget):
         self._bar.setVisible(not self.alternate and bool(self.history))
         self.update()
 
-    # ------------------------------------------------------------------
-    # screen surgery
-    # ------------------------------------------------------------------
+    # --- screen surgery ---
 
     def _move(self, row: int, col: int, address: bool = False) -> None:
         if address and self.origin_mode:
@@ -567,8 +559,7 @@ class TerminalScreen(QWidget):
             row[col] = blank
 
     def _erase_line(self, mode: int) -> None:
-        # Erased cells take the pen's background, so a reverse-video line that
-        # clears "to the end" stays inverted right to the margin.
+        # Erased cells take the pen's bg, so a reverse line clears to the margin.
         blank = _blank_cell(bg=self.pen[1])
         row = self.lines[self.cr]
         if mode == 0:
@@ -596,12 +587,10 @@ class TerminalScreen(QWidget):
                 self.history.clear()
                 self._update_bar()
 
-    def _blank_cell(self, fg: int = -1, bg: int = -1, flags: int = 0):
+    def _blank_cell(self, fg: int = -1, bg: int = -1, flags: int = 0) -> tuple:
         return _blank_cell(fg, bg, flags)
 
-    # ------------------------------------------------------------------
-    # colours and attributes
-    # ------------------------------------------------------------------
+    # --- colours and attributes ---
 
     def _sgr(self, params: list[int]) -> None:
         fg, bg, flags = self.pen
@@ -672,9 +661,7 @@ class TerminalScreen(QWidget):
             return 256 + (red << 16 | green << 8 | blue), index + 4
         return current, index
 
-    # ------------------------------------------------------------------
-    # scrolling the view back into history
-    # ------------------------------------------------------------------
+    # --- scrolling the view back into history ---
 
     def _update_bar(self) -> None:
         room = 0 if self.alternate else len(self.history)
@@ -690,7 +677,7 @@ class TerminalScreen(QWidget):
         self._back = value
         self.update()
 
-    def wheelEvent(self, event) -> None:
+    def wheelEvent(self, event: QWheelEvent) -> None:
         if not self.history or self.alternate:
             return
         steps = 3 * (1 if event.angleDelta().y() < 0 else -1)
@@ -713,11 +700,9 @@ class TerminalScreen(QWidget):
         total = history + self.lines
         return max(0, len(total) - self._back - self.rows)
 
-    # ------------------------------------------------------------------
-    # drawing
-    # ------------------------------------------------------------------
+    # --- drawing ---
 
-    def paintEvent(self, event) -> None:
+    def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(DEFAULT_BG))
         rows = self._visible_rows()
@@ -813,21 +798,19 @@ class TerminalScreen(QWidget):
             painter.setPen(QColor(DEFAULT_FG))
             painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
-    # ------------------------------------------------------------------
-    # selection
-    # ------------------------------------------------------------------
+    # --- selection ---
 
-    def mousePressEvent(self, event) -> None:
+    def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self._select_from = self._select_to = self._cell_at(event.position().toPoint())
             self.update()
 
-    def mouseMoveEvent(self, event) -> None:
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._select_from is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self._select_to = self._cell_at(event.position().toPoint())
             self.update()
 
-    def mouseDoubleClickEvent(self, event) -> None:
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         cell = self._cell_at(event.position().toPoint())
         absolute = self._view_top_index() + cell[0]
         history = [] if self.alternate else self.history
@@ -847,7 +830,7 @@ class TerminalScreen(QWidget):
             self._select_to = (cell[0], end)
             self.update()
 
-    def _cell_at(self, point) -> tuple[int, int]:
+    def _cell_at(self, point: QPoint) -> tuple[int, int]:
         row = max(0, min(self.rows - 1, point.y() // self._ch))
         col = max(0, min(self.cols - 1, point.x() // self._cw))
         return (int(row), int(col))
@@ -879,16 +862,14 @@ class TerminalScreen(QWidget):
             out.pop()
         return "\n".join(out)
 
-    # ------------------------------------------------------------------
-    # typing
-    # ------------------------------------------------------------------
+    # --- typing ---
 
-    def focusInEvent(self, event) -> None:
+    def focusInEvent(self, event: QFocusEvent) -> None:
         self._blink_on = True
         self._blink.start()
         super().focusInEvent(event)
 
-    def focusOutEvent(self, event) -> None:
+    def focusOutEvent(self, event: QFocusEvent) -> None:
         self._blink.stop()
         self._blink_on = True
         self.update()
@@ -899,7 +880,7 @@ class TerminalScreen(QWidget):
             self._blink_on = not self._blink_on
             self.update()
 
-    def keyPressEvent(self, event) -> None:
+    def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
         mods = event.modifiers()
         ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
@@ -935,7 +916,7 @@ class TerminalScreen(QWidget):
         else:
             self.send_data.emit(text.replace("\r\n", "\r").replace("\n", "\r"))
 
-    def _key_bytes(self, key: int, mods, text: str) -> str | None:
+    def _key_bytes(self, key: int, mods: Qt.KeyboardModifier, text: str) -> str | None:
         ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
         alt = bool(mods & Qt.KeyboardModifier.AltModifier)
@@ -982,8 +963,7 @@ class TerminalScreen(QWidget):
         if key in function:
             return function[key]
 
-        # Ctrl+letter is the control byte whatever Qt reports as text, and it
-        # must be settled before the fall-through below (nano's ^G, ^X, ^K...).
+        # Ctrl+letter is the control byte, settled before the fall-through below.
         if ctrl and Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
             return chr(key - Qt.Key.Key_A + 1)
         if ctrl:

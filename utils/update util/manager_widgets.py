@@ -5,17 +5,36 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable
+
 from PyQt6.QtCore import (
     QEvent,
     QEasingCurve,
     QObject,
+    QPoint,
     QPropertyAnimation,
+    QPointF,
     QRectF,
     QSize,
     Qt,
     pyqtProperty,
+    pyqtSignal,
 )
-from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+)
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -30,7 +49,10 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QSlider,
     QSpinBox,
+    QStyle,
+    QStyleOptionTab,
     QTabBar,
     QTabWidget,
     QToolTip,
@@ -40,7 +62,167 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from manager_const import scaled_sheet, zoom_size
+from manager_const import find_asset, scaled_sheet, zoom_size
+
+
+# --- tab captions and the pictures a crowded bar falls back on ---
+
+#: What a tab spends on itself besides its text - the sheet's side padding,
+#: its borders and the small gap before the icon - counted at 100% zoom.
+_TAB_CHROME = 34
+#: Narrower than this a caption could not be read anyway (100% zoom): below
+#: it the tab drops its text entirely and wears its icon alone.
+_TAB_MIN_TEXT = 24
+
+#: The pictures this module paints itself, made once and kept: the bar
+#: refits on every resize, and repainting the same glyphs each time is waste.
+#: File-backed marks live here too, so an unreadable asset is tried once.
+_DRAWN_ICONS: dict[str, QIcon] = {}
+
+#: Every tab picture is painted at least this wide (at 100% zoom), whatever
+#: the bar's own icon size measures. The tab keeps the size the icon size
+#: gives it - only the drawn mark grows, so a bigger picture never means a
+#: bigger tab.
+_TAB_ICON_DRAW = 24
+
+
+def tab_icon_side(bar: QTabBar) -> int:
+    """The edge a tab's picture is drawn at: the bar's icon size, but never
+    smaller than the comfortable mark. Zoomed with the rest of the bar."""
+    return max(int(bar.iconSize().width()), zoom_size(_TAB_ICON_DRAW))
+
+
+def _drawn_icon(key: str, paint: Callable[[QPainter], None], filename: str = "") -> QIcon:
+    """One tab picture, made once and remembered; a shipped asset wins, the paint glyph is the fallback so a bare checkout still draws something."""
+    icon = _DRAWN_ICONS.get(key)
+    if icon is None:
+        path = find_asset(filename) if filename else None
+        if path is not None:
+            icon = QIcon(str(path))
+        else:
+            canvas = QPixmap(32, 32)
+            canvas.fill(Qt.GlobalColor.transparent)
+            p = QPainter(canvas)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            paint(p)
+            p.end()
+            icon = QIcon(canvas)
+        _DRAWN_ICONS[key] = icon
+    return icon
+
+
+def default_tab_icon() -> QIcon:
+    """The mark for any tab that arrives without one: the shipped defaulttabicon.png, else four rounded tiles in the bar's grey with one accent corner."""
+    def paint(p: QPainter) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        for n, (x, y) in enumerate(((5.0, 5.0), (18.5, 5.0),
+                                    (5.0, 18.5), (18.5, 18.5))):
+            p.setBrush(QColor("#c51a4a") if n == 0 else QColor("#9db4c8"))
+            p.drawRoundedRect(QRectF(x, y, 8.5, 8.5), 2.2, 2.2)
+    return _drawn_icon("default_tab", paint, "defaulttabicon.png")
+
+
+def terminal_tab_icon() -> QIcon:
+    """The picture the SSH terminal tab wears: the shipped terminalicon.png, else a drawn shell frame with a raspberry prompt."""
+    def paint(p: QPainter) -> None:
+        frame = QPen(QColor("#9db4c8"))
+        frame.setWidthF(2.4)
+        p.setPen(frame)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(4.0, 6.0, 24.0, 20.0), 3.0, 3.0)
+        prompt = QPen(QColor("#c51a4a"))
+        prompt.setWidthF(2.2)
+        prompt.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(prompt)
+        p.drawLine(QPointF(8.5, 12.5), QPointF(12.5, 16.0))
+        p.drawLine(QPointF(12.5, 16.0), QPointF(8.5, 19.5))
+        p.drawLine(QPointF(14.5, 19.5), QPointF(20.0, 19.5))
+    return _drawn_icon("terminal_tab", paint, "terminalicon.png")
+
+
+def settings_tab_icon() -> QIcon:
+    """The cog the pinned Settings tab always wears: a rim with eight teeth, kept at every width because Settings is never squeezed away."""
+    def paint(p: QPainter) -> None:
+        pen = QPen(QColor("#d6d6d6"))
+        pen.setWidthF(3.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        # A thick rim with short stubs standing out of it: at 18px anything
+        # longer reads as a sun, not a cog.
+        p.drawEllipse(QRectF(9.0, 9.0, 14.0, 14.0))
+        for step in range(8):
+            angle = math.radians(step * 45)
+            dx, dy = math.cos(angle), math.sin(angle)
+            p.drawLine(QPointF(16 + 8.2 * dx, 16 + 8.2 * dy),
+                       QPointF(16 + 11.2 * dx, 16 + 11.2 * dy))
+    return _drawn_icon("settings_tab", paint)
+
+
+def tab_caption(bar: QTabBar, index: int) -> str:
+    """The full name a tab carries: the caption stored in its data (kept whole even when the bar elides the text), or its plain text."""
+    try:
+        stored = bar.tabData(index)
+    except (IndexError, RuntimeError):
+        stored = None
+    if stored is not None and str(stored) != "":
+        return str(stored)
+    return bar.tabText(index)
+
+
+#: Air between a tab's icon and its caption, and the give that keeps an
+#: elided caption off the capsule's edge - both before zoom.
+_TAB_LABEL_GAP = 6
+_TAB_LABEL_SLACK = 4
+
+
+def _draw_centered_tab_label(opt: QStyleOptionTab, painter: QPainter, bar: QTabBar) -> None:
+    """Draw one tab's icon and caption as one centred block, holding out room for the side buttons; the styled bar would pin the icon left and read off-balance."""
+    rect = opt.rect
+    left = bar.tabButton(opt.tabIndex, QTabBar.ButtonPosition.LeftSide)
+    right = bar.tabButton(opt.tabIndex, QTabBar.ButtonPosition.RightSide)
+    pad = zoom_size(2)
+    if left is not None and left.isVisible():
+        rect = rect.adjusted(left.width() + pad, 0, 0, 0)
+    if right is not None and right.isVisible():
+        rect = rect.adjusted(0, 0, -(right.width() + pad), 0)
+    has_icon = not opt.icon.isNull()
+    # The mark draws bigger than the bar measures its icons (see
+    # _TAB_ICON_DRAW): a clearer picture without a taller or wider tab.
+    draw_side = tab_icon_side(bar) if has_icon else 0
+    icon_w = draw_side
+    gap = zoom_size(_TAB_LABEL_GAP) if has_icon and opt.text else 0
+    # (QStyleOptionTab's font copy is invisible to PyQt; the bar's own font
+    # is what initStyleOption put in there.)
+    font = bar.font()
+    metrics = QFontMetrics(font)
+    avail = max(0, rect.width() - icon_w - gap - zoom_size(_TAB_LABEL_SLACK))
+    text = metrics.elidedText(opt.text, bar.elideMode(), avail)
+    text_w = min(avail, metrics.horizontalAdvance(text))
+    total = icon_w + gap + text_w
+    x = rect.left() + max(0, (rect.width() - total) // 2)
+    middle = rect.center().y()
+    painter.save()
+    painter.setFont(font)
+    if has_icon:
+        pix = opt.icon.pixmap(QSize(draw_side, draw_side))
+        painter.drawPixmap(x, middle - pix.height() // 2, pix)
+        x += icon_w + gap
+    if text:
+        enabled = bool(opt.state & QStyle.StateFlag.State_Enabled)
+        if not enabled:
+            color = QColor("#666666")
+        elif opt.state & QStyle.StateFlag.State_Selected:
+            color = QColor("#e0e0e0")
+        elif opt.state & QStyle.StateFlag.State_MouseOver:
+            color = QColor("#ffffff")
+        else:
+            color = QColor("#aaaaaa")
+        painter.setPen(QPen(color))
+        painter.drawText(x, rect.top(), text_w + zoom_size(_TAB_LABEL_SLACK),
+                         rect.height(),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         text)
+    painter.restore()
 
 
 class RightPinnedTabBar(QTabBar):
@@ -54,38 +236,203 @@ class RightPinnedTabBar(QTabBar):
     is resized, so the pinned tab always ends up flush right.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.gap_index = -1
+        self._refitting = False
 
     def set_gap_index(self, index: int) -> None:
+        old = self.gap_index
         self.gap_index = index
-        self._relayout()
+        # Whatever the old index points at now, it is not the gap any more -
+        # and only the gap may sit disabled on this bar. Hand the tab that
+        # inherited the position (a reorder can leave one sitting exactly
+        # where the blink last struck) its clicks back.
+        if 0 <= old < self.count() and old != index:
+            self.setTabEnabled(old, True)
+        self.refit()
 
     def tabSizeHint(self, index: int) -> QSize:
-        size = QTabBar.tabSizeHint(self, index)
-        if index == self.gap_index and 0 <= index < self.count():
-            used = sum(
-                QTabBar.tabSizeHint(self, i).width()
-                for i in range(self.count()) if i != index
-            )
-            return QSize(max(0, self.width() - used), size.height())
-        return size
+        """Equalise the movable tabs to the widest, stretch the gap to soak spare room, and leave Settings at its own width."""
+        natural = QTabBar.tabSizeHint(self, index)
+        if not (0 <= self.gap_index < self.count()):
+            return natural              # nothing pinned yet: leave tabs natural
+        count = self.count()
+        settings_index = self.gap_index + 1
+        if index == self.gap_index:
+            used = sum(self.tabSizeHint(i).width() for i in range(count)
+                       if i != index)
+            return QSize(max(0, self.width() - used), natural.height())
+        if index == settings_index:
+            return natural
+        movable = [i for i in range(count)
+                   if i != self.gap_index and i != settings_index]
+        if movable:
+            widest = max(QTabBar.tabSizeHint(self, i).width() for i in movable)
+            # Never let the movable tabs eat the room reserved for Settings:
+            # the squeeze aims captions at an equal share, and this caps the
+            # drawn width at that share even if the aim comes out a little
+            # wide. The label paints centred into whatever rect results.
+            share = max(1, (self.width() - 2
+                            - QTabBar.tabSizeHint(self, settings_index).width())
+                        // len(movable))
+            return QSize(min(widest, share), natural.height())
+        return natural
 
-    def resizeEvent(self, event) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        self.refit()
+
+    def paintEvent(self, _event: QPaintEvent) -> None:
+        """Paint every tab as the sheet's capsule plus a centred label; the bar takes over painting so the icon-and-caption block centres as one piece."""
+        painter = QPainter(self)
+        style = self.style()
+        opt = QStyleOptionTab()
+        for i in range(self.count()):
+            if not self.tabRect(i).isValid():
+                continue
+            self.initStyleOption(opt, i)
+            style.drawControl(QStyle.ControlElement.CE_TabBarTabShape,
+                              opt, painter, self)
+            _draw_centered_tab_label(opt, painter, self)
+        painter.end()
+
+    def refit(self) -> None:
+        """Re-measure the bar and shorten the captions that no longer fit, dropping a tab to its icon when even an ellipsis leaves nothing readable."""
+        if self._refitting:
+            return
+        self._refitting = True
+        try:
+            self._refit()
+        finally:
+            self._refitting = False
         self._relayout()
 
-    def _relayout(self) -> None:
-        """Force the bar to re-run :meth:`tabSizeHint` and re-place every tab.
+    def _refit(self) -> None:
+        if not (0 <= self.gap_index < self.count()):
+            return                      # nothing pinned yet: measure later
+        if self.gap_index != self.count() - 2:
+            # The pinned pair is out of date - a tab went in or came out and
+            # the owner has not re-pinned yet. Squeezing on the stale index
+            # could treat the real Settings tab as a movable one, and
+            # Settings must never be touched: leave the texts alone.
+            return
+        settings_index = self.gap_index + 1
+        movable = [i for i in range(self.count())
+                   if i != self.gap_index and i != settings_index]
+        if not movable:
+            return
+        # Only the gap ever sits disabled here; if a stale blink greyed a
+        # real tab out earlier (see _relayout), this is where it heals.
+        if not self.isTabEnabled(settings_index):
+            self.setTabEnabled(settings_index, True)
+        for i in movable:
+            if not self.isTabEnabled(i):
+                self.setTabEnabled(i, True)
+        # Every tab wears something, even when its name comes off later.
+        if self.tabIcon(settings_index).isNull():
+            self.setTabIcon(settings_index, default_tab_icon())
+        for i in movable:
+            if self.tabIcon(i).isNull():
+                self.setTabIcon(i, default_tab_icon())
+            # Measure from the full captions, whatever an earlier pass made
+            # of them; the real names live in the tab's data, untouched.
+            caption = tab_caption(self, i)
+            if self.tabText(i) != caption:
+                self.setTabText(i, caption)
+        reserve = QTabBar.tabSizeHint(self, settings_index).width()
+        room = max(0, self.width() - 2 - reserve)
+        if self.width() < zoom_size(50):
+            return   # the bar has no real width yet (window still hidden
+                     # or being built): restore only, never squeeze
+        widest = max(QTabBar.tabSizeHint(self, i).width() for i in movable)
+        if widest * len(movable) <= room:
+            return                      # everything still fits in full
+        per = max(1, room // len(movable))
+        metrics = QFontMetrics(self.font())
+        # The chrome constant aims the caption at a share of the bar; the
+        # sheet's real padding is never exactly that, so each pass measures
+        # what the elided captions actually cost and shaves the next aim by
+        # the overage. Two or three rounds settle; the loop cap is a brake.
+        # The drawn mark can be wider than the bar's measured icon, and the
+        # caption has to clear the picture as painted, not as measured.
+        text_room = per - tab_icon_side(self) - zoom_size(_TAB_CHROME)
+        for _ in range(4):
+            icon_only = text_room < zoom_size(_TAB_MIN_TEXT)
+            for i in movable:
+                caption = tab_caption(self, i)
+                if icon_only:
+                    self.setTabText(i, "")
+                else:
+                    text = metrics.elidedText(caption, Qt.TextElideMode.ElideRight,
+                                              max(8, text_room))
+                    self.setTabText(i, str(text))
+                # Only a tab whose name was cut down explains itself on hover,
+                # so one that still shows everything keeps whatever tooltip it
+                # already had (the SSH tab's connection title among them).
+                self.setTabToolTip(i, caption)
+            if icon_only:
+                break
+            widest = max(QTabBar.tabSizeHint(self, i).width() for i in movable)
+            if widest <= per:
+                break
+            text_room -= widest - per
 
-        QTabBar only recomputes tab sizes when its layout is invalidated; a
-        width change alone is not enough once the gap tab is involved. Blinking
-        the gap tab's enabled state runs the re-layout and leaves the tab
-        disabled (unclickable) exactly as it was."""
-        if 0 <= self.gap_index < self.count():
+    def _relayout(self) -> None:
+        """Force the bar to re-run tabSizeHint by blinking the gap tab's enabled state - only when the index provably is the gap."""
+        if 0 <= self.gap_index < self.count() and self.gap_index == self.count() - 2:
             self.setTabEnabled(self.gap_index, True)
             self.setTabEnabled(self.gap_index, False)
+
+
+class RightPinnedTabWidget(QTabWidget):
+    """The main tab widget, announcing every add and remove.
+
+    The pinned Settings tab depends on a gap whose index is stored in the bar;
+    adding or removing a tab to the left of that gap shifts every later index,
+    so the owner has to re-pin. This Qt build exposes no ``countChanged`` signal
+    on the tab bar (only ``tabRemoved``), so the widget fires its own
+    :data:`tabCountChanged` from the ``addTab``/``insertTab``/``removeTab``/
+    ``clear`` calls the app actually makes. Qt never adds a tab to itself, so
+    wrapping those Python entry points catches every change in the count."""
+
+    tabCountChanged = pyqtSignal(int)
+
+    def _announce(self) -> None:
+        self.tabCountChanged.emit(self.count())
+
+    def _capture(self, index: int, label: object) -> None:
+        """Store the tab's full name in its data the moment it appears, so a squeezed label never reaches name lookups."""
+        if 0 <= index < self.count() and str(label or "") != "":
+            self.tabBar().setTabData(index, str(label))
+
+    def addTab(self, widget: QWidget, label: str = "") -> int:
+        index = super().addTab(widget, label)
+        self._capture(index, label)
+        self._announce()
+        return index
+
+    def insertTab(self, index: int, widget: QWidget, label: str = "") -> int:
+        placed = super().insertTab(index, widget, label)
+        self._capture(placed, label)
+        self._announce()
+        return placed
+
+    def setTabText(self, index: int, text: str) -> None:
+        super().setTabText(index, text)
+        # A rename is a new caption, not a shortened one: refresh the data
+        # and let the bar re-measure what every tab can now afford.
+        if 0 <= index < self.count():
+            self.tabBar().setTabData(index, str(text))
+        self.tabBar().refit()
+
+    def removeTab(self, index: int) -> None:
+        super().removeTab(index)
+        self._announce()
+
+    def clear(self) -> None:
+        super().clear()
+        self._announce()
 
 
 class TabTransportDots(QWidget):
@@ -97,7 +444,7 @@ class TabTransportDots(QWidget):
     mark, :meth:`set_state` recolouring them from the current transport states.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QHBoxLayout(self)
         # The dots are rebuilt whenever the zoom changes, so reading the zoom in
@@ -136,14 +483,10 @@ class ToggleSwitch(QCheckBox):
     TRACK_H = 20
 
     def _track(self) -> tuple[int, int]:
-        """The pill's size at the zoom the interface is drawn at.
-
-        The switch is painted rather than styled, so no stylesheet can scale it:
-        the two hand-written sizes are asked of :mod:`manager_const` instead.
-        """
+        """The pill's size at the current zoom; painted not styled, so the hand-written sizes are asked of manager_const."""
         return zoom_size(self.TRACK_W), zoom_size(self.TRACK_H)
 
-    def __init__(self, text: str = "", parent=None):
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
         self._handle = 1.0 if self.isChecked() else 0.0
         self._anim = QPropertyAnimation(self, b"handle_pos", self)
@@ -159,14 +502,7 @@ class ToggleSwitch(QCheckBox):
         self._anim.start()
 
     def setChecked(self, checked: bool) -> None:
-        """Set the state, and take the painted handle there too.
-
-        A switch whose signals are blocked never hears about its own change of
-        mind, and this widget draws its handle from a copy of the state it
-        keeps: without moving that copy a rebuild would paint a switched-on
-        addon with the handle still on the left, which reads as a checkbox that
-        does not work. A plain click keeps its slide - the animation answers
-        the ``toggled`` signal, which is only blocked here."""
+        """Set the state and move the painted handle too, so a blocked-signals rebuild still shows the switch on."""
         if self.signalsBlocked():
             self._anim.stop()
             self._handle = 1.0 if bool(checked) else 0.0
@@ -193,7 +529,7 @@ class ToggleSwitch(QCheckBox):
     def sizeHint(self) -> QSize:
         return self.minimumSizeHint()
 
-    def paintEvent(self, _event) -> None:
+    def paintEvent(self, _event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         on = self.isChecked()
@@ -252,11 +588,11 @@ class _TitleTip(QObject):
     PAD = 6       # and its "padding: 0 6px"
     BAND = 24     # the title is drawn across the border, so a thin strip
 
-    def __init__(self, text: str, parent=None):
+    def __init__(self, text: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.text = text
 
-    def eventFilter(self, watched, event):
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() != QEvent.Type.ToolTip or not isinstance(watched, QGroupBox):
             return False
         # A tool-tip event is a QHelpEvent, not a mouse event: it carries no
@@ -271,7 +607,7 @@ class _TitleTip(QObject):
         return True
 
     @classmethod
-    def _over_title(cls, box: QGroupBox, point) -> bool:
+    def _over_title(cls, box: QGroupBox, point: QPoint) -> bool:
         # The same title geometry the app stylesheet spells out, at the zoom the
         # window is currently drawn at.
         left, pad, band = zoom_size(cls.LEFT), zoom_size(cls.PAD), zoom_size(cls.BAND)
@@ -282,11 +618,7 @@ class _TitleTip(QObject):
 
 
 def tip_on_title(box: QGroupBox, text: str) -> QGroupBox:
-    """Attach `text` to a group box, shown only over its title.
-
-    Use this instead of ``box.setToolTip()``, which covers the whole panel and
-    is inherited by every control in it.
-    """
+    """Attach text to a group box, shown only over its title (box.setToolTip covers the whole panel)."""
     box.setToolTip("")
     box.installEventFilter(_TitleTip(text, box))
     return box
@@ -297,7 +629,7 @@ class ToggleGroup(QGroupBox):
     group-box checkbox. Keeps the old isChecked/setChecked/toggled interface
     so the Settings code does not have to care which kind it got."""
 
-    def __init__(self, title: str, checked: bool, body: str = "box", tip: str = ""):
+    def __init__(self, title: str, checked: bool, body: str = "box", tip: str = "") -> None:
         super().__init__()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 8, 12, 10)
@@ -319,14 +651,15 @@ class ToggleGroup(QGroupBox):
             self.switch.setToolTip(tip)
         outer.addLayout(header)
         body_widget = QWidget()
+        self.body_widget = body_widget
         if body == "form":
-            self.body_layout = QFormLayout(body_widget)
+            self.body_layout = QFormLayout(self.body_widget)
             self.body_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
             self.body_layout.setHorizontalSpacing(12)
             self.body_layout.setVerticalSpacing(8)
             outer.setContentsMargins(22, 8, 12, 10)
         else:
-            self.body_layout = QVBoxLayout(body_widget)
+            self.body_layout = QVBoxLayout(self.body_widget)
             self.body_layout.setContentsMargins(0, 0, 0, 0)
             self.body_layout.setSpacing(8)
         body_widget.setVisible(self.switch.isChecked())
@@ -348,7 +681,7 @@ class CollapseGroup(QGroupBox):
     """
 
     def __init__(self, title: str, collapsed: bool = True, body: str = "box",
-                 tip: str = ""):
+                 tip: str = "") -> None:
         super().__init__()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 8, 12, 10)
@@ -404,9 +737,7 @@ class CollapseGroup(QGroupBox):
 
 
 def make_file_tree(title: str) -> QTreeWidget:
-    """Build a file list with the columns, selection mode and look both file
-    browsers use. `title` labels the first column, so the local and remote
-    trees differ only there."""
+    """A file list with the columns, selection mode and look both file browsers use; title labels the first column."""
     tree = QTreeWidget()
     tree.setHeaderLabels([title, "Size", "Modified"])
     tree.setRootIsDecorated(True)
@@ -430,7 +761,7 @@ class StringListDialog(QDialog):
     blank lines are dropped there rather than blocked on entry.
     """
 
-    def __init__(self, title: str, label: str, items: list[str], parent=None, monospace: bool = False):
+    def __init__(self, title: str, label: str, items: list[str], parent: QWidget | None = None, monospace: bool = False) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(480, 360)
@@ -486,7 +817,7 @@ class StringListDialog(QDialog):
 class TabEditDialog(QDialog):
     """Editor for one configurable web tab (display name, ip, port, path)."""
 
-    def __init__(self, parent=None, tab: dict | None = None, title: str = "Web tab"):
+    def __init__(self, parent: QWidget | None = None, tab: dict | None = None, title: str = "Web tab") -> None:
         super().__init__(parent)
         tab = tab or {}
         self.setWindowTitle(title)
@@ -534,65 +865,211 @@ class TabEditDialog(QDialog):
         }
 
 
-class DryRunDialog(QDialog):
-    """Read-only report of what a deploy would change, built from a dry-run plan.
+# --- the colour wheel: what api.ui.pick_color and a "color" field open ---
 
-    The plan comes straight from SftpWorker.deploy() in dry_run mode, so nothing
-    here has to re-derive anything - it only counts and lists.
-    """
+#: The hue/saturation picture at full value, built once per size and kept -
+#: repainting 40 000 pixels on every drag would be pure waste.
+_WHEEL_DISCS: dict[int, QPixmap] = {}
 
-    def __init__(self, plan: dict, parent=None):
+
+class _ColorWheel(QWidget):
+    """An HSV disc: the angle is the hue, the distance from the centre the
+    saturation; brightness comes from the slider beside it.
+
+    The value is a black veil laid over the full-strength disc with
+    ``SourceAtop`` - the same maths HSV does behind it - and that blend
+    leaves the corners outside the circle transparent."""
+
+    def __init__(self, parent: QWidget | None = None, side: int = 200) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Deploy preview (dry run)")
-        self.resize(620, 480)
-        layout = QVBoxLayout(self)
-        unchanged = plan.get("unchanged", [])
-        # Headline numbers first; the deletion lines only appear if that mirror
-        # direction is actually switched on.
-        summary = (
-            f"Directories to create: {len(plan['directories'])}\n"
-            f"Files to upload (changed): {len(plan['files'])}\n"
-        )
-        if unchanged:
-            summary += f"Unchanged files skipped: {len(unchanged)}\n"
-        if plan["would_delete"]:
-            summary += f"Server files to remove (not on local): {len(plan['stale_files'])}\n"
-            summary += f"Server directories to remove (not on local): {len(plan['stale_dirs'])}\n"
-        if plan.get("would_delete_local"):
-            summary += f"Local files to remove (not on server): {len(plan.get('local_files', []))}\n"
-            summary += f"Local directories to remove (not on server): {len(plan.get('local_dirs', []))}\n"
-        if not plan["would_delete"] and not plan.get("would_delete_local"):
-            summary += "Mirror cleanup is OFF - nothing will be deleted."
-        label = QLabel(summary)
-        label.setStyleSheet("color: #e0e0e0;")
-        layout.addWidget(label)
+        self._side = zoom_size(side)
+        self.setFixedSize(self._side, self._side)
+        self._hue = 0.0        # 0..1
+        self._sat = 0.0        # 0..1
+        self._value = 1.0      # 0..1
+        self.on_change = None  # callback, handed the new QColor
 
-        # The delete tabs stay visible but empty when mirror cleanup is off.
-        tabs = QTabWidget()
-        tabs.addTab(self._make_list(plan["directories"]), "New / update dirs")
-        tabs.addTab(self._make_list(plan["files"]), "Files to upload")
-        if unchanged:
-            tabs.addTab(self._make_list(unchanged), "Unchanged (skipped)")
-        tabs.addTab(self._make_list(plan["stale_files"] + plan["stale_dirs"]), "Delete on server")
-        tabs.addTab(
-            self._make_list(plan.get("local_files", []) + plan.get("local_dirs", [])),
-            "Delete on local",
-        )
-        layout.addWidget(tabs, 1)
+    def set_hsv(self, hue: float, sat: float, value: float) -> None:
+        self._hue, self._sat, self._value = hue, sat, value
+        self.update()
 
-        note = QLabel("This is a preview. No changes were made. Close this dialog and press Deploy to apply.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #ffb020;")
-        layout.addWidget(note)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
-        layout.addWidget(buttons)
+    def hsv(self) -> tuple:
+        return self._hue, self._sat, self._value
+
+    def set_colour(self, colour: QColor) -> None:
+        """Point the wheel at a colour; a grey one keeps the current hue."""
+        hue, sat, value, _a = colour.getHsvF()
+        if hue < 0.0:
+            hue = self._hue
+        self.set_hsv(hue, max(0.0, sat), max(0.0, value))
+
+    def colour(self) -> QColor:
+        return QColor.fromHsvF(self._hue, self._sat, self._value)
 
     @staticmethod
-    def _make_list(items: list[str]) -> QListWidget:
-        """A read-only sorted list box for one tab of the preview."""
-        widget = QListWidget()
-        for item in sorted(items, key=lambda entry: entry.lower()):
-            widget.addItem(item)
-        return widget
+    def _disc(side: int) -> QPixmap:
+        cached = _WHEEL_DISCS.get(side)
+        if cached is not None:
+            return cached
+        img = QImage(side, side, QImage.Format.Format_ARGB32)
+        img.fill(QColor(0, 0, 0, 0))
+        radius = side / 2.0
+        for y in range(side):
+            dy = radius - y - 0.5              # centre-based, up positive
+            for x in range(side):
+                dx = x + 0.5 - radius
+                dist = math.hypot(dx, dy)
+                if dist > radius:
+                    continue
+                hue = math.degrees(math.atan2(dy, dx)) % 360.0
+                sat = min(1.0, dist / radius)
+                img.setPixelColor(x, y, QColor.fromHsvF(hue / 360.0, sat, 1.0))
+        disc = QPixmap.fromImage(img)
+        _WHEEL_DISCS[side] = disc
+        return disc
+
+    def paintEvent(self, _event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        radius = self._side / 2.0
+        painter.drawPixmap(0, 0, self._disc(self._side))
+        if self._value < 1.0:
+            painter.setCompositionMode(QPainter.CompositionMode.SourceAtop)
+            painter.fillRect(self.rect(), QColor(
+                0, 0, 0, int(round(255 * (1.0 - self._value)))))
+            painter.setCompositionMode(QPainter.CompositionMode.SourceOver)
+        angle = self._hue * 2.0 * math.pi
+        mx = radius + radius * self._sat * math.cos(angle)
+        my = radius - radius * self._sat * math.sin(angle)
+        ring = max(6.0, self._side * 0.045)
+        pen = QPen(QColor("#ffffff") if self._value < 0.6 else QColor("#202020"))
+        pen.setWidthF(max(1.5, self._side / 100.0))
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(mx, my), ring, ring)
+
+    def _pick(self, pos: QPointF) -> None:
+        radius = self._side / 2.0
+        dx = pos.x() + 0.5 - radius
+        dy = radius - pos.y() - 0.5
+        self._hue = (math.degrees(math.atan2(dy, dx)) % 360.0) / 360.0
+        self._sat = min(1.0, math.hypot(dx, dy) / radius)
+        self.update()
+        if callable(self.on_change):
+            self.on_change(self.colour())
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._pick(event.position())
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._pick(event.position())
+
+
+class ColorWheelDialog(QDialog):
+    """A colour wheel with the hex line beside it - and the hex fills itself.
+
+    Turning the wheel, dragging the marker or moving the brightness slider
+    writes ``#rrggbb`` into the line; typing a hex moves the wheel to it.
+    ``get_colour`` is the one-call form: the hex back, or ``""`` when the
+    dialog was cancelled."""
+
+    def __init__(self, initial: str = "", parent: QWidget | None = None,
+                 title: str = "Choose a colour") -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        start = QColor(str(initial)) if str(initial or "").strip() else QColor()
+        if not start.isValid():
+            start = QColor("#ffb020")
+
+        layout = QHBoxLayout(self)
+        self.wheel = _ColorWheel(self)
+        self.wheel.on_change = self._from_wheel
+        layout.addWidget(self.wheel)
+
+        side = QVBoxLayout()
+        row = QHBoxLayout()
+        self.value_slider = QSlider(Qt.Orientation.Vertical)
+        self.value_slider.setRange(0, 255)
+        self.value_slider.setToolTip("Brightness")
+        self.value_slider.valueChanged.connect(self._from_slider)
+        row.addWidget(self.value_slider)
+        info = QVBoxLayout()
+        self.preview = QLabel()
+        self.preview.setMinimumHeight(zoom_size(36))
+        info.addWidget(self.preview)
+        info.addWidget(QLabel("Hex:"))
+        self.hex_input = QLineEdit()
+        self.hex_input.setPlaceholderText("#rrggbb")
+        self.hex_input.textChanged.connect(self._from_hex)
+        info.addWidget(self.hex_input)
+        info.addStretch(1)
+        row.addLayout(info, 1)
+        side.addLayout(row, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        side.addWidget(buttons)
+        layout.addLayout(side, 1)
+
+        self._syncing = False
+        hue, sat, value, _a = start.getHsvF()
+        self.wheel.set_hsv(max(0.0, hue), max(0.0, sat), max(0.0, value))
+        self._syncing = True
+        self.value_slider.setValue(int(round(value * 255)))
+        self.hex_input.setText(start.name())
+        self._syncing = False
+        self._show(start)
+
+    # --- the three controls keeping each other current ---
+
+    def _show(self, colour: QColor) -> None:
+        self.preview.setStyleSheet(scaled_sheet(
+            f"QLabel {{ background: {colour.name()};"
+            " border: 1px solid #555555; border-radius: 6px; }"))
+
+    def _push(self, colour: QColor) -> None:
+        """One control moved: bring the hex line and the preview along."""
+        self._syncing = True
+        self.hex_input.setText(colour.name())
+        self._syncing = False
+        self._show(colour)
+
+    def _from_wheel(self, colour: QColor) -> None:
+        self._syncing = True
+        self.value_slider.setValue(int(round(colour.valueF() * 255)))
+        self._syncing = False
+        self._push(colour)
+
+    def _from_slider(self, value: int) -> None:
+        hue, sat, _old = self.wheel.hsv()
+        colour = QColor.fromHsvF(hue, sat, max(0.0, value / 255.0))
+        self.wheel.set_hsv(hue, sat, colour.valueF())
+        if not self._syncing:
+            self._push(colour)
+
+    def _from_hex(self, text: str) -> None:
+        if self._syncing:
+            return
+        colour = QColor(str(text).strip())
+        if not colour.isValid():
+            return                      # half-typed hex: wait, don't fight
+        self.wheel.set_colour(colour)
+        self._syncing = True
+        self.value_slider.setValue(int(round(colour.valueF() * 255)))
+        self._syncing = False
+        self._show(colour)
+
+    # --- the answer ---
+
+    def colour(self) -> str:
+        return self.wheel.colour().name()
+
+    @staticmethod
+    def get_colour(initial: str = "", parent: QWidget | None = None,
+                   title: str = "Choose a colour") -> str:
+        box = ColorWheelDialog(initial, parent, title)
+        return box.colour() if box.exec() else ""

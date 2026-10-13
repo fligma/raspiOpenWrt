@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Entry point: start the Qt application and show the rasconf Manager window.
+"""Entry point: start the Qt application and show the Berry Manager window.
 
 This is the one module that runs as a program. Every other file holds a piece
 of the app - the window, its tabs, the addon runtime - and is imported; here
@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import QApplication
 from manager_browser import set_cert_bypass
 from manager_config import load_app_config
 from manager_const import ICON_FILES, find_asset
-from manager_gui import RasconfManager
+from manager_gui import BerryManager
 
 
 def main() -> int:
@@ -29,14 +29,13 @@ def main() -> int:
     set_cert_bypass(bool(load_app_config().get("ignore_cert_errors")))
 
     app = QApplication(sys.argv)
-    app.setApplicationName("rasconf Manager")
-    app.setApplicationDisplayName("rasconf Manager")
+    app.setApplicationName("Berry Manager")
     app.setOrganizationName("fligma")
     icon_path = find_asset(ICON_FILES[0])
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))
 
-    window = RasconfManager()
+    window = BerryManager()
     window.fit_window_to_screen()
     window.show()
     return app.exec()

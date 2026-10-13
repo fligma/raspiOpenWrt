@@ -2,7 +2,7 @@
 """The addon's own half of the process protocol, and a stub for testing one.
 
 An executable addon - a compiled ``.py``, a Go binary, a shell script, anything
-- talks to rasconf Manager over its stdin and stdout. The app's side of that
+- talks to Berry Manager over its stdin and stdout. The app's side of that
 conversation is ``ProcessBridge`` in :mod:`manager_addons`. This module is the
 other side, written once so a Python addon needs no code change to run as its
 own program:
@@ -50,6 +50,8 @@ import queue
 import sys
 import threading
 import traceback
+from collections.abc import Callable
+from typing import Any
 
 from addon_common import (
     API_VERSION,
@@ -77,7 +79,7 @@ REFUSED = {
 }
 
 
-def load_addon(path, module_name: str | None = None):
+def load_addon(path: str | Path, module_name: str | None = None) -> Any:
     """Import one addon file as its own module, the way the app does."""
     source = Path(path)
     if not source.is_file():
@@ -96,31 +98,34 @@ def load_addon(path, module_name: str | None = None):
     return module
 
 
-# ---------------------------------------------------------------------------
-# The api object a process addon is handed
-# ---------------------------------------------------------------------------
+# --- The api object a process addon is handed ---
 
 class _Method:
     """One namespaced call, e.g. ``api.device.run``."""
 
-    def __init__(self, api: "ProcessAPI", namespace: str, name: str):
+    def __init__(self, api: "ProcessAPI", namespace: str, name: str) -> None:
         self._api = api
         self._method = f"{namespace}.{name}" if namespace else name
 
-    def __call__(self, *arguments, **named):
+    def __call__(self, *arguments: Any, **named: Any) -> Any:
         return self._api.request(self._method, arguments, named)
 
 
 class ProcessAPI:
     """The ``api`` object of an addon that runs as its own process."""
 
-    #: Argument names, so ``api.device.run("uptime")`` sends ``{"command": ...}``.
+    #: Positional argument names per method, so calls cross the pipe as keywords.
     _POSITIONAL = {
-        "device.run": ("command", "timeout"),
-        "device.run_async": ("command", "on_done", "timeout"),
+        "device.run": ("command", "timeout", "block", "device"),
+        "device.run_async": ("command", "on_done", "timeout", "device"),
         "device.shell_send": ("line",),
         "device.is_connected": ("protocol",),
         "device.ensure_connected": ("protocol",),
+        "device.mode": (),
+        "device.set_mode": ("mode",),
+        "device.bind": ("host", "port", "username", "password",
+                        "key_file", "remote_root"),
+        "device.unbind": (),
         "device.exists": ("path", "outside_root"),
         "device.stat": ("path", "outside_root"),
         "device.read_text": ("path", "encoding", "outside_root"),
@@ -175,12 +180,13 @@ class ProcessAPI:
         "config.declare": ("fields", "defaults", "title"),
         "config.save_text": ("raw",),
         "config.path": (),
+        "ui.pick_color": ("title", "initial"),
         "session.web_url": ("tab",),
         "peers.info": ("addon_id",),
         "peers.send": ("addon_id", "data"),
     }
 
-    def __init__(self, addon_id: str = "", name: str = ""):
+    def __init__(self, addon_id: str = "", name: str = "") -> None:
         self.id = addon_id or os.environ.get("RASCONF_ADDON_ID", "addon")
         self.name = name or self.id
         self.api_version = API_VERSION
@@ -193,9 +199,8 @@ class ProcessAPI:
         self.reader: threading.Thread | None = None
         self.dispatcher: threading.Thread | None = None
         self.stopping = threading.Event()
-        # What the app sent in its ``start`` line: the addon's own record, kept
-        # under a name of its own because ``session`` belongs to api.session, the
-        # namespace the addon calls (api.session.status() and the rest of it).
+        # The app's ``start`` line, kept under its own name so it does not
+        # collide with the api.session namespace the addon calls.
         self.launch: dict = {}
         self.ready = threading.Event()           # init() has been called
         self.started = False                      # and the start hook has run
@@ -209,7 +214,7 @@ class ProcessAPI:
         self.schedule = _Schedule(self)
         self.paths = _Paths(self)
 
-    # --- the pipe ---------------------------------------------------------
+    # --- the pipe ---
 
     def send(self, payload: dict) -> bool:
         """One JSON object per line out, flushed: the app is waiting on it."""
@@ -223,16 +228,8 @@ class ProcessAPI:
             return False
         return True
 
-    def request(self, method: str, arguments=(), named=None):
-        """Ask the app to do something and wait for its answer.
-
-        Positional arguments are matched against the names the app's own method
-        uses (``_POSITIONAL``) because the call crosses the pipe as keyword
-        arguments; a method that is not in that table has to be called with
-        keywords. A function cannot be sent as data: the request names which
-        argument is the callback and keeps the function here under a token, so
-        the app can call it back with ``{"op": "invoke", "token": 7}``.
-        """
+    def request(self, method: str, arguments: tuple = (), named: dict | None = None) -> Any:
+        """Ask the app to do something and wait for its answer, callbacks kept local under a token."""
         if method in REFUSED:
             raise AddonError(REFUSED[method])
         names = self._POSITIONAL.get(method, ())
@@ -240,7 +237,7 @@ class ProcessAPI:
         values: dict = {}
         callback = None
 
-        def place(key: str, value) -> None:
+        def place(key: str, value: Any) -> None:
             nonlocal callback
             if callable(value):
                 if key == callback_argument:
@@ -292,9 +289,7 @@ class ProcessAPI:
         return result
 
     def read_loop(self) -> None:
-        """Route the app's lines: answers to whoever asked, anything else to
-        the dispatcher. This thread never runs addon code, so a callback can
-        arrive while a request of the addon's own is still in flight."""
+        """Route the app's lines: answers to whoever asked, the rest to the dispatcher."""
         stream = sys.stdin
         if hasattr(stream, "reconfigure"):
             try:
@@ -321,8 +316,7 @@ class ProcessAPI:
                     pass
                 continue
             self.inbox.put(message)
-        # The app closed the pipe: hand the dispatcher the same news, and let it
-        # finish whatever it is running before the addon stops.
+        # The app closed the pipe: tell the dispatcher, then let it finish.
         self.inbox.put({"op": "shutdown", "reason": "the app closed the pipe"})
 
     def dispatch_loop(self) -> None:
@@ -381,7 +375,7 @@ class ProcessAPI:
     def traceback(self, where: str) -> None:
         self.error(f"{where}: {traceback.format_exc(limit=2).strip()}")
 
-    def _fire(self, hook: str, *arguments) -> None:
+    def _fire(self, hook: str, *arguments: Any) -> None:
         if self.module is None:
             return
         function = getattr(self.module, hook, None)
@@ -389,25 +383,18 @@ class ProcessAPI:
             guard_call(self, function, *arguments, where=hook)
 
     def _start_hook(self) -> None:
-        """Run the addon's ``start`` once, and only once it exists.
-
-        The app pushes ``start`` as soon as the process is up, which is normally
-        while this file is still being imported - and an addon cannot be told to
-        start before it has been read. So the line is remembered here, and
-        whichever of the two arrives last fires it: the app's message when the
-        addon is already loaded, ``serve`` when it is not.
-        """
+        """Run the addon's ``start`` once it exists, fired by whichever of the load and the app's line arrives last."""
         if self.started or self.module is None or not self.ready.is_set():
             return
         self.started = True
         self._fire("start")
 
-    # --- logging ----------------------------------------------------------
+    # --- logging ---
 
-    def log(self, text) -> None:
+    def log(self, text: Any) -> None:
         self.send({"op": "log", "log": str(text)})
 
-    def error(self, text) -> None:
+    def error(self, text: Any) -> None:
         self.send({"op": "log", "log": f"error: {text}"})
 
     def manifest(self, manifest: dict) -> None:
@@ -417,12 +404,9 @@ class ProcessAPI:
         self.send(push)
 
 
-def guard_call(api, function, *arguments, where: str = "") -> None:
-    """Call addon code and keep its failure in the app's log.
-
-    The app never sees an exception from a process addon: it only gets the line
-    this writes to the log, which is what a Python addon's failure looks like too.
-    """
+def guard_call(api: ProcessAPI, function: Callable[..., Any], *arguments: Any,
+               where: str = "") -> None:
+    """Call addon code and keep its failure in the app's log, never as an exception across the pipe."""
     try:
         function(*arguments)
     except AddonError as error:
@@ -434,11 +418,11 @@ def guard_call(api, function, *arguments, where: str = "") -> None:
 class _Namespace:
     """``api.device`` and friends: every attribute is one remote method."""
 
-    def __init__(self, api: ProcessAPI, name: str):
+    def __init__(self, api: ProcessAPI, name: str) -> None:
         self._api = api
         self._name = name
 
-    def __getattr__(self, method: str):
+    def __getattr__(self, method: str) -> _Method:
         if method.startswith("_"):
             raise AttributeError(method)
         return _Method(self._api, self._name, method)
@@ -447,10 +431,10 @@ class _Namespace:
 class _Events:
     """``api.events``: the registry is local because the app pushes the events."""
 
-    def __init__(self, api: ProcessAPI):
+    def __init__(self, api: ProcessAPI) -> None:
         self._api = api
 
-    def on(self, name: str, callback):
+    def on(self, name: str, callback: Callable[..., Any]) -> Callable[[], None]:
         bucket = self._api.listeners.setdefault(str(name), [])
         bucket.append(callback)
 
@@ -459,7 +443,7 @@ class _Events:
 
         return detach
 
-    def off(self, name: str, callback=None) -> int:
+    def off(self, name: str, callback: Callable[..., Any] | None = None) -> int:
         bucket = self._api.listeners.get(str(name), [])
         before = len(bucket)
         if callback is None:
@@ -475,7 +459,8 @@ class _Events:
 class _Timer:
     """The handle ``api.schedule.after``/``every`` returns: has ``.cancel()``."""
 
-    def __init__(self, api, seconds: float, callback, repeat: bool):
+    def __init__(self, api: ProcessAPI, seconds: float, callback: Callable[[], Any],
+                 repeat: bool) -> None:
         self.api = api
         self.callback = callback
         self.seconds = max(0.05, float(seconds))
@@ -507,14 +492,14 @@ class _Timer:
 class _Schedule:
     """``api.schedule``: plain threads, so the addon owns its own clock."""
 
-    def __init__(self, api):
+    def __init__(self, api: ProcessAPI) -> None:
         self._api = api
         self.handles: list[_Timer] = []
 
-    def after(self, seconds, callback) -> _Timer:
+    def after(self, seconds: float, callback: Callable[[], Any]) -> _Timer:
         return self._track(_Timer(self._api, float(seconds), callback, False))
 
-    def every(self, seconds, callback) -> _Timer:
+    def every(self, seconds: float, callback: Callable[[], Any]) -> _Timer:
         return self._track(_Timer(self._api, max(0.1, float(seconds)), callback, True))
 
     def _track(self, timer: _Timer) -> _Timer:
@@ -530,7 +515,7 @@ class _Schedule:
 class _Paths:
     """``api.paths``, straight from the environment the app set for us."""
 
-    def __init__(self, api: ProcessAPI):
+    def __init__(self, api: ProcessAPI) -> None:
         self._api = api
 
     @staticmethod
@@ -568,30 +553,26 @@ class _Paths:
 
     @property
     def assets(self) -> Path:
-        """The pictures shipped inside the program, as the app handed them out."""
+        """The pictures packed with this program: its own bundle first, else the app's."""
+        bundle = getattr(sys, "_MEIPASS", None)          # a onefile build unpacks here
+        if bundle:
+            own = Path(str(bundle)) / "assets"
+            if own.is_dir():
+                return own
         return self._env("RASCONF_ASSETS", self.base / "assets")
 
     @property
     def log(self) -> Path:
-        return self._env("RASCONF_LOG", self.base / "rasconf_manager.log")
+        return self._env("RASCONF_LOG", self.base / "berry_manager.log")
 
 
-# ---------------------------------------------------------------------------
-# Serving
-# ---------------------------------------------------------------------------
+# --- Serving ---
 
-def serve(target, addon_id: str = "") -> int:
-    """Run one addon file as a process addon until the app stops it.
-
-    ``target`` is the addon's ``.py`` path - normally ``__file__`` from a small
-    launcher, or from a manifest that says ``{"command": ["python3", ...]}``.
-    Returns the exit code: 0 after a clean shutdown, non-zero when the addon
-    could not be used at all, so the app's log says which and why.
-    """
+def serve(target: str | Path, addon_id: str = "") -> int:
+    """Run one addon file as a process addon until the app stops it."""
     api = ProcessAPI(addon_id or os.environ.get("RASCONF_ADDON_ID", ""))
-    # The reader only routes; the dispatcher runs the addon's hooks. Neither of
-    # them is the thread that calls init, so an addon can make requests while
-    # the app makes callbacks while it is still starting up.
+    # The reader only routes; the dispatcher runs the hooks. Neither is the
+    # init thread, so the addon and the app can call each other while starting.
     api.reader = threading.Thread(target=api.read_loop, daemon=True, name="addon-in")
     api.reader.start()
     api.dispatcher = threading.Thread(target=api.dispatch_loop, daemon=True,
@@ -620,8 +601,7 @@ def serve(target, addon_id: str = "") -> int:
         api.error("the addon has no init(api) function")
         return 4
     guard_call(api, init, api, where="init")
-    # init is over: an ``op=start`` that arrived during the import can now run,
-    # and one that arrives later runs straight away.
+    # init is over: any start line from the import can now fire.
     api.ready.set()
     api._start_hook()
     # Wait until the dispatcher has seen a shutdown, or the pipe has closed.
@@ -633,27 +613,13 @@ def serve(target, addon_id: str = "") -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Testing one addon without the app
-# ---------------------------------------------------------------------------
+# --- Testing one addon without the app ---
 
 class StubAPI:
-    """An ``api`` that writes down what it was asked for instead of doing it.
-
-    ```python
-    api = addon_client.stub_api("mytool")
-    addon = addon_client.load_addon("addons/mytool.py")
-    addon.init(api)
-    assert api.called("tabs.add_tab"), "the addon opened no tab"
-    print(api.asked("device.run", "command"))
-    ```
-
-    ``answer(method, value)`` sets what a call returns; the defaults are what an
-    addon normally gets from a running app with a device connected.
-    """
+    """An ``api`` that records what it was asked for, for testing an addon without the app."""
 
     def __init__(self, addon_id: str = "test", config: dict | None = None,
-                 settings: dict | None = None):
+                 settings: dict | None = None) -> None:
         self.id = addon_id
         self.name = addon_id
         self.api_version = API_VERSION
@@ -665,25 +631,24 @@ class StubAPI:
         self.declared: dict = {}
         self.base_dir = Path(__file__).resolve().parent
         self.timers = _Schedule(self)
-        # The name an addon actually calls, so a test script can drive a job that
-        # paces itself through ``api.schedule.after``.
+        # The name an addon calls, so a test can drive a job that paces itself
+        # through ``api.schedule.after``.
         self.schedule = self.timers
         for namespace in ("device", "ui", "tabs", "settings", "config", "peers",
                           "session", "events"):
             setattr(self, namespace, _StubNamespace(self, namespace))
-        # The real folders, from the same environment a compiled addon reads:
-        # a test that writes through api.paths writes where the addon would.
+        # The real folders, from the same environment a compiled addon reads.
         self.paths = _Paths(self)
 
-    # --- what the addon did ----------------------------------------------
+    # --- what the addon did ---
 
-    def record(self, method: str, arguments, named):
+    def record(self, method: str, arguments: Any, named: Any) -> Any:
         self.calls.append((method, tuple(arguments), dict(named)))
         if method in self.results:
             return self.results[method]
         return self.default(method, arguments, named)
 
-    def answer(self, method: str, value) -> "StubAPI":
+    def answer(self, method: str, value: Any) -> "StubAPI":
         """Say what ``api.<method>`` should return. Chains, for a test."""
         self.results[str(method)] = value
         return self
@@ -700,7 +665,8 @@ class StubAPI:
                 return entry
         return None
 
-    def argument(self, method: str, name: str, arguments, named, default=None):
+    def argument(self, method: str, name: str, arguments: Any, named: Any,
+                 default: Any = None) -> Any:
         """One argument of a call, whether it was given by name or by position."""
         if name in named:
             return named[name]
@@ -709,7 +675,7 @@ class StubAPI:
             return arguments[names.index(name)]
         return default
 
-    def asked(self, method: str, key: str, default=None):
+    def asked(self, method: str, key: str, default: Any = None) -> Any:
         """One argument of the last call to ``method``, by name or position."""
         entry = self.last(method)
         if entry is None:
@@ -717,22 +683,16 @@ class StubAPI:
         _method, arguments, named = entry
         return self.argument(method, key, arguments, named, default)
 
-    def log(self, text) -> None:
+    def log(self, text: Any) -> None:
         self.logs.append(str(text))
 
-    def error(self, text) -> None:
+    def error(self, text: Any) -> None:
         self.logs.append(f"error: {text}")
 
-    # --- sensible answers -------------------------------------------------
+    # --- sensible answers ---
 
-    def default(self, method: str, arguments, named):
-        """What an addon normally hears back from a running app.
-
-        Only the answers a test could otherwise trip over are spelled out; a
-        device that is not there, a dialog nobody clicked and a tab nobody
-        opened all answer the way the app would in the same situation.
-        Anything else comes back as ``None``, and ``answer`` sets it instead.
-        """
+    def default(self, method: str, arguments: Any, named: Any) -> Any:
+        """What an addon normally hears back from a running app; ``answer`` overrides it."""
         ask = lambda name, fallback=None: self.argument(method, name, arguments,
                                                         named, fallback)
         if method in ("device.run", "device.append_text", "device.write_text",
@@ -770,14 +730,12 @@ class StubAPI:
                 return ask("name", "tab")
             if method == "tabs.names":
                 return []
-            # ``widget``/``view``/``widget_value`` address real Qt objects, and
-            # an addon that asks for one gets what it would get when the tab is
-            # not there: nothing, so its own ``is not None`` guard does the rest.
+            # ``widget``/``view``/``widget_value`` address real Qt objects; a test
+            # gets nothing, so the addon's own ``is not None`` guard does the rest.
             if method in ("tabs.widget", "tabs.view", "tabs.widget_value"):
                 return None
             if method in ("tabs.set_icon", "tabs.icon", "tabs.use_app_icon"):
-                # The app would say whether the mark was read; a test reads the
-                # call itself with ``asked("tabs.set_icon", "icon")``.
+                # The app would say whether the mark was read; a test reads the call.
                 return True
             return ""
         if method.startswith("settings."):
@@ -838,15 +796,15 @@ class StubAPI:
 
 
 class _StubNamespace:
-    def __init__(self, api: StubAPI, name: str):
+    def __init__(self, api: StubAPI, name: str) -> None:
         self._api = api
         self._name = name
 
-    def __getattr__(self, method: str):
+    def __getattr__(self, method: str) -> Callable[..., Any]:
         if method.startswith("_"):
             raise AttributeError(method)
 
-        def call(*arguments, **named):
+        def call(*arguments: Any, **named: Any) -> Any:
             return self._api.record(f"{self._name}.{method}", arguments, named)
 
         call.__name__ = method

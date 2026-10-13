@@ -33,11 +33,13 @@ import re
 import sys
 import time
 import types
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")      # widgets, no window
 
-#: The folder rasconf Manager and addon_client live in, two levels up from here.
+#: The folder Berry Manager and addon_client live in, two levels up from here.
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
@@ -55,7 +57,7 @@ ON_THE_DEVICE = ["cgi-bin/index.py", "css/main.css", "cgi-bin/hash.file",
                  "js/stale_leftover.js", "old/thing.html"]
 
 
-def check(condition, text: str) -> None:
+def check(condition: object, text: str) -> None:
     """One thing the addon has to do; all of them are reported, not just the first."""
     if not condition:
         FAILURES.append(text)
@@ -67,28 +69,26 @@ def look(text: str) -> None:
     print(f"       {text}")
 
 
-# ---------------------------------------------------------------------------
-# The device, the SFTP and the api object the addon is handed
-# ---------------------------------------------------------------------------
+# --- the device, the SFTP and the api object the addon gets ---
 
 class FakeSFTP:
     """Enough of paramiko's SFTP for the writing stage: stat, mkdir, put."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.put_to: list[tuple[str, str]] = []
         self.mkdir_to: list[str] = []
         self.known = {REMOTE}
 
-    def stat(self, path):
+    def stat(self, path: str) -> dict:
         if path in self.known:
             return {"size": 0}
         raise OSError(f"No such file: {path}")
 
-    def mkdir(self, path):
+    def mkdir(self, path: str) -> None:
         self.known.add(path)
         self.mkdir_to.append(path)
 
-    def put(self, local, full):
+    def put(self, local: str, full: str) -> None:
         if not Path(str(local)).is_file():
             raise AssertionError(f"asked to send a file that is not here: {local}")
         if not str(full).startswith(REMOTE + "/"):
@@ -101,7 +101,7 @@ class FakeSFTP:
 class FakeDevice:
     """Answers the shell the way a Pi with an untidy, partly outdated copy answers."""
 
-    def __init__(self, installer):
+    def __init__(self, installer: Any) -> None:
         self.installer = installer
         self.commands: list[str] = []
 
@@ -128,7 +128,7 @@ class Api(addon_client.StubAPI):
     the addon then has to send each file through ``device.upload`` instead.
     """
 
-    def __init__(self, *args, installer=None, no_open: bool = False, **named):
+    def __init__(self, *args: Any, installer: Any = None, no_open: bool = False, **named: Any) -> None:
         super().__init__(*args, **named)
         self.no_open = no_open
         self.device_state = FakeDevice(installer)
@@ -138,14 +138,14 @@ class Api(addon_client.StubAPI):
         self.quits = 0
 
     @contextlib.contextmanager
-    def _session(self):
+    def _session(self) -> Iterator[Any]:
         self.opens += 1
         try:
             yield types.SimpleNamespace(sftp=self.sftp, remote_root=REMOTE, client=None)
         finally:
             self.quits += 1
 
-    def default(self, method, arguments, named):
+    def default(self, method: str, arguments: Any, named: Any) -> Any:
         if method == "device.open":
             if self.no_open:
                 raise addon_client.AddonError(
@@ -195,7 +195,7 @@ class Api(addon_client.StubAPI):
                     out.append(arguments[3] if len(arguments) > 3 else None)
         return out
 
-    def last(self, identifier: str, prop: str):
+    def last(self, identifier: str, prop: str) -> Any:
         values = self.sets(identifier, prop)
         return values[-1] if values else None
 
@@ -207,22 +207,39 @@ def quoted_words(command: str) -> list[str]:
     return re.findall(r'"([^"]*)"', command)
 
 
-# ---------------------------------------------------------------------------
-# Part one: the spec, built by Qt for real
-# ---------------------------------------------------------------------------
+def cells(row: object) -> list:
+    """A plan row's cells, whether the addon sent a bare list or the dict it
+    now sends: ``{"cells": [...], "color": "#rrggbb"}``, tinted by action."""
+    return list(row["cells"]) if isinstance(row, dict) else list(row)
 
-def test_the_tab(installer, app) -> None:
+
+# --- part one: the spec, built by Qt for real ---
+
+def test_the_tab(installer: Any, app: Any) -> None:
     """Every control the addon later sets, and every property it sets on it."""
     print("\n1. the tab, built by Qt from the spec")
     import addon_api
 
     widget, registry = addon_api.build_spec(installer.tab_spec(installer.DEFAULTS))
-    wanted = set(installer.FIELDS_BY_KEY) | {"status", "bar", "target", "plan", "log"}
+    wanted = set(installer.FIELDS_BY_KEY) | {"status", "bar", "target", "plan", "log",
+                                             "views", "state"}
+    wanted |= {f"step_{key}" for key, _caption in installer.STEPS}
+    wanted |= {f"sum_{name}" for name in ("write", "same", "extra")}
     wanted |= {name for name, _text in installer.BUTTONS} | {installer.STOP}
     check(not wanted - set(registry),
           f"the spec leaves out {sorted(wanted - set(registry)) or 'nothing'} "
           f"and adds {sorted(set(registry) - wanted) or 'nothing'}")
     check(registry["plan"].columnCount() == 4, "the plan table has four columns")
+    check(registry["views"].count() == 3,
+          f"the tab's notebook has {registry['views'].count()} pages, not 3")
+    captions = [registry["views"].tabText(i) for i in range(registry["views"].count())]
+    check(captions == ["Files", "Log", "Settings"],
+          f"the notebook's pages are not the ones the tab promises: {captions}")
+    flow = [str(registry[f"step_{key}"].text()) for key, _caption in installer.STEPS]
+    check(all(text.endswith(caption) for (key, caption), text in zip(installer.STEPS, flow))
+          and all(text.startswith(installer._STEP_GLYPHS["pending"])
+                  for text in flow),
+          f"the step flow does not start as six waiting steps: {flow}")
     check(registry["log"].isReadOnly(), "the log cannot be typed into")
     check(bool(registry["bar"].maximum()), "the progress bar starts with a range")
     missing_tip = [name for name, _text in installer.BUTTONS
@@ -236,7 +253,7 @@ def test_the_tab(installer, app) -> None:
           == "\n".join(installer.DEFAULTS["restart_command"]),
           "a list or multiline setting is not shown as it is stored")
 
-    def applies(identifier, prop, value):
+    def applies(identifier: str, prop: str, value: Any) -> str:
         try:
             addon_api.apply_widget_property(registry[identifier], prop, value)
         except Exception as error:          # noqa: BLE001 - the point of the check
@@ -247,9 +264,18 @@ def test_the_tab(installer, app) -> None:
                   ("status", "style", "color: #ffb020; padding: 2px 4px;"),
                   ("bar", "maximum", 22), ("bar", "value", 7),
                   ("bar", "format", "writing files  %p%"),
-                  ("plan", "rows", [["a/b.py", "1 KiB", "-", "new"]]),
+                  ("plan", "rows", [["a/b.py", "1 KiB", "-", "new"],
+                                    {"cells": ["c/d.js", "2 KiB", "-", "replaced"],
+                                     "color": installer.ACTION_COLORS["replaced"]}]),
                   ("log", "append", "one line"), ("log", "value", ""),
                   ("target", "text", "goes here"),
+                  ("state", "text", "\u25cf 192.168.1.10"),
+                  ("state", "style", installer._CHIP_STYLES["green"]),
+                  ("views", "current", 1),
+                  ("step_files", "text", installer._STEP_GLYPHS["done"] + "Files"),
+                  ("step_files", "style", installer._STEP_STYLES["active"]),
+                  ("sum_write", "text", "6 to write"),
+                  ("sum_write", "style", installer._CHIP_STYLES["crimson"]),
                   ("install", "enabled", False)]
     for identifier, prop, value in properties:
         why = applies(identifier, prop, value)
@@ -264,11 +290,9 @@ def test_the_tab(installer, app) -> None:
     check(not unreadable, f"these form controls give back nothing: {unreadable or 'none'}")
 
 
-# ---------------------------------------------------------------------------
-# Part two: the job, end to end
-# ---------------------------------------------------------------------------
+# --- part two: the job, end to end ---
 
-def pump(app, installer, seconds=240) -> bool:
+def pump(app: Any, installer: Any, seconds: float = 240) -> bool:
     """Let the addon's own timers run while this waits, as the app would."""
     limit = time.time() + seconds
     while installer.working and time.time() < limit:
@@ -279,7 +303,7 @@ def pump(app, installer, seconds=240) -> bool:
     return not installer.working
 
 
-def fresh(installer, defaults: dict, no_open: bool = False) -> Api:
+def fresh(installer: Any, defaults: dict, no_open: bool = False) -> Api:
     """A stub api whose form holds the addon's own values, and the addon on it."""
     api = Api(addon_id="web_installer", installer=installer, no_open=no_open)
     api.form = dict(defaults)
@@ -288,7 +312,7 @@ def fresh(installer, defaults: dict, no_open: bool = False) -> Api:
     return api
 
 
-def github_is_there(installer) -> bool:
+def github_is_there(installer: Any) -> bool:
     """Whether this machine can ask GitHub anything at all."""
     fetcher = installer.Fetcher()
     try:
@@ -302,7 +326,7 @@ def github_is_there(installer) -> bool:
     return True
 
 
-def test_look_around(installer, app, defaults: dict) -> list:
+def test_look_around(installer: Any, app: Any, defaults: dict) -> list:
     """Fetch only: the plan fills in, the files land here, nothing goes anywhere."""
     print("\n2. Fetch files, against the real repository")
     api = fresh(installer, defaults)
@@ -323,25 +347,38 @@ def test_look_around(installer, app, defaults: dict) -> list:
     folder = Path(api.paths.data) / "staging"
     staged = sorted(path.relative_to(folder).as_posix()
                     for path in folder.rglob("*") if path.is_file())
-    check(sorted(row[0] for row in plan) == staged,
+    check(sorted(cells(row)[0] for row in plan) == staged,
           "the plan and what is really staged here do not match")
-    check(all(row[0].startswith(("assets/", "cgi-bin/", "css/", "js/")) for row in plan),
+    check(all(cells(row)[0].startswith(("assets/", "cgi-bin/", "css/", "js/")) for row in plan),
           "something that is not the dashboard was staged")
     check(not api.sftp.put_to and not api.opens,
           "a look-around wrote to the device")
-    big = {row[0]: row[1] for row in plan}
+    big = {cells(row)[0]: cells(row)[1] for row in plan}
     check("KiB" in str(big.get("assets/android-chrome-512x512.png"))
           and float(str(big.get("assets/android-chrome-512x512.png")).split()[0]) > 100,
           f"the sizes are not said sensibly: {big.get('assets/android-chrome-512x512.png')}")
-    seen = [row for row in plan if row[2] != "-"]
-    check(len(seen) == 2 and all(row[3] == "already there" for row in seen),
-          f"what the device has was not noticed: {[(row[0], row[2], row[3]) for row in seen]}")
+    seen = [row for row in plan if cells(row)[2] != "-"]
+    check(len(seen) == 2 and all(cells(row)[3] == "already there" for row in seen),
+          f"what the device has was not noticed: {[(cells(row)[0], cells(row)[2], cells(row)[3]) for row in seen]}")
+    check(any(row.get("color") == installer.ACTION_COLORS["already there"] for row in plan),
+          "the plan's rows do not wear the colour of what happens to them")
     check("press Install" in str(api.last("status", "text")),
           "a look-around should say what it would do and stop there")
+    check(str(api.last("sum_write", "text")).startswith(str(len(plan) - 2)),
+          f"the write badge does not count what is left to do: {api.last('sum_write', 'text')!r}")
+    # The fetch route walked files and compare, stopped before the writing, and
+    # never routes through backup, write or restart at all.
+    check(str(api.last("step_files", "text")).startswith("\u2713")
+          and str(api.last("step_compare", "text")).startswith("\u2713")
+          and str(api.last("step_backup", "text")).startswith("\u00b7")
+          and str(api.last("step_write", "text")).startswith("\u00b7")
+          and str(api.last("step_check", "text")).startswith("\u00b7"),
+          f"the step flow does not read as a look-around: "
+          f"{[api.last(f'step_{key}', 'text') for key, _c in installer.STEPS]}")
     return plan
 
 
-def test_install(installer, app, defaults: dict, plan: list) -> None:
+def test_install(installer: Any, app: Any, defaults: dict, plan: list) -> None:
     """The whole route, with the tidy switched on: what goes, and what stays."""
     print("\n3. Install, tidying away what is left over")
     api = fresh(installer, dict(defaults, remove_extra=True))
@@ -358,7 +395,7 @@ def test_install(installer, app, defaults: dict, plan: list) -> None:
     check(sorted(set(api.sftp.mkdir_to)) == [f"{REMOTE}/{name}"
           for name in ("assets", "cgi-bin", "css", "js")],
           f"the folders it needed were not made: {sorted(set(api.sftp.mkdir_to))}")
-    written = len([row for row in plan if row[3] != "already there"])
+    written = len([row for row in plan if cells(row)[3] != "already there"])
     check(len(sent) == written, f"{len(sent)} file(s) went up, {written} were planned")
     check(not any("hash.file" in full or full.endswith("README.md")
                   for _local, full in sent),
@@ -374,6 +411,10 @@ def test_install(installer, app, defaults: dict, plan: list) -> None:
           f"{api.last('bar', 'maximum')}, not full")
     check("the dashboard answers" in api.log_text(),
           "an answering dashboard was not reported")
+    check(all(str(api.last(f"step_{key}", "text")).startswith("\u2713")
+              for key, _caption in installer.STEPS),
+          f"a finished install left a step unlit: "
+          f"{[api.last(f'step_{key}', 'text') for key, _c in installer.STEPS]}")
     check("file(s) written" in str(api.last("status", "text"))
           and "answers on port" in str(api.last("status", "text")),
           f"the last word was not the summary: {api.last('status', 'text')!r}")
@@ -402,7 +443,7 @@ def test_install(installer, app, defaults: dict, plan: list) -> None:
          f"{api2.times('device.upload')} upload(s), {api2.opens} sessions")
 
 
-def test_local_folder(installer, app, defaults: dict) -> None:
+def test_local_folder(installer: Any, app: Any, defaults: dict) -> None:
     """The other source: a folder on this machine, with no internet involved."""
     print("\n6. the files from a local folder, which needs no internet")
     source = ROOT.parent.parent / "src" / "www_rasconf"
@@ -414,11 +455,11 @@ def test_local_folder(installer, app, defaults: dict) -> None:
     check(pump(app, installer), "the local job never came to an end")
     plan = api.last("plan", "rows") or []
     look(f"{len(plan)} row(s); the tab says: {api.last('status', 'text')}")
-    names = {row[0] for row in plan}
+    names = {cells(row)[0] for row in plan}
     check({"cgi-bin/index.py", "cgi-bin/sysinfo.py", "js/render.js"} <= names,
           f"the folder here did not give the whole dashboard: {sorted(names)[:4]}")
     check("README.md" not in names, "the skip list was not honoured")
-    check(not any(".pyc" in row[0] or "__pycache__" in row[0] for row in plan),
+    check(not any(".pyc" in cells(row)[0] or "__pycache__" in cells(row)[0] for row in plan),
           "the folder's own junk came along")
     check(api.times("device.run_async") == 1,
           f"a local fetch should ask the device once, not {api.times('device.run_async')} times")
@@ -426,13 +467,13 @@ def test_local_folder(installer, app, defaults: dict) -> None:
           "GitHub was asked for something on the local route")
 
 
-def test_wrong_ref(installer, app, defaults: dict) -> None:
+def test_wrong_ref(installer: Any, app: Any, defaults: dict) -> None:
     """A branch that is not there: said once, in words that say what to check."""
     print("\n5. a ref that does not exist")
     asked: list[tuple[str, str]] = []
     original = installer.Fetcher.get
 
-    def counting(self, host, path, accept="application/octet-stream"):
+    def counting(self, host: str, path: str, accept: str = "application/octet-stream") -> Any:
         asked.append((host, path))
         return original(self, host, path, accept)
 
@@ -451,7 +492,7 @@ def test_wrong_ref(installer, app, defaults: dict) -> None:
     check("Check the" in said, "the message does not say what to check")
 
 
-def test_the_bar(installer, app, defaults: dict) -> None:
+def test_the_bar(installer: Any, app: Any, defaults: dict) -> None:
     """Watch a whole local install through the bar alone: it must move for every
     stage, name each one, and finish full instead of stuck at 95%."""
     print("\n7. the progress bar, stage by stage")
@@ -495,11 +536,15 @@ def test_the_bar(installer, app, defaults: dict) -> None:
           f"the bar did not end full after the restart: {moved[-1:]}")
 
 
-# ---------------------------------------------------------------------------
+# --- run it ---
 
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)    # the Test pane wants it live
+        # The Test pane wants it live; and a Windows console often speaks
+        # cp1252, which has no room for the step marks this tab now paints,
+        # so anything undisplayable becomes "?" rather than stopping the run.
+        sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
+                               errors="replace")
     if not SOURCE.is_file():
         print(f"there is no addon at {SOURCE}")
         return 2

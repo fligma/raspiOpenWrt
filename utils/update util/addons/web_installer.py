@@ -36,13 +36,15 @@ import http.client
 import json
 import posixpath
 import re
+import shutil
 import ssl
 import time
+from collections.abc import Callable
+from typing import Any
 from pathlib import Path
 from urllib.parse import quote
 
-# The Qt-free half of the contract, so this file also runs compiled into a
-# program of its own and inside a test script that never opens a window.
+# Qt-free contract half: runs standalone and in tests.
 from addon_common import AddonError, config_get, merge_config
 
 ADDON = {
@@ -53,6 +55,7 @@ ADDON = {
                    "profile's remote folder over SFTP, with a backup, the exec "
                    "bit on the CGI entry, a web server restart and a check that "
                    "the page answers afterwards.",
+    "requires": ["ssh", "sftp"],
     "api": 1,
 }
 
@@ -63,9 +66,7 @@ api = None                  # filled in by init()
 working = False             # one job at a time
 job: dict | None = None     # the job in progress, or nothing
 
-# ---------------------------------------------------------------------------
-# What can be configured, and what it starts out as
-# ---------------------------------------------------------------------------
+# --- what can be configured, and what it starts out as ---
 
 DEFAULTS = {
     "source": "GitHub",
@@ -161,16 +162,19 @@ BUTTONS = (("fetch", "Fetch files"), ("install", "Install"), ("open", "Open dash
            ("restart", "Restart web server"), ("check", "Check page"),
            ("push", "Save to config"), ("pull", "Reload from config"))
 
-#: The way out, which stays live while everything else is greyed out.
-STOP = "stop"
+#: Step flow across the top: six chips for ten stages.
+STEPS = (("files", "Files"), ("compare", "Compare"), ("backup", "Backup"),
+         ("write", "Write"), ("restart", "Restart"), ("check", "Check"))
 
-#: What each button on the tab does, filled in once the functions exist.
+STAGE_TO_STEP = {"tree": "files", "fetch": "files", "remote": "compare",
+                 "ready": "compare", "confirm": "compare", "backup": "backup",
+                 "write": "write", "prune": "write", "after": "restart",
+                 "verify": "check"}
+
+STOP = "stop"
 HANDLERS: dict = {}
 
-#: The list for when GitHub will not give one: the dashboard's own files as they
-#: are in this repository. The raw files come from a CDN that is not counted
-#: against the API's sixty anonymous requests an hour, so an installer that knows
-#: the layout keeps working when the file list stops answering.
+#: Fallback file list when GitHub gives none.
 FALLBACK_TREE = [
     "assets/250px-BrownSpiderMonkey_(edit2).jpg",
     "assets/android-chrome-192x192.png",
@@ -206,34 +210,68 @@ QProgressBar { border: 1px solid #3c3c3c; border-radius: 4px; text-align: center
                background-color: #1b1b1b; }
 QProgressBar::chunk { background-color: #c51a4a; border-radius: 3px; }
 QPushButton { padding: 7px 14px; }
+QTabWidget::pane { border: 1px solid #3c3c3c; border-radius: 6px; top: -1px; }
+QTabBar::tab { background-color: #1d1d1d; color: #9a9a9a; padding: 5px 14px;
+               border: 1px solid #3c3c3c; border-bottom: none;
+               border-top-left-radius: 6px; border-top-right-radius: 6px; }
+QTabBar::tab:selected { background-color: #24141a; color: #e8e8e8;
+                        border-color: #c51a4a; }
+QTabBar::tab:hover:!selected { color: #d0d0d0; }
 """
 
 BANNER_STYLE = ("QLabel { color: #e8e8e8; font-size: 13pt; font-weight: 600;"
                 " padding: 4px 2px 2px 2px; }")
 
-#: Shell punctuation that must never reach a command line from a config value.
+#: Step chip moods: reached, doing, waiting, off.
+_STEP_STYLES = {
+    "done":    "color: #23d18b; font-weight: 600; padding: 2px 4px;",
+    "active":  "color: #ffffff; background-color: #c51a4a; border-radius: 9px;"
+               " padding: 2px 9px; font-weight: 700;",
+    "pending": "color: #6f6f6f; padding: 2px 4px;",
+    "off":     "color: #454545; padding: 2px 4px;",
+}
+_STEP_GLYPHS = {"done": "\u2713 ", "active": "\u25cf ", "pending": "\u25cb ", "off": "\u00b7 "}
+
+def _chip_style(foreground: str, background: str, edge: str) -> str:
+    return (f"color: {foreground}; background-color: {background};"
+            f" border: 1px solid {edge}; border-radius: 9px;"
+            f" padding: 1px 9px; font-weight: 600;")
+
+
+#: One style per tone for the count badges.
+_CHIP_STYLES = {
+    "crimson": _chip_style("#ff8aa6", "#2a1218", "#7c2140"),
+    "gray":    _chip_style("#9a9a9a", "#1e1e1e", "#3c3c3c"),
+    "amber":   _chip_style("#ffb020", "#241d12", "#5a4519"),
+    "green":   _chip_style("#23d18b", "#12251c", "#1f5c40"),
+}
+
+#: Plan row tints by action.
+ACTION_COLORS = {"queued": "#5fb3ff", "new": "#5fb3ff", "written": "#23d18b",
+                 "replaced": "#ffb020", "written again": "#ffb020",
+                 "already there": "#777777"}
+
+#: Shell chars that must never reach a command line.
 _UNSAFE = re.compile(r"[\"'`$;|&<>\\\n\r\t]")
 _RELATIVE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
-# ---------------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------------
+# --- small helpers ---
 
-def one_line(value) -> str:
+def one_line(value: Any) -> str:
     """One clean line of text from whatever the form holds."""
     text = str("" if value is None else value).strip()
     return text.splitlines()[0].replace("\r", "") if text else ""
 
 
-def safe_path(value, fallback: str = "") -> str:
+def safe_path(value: Any, fallback: str = "") -> str:
     """A relative path that is safe to put into a shell command, or the fallback."""
     text = one_line(value).replace("..", "")
     text = _UNSAFE.sub("", text).strip("/ ")
     return text if text and _RELATIVE.match(text) else fallback
 
 
-def clean_list(value) -> list[str]:
+def clean_list(value: Any) -> list[str]:
     """A config value as a list of clean entries, whatever shape it arrived in."""
     if value is None:
         return []
@@ -281,9 +319,7 @@ def matches(path: str, patterns: list[str]) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Reading the form
-# ---------------------------------------------------------------------------
+# --- reading the form ---
 
 def values_of() -> dict:
     """The form as a config-shaped dict."""
@@ -318,9 +354,7 @@ def merge_current() -> dict:
     return merge_config(merged, values_of())
 
 
-# ---------------------------------------------------------------------------
-# The tab
-# ---------------------------------------------------------------------------
+# --- the tab ---
 
 def control_spec(key: str, values: dict) -> dict:
     """The form row for one config key, prefilled with the current value."""
@@ -360,31 +394,99 @@ def control_spec(key: str, values: dict) -> dict:
     return spec
 
 
+def step_chip(key: str, caption: str) -> dict:
+    """One step of the flow, waiting for its turn."""
+    return {"kind": "label", "id": "step_" + key,
+            "text": _STEP_GLYPHS["pending"] + caption,
+            "style": _STEP_STYLES["pending"],
+            "tooltip": "The job walks these steps left to right - the lit one "
+                       "is what it is doing now"}
+
+
+def view_page(page: int) -> None:
+    """Jump the tab's own notebook: 0 the plan, 1 the log, 2 the settings."""
+    try:
+        api.tabs.set_widget(TAB, "views", "current", int(page))
+    except AddonError:
+        pass
+
+
+def paint_steps(stages: list[str], cutoff: int, active: str | None = None) -> None:
+    """Re-paint the step flow: ``cutoff`` stages done, ``active`` running now."""
+    route: list[str] = []
+    for stage in stages:
+        step = STAGE_TO_STEP.get(stage)
+        if step and step not in route:
+            route.append(step)
+    for key, caption in STEPS:
+        positions = [i for i, stage in enumerate(stages)
+                     if STAGE_TO_STEP.get(stage) == key]
+        if key == active:
+            state = "active"
+        elif key not in route:
+            state = "off"
+        elif positions and max(positions) < cutoff:
+            state = "done"
+        else:
+            state = "pending"
+        try:
+            api.tabs.set_widget(TAB, "step_" + key, "text", _STEP_GLYPHS[state] + caption)
+            api.tabs.set_widget(TAB, "step_" + key, "style", _STEP_STYLES[state])
+        except AddonError:
+            pass
+
+
+def _chip(identifier: str, text: str, tone: str) -> None:
+    """One of the three count badges, with the words and the colour to match."""
+    try:
+        api.tabs.set_widget(TAB, identifier, "text", text)
+        api.tabs.set_widget(TAB, identifier, "style", _CHIP_STYLES[tone])
+    except AddonError:
+        pass
+
+
+def reset_totals() -> None:
+    """The badges before any plan: one honest placeholder, two blanks."""
+    _chip("sum_write", "no plan yet", "gray")
+    _chip("sum_same", "", "gray")
+    _chip("sum_extra", "", "gray")
+
+
+def refresh_totals(items: list[dict] | None = None) -> None:
+    """Say what the plan adds up to: to write, already there, left over."""
+    items = items if items is not None else (job or {}).get("items") or []
+    if not items:
+        reset_totals()
+        return
+    pending = len([item for item in items if str(item.get("action") or "queued")
+                   in ("queued", "new", "replaced", "written again")])
+    written = len([item for item in items if item.get("action") == "written"])
+    same = len([item for item in items if item.get("action") == "already there"])
+    words = f"{pending} to write" + (f" \u00b7 {written} written" if written else "")
+    _chip("sum_write", words, "crimson" if pending else "green")
+    _chip("sum_same", f"{same} already there", "gray")
+    extras = (job or {}).get("extras")
+    if extras is None:
+        _chip("sum_extra", "", "gray")
+    else:
+        _chip("sum_extra", f"{extras} extra on device" if extras else "nothing left over",
+              "amber" if extras else "green")
+
+
 def tab_spec(values: dict) -> dict:
-    """The whole tab: the settings on the left, what the job is doing on the right."""
+    """The whole tab: a header, the step flow, and one notebook of pages."""
     groups = []
     for title, keys in GROUPS:
         groups.append({
             "kind": "group", "text": title, "layout": "form",
             "children": [control_spec(key, values) for key in keys],
         })
-    groups.append({
-        "kind": "label", "id": "target", "text": "", "word_wrap": True,
-        "style": "color: #9a9a9a; padding: 6px 4px;",
-    })
-    left = {"kind": "scroll", "children": [{"kind": "column", "children": groups,
-                                            "stretch": True}]}
-    right = {"kind": "column", "children": [
-        {"kind": "label", "text": "What will be written",
-         "style": "color: #c51a4a; font-weight: 600; padding: 2px 4px;"},
-        {"kind": "table", "id": "plan",
-         "columns": ["File", "Size", "On the device", "Action"],
-         "tooltip": "The files this job will send, and what the device already "
-                    "has of them"},
-        {"kind": "multi", "id": "log", "readonly": True,
-         "placeholder": "Every step of the last job, as it happened",
-         "tooltip": "The same lines go into the program's own log"},
-    ]}
+    steps: list[dict] = []
+    for index, (key, caption) in enumerate(STEPS):
+        if index:
+            steps.append({"kind": "label", "text": "\u2192",
+                          "style": "color: #454545; padding: 0 1px;"})
+        steps.append(step_chip(key, caption))
     tips = (
         ("fetch", "Fetch files", "Get the tree from GitHub or from the local "
                                  "folder and work out what the device needs"),
@@ -400,11 +502,38 @@ def tab_spec(values: dict) -> dict:
                          "across stays on the device"),
     )
     return {"kind": "column", "children": [
-        {"kind": "label", "text": "Rasconf web installer", "style": BANNER_STYLE},
+        {"kind": "row", "children": [
+            {"kind": "label", "text": "Rasconf web installer", "style": BANNER_STYLE},
+            {"kind": "spacer"},
+            {"kind": "label", "id": "target", "text": "",
+             "style": "color: #9a9a9a; padding: 2px 6px;"},
+            {"kind": "label", "id": "state", "text": "", "style": _CHIP_STYLES["gray"]},
+        ]},
+        {"kind": "row", "children": steps},
         {"kind": "label", "id": "status", "text": "Ready.", "word_wrap": True,
          "style": "color: #23d18b; padding: 2px 4px;"},
         {"kind": "progress", "id": "bar", "maximum": 100, "value": 0},
-        {"kind": "splitter", "children": [left, right]},
+        {"kind": "row", "children": [
+            {"kind": "label", "id": "sum_write", "text": "no plan yet",
+             "style": _CHIP_STYLES["gray"]},
+            {"kind": "label", "id": "sum_same", "text": "",
+             "style": _CHIP_STYLES["gray"]},
+            {"kind": "label", "id": "sum_extra", "text": "",
+             "style": _CHIP_STYLES["gray"]},
+            {"kind": "spacer"},
+        ]},
+        {"kind": "tabs", "id": "views", "children": [
+            {"kind": "table", "id": "plan", "label": "Files",
+             "columns": ["File", "Size", "On the device", "Action"],
+             "stretch": 0, "col_widths": [0, 90, 120, 130],
+             "tooltip": "The files this job will send, and what the device "
+                        "already has of them"},
+            {"kind": "multi", "id": "log", "label": "Log", "readonly": True,
+             "placeholder": "Every step of the last job, as it happened",
+             "tooltip": "The same lines go into the program's own log"},
+            {"kind": "scroll", "label": "Settings",
+             "children": [{"kind": "column", "children": groups}]},
+        ]},
         {"kind": "row", "children": [
             {"kind": "button", "id": identifier, "text": text, "tooltip": tip,
              "on": ["clicked"]} for identifier, text, tip in tips],
@@ -413,18 +542,11 @@ def tab_spec(values: dict) -> dict:
 
 
 def build_tab() -> None:
-    """The tab as a spec, and its buttons as reports.
-
-    Nothing here holds on to a widget. The app builds the controls in its own
-    process, so the one route a press can take is the ``on_widget`` hook below -
-    which is also how it arrives when the addon is imported into the app, so a
-    compiled copy behaves exactly like a source one.
-    """
+    """The tab as a spec, and its buttons as reports; nothing holds a widget."""
     api.tabs.add_tab(TAB, spec=tab_spec(merge_config(DEFAULTS, api.config.stored())),
                      style=TAB_STYLE)
     try:
-        # This tab wears the program's own mark and keeps wearing it, so the two
-        # never disagree about what the app looks like.
+        # Use the program's own mark for the tab icon.
         api.tabs.use_app_icon(TAB)
     except AddonError as error:             # an app with no icon of its own
         api.log(f"web installer tab icon: {error}")
@@ -458,16 +580,7 @@ def note(text: str) -> None:
 
 
 def progress(done: int, total: int) -> None:
-    """Move the bar.
-
-    While a job runs, ``done`` of ``total`` is the progress *inside* the stage
-    that is going on now, and each stage owns a slice of the bar (see
-    :func:`_bar_spans`). So the last file of a download lands at the end of the
-    download's piece instead of at 95% of the whole job with a web server still
-    to restart and a page still to check - which is where the bar used to sit
-    while the job quietly carried on without it. With no job, which is how the
-    two one-command buttons get here, the numbers are the whole bar.
-    """
+    """Move the bar; each running stage owns a slice of it (see _bar_spans)."""
     total = max(int(total), 1)
     done = min(max(int(done), 0), total)
     stage = str((job or {}).get("stage") or "")
@@ -481,23 +594,24 @@ def progress(done: int, total: int) -> None:
 
 
 def bar_text(text: str) -> None:
-    """The step painted inside the bar itself.
-
-    Qt still expands ``%p`` there, so the bar reads "writing files 62%" and says
-    what it is doing as well as how far through it is. The status line under it
-    keeps the long version.
-    """
+    """The step painted inside the bar itself; Qt still expands ``%p`` there."""
     api.tabs.set_widget(TAB, "bar", "format", f"{text}  %p%" if text else "%p%")
 
 
 def show_plan(items: list[dict]) -> None:
-    """The table, in the order the job works through it."""
+    """The table, in the order the job works through it, tinted by action."""
     rows = []
     for item in items:
         seen = item.get("remote")
-        rows.append([item.get("path", ""), human(item.get("size") or 0),
-                     seen if seen else "-", item.get("action", "queued")])
+        action = str(item.get("action") or "queued")
+        row = {"cells": [item.get("path", ""), human(item.get("size") or 0),
+                         seen if seen else "-", action]}
+        colour = ACTION_COLORS.get(action)
+        if colour:
+            row["color"] = colour
+        rows.append(row)
     api.tabs.set_widget(TAB, "plan", "rows", rows)
+    refresh_totals(items)
 
 
 def describe(values: dict) -> str:
@@ -511,7 +625,7 @@ def describe(values: dict) -> str:
 
 
 def show_target(values: dict) -> None:
-    """Under the form: where this profile's files would land, right now."""
+    """The header line: where these files come from and where they land."""
     status: dict = {}
     try:
         status = api.session.status() or {}
@@ -520,31 +634,27 @@ def show_target(values: dict) -> None:
     root = str(status.get("remote_root") or "the profile's remote folder")
     sub = safe_path(config_get(values, "subdir", ""))
     whole = posixpath.join(root.rstrip("/"), sub) if sub else root
-    lines = [describe(values), f"Goes to {whole}"]
-    host = str(status.get("host") or "")
-    if host:
-        lines.append(f"On {host}" + ("  (SFTP is up)" if status.get("sftp_connected")
-                                     else "  (not connected yet)"))
     try:
-        api.tabs.set_widget(TAB, "target", "text", "\n".join(lines))
+        api.tabs.set_widget(TAB, "target", "text", f"{describe(values)}  \u2192  {whole}")
+    except AddonError:
+        pass
+    host = one_line(str(status.get("host") or ""))
+    up = bool(status.get("sftp_connected"))
+    words = ("\u25cf " if up else "\u25cb ") + (host or "no host yet")
+    words += "  \u00b7  SFTP up" if up else "  \u00b7  not connected"
+    try:
+        api.tabs.set_widget(TAB, "state", "text", words)
+        api.tabs.set_widget(TAB, "state", "style", _CHIP_STYLES["green" if up else "gray"])
     except AddonError:
         pass
 
 
-# ---------------------------------------------------------------------------
-# The one bit of network this addon needs, with nothing but the standard library
-# ---------------------------------------------------------------------------
+# --- network: standard library only ---
 
 class Fetcher:
-    """A few HTTPS connections, kept open and reused for the whole download.
+    """A few HTTPS connections, kept open and reused for the whole download."""
 
-    Twenty-two files fetched with a fresh TLS handshake apiece take longer than
-    the transfer itself, and an addon may not add a dependency of its own. One
-    connection per host, with a retry when the server has quietly closed it, is
-    all that is needed here.
-    """
-
-    def __init__(self, token: str = ""):
+    def __init__(self, token: str = "") -> None:
         self.token = str(token or "")
         self.connections: dict[str, http.client.HTTPSConnection] = {}
 
@@ -556,11 +666,12 @@ class Fetcher:
             self.connections[host] = connection
         return connection
 
-    def get(self, host: str, path: str, accept: str = "application/octet-stream"):
+    def get(self, host: str, path: str,
+            accept: str = "application/octet-stream") -> tuple[int, bytes]:
         """``(status, body)`` for one GET, retried once on a dropped connection."""
         status, body = 0, b""
         for attempt in (0, 1):
-            headers = {"User-Agent": "rasconf-manager", "Accept": accept}
+            headers = {"User-Agent": "berry-manager", "Accept": accept}
             if self.token:
                 headers["Authorization"] = f"token {self.token}"
             connection = self._connection(host)
@@ -578,7 +689,7 @@ class Fetcher:
                 time.sleep(0.4)
         return status, body
 
-    def json(self, host: str, path: str):
+    def json(self, host: str, path: str) -> Any:
         status, body = self.get(host, path, accept="application/json")
         if status != 200:
             raise AddonError(_refused(status, body, path))
@@ -598,7 +709,7 @@ class Fetcher:
                     pass
 
 
-def _refused(status: int, body, path: str) -> str:
+def _refused(status: int, body: bytes, path: str) -> str:
     """A failure worth showing to a user, in words that say what to do next."""
     detail = ""
     try:
@@ -617,9 +728,7 @@ def _refused(status: int, body, path: str) -> str:
     return f"GitHub answered {status} for {path}" + (f": {detail}" if detail else "")
 
 
-# ---------------------------------------------------------------------------
-# Reading the settings into the shapes the job needs
-# ---------------------------------------------------------------------------
+# --- reading the settings into the shapes the job needs ---
 
 def is_local(values: dict) -> bool:
     """Whether this install reads a folder on this machine instead of GitHub."""
@@ -664,13 +773,7 @@ def job_paths(values: dict) -> dict:
 
 
 def page_urls(paths: dict) -> list[str]:
-    """The addresses the device can ask itself for its page at.
-
-    Loopback first, since it needs no network and does not care which profile is
-    connected; then the address in the connection panel, because a uhttpd bound to
-    one interface answers on the LAN address and not on ``127.0.0.1``. Either of
-    them replying is the proof wanted - that the dashboard is up.
-    """
+    """The addresses the device can ask itself for its page at; loopback first."""
     out = [f"https://127.0.0.1:{paths['port']}{paths['web_path']}"]
     try:
         status = api.session.status() or {}
@@ -683,12 +786,7 @@ def page_urls(paths: dict) -> list[str]:
 
 
 def device_path(relative: str) -> str:
-    """One absolute device path below the remote root, or nothing at all.
-
-    Anything that is going to be typed into a shell command comes through here,
-    so a name from the repository or from the device's own listing cannot escape
-    the folder the profile deploys into.
-    """
+    """One device path below the remote root, or nothing; nothing escapes it."""
     clean = safe_path(relative)
     if not clean:
         return ""
@@ -712,20 +810,13 @@ def _ignored(relative: str) -> bool:
     return str(relative).endswith((".pyc", ".pyo", ".tmp", ".bak", ".swp", "~"))
 
 
-# ---------------------------------------------------------------------------
-# The job: one unit of work per tick, so the tab keeps painting
-# ---------------------------------------------------------------------------
+# --- the job: one unit of work per tick ---
 
-#: How much of the bar each stage gets, in units of no particular size. The two
-#: that work file by file take most of it because that is where the time goes, and
-#: every other stage gets a piece of its own so the bar moves while the device is
-#: backing up, tidying, restarting and answering - the part of a job that used to
-#: leave it stuck at 95%.
+#: Bar share per stage; the file-by-file ones get most.
 STAGE_WEIGHTS = {"tree": 4, "fetch": 40, "remote": 8, "ready": 4, "confirm": 2,
                  "backup": 12, "write": 40, "prune": 8, "after": 10, "verify": 8}
 
-#: What the bar says while a stage runs. Short on purpose: it is painted inside a
-#: thin widget, and the status line under the tab has the long version.
+#: What the bar says during a stage; short, it fits the bar.
 STAGE_WORDS = {"tree": "finding the files", "fetch": "downloading", "remote": "asking the device",
                "ready": "nothing to write", "confirm": "waiting for you",
                "backup": "backing up", "write": "writing files", "prune": "tidying away",
@@ -733,8 +824,7 @@ STAGE_WORDS = {"tree": "finding the files", "fetch": "downloading", "remote": "a
 
 
 def route(values: dict, action: str) -> list[str]:
-    """The stages this job walks. A local folder needs no download, and only an
-    install writes, tidies up, sets the entry going and checks the page."""
+    """The stages this job walks; only an install writes, tidies and checks."""
     stages = ["tree"]
     if not is_local(values):
         stages.append("fetch")
@@ -745,10 +835,7 @@ def route(values: dict, action: str) -> list[str]:
 
 
 def _bar_spans(stages: list[str]) -> tuple[dict, int]:
-    """Slice the bar across this route: where each stage starts, how far it can
-    go, and the total the bar is scaled to. The last stage's end is the maximum,
-    so a job that finishes always lands on 100% and one that stops short does not
-    pretend it finished."""
+    """Slice the bar across this route; the last stage's end is the maximum."""
     spans: dict[str, tuple[int, int]] = {}
     total = 0
     for stage in stages:
@@ -758,8 +845,7 @@ def _bar_spans(stages: list[str]) -> tuple[dict, int]:
 
 
 def _bar_stage(stage: str) -> None:
-    """The bar as one stage begins: the ground it has already covered is filled
-    in, and its word goes on the bar."""
+    """The bar as one stage begins: ground covered is filled in, word set."""
     start, _weight = (job.get("spans") or {}).get(stage, (0, 0))
     api.tabs.set_widget(TAB, "bar", "value", start)
     bar_text(STAGE_WORDS.get(stage, stage))
@@ -780,6 +866,8 @@ def start_job(stages: list[str], label: str, values: dict) -> None:
     _buttons(False)
     api.tabs.set_widget(TAB, "log", "value", "")
     api.tabs.set_widget(TAB, "plan", "rows", [])
+    reset_totals()
+    view_page(0)                       # the plan is what a new job starts on
     api.tabs.set_widget(TAB, "bar", "maximum", units)
     api.tabs.set_widget(TAB, "bar", "value", 0)
     if "fetch" in stages:
@@ -796,6 +884,10 @@ def _enter(stage: str) -> None:
     job["stage"] = stage
     job["index"] = 0
     _bar_stage(stage)
+    # Step flow follows the route: past done, this one lit.
+    stages = list(job["stages"])
+    paint_steps(stages, stages.index(stage) if stage in stages else 0,
+                STAGE_TO_STEP.get(stage))
     handler = STAGES.get(stage)
     if handler is None:
         stop(f"this addon asked for a stage it has no code for: {stage}")
@@ -820,12 +912,7 @@ def _next() -> None:
 
 
 def _again(delay: float = 0.01) -> None:
-    """Come back for the next unit of this stage on the next tick.
-
-    Everything slow here is done a piece at a time for one reason: the app keeps
-    painting and answering while a job runs. The same install done in one call
-    would finish looking the same and be frozen the whole way through.
-    """
+    """Come back for the next unit of this stage; a piece at a time keeps painting."""
     if job is not None:
         api.schedule.after(delay, _tick)
 
@@ -852,8 +939,13 @@ def _progress(done: int, total: int, text: str) -> None:
 def stop(text: str = "stopped") -> None:
     """Give the job up: the buttons come back and the session goes."""
     global working, job
+    stages = list((job or {}).get("stages") or [])
+    stage = str((job or {}).get("stage") or "")
     _close_session()
     _drop_http()
+    if stages:
+        # Steps before the cut-off read done; the rest do not.
+        paint_steps(stages, stages.index(stage) if stage in stages else len(stages))
     working = False
     job = None
     _buttons(True)
@@ -863,12 +955,7 @@ def stop(text: str = "stopped") -> None:
 
 
 def _done() -> None:
-    """The end of a route, in one line that says what happened.
-
-    The words are worked out while the job is still there: a summary is a small
-    function, and one that looks something up in the job would find nothing at
-    all once the job has been put away.
-    """
+    """The end of a route, in one line; the words are made while the job exists."""
     global working, job
     if job is None:
         return
@@ -891,6 +978,8 @@ def _done() -> None:
                 parts.append(f"{removed} tidied away")
             text = ", ".join(parts)
     units = int((job or {}).get("units") or 100)
+    # Finish every step while the job can still be read.
+    paint_steps(list(job["stages"]), len(job["stages"]))
     _close_session()
     _drop_http()
     api.tabs.set_widget(TAB, "bar", "value", units)   # the bar ends full, every time
@@ -907,25 +996,16 @@ def _done() -> None:
 
 
 def _problem(text: str) -> None:
-    """Log one thing that went wrong and keep the job moving.
-
-    A file that will not upload should not take the twenty-one around it down
-    with it, but it has to be said out loud rather than counted quietly at the
-    end.
-    """
+    """Log one thing that went wrong and keep the job moving."""
     if job is not None:
         job.setdefault("errors", []).append(str(text))
     note(f"problem: {text}")
     api.error(text)
 
 
-def _device(command: str, then, timeout: int = 90, step: str = "") -> None:
-    """One SSH command for the job, its answer carried back into the route.
-
-    The command runs in the app's pool and the callback arrives on the GUI
-    thread, so nothing here waits on the device and the tab paints while it
-    thinks.
-    """
+def _device(command: str, then: Callable[[dict], None], timeout: int = 90,
+            step: str = "") -> None:
+    """One SSH command for the job; its answer comes back on the GUI thread."""
     if job is None:
         return
     if step:
@@ -947,9 +1027,7 @@ def _device(command: str, then, timeout: int = 90, step: str = "") -> None:
     api.device.run_async(command, answered, timeout=timeout)
 
 
-# ---------------------------------------------------------------------------
-# Stage: the list of files
-# ---------------------------------------------------------------------------
+# --- stage: the list of files ---
 
 def _stage_tree() -> None:
     """Work out what there is to install, from GitHub or from a folder here."""
@@ -961,13 +1039,7 @@ def _stage_tree() -> None:
 
 
 def _github_tree(values: dict, paths: dict) -> None:
-    """Ask GitHub for the tree of that folder; fall back to the built-in list.
-
-    One call gives every path and its size, which is what the plan table wants
-    before anything is fetched. The anonymous limit is sixty an hour, so a
-    refusal is expected now and then and is not fatal: the files themselves come
-    off a CDN that is not counted the same way.
-    """
+    """Ask GitHub for the tree of that folder; fall back to the built-in list."""
     owner = safe_path(config_get(values, "owner", ""), DEFAULTS["owner"])
     repo = safe_path(config_get(values, "repo", ""), DEFAULTS["repo"])
     prefix = paths["repo_path"]
@@ -1042,9 +1114,7 @@ def _set_items(items: list[dict]) -> None:
     _next()
 
 
-# ---------------------------------------------------------------------------
-# Stage: the files themselves
-# ---------------------------------------------------------------------------
+# --- stage: the files themselves ---
 
 def _stage_fetch() -> None:
     """Start the download, one file per tick."""
@@ -1077,9 +1147,7 @@ def _unit_fetch() -> None:
         stop(f"the download stopped: {error}")
         return
     if status == 404 and not job.get("fetched"):
-        # The first file not being there means the address is wrong rather than
-        # one file having gone away, and twenty-two more asks would only say it
-        # louder. GitHub's own advice is the longer part of the message.
+        # A first 404 means a wrong address, not one file gone.
         stop(f"{one_line(config_get(values, 'owner', ''))}/"
              f"{one_line(config_get(values, 'repo', ''))} has no "
              f"{full} at {one_line(config_get(values, 'ref', 'main'))}. Check the "
@@ -1106,11 +1174,7 @@ def _unit_fetch() -> None:
 
 
 def staging() -> Path:
-    """The addon's own folder for what it downloads.
-
-    Under ``api.paths.data``, so a built program writes beside itself rather than
-    inside its own read-only bundle, and none of the user's files are involved.
-    """
+    """The addon's own folder under ``api.paths.data`` for what it downloads."""
     folder = Path(api.paths.data) / "staging"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
@@ -1118,8 +1182,6 @@ def staging() -> Path:
 
 def _reset_staging() -> None:
     """Empty the staging folder before a download, so no old file rides along."""
-    import shutil
-
     for child in staging().iterdir():
         try:
             if child.is_dir():
@@ -1130,16 +1192,10 @@ def _reset_staging() -> None:
             pass
 
 
-# ---------------------------------------------------------------------------
-# Stage: what the device already has
-# ---------------------------------------------------------------------------
+# --- stage: what the device already has ---
 
 def _stage_remote() -> None:
-    """One command listing every file under the remote root, with its size.
-
-    Metadata only: the plan is worked out from sizes, so nothing is downloaded to
-    find out what is already there.
-    """
+    """One command listing every file under the remote root, with its size."""
     script = "\n".join([
         f'ROOT={quoted(_remote_root())}',
         'if [ ! -d "$ROOT" ]; then echo "NOTHING: that folder is not there yet"; '
@@ -1178,6 +1234,8 @@ def on_remote(result: dict) -> None:
             item["action"] = "already there"
         else:
             item["action"] = "replaced"
+    # Leftovers no route asked for, counted for the third badge.
+    job["extras"] = len(_extras(job["items"], job["paths"]))
     show_plan(job["items"])
     if not remote:
         note("the remote folder is empty or missing - this is a fresh install")
@@ -1205,9 +1263,7 @@ def _stage_ready() -> None:
     _next()
 
 
-# ---------------------------------------------------------------------------
-# Stage: the ask, the backup, and the writing
-# ---------------------------------------------------------------------------
+# --- stage: the ask, the backup, and the writing ---
 
 def _stage_confirm() -> None:
     """Ask once, in plain words, before anything on the device is touched."""
@@ -1363,11 +1419,7 @@ def _stage_after() -> None:
 
 
 def _page_probe(urls: list[str]) -> list[str]:
-    """Shell that asks for the page at each address in turn and stops at the first
-    answer. The dashboard's certificate is self-signed by design, so the check
-    turns verification off: it is asking whether something answers, not whether
-    this machine would trust the chain.
-    """
+    """Shell that asks for the page at each address, stopping at the first answer."""
     return [
         "for URL in %s; do" % " ".join(quoted(text) for text in urls),
         '  BODY=$(command -v curl >/dev/null 2>&1 && curl -s -k -m 10 "$URL" 2>/dev/null)',
@@ -1426,9 +1478,7 @@ def on_verified(result: dict) -> None:
     _next()
 
 
-# ---------------------------------------------------------------------------
-# One SFTP session, when the app will hand one out
-# ---------------------------------------------------------------------------
+# --- one SFTP session, when the app will hand one out ---
 
 def _remote_root() -> str:
     """The profile's deploy folder: every path in this job sits below it."""
@@ -1444,13 +1494,7 @@ def _remote_root() -> str:
 
 
 def _open_session() -> bool:
-    """Hold one SSH session for the whole transfer, if this addon may.
-
-    A Python addon inside the app can keep a session open, which is the
-    difference between twenty files going up in one connection and twenty
-    handshakes. A compiled addon is told in as many words that it cannot, and the
-    same code then uses the file methods, each of which opens and closes its own.
-    """
+    """Hold one SSH session for the whole transfer, if this addon may."""
     if job is None:
         return False
     if job.get("session") is not None:
@@ -1501,7 +1545,7 @@ def device_full(target: str) -> str:
     return posixpath.normpath(posixpath.join(root, str(target).lstrip("/")))
 
 
-def _remote_dirs(sftp, directory: str) -> None:
+def _remote_dirs(sftp: Any, directory: str) -> None:
     """mkdir -p over SFTP, so every file has somewhere to land."""
     if not directory or directory == "/":
         return
@@ -1517,11 +1561,9 @@ def _remote_dirs(sftp, directory: str) -> None:
             pass
 
 
-# ---------------------------------------------------------------------------
-# Two buttons that are a single command, not a job
-# ---------------------------------------------------------------------------
+# --- two buttons that are a single command, not a job ---
 
-def _quick(command: str, told, step: str, timeout: int = 90) -> None:
+def _quick(command: str, told: Callable[[dict], None], step: str, timeout: int = 90) -> None:
     """One command with the buttons held down while the device thinks."""
     global working
     if working or api is None:
@@ -1619,19 +1661,13 @@ def open_dashboard(_checked: bool = False) -> None:
         say(f"the page could not be opened: {error}", bad=True)
 
 
-# ---------------------------------------------------------------------------
-# GitHub connections, made once and dropped when a job ends
-# ---------------------------------------------------------------------------
+# --- GitHub connections, reused then dropped ---
 
 _fetchers: dict[str, Fetcher] = {}
 
 
 def _http(values: dict) -> Fetcher:
-    """The shared fetcher, keeping its HTTPS connections open between calls.
-
-    Keyed by token, so a job that changed it does not inherit a connection that
-    would still present the old credentials.
-    """
+    """The shared fetcher, keyed by token so a changed one does not inherit connections."""
     key = str(config_get(values, "token", "") or "")
     fetcher = _fetchers.get(key)
     if fetcher is None:
@@ -1646,16 +1682,10 @@ def _drop_http() -> None:
     _fetchers.clear()
 
 
-# ---------------------------------------------------------------------------
-# The buttons
-# ---------------------------------------------------------------------------
+# --- the buttons ---
 
 def _buttons(usable: bool) -> None:
-    """Grey the buttons out while a job is running, through the app.
-
-    The Stop button is the other way round: it is only of any use while the rest
-    of the tab is asleep.
-    """
+    """Grey the buttons out while a job runs; Stop is the other way round."""
     for identifier, _text in BUTTONS:
         try:
             api.tabs.set_widget(TAB, identifier, "enabled", bool(usable))
@@ -1680,12 +1710,7 @@ def _begin(action: str) -> None:
 
 
 def _ensure_sftp(values: dict) -> None:
-    """Ask the app for a session if there is none, and say that it was asked.
-
-    Every device call opens one of its own when it has to, so this is only about
-    the profile's password: without a saved one the app cannot connect at all,
-    and it is better to have said so at the start than to fail twenty times.
-    """
+    """Ask the app for a session if there is none, so a missing password says so up front."""
     try:
         if api.device.is_connected("sftp"):
             return
@@ -1731,7 +1756,7 @@ HANDLERS.update({
     "stop": stop_job,
 })
 
-#: The stages a route is made of, and the per-file work each one repeats.
+#: The stages a route is made of, and the work each repeats.
 STAGES = {
     "tree": _stage_tree,
     "fetch": _stage_fetch,
@@ -1748,9 +1773,7 @@ STAGES = {
 UNITS = {"fetch": _unit_fetch, "write": _unit_write}
 
 
-# ---------------------------------------------------------------------------
-# The hooks the app calls
-# ---------------------------------------------------------------------------
+# --- the hooks the app calls ---
 
 def focus_tab(_checked: bool = False) -> None:
     """The Tools menu entry: go to the tab."""
@@ -1759,7 +1782,7 @@ def focus_tab(_checked: bool = False) -> None:
     api.tabs.activate(TAB)
 
 
-def init(plugin_api) -> None:
+def init(plugin_api: Any) -> None:
     """Build the tab from the saved config."""
     global api
     api = plugin_api
@@ -1787,13 +1810,7 @@ def shutdown() -> None:
 
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
-    """A control on the tab reported something: run what its button means.
-
-    Every button in the spec says ``"on": ["clicked"]``, so the app calls this
-    with the id it was pressed. It is the only way a click reaches an addon that
-    has been compiled into a program of its own, because the widget itself lives
-    in the app's process and cannot be handed over.
-    """
+    """A button on the tab was clicked: run what its id means."""
     if str(tab) != TAB or str(event) != "clicked":
         return
     handler = HANDLERS.get(str(identifier))

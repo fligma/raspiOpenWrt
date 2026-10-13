@@ -4,7 +4,7 @@
   "profiles": [
     {
       "name": "Default",
-      "host": "192.168.1.1",
+      "host": "192.168.12.1",
       "port": 22,
       "username": "root",
       "key_file": "",
@@ -12,22 +12,8 @@
       "source": "",
       "trust_unknown_host": false,
       "remember_password": false,
-      "deploy_ignore": [
-        "*.bak",
-        "assets/private/"
-      ],
       "ssh_timeout": 12,
-      "post_deploy_commands": [
-      ],
       "logging_enabled": true,
-      "remote_backup_enabled": false,
-      "local_backup_enabled": false,
-      "mirror_delete_remote": false,
-      "mirror_delete_local": false,
-      "backup_directory": "/tmp/rasconf_backups",
-      "local_backup_directory": "",
-      "keep_last_n_backups": 5,
-      "confirm_destructive": true,
       "show_hidden_files": true,
       "auto_connect_sftp": false,
       "auto_connect_ssh": false,
@@ -44,9 +30,8 @@
       "tab_order": [
         "Berry",
         "SSH",
-        "Web Interface",
+        "Web",
         "LuCI",
-        "Certificates",
         "Web installer"
       ],
       "terminal_font_size": 10,
@@ -56,15 +41,15 @@
       "terminal_history_limit": 500,
       "web_port": 8989,
       "web_path": "/cgi-bin/index.py",
-      "luci_url": "http://192.168.1.1/",
+      "luci_url": "http://192.168.12.1/",
       "web_tabs": [
-        { "name": "Web Interface", "ip": "", "port": 8989, "path": "/cgi-bin/index.py", "scheme": "http" },
+        { "name": "Web", "ip": "", "port": 8989, "path": "/cgi-bin/index.py", "scheme": "http" },  
         { "name": "LuCI", "ip": "", "port": 80, "path": "/", "scheme": "http" }
       ],
       "addons": {
         "berry": { "enabled": true, "settings": {} },
-        "cert_manager": { "enabled": true, "settings": {} },
-        "web_installer": { "enabled": true, "settings": {} }
+        "addon_store": { "enabled": true, "settings": {} },
+        "web_installer": { "enabled": false, "settings": {} }
       },
       "quick_commands": [
         { "label": "Show version", "command": "cat /etc/openwrt_release" }

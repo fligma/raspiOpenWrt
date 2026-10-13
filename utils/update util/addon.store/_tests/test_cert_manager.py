@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A test for addons/cert_manager.py.
+"""A test for the cert_manager addon (in addon.store, or addons if re-shipped).
 
 The certificate addon's whole job is one openssl request written into a shell
 heredoc, and openssl is strict about what may go in it - stricter than anything
@@ -22,7 +22,11 @@ Four things get looked at:
 
 No internet and no device are needed. Run it from the Test panel, or::
 
-    python addons/_tests/test_cert_manager.py
+    python addon.store/_tests/test_cert_manager.py
+
+The Berry addon store also runs this file before it compiles the addon, setting
+``RASCONF_ADDON_SOURCE`` to the freshly downloaded ``.py`` so the copy under test
+is the one that is about to be built.
 """
 
 from __future__ import annotations
@@ -30,16 +34,22 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")      # widgets, no window
 
-#: The folder rasconf Manager and addon_client live in, two levels up from here.
+#: The folder Berry Manager and addon_client live in, two levels up from here.
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 import addon_client                                          # noqa: E402
 
-SOURCE = ROOT / "addons" / "cert_manager.py"
+#: The addon to test: the copy a store install handed over, else the one in the
+#: tree - the store folder first, the addons folder if it was ever re-shipped.
+_HANDED = os.environ.get("RASCONF_ADDON_SOURCE")
+SOURCE = Path(_HANDED) if _HANDED else ROOT / "addon.store" / "cert_manager.py"
+if not _HANDED and not SOURCE.is_file():
+    SOURCE = ROOT / "addons" / "cert_manager.py"
 FAILURES: list[str] = []
 
 #: The address the fake connection panel reports, which a blank Common name and
@@ -91,7 +101,7 @@ ISSUED = {"code": 0,
           "err": ""}
 
 
-def check(condition, text: str) -> None:
+def check(condition: object, text: str) -> None:
     """One thing the addon has to do; all of them are reported, not just the first."""
     if not condition:
         FAILURES.append(text)
@@ -103,21 +113,19 @@ def look(text: str) -> None:
     print(f"       {text}")
 
 
-# ---------------------------------------------------------------------------
-# The api object the addon is handed
-# ---------------------------------------------------------------------------
+# --- the api object the addon is handed ---
 
 class Api(addon_client.StubAPI):
     """The recording stub, with a device that answers and a form that holds."""
 
-    def __init__(self, *args, answer=ISSUED, host="192.168.50.1", **named):
+    def __init__(self, *args: Any, answer: Any = ISSUED, host: str = "192.168.50.1", **named: Any) -> None:
         super().__init__(*args, **named)
         self.device_answer = answer
         self.host = host
         self.form: dict = {}
         self.commands: list[str] = []
 
-    def default(self, method, arguments, named):
+    def default(self, method: str, arguments: Any, named: Any) -> Any:
         if method == "device.run_async":
             command = self.argument(method, "command", arguments, named, "")
             callback = self.argument(method, "on_done", arguments, named)
@@ -155,7 +163,7 @@ class Api(addon_client.StubAPI):
                     out.append(arguments[3] if len(arguments) > 3 else None)
         return out
 
-    def last_set(self, identifier: str, prop: str):
+    def last_set(self, identifier: str, prop: str) -> Any:
         values = self.sets(identifier, prop)
         return values[-1] if values else None
 
@@ -182,7 +190,7 @@ def as_form(cert: dict) -> dict:
     return out
 
 
-def fresh(cert: dict, answer=ISSUED, host=HOST, saved: dict | None = None) -> Api:
+def fresh(cert: dict, answer: Any = ISSUED, host: str = HOST, saved: dict | None = None) -> Api:
     """The addon on a stub api, its form filled in as ``cert`` says."""
     api = Api(addon_id="cert_manager", config=dict(saved or {}),
               answer=answer, host=host)
@@ -191,9 +199,7 @@ def fresh(cert: dict, answer=ISSUED, host=HOST, saved: dict | None = None) -> Ap
     return api
 
 
-# ---------------------------------------------------------------------------
-# One: the subject that reaches openssl
-# ---------------------------------------------------------------------------
+# --- one: the subject that reaches openssl ---
 
 def test_the_subject() -> None:
     print("\n1. the subject, as it goes into the .cnf")
@@ -221,9 +227,7 @@ def test_the_subject() -> None:
           "cleaning the subject also touched a value somebody really typed")
 
 
-# ---------------------------------------------------------------------------
-# Two: the check that refuses what openssl would refuse
-# ---------------------------------------------------------------------------
+# --- two: the check that refuses what openssl would refuse ---
 
 def test_the_check() -> None:
     print("\n2. refusing a request openssl would refuse")
@@ -262,9 +266,7 @@ def test_the_check() -> None:
           f"a name with a space in it was let through: {spaced}")
 
 
-# ---------------------------------------------------------------------------
-# Three: the script that goes over SSH
-# ---------------------------------------------------------------------------
+# --- three: the script that goes over SSH ---
 
 def test_the_script() -> None:
     print("\n3. the script the device runs")
@@ -299,9 +301,7 @@ def test_the_script() -> None:
     look(f"{len(filled.splitlines())} line(s) of shell")
 
 
-# ---------------------------------------------------------------------------
-# Four: what a refusal on the device is turned into
-# ---------------------------------------------------------------------------
+# --- four: what a refusal on the device becomes ---
 
 def test_the_failure() -> None:
     print("\n4. what the device's answer becomes")
@@ -357,11 +357,9 @@ def test_the_failure() -> None:
     cert_manager.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# Five: the tab, and the config it leaves behind
-# ---------------------------------------------------------------------------
+# --- five: the tab, and the config it leaves behind ---
 
-def test_the_tab(app) -> None:
+def test_the_tab(app: Any) -> None:
     print("\n5. the tab, built by Qt from the spec")
     import addon_api
 
@@ -390,7 +388,7 @@ def test_the_tab(app) -> None:
     check(registry["key_type"].currentText() in ("ec", "rsa"),
           "the key type is not a choice of the two openssl takes")
 
-    def applies(identifier, prop, value):
+    def applies(identifier: str, prop: str, value: Any) -> str:
         try:
             addon_api.apply_widget_property(registry[identifier], prop, value)
         except Exception as error:              # noqa: BLE001 - the point of the check
@@ -422,11 +420,9 @@ def test_the_tab(app) -> None:
     cert_manager.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# Seven: the mark beside the tab's label
-# ---------------------------------------------------------------------------
+# --- seven: the mark beside the tab's label ---
 
-def test_the_mark(app) -> None:
+def test_the_mark(app: Any) -> None:
     """The trophy: what the addon sends, and what the app makes of it."""
     print("\n7. the tab's mark")
     api = fresh(PROPER, saved=PROPER)
@@ -484,7 +480,7 @@ def test_the_mark(app) -> None:
     cert_manager.shutdown()
 
 
-# ---------------------------------------------------------------------------
+# --- run it ---
 
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
