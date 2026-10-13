@@ -963,12 +963,15 @@ class BerryManager(
             if used:
                 for transport in used:
                     row.addWidget(self._transport_state_part(transport, states))
-                own = bool(getattr(addon, "own_connection", False))
+                own = bool(getattr(addon, "uses_own", addon.own_connection))
+                declared = str(getattr(addon, "connection", "app"))
                 mode = QLabel("own connection" if own else "main connection")
                 mode.setStyleSheet("color: #8f8f8f;")
                 mode.setToolTip(
-                    "This addon opens a fresh connection for every call." if own
-                    else "This addon shares the app's main SSH/SFTP session.")
+                    "This addon opened its own connection for every call."
+                    if own else
+                    "This addon shares the app's main SSH/SFTP session.")
+                mode.setToolTip(mode.toolTip() + f"\nDeclared in its manifest: \"connection\": \"{declared}\".")
                 row.addWidget(mode)
             else:
                 quiet = QLabel("no connection declared")
@@ -1175,8 +1178,10 @@ class BerryManager(
 
         self.ssh_tab_check = ToggleSwitch("Show the SSH terminal tab")
         self.ssh_tab_check.setToolTip(
-            "Add or remove the SSH terminal tab. The protocol stays available "
-            "to the API and the addons either way."
+            "Add or remove the SSH terminal tab. This switch is also the SSH "
+            "gate for the addons and the device API: switched off, they are "
+            "refused SSH work until it is on. The master switch in this "
+            "panel's header stops both protocols for everyone."
         )
         self.ssh_tab_check.setChecked(bool(self.app_config.get("ssh_enabled", True)))
         ssh_body.addWidget(self.ssh_tab_check)
@@ -1233,6 +1238,17 @@ class BerryManager(
         sftp_body = QVBoxLayout(sftp_box)
         sftp_body.setContentsMargins(16, 12, 12, 10)
         sftp_body.setSpacing(8)
+
+        self.sftp_enable_check = ToggleSwitch("Enable the SFTP connection")
+        self.sftp_enable_check.setToolTip(
+            "The gate for file transfer. Switched off, the connect controls "
+            "and the Remote dir line go away and the addons and the device "
+            "API are refused SFTP work until it is on again. The master "
+            "switch in this panel's header stops both protocols for everyone."
+        )
+        self.sftp_enable_check.setChecked(bool(self.app_config.get("sftp_enabled", True)))
+        self.sftp_enable_check.toggled.connect(self._on_sftp_enabled_toggled)
+        sftp_body.addWidget(self.sftp_enable_check)
 
         self.sftp_auto_connect_check = ToggleSwitch("Auto-connect at startup")
         self.sftp_auto_connect_check.setToolTip("Open the SFTP connection automatically when the app starts.")
@@ -1382,6 +1398,7 @@ class BerryManager(
         self.app_config["max_log_lines"] = self.max_log_spin.value()
         self.app_config["logging_enabled"] = self.logging_group.isChecked()
         self.app_config["ssh_enabled"] = self.ssh_tab_check.isChecked()
+        self.app_config["sftp_enabled"] = self.sftp_enable_check.isChecked()
         self.app_config["reboot_wait_seconds"] = self.reboot_wait_spin.value()
         self.app_config["reboot_retry_interval"] = self.reboot_retry_spin.value()
         self.app_config["reboot_auto_watch"] = self.reboot_auto_watch_check.isChecked()
@@ -1406,6 +1423,13 @@ class BerryManager(
         self.ensure_main_tabs()
         self._apply_remembered_order()
         self._reload_default_tab_combo(select=self.app_config.get("default_tab", "Berry"))
+
+    def _on_sftp_enabled_toggled(self, _checked: bool = False) -> None:
+        """Persist the SFTP gate: off hides its controls and refuses SFTP work
+        for the addons and the device API; the master switch stops both."""
+        self.app_config["sftp_enabled"] = self.sftp_enable_check.isChecked()
+        self.save_app_config()
+        self.update_connection_ui()
 
     def _on_addon_dev_toggled(self, _checked: bool = False) -> None:
         """Show or hide the Addon Dev tab and its Tools entry as it is switched."""
@@ -1489,6 +1513,7 @@ class BerryManager(
         self.action_log_console.setChecked(bool(cfg.get("log_visible", True)))
 
         self.ssh_tab_check.setChecked(bool(cfg.get("ssh_enabled", True)))
+        self.sftp_enable_check.setChecked(bool(cfg.get("sftp_enabled", True)))
 
         master_switch = self.connection_group.switch
         master_wanted = bool(cfg.get("master_connection", True))
@@ -1674,7 +1699,7 @@ class BerryManager(
         box = QMessageBox(self)
         box.setWindowTitle("About Berry")
         box.setText(
-            "<b>Berry Manager V1.5.5</b><br>"
+            "<b>Berry Manager V1.5.6</b><br>"
             "Manage routers and devices over ssh&sftp<br>"
             'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'

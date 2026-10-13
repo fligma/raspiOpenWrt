@@ -191,6 +191,9 @@ def test_the_manifest(addon: Any) -> None:
     check(addon.ADDON.get("requires") == ["ssh"],
           f"the addon must declare its services: {addon.ADDON.get('requires')!r}")
     check(str(addon.ADDON.get("api")) == "1", "the addon must stay on api version 1")
+    check(addon.ADDON.get("connection") == "both",
+          f"the api now refuses a device= run unless the manifest declares it: "
+          f"{addon.ADDON.get('connection')!r}")
     positional = addon_client.ProcessAPI._POSITIONAL.get("device.run", ())
     check("device" in positional and "block" in positional,
           f"device.run's one-off device must be reachable by the pipe too: {positional}")

@@ -443,8 +443,9 @@ def addon_metadata(source: Path) -> dict:
     """What an addon's source says about itself: its manifest and its settings.
 
     A program built from that source cannot answer either until it runs, and the
-    app needs both before then: ``requires`` is what lets ``api.device`` use a
-    transport at all, and the declared fields are the form Settings shows. So the
+    app needs both before then: ``requires`` and ``connection`` are what let
+    ``api.device`` use a transport or its session at all, and the declared
+    fields are the form Settings shows. So the
     store reads them out of the file, with no import and no Qt, and keeps them
     beside the program and in the addon's own ``_data`` folder.
     """
@@ -531,6 +532,9 @@ ADDON = {
     "description": "$description",
     # The transports api.device may use; leave the key out if never.
     "requires": ["ssh", "sftp"],
+    # Whose connection the device calls use: "app" (the app's session),
+    # "own" (a fresh connection per call) or "both" (the user picks).
+    "connection": "app",
     "api": 1,
 }
 

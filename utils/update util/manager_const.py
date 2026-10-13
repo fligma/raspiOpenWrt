@@ -153,10 +153,12 @@ DEFAULT_APP_CONFIG = {
     "auto_connect_sftp": False,
     "auto_connect_ssh": False,
     "use_alt_icon": False,
-    # sftp_enabled hides the SFTP buttons and status line; an old
-    # profile may still carry it off. Nothing stops one protocol
-    # off now - the header stops both. ssh_enabled shows/hides the
-    # SSH terminal tab (Settings > Connection).
+    # Per-transport gates, each with its own switch in Settings >
+    # Connection. Off, the transport's controls go away and
+    # api.device refuses that transport to every addon (see the
+    # guards in addon_api); the header's master switch still stops
+    # both at once. ssh_enabled additionally shows or hides the
+    # SSH terminal tab.
     "sftp_enabled": True,
     "ssh_enabled": True,
     # The Addon Dev tab: the addon index, logs, processes, tools.

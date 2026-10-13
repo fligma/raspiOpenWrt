@@ -12,14 +12,15 @@
     {
       "id": "openwrt_logs",
       "name": "OpenWrt Log Viewer",
-      "version": "2.6",
+      "version": "2.7",
       "author": "fligma",
       "description": "a single-device log viewer and a multi-device view,colour-coded connections,log by time. The search highlights matching lines,",
       "filename": "openwrt_logs.py",
       "assets": [
         "openwrtlogsicon.png"
       ],
-      "test": "test_openwrt_logs.py"
+      "test": "test_openwrt_logs.py",
+      "status": "updated"
     },
     {
       "id": "openwrt_package_manager",

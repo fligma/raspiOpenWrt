@@ -259,9 +259,8 @@ class TerminalScreen(QWidget):
             self.saved_cursor = (self.cr, self.cc, *self.pen)
             self._state = "ground"
         elif ch == "8":
-            self.cr, self.cc, self.pen = (self.saved_cursor[0], self.saved_cursor[1]), \
-                                          (self.saved_cursor[2], self.saved_cursor[3], self.saved_cursor[4])
-            self.wrap_next = False
+            self._move(self.saved_cursor[0], self.saved_cursor[1])
+            self.pen = tuple(self.saved_cursor[2:])
             self._state = "ground"
         elif ch == "D":                # IND: down one line, scrolling if needed
             self._line_feed()
@@ -392,8 +391,8 @@ class TerminalScreen(QWidget):
         elif final == "s" and not private:
             self.saved_cursor = (self.cr, self.cc, *self.pen)
         elif final == "u" and not private:
-            self.cr, self.cc = self.saved_cursor[0], self.saved_cursor[1]
-            self.pen = self.saved_cursor[2:]
+            self._move(self.saved_cursor[0], self.saved_cursor[1])
+            self.pen = tuple(self.saved_cursor[2:])
         elif final == "t":
             pass                                           # window manipulation: ignored
         elif final == "Z":
@@ -418,7 +417,7 @@ class TerminalScreen(QWidget):
                 if on:
                     self.saved_cursor = (self.cr, self.cc, *self.pen)
                 else:
-                    self.cr, self.cc = self.saved_cursor[0], self.saved_cursor[1]
+                    self._move(self.saved_cursor[0], self.saved_cursor[1])
             elif mode in (47, 1047, 1049):
                 self._alternate(on, full=mode == 1049)
             elif mode == 2004:
@@ -467,7 +466,7 @@ class TerminalScreen(QWidget):
     def _back_tabs(self, count: int) -> None:
         for _ in range(max(1, count)):
             earlier = [t for t in self.tabs if t < self.cc]
-            self.cc = max(0, earlier[-1] if earlier else 0)
+            self.cc = max(earlier) if earlier else 0
 
     def _put(self, ch: str) -> None:
         if self.wrap_next:

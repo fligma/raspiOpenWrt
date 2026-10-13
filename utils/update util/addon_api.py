@@ -28,24 +28,33 @@ The namespaces on ``api``
     (the logo the program wears itself).
 
 ``api.device``
-    SSH and SFTP.
+    SSH and SFTP. Every call passes three gates: the master switch and the
+    transport's own switch in Settings > Connection must be on, the transport
+    must be listed under ``"requires"`` in the manifest, and the connection it
+    reaches must be the one the manifest declared under ``"connection"``:
+    ``"app"`` (the default - only the app's main session), ``"own"`` (only a
+    connection of its own) or ``"both"`` (either, the user's Settings switch
+    picks). An addon shipped with the program always rides the app's session.
     ``run(command, timeout=30, device=None)`` -> ``{"code", "out", "err"}`` (runs in
     the background and waits; use ``run_async(command, on_done)`` from ``init``),
     ``shell_send(line)`` writes to the live terminal tab,
-    ``ensure_connected("ssh"|"sftp")``, ``is_connected()``.
+    ``ensure_connected("ssh"|"sftp")``, ``is_connected()``, ``mode()`` and
+    ``set_mode("main"|"own")`` report and switch a ``"both"`` addon.
     ``device`` on ``run``/``run_async``/``open`` is a one-off dict of connection
     details (``host``, ``port``, ``username``, ``password``, ``key_file``,
-    ``remote_root``): the call reaches that machine instead of the profile,
-    for any addon that talks to several devices - one API call, so it stores
-    nothing and never moves the app's own session; addons shipped with the
-    program may use it too. ``bind()`` stays the drop-in-only door.
+    ``remote_root``): the call reaches that machine instead of the profile -
+    a connection of its own, so it needs ``"connection"`` to allow one; one
+    API call, so it stores nothing and never moves the app's own session;
+    addons shipped with the program may use it too. ``bind()`` stays the
+    drop-in-only door.
     Files: ``list()``, ``exists()``, ``stat()``, ``read_text()``,
     ``read_bytes()``, ``write_text()``, ``write_bytes()``, ``mkdir()``,
     ``remove()``, ``rename()``, ``upload()``, ``download()`` - each takes
     ``outside_root=True`` to reach above the profile's remote folder
     (``/etc/ssl`` and the like); without it a path stays inside that folder.
     ``open()`` is a context manager yielding a live ``Connection`` with
-    ``.client`` / ``.sftp`` (raw paramiko) for anything not covered above.
+    ``.client`` / ``.sftp`` (raw paramiko) for anything not covered above;
+    it opens a connection of its own, so it needs the same declaration.
 
 ``api.tabs``
     ``add_web_tab(name, url=None, ip="", port=80, path="/", scheme="http")``
@@ -1225,12 +1234,17 @@ class DeviceAPI:
         return getattr(self._api, "_addon", None)
 
     def _guard(self, transport: str) -> None:
-        """Refuse a transport unless the master switch and ``requires`` allow."""
+        """Refuse a transport unless the master switch, that transport's own
+        Settings switch and the addon's ``requires`` all allow it."""
         win = self._win
         check = getattr(win, "connections_enabled", None)
         if callable(check) and not check():
             raise AddonError(
                 "connections are switched off (Settings > Connection)")
+        config = getattr(win, "app_config", {}) or {}
+        if not bool(config.get(f"{transport}_enabled", True)):
+            raise AddonError(
+                f"{transport.upper()} is switched off (Settings > Connection)")
         addon = self._addon()
         declared = tuple(getattr(addon, "requires", ()) or ()) if addon is not None else ()
         if transport not in declared:
@@ -1240,11 +1254,34 @@ class DeviceAPI:
                 f"its connection services, e.g. \"requires\": {wanted} "
                 "in its ADDON manifest")
 
+    def _uses_own(self) -> bool:
+        """Whether this addon runs on a connection of its own right now."""
+        addon = self._addon()
+        return bool(getattr(addon, "uses_own", False)) if addon is not None else False
+
+    def _allow_own(self) -> None:
+        """Refuse any connection that is not the app's session unless the
+        manifest declared one; shipped addons carry their own permission."""
+        addon = self._addon()
+        if addon is None or getattr(addon, "is_bundled", False):
+            return
+        if str(getattr(addon, "connection", "app")) not in ("own", "both"):
+            raise AddonError(
+                'this addon may not open a connection of its own: it has to '
+                'declare its connection source, e.g. "connection": "own" '
+                '(or "both") in its ADDON manifest')
+
+    def _need_app(self, reason: str) -> None:
+        """Refuse work that reaches the app's own session for an addon that
+        declared only a connection of its own."""
+        if self._uses_own():
+            raise AddonError(
+                f"{reason} reaches the app's main session, but this addon "
+                'declared "connection": "own" in its ADDON manifest')
+
     def _shared(self) -> Any:
         """The app's main connection when this addon shares it, else ``None``."""
-        addon = self._addon()
-        if addon is not None and not getattr(addon, "is_bundled", False) \
-                and getattr(addon, "own_connection", False):
+        if self._uses_own():
             return None
         return getattr(self._win, "shared_conn", None)
 
@@ -1288,7 +1325,8 @@ class DeviceAPI:
         # Re-check the gates in the worker thread; they may have moved.
         self._guard("ssh")
         if device:
-            # A one-off device never uses the app's session.
+            # A one-off device is a connection of its own: declared only.
+            self._allow_own()
             shared = None
         else:
             shared = self._open_shared(settings)
@@ -1312,6 +1350,8 @@ class DeviceAPI:
             raise AddonError("empty command")
         self._check_device(device)
         self._guard("ssh")
+        if device:
+            self._allow_own()
         self._mark("ssh")
         future = POOL.submit(self._exec, command, timeout, device)
         if not block:
@@ -1323,6 +1363,8 @@ class DeviceAPI:
         """``run`` without waiting: ``on_done(result)`` arrives on the GUI thread."""
         self._check_device(device)
         self._guard("ssh")
+        if device:
+            self._allow_own()
         self._mark("ssh")
         future = POOL.submit(self._exec, command, timeout, device)
         if on_done is not None:
@@ -1339,6 +1381,7 @@ class DeviceAPI:
     def shell_send(self, line: str) -> bool:
         """Type into the live terminal tab. False when no shell is open."""
         self._guard("ssh")
+        self._need_app("device.shell_send()")
         self._mark("ssh")
         worker = self._win.shell_worker
         if worker is None or not worker.isRunning():
@@ -1353,12 +1396,15 @@ class DeviceAPI:
         check = getattr(win, "connections_enabled", None)
         if callable(check) and not check():
             return False
+        config = getattr(win, "app_config", {}) or {}
         shared = getattr(win, "shared_conn", None)
         live = bool(shared.active()) if shared is not None else False
         worker = win.shell_worker
         states = {
-            "sftp": bool(win.sftp_connected or live),
-            "ssh": bool((worker is not None and worker.isRunning()) or live),
+            "sftp": bool(win.sftp_connected or live)
+                    and bool(config.get("sftp_enabled", True)),
+            "ssh": bool((worker is not None and worker.isRunning()) or live)
+                   and bool(config.get("ssh_enabled", True)),
         }
         if protocol is None:
             return any(states.values())
@@ -1366,11 +1412,7 @@ class DeviceAPI:
 
     def mode(self) -> str:
         """``"main"`` shares the app's session, ``"own"`` connects per call."""
-        addon = self._addon()
-        if addon is not None and not getattr(addon, "is_bundled", False) \
-                and getattr(addon, "own_connection", False):
-            return "own"
-        return "main"
+        return "own" if self._uses_own() else "main"
 
     def set_mode(self, mode: str) -> None:
         """Switch a drop-in addon between the main and its own connection."""
@@ -1383,6 +1425,11 @@ class DeviceAPI:
         if getattr(addon, "is_bundled", False):
             raise AddonError("an addon shipped with the program always uses "
                              "the app's main connection")
+        if str(getattr(addon, "connection", "app")) != "both":
+            declared = str(getattr(addon, "connection", "app"))
+            raise AddonError('only an addon that declared "connection": '
+                             '"both" may switch between the two; this one '
+                             f'declared "{declared}"')
         manager = self._api._manager
         # The record and the Settings rows live on the GUI thread.
         manager.bus.post(lambda: manager.set_own_connection(addon.id,
@@ -1397,9 +1444,11 @@ class DeviceAPI:
             raise AddonError("an addon shipped with the program always uses "
                              "the app's main connection; it cannot bind a "
                              "different device")
-        if addon is not None and not getattr(addon, "own_connection", False):
+        self._allow_own()
+        if not self._uses_own():
             raise AddonError("bind only applies to an addon using its own "
-                             "connection: switch it on in Settings, or call "
+                             "connection: declare \"connection\": \"both\" "
+                             "and switch it on in Settings, or call "
                              "api.device.set_mode('own') first")
         wanted = str(host or "").strip()
         if not wanted:
@@ -1427,6 +1476,7 @@ class DeviceAPI:
         if kind not in ("sftp", "ssh"):
             raise AddonError("protocol must be 'sftp' or 'ssh'")
         self._guard(kind)
+        self._need_app("device.ensure_connected()")
         already = self.is_connected(kind)
         if not already:
             if kind == "sftp":
@@ -1470,6 +1520,7 @@ class DeviceAPI:
         """with api.device.open() as conn: a session you keep open; always its own connection, device overrides the details for it alone."""
         self._check_device(device)
         self._guard("sftp")
+        self._allow_own()
         self._mark("sftp")
         settings = self._settings(device)
         client = None

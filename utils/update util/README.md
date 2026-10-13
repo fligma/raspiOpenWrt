@@ -157,9 +157,12 @@ field is cleared and a stored credential is picked up again.
 
 The Settings tab is grouped into categories so that each section only shows the
 options that belong to it. The **SSH** category can be ticked off: unchecking it
-hides its options and removes the terminal from the window, and the state is
-saved (`ssh_enabled`). The **File transfer (SFTP)** block and the **Custom tabs**
-category are always shown. The file tab is no longer built into the app: the
+hides its options, removes the terminal from the window, and refuses SSH to the
+addons and the device API until it is back on; the state is saved
+(`ssh_enabled`). The **File transfer (SFTP)** block has its own **Enable the
+SFTP connection** switch (`sftp_enabled`): off, its connect controls go and
+addons are refused SFTP work. The **Custom tabs**
+category is always shown. The file tab is no longer built into the app: the
 bundled **Berry** addon browses files over this SFTP connection, and its on/off
 switch lives with the other shipped addons in **Bundled with the program** below.
 The connection panel is titled **Connection settings**; when the SFTP transport
@@ -191,6 +194,8 @@ hide their own indented options while off.
     (`addon_dev_enabled`). Off, the tab and the menu entry are gone; the
     addons themselves are still switched on and off in Settings below.
 - **File transfer (SFTP)** (always visible)
+  - **Enable the SFTP connection** - the gate: off, the connect controls go and
+    the addons and the device API are refused SFTP work (`sftp_enabled`)
   - Auto-connect at startup (opens the SFTP connection when the app launches)
   - **Enable logging to file** - when off, nothing is written to
     `berry_manager.log`. While on it exposes the maximum on-screen log lines
@@ -219,7 +224,8 @@ hide their own indented options while off.
     below). **Berry** is switched from here, which shows or hides its file tab.
     Addons you drop in later, and the ones the store installs, are listed under
     **Installed addons**, and a store install is not marked down for where it
-    came from: it gets the same switch, the same *own connection* option and the
+    came from: it gets the same switch, the same *own connection* option (where
+    its manifest declares `"connection": "both"`) and the
     same config panel as any other, because the store writes a manifest beside
     the program it built and seeds its settings folder before it is ever started.
 
@@ -298,8 +304,8 @@ is applied when the window opens; nothing needs a restart.
 | `show_hidden_files` | Include dot-files in Berry's device listing |
 | `auto_connect_sftp` | Open the SFTP connection at startup |
 | `auto_connect_ssh` | Open the SSH terminal at startup (only when the SSH tab is on) |
-| `sftp_enabled` | Whether the SFTP transport is used at all (drives the Remote dir line and connect button) |
-| `ssh_enabled` | Show the SSH tab (untick to hide it) |
+| `sftp_enabled` | SFTP gate: its controls show, and addons and the device API may use SFTP, only while it is on |
+| `ssh_enabled` | SSH gate and SSH tab visibility: off, the terminal tab is gone and addons are refused SSH work |
 | `addon_dev_enabled` | Show the Addon Dev tab and its Tools menu entry |
 | `reboot_wait_seconds` | Downtime allowed for a reboot before the first reconnect attempt (0-600) |
 | `reboot_retry_interval` | Seconds between reconnect attempts until the device answers (1-300) |
@@ -434,7 +440,9 @@ section per shipped addon, and an **Installed addons** list for everything that
 came in after the build - a hand-written `.py`, a program built by the Addon Dev
 tab, and an addon the store installed. Each row carries the addon's enable
 switch, its version and author, what it said about itself, a **Restart**
-button, an **own connection** switch where the addon asked for a transport, and
+button, an **own connection** switch where the addon's manifest declared
+`"connection": "both"` - that choice is the user's only where the author
+left it open - and
 a **Show tab** button when the addon opened one. A shipped addon gets the
 switch, its state and its config panel, plus **Show tab** while it has one - but
 no **Restart**: restarting reads the addon's file again, and that file is inside
@@ -482,6 +490,7 @@ too: **Show the Addon Dev tab** in Settings says whether it is there. See
 from addon_common import AddonError     # plain Python, nothing Qt behind it
 
 ADDON = {"name": "My tool", "version": "1.0", "api": 1,
+         "requires": ["ssh"], "connection": "app",
          "description": "What it does"}
 
 api = None
@@ -515,7 +524,7 @@ The object in `init` is the only door into the app:
 | --- | --- |
 | `api.id`, `api.name`, `api.log(text)`, `api.error(text)` | identity and the shared log |
 | `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the two an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request) and `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything) |
-| `api.device` | SSH and SFTP: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download` |
+| `api.device` | SSH and SFTP: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download`. Every call is refused unless the master switch and that transport's switch in Settings are on, the transport is listed under `"requires"`, and the connection it reaches is the one `"connection"` declares |
 | `api.tabs` | `add_web_tab`, `add_tab`, `close`, `rename`, `activate`, `names`, `exists`, `url`, `navigate`, `reload`, `view`, `widget`, `set_widget`, `widget_value`, `set_html`, `inject_css`, `inject_js`, `set_style`, `set_icon`, `icon`, `use_app_icon` |
 | `api.ui` | `information`, `warning`, `error`, `question`, `input`, `choose`, `notify`, `menu_item`, `dialog`, `set_setting_widget`, `window()` |
 | `api.events` | `on(name, callback)` (returns the unsubscribe callable), `off`, `names` |
@@ -537,6 +546,17 @@ want from `init`. Relative file paths are confined to the profile's remote
 directory, and `outside_root=True` opts out of that. Addons use the profile's
 saved connection details, which means a password has to be in the connection
 panel (or saved with **Remember password**) before a device call can connect.
+
+Every `api.device` call passes three gates. The **switches**: the master
+switch in the connection panel and that transport's own switch in Settings
+(`ssh_enabled`, `sftp_enabled`) both have to be on. The **transports**: the
+manifest's `"requires"` list names each transport the API may hand the addon.
+The **connection source**: `"connection"` says whose connection the calls
+use - `"app"` (the default) rides only the app's main session, `"own"` only a
+connection of its own (`run(device=...)`, `open()`, `bind()`), and `"both"`
+lets the user's *own connection* switch in Settings pick, which is also the
+only case where the addon may switch it itself with `api.device.set_mode()`.
+An addon that comes inside the program always rides the app's session.
 
 ### Each addon's own config file
 
@@ -877,13 +897,15 @@ way through:
    written into the active profile as **switched off**, so nothing of it runs
    until you turn it on;
 5. Settings > Addons is rescanned and its row appears under **Installed
-   addons** with a switch, an *own connection* option and a config panel like
-   any other addon's, waiting to be turned on.
+   addons** with a switch, a config panel and - where its manifest declared
+   `"connection": "both"` - an *own connection* option, like any other
+   addon's, waiting to be turned on.
 
 Step 4 also writes down what the addon's own source declared, which is what
 makes that row a full one before the program has ever run: an `addons/<id>.json`
 manifest beside it - `name`, `version`, `author`, `description`, `api`, the
-`ssh`/`sftp` transports `api.device` is allowed to hand it, and an `origin` mark
+`ssh`/`sftp` transports `api.device` is allowed to hand it, the `connection`
+declaration saying whose connection it may use, and an `origin` mark
 saying the store put it there - and its `fields.json` form, with a `config.json`
 seeded from the addon's defaults, under `addons/_data/<id>`. Both are read
 without importing or running any of the addon, since the source is parsed with

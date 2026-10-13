@@ -49,11 +49,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     _code = main()
-    # A requested restart really starts here: the window is closed, the
-    # addons and connections are down and Qt is finished, so the fresh
-    # copy meets none of this one's files still held open - and it is
-    # started detached and untracked, so the exit cleanup below lets it
-    # live.
     if take_restart_request() and not relaunch_process():
         print("could not start a new copy; reopen the app manually",
               file=sys.stderr)

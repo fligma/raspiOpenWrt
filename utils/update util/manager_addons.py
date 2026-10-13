@@ -198,6 +198,7 @@ class Addon:
         self.uses_sftp = False
         self.requires: tuple = ()             # manifest "requires"
         self.own_connection = False           # False: share the app connection
+        self.connection = "app"               # manifest "connection": app/own/both
 
     @property
     def is_bundled(self) -> bool:
@@ -223,6 +224,19 @@ class Addon:
             return ADDONS_DIR.resolve() in self.source.resolve().parents
         except OSError:
             return False
+
+    @property
+    def uses_own(self) -> bool:
+        """Whose connection this addon actually runs on: the manifest says
+        whether it may have one of its own at all, and only a "both" addon
+        leaves that choice to the user's Settings switch."""
+        if self.is_bundled:
+            return False          # a shipped addon is pinned to the app session
+        if self.connection == "own":
+            return True
+        if self.connection == "both":
+            return bool(self.own_connection)
+        return False
 
     def has_source_beside(self) -> bool:
         """Whether the file or folder this program was built from is next to it."""
@@ -693,6 +707,8 @@ class AddonManager:
             "enabled": bool(addon.enabled),
             "requires": list(addon.requires),
             "own_connection": bool(addon.own_connection),
+            "connection": addon.connection,
+            "uses_own": bool(addon.uses_own),
             "loaded": bool(addon.loaded),
             "source": str(addon.source),
             "home": str(addon.home),
@@ -751,6 +767,14 @@ class AddonManager:
             # Bundled addons are pinned to the main connection.
             addon.own_connection = (
                 bool(record.get("own_connection", False)) and not addon.is_bundled)
+            if addon.own_connection and "connection" not in (addon.manifest or {}):
+                # An install from before the "connection" declaration, which the
+                # profile had moved onto a connection of its own, keeps that
+                # choice: undeclared plus an own switch means it may use both.
+                addon.connection = "both"
+                self.log(addon.id, "no \"connection\" in its manifest, but the "
+                           "profile had it on its own connection: treated as "
+                           "\"both\"", warning=True)
             previous = keep.get(addon.id)
             if previous is not None and previous.loaded:
                 # Same id still on: tear the old one down so new code runs.
@@ -793,6 +817,18 @@ class AddonManager:
         if isinstance(value, (list, tuple, set)):
             addon.requires = tuple(sorted(
                 {str(part).strip().lower() for part in value} & {"ssh", "sftp"}))
+        # "connection" declares whose connection the addon uses; undeclared
+        # means the app's, and an addon may never use another kind than the
+        # one it declared here.
+        value = manifest.get("connection")
+        if value is not None:
+            text = str(value).strip().lower()
+            if text in ("app", "main"):
+                addon.connection = "app"
+            elif text in ("own", "private"):
+                addon.connection = "own"
+            elif text == "both":
+                addon.connection = "both"
 
     def preview_manifest(self, addon: Addon) -> None:
         """What a program's sidecar says about it, read before it has run once.
@@ -1011,6 +1047,18 @@ class AddonManager:
             return
         if addon.is_bundled:
             # A shipped addon always uses the app's main connection.
+            return
+        if addon.connection != "both":
+            # The source is the addon's declaration, not the user's to switch;
+            # clear the stored choice so it cannot outlive that declaration.
+            record = self.record_for(addon_id)
+            if record.get("own_connection") or addon.own_connection:
+                record["own_connection"] = False
+                addon.own_connection = False
+                self.save_records()
+            self.log(addon_id, f"ignoring the own-connection switch: this "
+                               f"addon declared \"connection\": "
+                               f"\"{addon.connection}\"", True)
             return
         record = self.record_for(addon_id)
         record["own_connection"] = bool(own)
@@ -1576,8 +1624,9 @@ class AddonManager:
         head.addWidget(status)
         # SSH / SFTP dots, for every transport this addon declared.
         self.make_transport_dots(addon.id, head)
-        if addon.requires and not addon.is_bundled:
-            # Drop-ins only: share the app's connection, or open a fresh one.
+        if addon.requires and not addon.is_bundled and addon.connection == "both":
+            # Declared "both": only here is the user's to choose between the
+            # app's session and a fresh connection per call.
             own = ToggleSwitch("own connection")
             own.setToolTip(
                 "Off: the addon shares the app's main SSH/SFTP session.\n"
@@ -1591,6 +1640,15 @@ class AddonManager:
             own.blockSignals(False)
             own.toggled.connect(lambda on, aid=addon.id: self.set_own_connection(aid, on))
             head.addWidget(own)
+        elif addon.requires and not addon.is_bundled and addon.connection == "own":
+            fixed = QLabel("own connection")
+            fixed.setStyleSheet("color: #8f8f8f;")
+            fixed.setToolTip(
+                "This addon declared \"connection\": \"own\" in its manifest,\n"
+                "so it always opens its own connection; it cannot use the\n"
+                "app's session."
+            )
+            head.addWidget(fixed)
         if not addon.is_bundled:
             # A shipped addon's file is inside the program, so no restart here.
             restart = QPushButton("Restart")

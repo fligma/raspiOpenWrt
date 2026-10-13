@@ -15,10 +15,12 @@ from addon_common import AddonError
 
 ADDON = {
     "name": "OpenWrt Log Viewer",
-    "version": "2.6",
+    "version": "2.7",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],
+    # Single mode rides the app's session, multi mode dials out on its own.
+    "connection": "both",
     "description": ("a single-device log viewer "
                     "and a multi-device view,"
                     "colour-coded connections,"
