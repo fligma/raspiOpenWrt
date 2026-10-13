@@ -10,15 +10,6 @@
       "test": "test_cert_manager.py"
     },
     {
-      "id": "hello_store",
-      "name": "Hello from the store",
-      "version": "1.0",
-      "author": "fligma",
-      "description": "An example addontest addon",
-      "filename": "hello_store.py",
-      "test": "test_hello_store.py"
-    },
-    {
       "id": "openwrt_logs",
       "name": "OpenWrt Log Viewer",
       "version": "2.6",
