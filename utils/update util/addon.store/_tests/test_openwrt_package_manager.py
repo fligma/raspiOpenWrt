@@ -2,11 +2,11 @@
 """A test for the openwrt_package_manager addon (for the addon store).
 
 It runs the addon with the recording stub from :mod:`addon_client`, checking:
-* the manifest services and api version;
-* config declaration for switching between apk and opkg backends;
-* tab creation and sub-page / widget structures;
-* fetching installed packages using apk (default) and opkg;
-* updating feeds, searching online, and handling widget events[cite: 5].
+* the manifest services and api version[cite: 5];
+* config declaration for switching between apk and opkg backends[cite: 5];
+* tab creation and sub-page / widget structures[cite: 5];
+* fetching installed packages using apk (default) and opkg[cite: 5];
+* updating feeds, searching online, and handling widget interactions[cite: 5].
 
 Run it from the Test panel, or on the command line::
 
@@ -140,16 +140,15 @@ def test_widget_actions(addon: Any, api: Api) -> None:
     print("\n4. widget interactions (install and remove)")
     fresh_addon(api)
     
-    # Test package removal event
-    addon._installed_cache = [("curl", "8.6.0")]
-    addon.on_widget("Package Manager", "inst_table", "selected", {"texts": ["curl"]})
+    # Test package removal event by mocking form selection value
+    api.form["inst_table"] = ["curl"]
     api.question_answer = True
     addon.on_widget("Package Manager", "btn_remove", "clicked", {})
     check(api.asked("device.run_async", "command") == "apk del curl",
           f"remove button triggers apk del: {api.asked('device.run_async', 'command')!r}[cite: 5]")
 
-    # Test package installation event
-    api.results["tabs.widget_value"] = ["htop - 3.3.0"]
+    # Test package installation event by mocking form selection value
+    api.form["browse_table"] = ["htop - 3.3.0"]
     addon.on_widget("Package Manager", "btn_install", "clicked", {})
     check(api.asked("device.run_async", "command") == "apk add htop",
           f"install button triggers apk add: {api.asked('device.run_async', 'command')!r}[cite: 5]")
@@ -158,6 +157,7 @@ def test_widget_actions(addon: Any, api: Api) -> None:
 def fresh_addon(api: Api) -> None:
     api_module.api = api
     api_module._installed_cache = []
+    api.form.clear()
 
 
 def main() -> int:
