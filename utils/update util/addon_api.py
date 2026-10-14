@@ -1999,7 +1999,7 @@ class TabsAPI:
 
     def add_web_tab(self, name: str, url: str = "", ip: str = "", port: int = 0,
                     path: str = "", scheme: str = "", position: int | None = None) -> str:
-        """An embedded page belonging to no profile: not stored, not rebuilt; give either a full url or ip/port/path/scheme."""
+        """An embedded page belonging to no profile: not stored, not rebuilt; give either a full url or ip/port/path/scheme. The tab wears an X, and closing it by hand simply takes it away."""
         name = str(name).strip()
         if not name:
             raise AddonError("a tab needs a name")
@@ -2007,13 +2007,22 @@ class TabsAPI:
             self.close(name)
         tab = dict(_tab_definition(url, ip, port, path, scheme))
         tab["name"] = name
-        entry = self._win.add_transient_web_tab(tab, self._index(position))
+        entry = self._win.add_transient_web_tab(
+            tab, self._index(position),
+            on_closed=lambda: self._forget_closed(entry["page"]))
         self._store[name] = {
             "page": entry["page"], "url_input": entry["url_input"],
             "view": entry["view"], "tab": tab, "web": True, "registry": {},
         }
         self._api.log(f"opened web tab '{name}' -> {entry['url_input'].text()}")
         return name
+
+    def _forget_closed(self, page: QWidget) -> None:
+        """The user closed one of this addon's pages with the tab's X: drop it
+        from the registry, so the addon's own list matches the window."""
+        for name in list(self._store):
+            if self._store[name].get("page") is page:
+                self._store.pop(name)
 
     def add_tab(self, name: str, widget: QWidget | None = None, spec: dict | None = None,
                 style: str = "", position: int | None = None) -> str:

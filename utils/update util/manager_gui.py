@@ -854,7 +854,10 @@ class BerryManager(
         bar = self.tabs.tabBar()
         keep: list[TabTransportDots] = []
         for index in range(self.tabs.count()):
-            if bar.tabButton(index, QTabBar.ButtonPosition.RightSide) is not None:
+            existing = bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
+            # A close button belongs to the tab itself, not to this pass:
+            # strip everything else and re-put the dots that are still wanted.
+            if existing is not None and existing.objectName() != "tabCloseButton":
                 bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
             page = self.tabs.widget(index)
             if page in wanted:

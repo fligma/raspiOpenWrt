@@ -147,6 +147,11 @@ jobs:
     - name: Run the addon test scripts
       shell: pwsh
       working-directory: "utils/update util"
+      env:
+        # A Windows runner's console speaks cp1252 and the tests print the
+        # marks their tabs wear (● ○ ✓), which would abort the print itself.
+        # With this, every child python writes UTF-8 whatever the console is.
+        PYTHONIOENCODING: utf-8
       run: |
         # Every addon's test lives beside it: the shipped addons in addons/_tests,
         # the store's in addon.store/_tests, each as test_<id>.py. Run them here,

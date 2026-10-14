@@ -20,9 +20,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
-from PyQt6.QtCore import QTimer, QUrl
+from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -31,18 +31,26 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QTabBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from addon_common import clean_child_env
 from manager_config import web_tab_url
+from manager_const import zoom_size
 from manager_widgets import TabEditDialog
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
 except ImportError:
     QWebEngineView = None
+
+try:
+    from PyQt6.QtWebEngineCore import QWebEnginePage
+except ImportError:
+    QWebEnginePage = None
 
 
 CERT_BYPASS_FLAG = "--ignore-certificate-errors"
@@ -153,6 +161,25 @@ if TYPE_CHECKING:
     from manager_gui import BerryManager
 
 
+if QWebEnginePage is not None:
+    class WebTabPage(QWebEnginePage):
+        """A page that lets a click wanting its own tab or window - a
+        ``target=_blank`` link, a script's ``window.open`` - get a real,
+        closable tab; the plain view would swallow the request in silence."""
+
+        def __init__(self, browser: "BrowserMixin") -> None:
+            super().__init__()
+            self._browser = browser
+
+        def createWindow(self, feature):        # noqa: ARG002 - one home for every kind
+            try:
+                return self._browser.open_requested_tab()
+            except Exception:
+                return None
+else:
+    WebTabPage = None
+
+
 class BrowserMixin:
     """Embedded browser tabs, mixed into the main window; its attributes come from ``manager_gui.BerryManager``."""
 
@@ -197,6 +224,8 @@ class BrowserMixin:
             return url_input, None, page
 
         view = QWebEngineView()
+        if WebTabPage is not None:
+            view.setPage(WebTabPage(self))
         add_tab()
 
         open_btn.clicked.connect(lambda: QDesktopServices.openUrl(view.url()))
@@ -332,16 +361,22 @@ class BrowserMixin:
         default_host = self.app_config.get("host", "192.168.1.1")
         for entry in list(getattr(self, "_web_tab_entries", [])) + list(
                 getattr(self, "_transient_tab_entries", [])):
+            if entry.get("popup"):
+                continue          # a page's own tab follows its page, not the host
             if not entry["tab"].get("ip"):
                 entry["url_input"].setText(web_tab_url(entry["tab"], default_host))
 
-    def add_transient_web_tab(self, tab: dict, position: int | None = None) -> dict:
-        """Open a browser tab that belongs to no profile (addons use it): not saved, not listed, not rebuilt, until closed."""
+    def add_transient_web_tab(self, tab: dict, position: int | None = None,
+                              on_closed: Callable[[], None] | None = None) -> dict:
+        """Open a browser tab that belongs to no profile (addons use it): not saved, not listed, not rebuilt. It wears an X for the user to close, and whoever opened it is told when that happens."""
         default_host = self.app_config.get("host", "192.168.1.1")
         url = web_tab_url(tab, tab.get("ip") or default_host)
         url_input, view, page = self._build_web_like_tab(url, tab.get("name", "Tab"), position)
         entry = {"page": page, "url_input": url_input, "view": view, "tab": tab}
+        if callable(on_closed):
+            entry["on_closed"] = on_closed
         self._transient_tab_entries.append(entry)
+        self._mark_tab_closable(page)
         if view is not None:
             QTimer.singleShot(200, lambda v=view, u=url_input: v.setUrl(QUrl(u.text())))
         return entry
@@ -350,6 +385,94 @@ class BrowserMixin:
         """Forget a transient tab; whoever made it removes the tab itself."""
         entries = getattr(self, "_transient_tab_entries", [])
         entries[:] = [entry for entry in entries if entry["page"] is not page]
+
+    def _mark_tab_closable(self, page: QWidget) -> None:
+        """Put an X on one tab. Only pages an addon opened, or a page opened
+        itself, ever get one; the profile's own tabs and the app's tabs stay
+        buttonless, because closing them by hand would only confuse."""
+        bar = self.tabs.tabBar()
+        index = self.tabs.indexOf(page)
+        if index < 0:
+            return
+        button = QToolButton(bar)
+        button.setObjectName("tabCloseButton")     # the dot sync spares this name
+        button.setText("\u2715")
+        button.setAutoRaise(True)
+        button.setFixedSize(zoom_size(16), zoom_size(16))
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip("Close this tab")
+        button.setStyleSheet(
+            "QToolButton { border: none; background: transparent; color: #9a9a9a; }"
+            "QToolButton:hover { color: #ff6b6b; }")
+        button.clicked.connect(
+            lambda _=False, p=page: self.close_transient_web_tab(p))
+        bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, button)
+        if hasattr(bar, "refit"):
+            bar.refit()
+
+    def close_transient_web_tab(self, page: QWidget) -> bool:
+        """Shut one closable tab for good: stop its loading, take the tab out,
+        and tell whoever opened it so their own list matches the window."""
+        entries = getattr(self, "_transient_tab_entries", [])
+        entry = next((row for row in entries if row["page"] is page), None)
+        if entry is None:
+            return False
+        index = self.tabs.indexOf(page)
+        view = entry.get("view")
+        if view is not None:
+            try:
+                view.stop()
+            except RuntimeError:
+                pass
+        entries.remove(entry)
+        name = str(entry["tab"].get("name", "Tab"))
+        if index >= 0:
+            self.tabs.removeTab(index)
+        page.deleteLater()
+        callback = entry.get("on_closed")
+        if callable(callback):
+            try:
+                callback()
+            except Exception:
+                pass
+        sync = getattr(self, "sync_tab_transport_dots", None)
+        if callable(sync):
+            try:
+                sync()
+            except Exception:
+                pass
+        self.log(f"Closed tab '{name}'")
+        return True
+
+    def open_requested_tab(self):
+        """A page inside a web tab asked to open a new tab or window: give it
+        its own closable tab, let the site name it once the title arrives, and
+        hand back the new page so the request actually lands there."""
+        url_input, view, page = self._build_web_like_tab(
+            "", "New page", self._content_insert_index())
+        entry = {"page": page, "url_input": url_input, "view": view,
+                 "tab": {"name": "New page"}, "popup": True}
+        self._transient_tab_entries.append(entry)
+        self._mark_tab_closable(page)
+        if view is not None:
+            view.titleChanged.connect(
+                lambda title, p=page: self._name_tab_after_site(p, title))
+            view.urlChanged.connect(
+                lambda _url, v=view, u=url_input: u.setText(v.url().toString()))
+        return None if view is None else view.page()
+
+    def _name_tab_after_site(self, page: QWidget, title: str) -> None:
+        """A page-opened tab wears the site's own name once the site offers one."""
+        text = str(title or "").strip()
+        if not text:
+            return
+        for entry in getattr(self, "_transient_tab_entries", []):
+            if entry["page"] is page:
+                entry["tab"]["name"] = text
+                break
+        index = self.tabs.indexOf(page)
+        if index >= 0:
+            self.tabs.setTabText(index, text)
 
     def _update_cert_bypass_state(self) -> None:
         """Say whether the saved switch is the one the browser actually runs with."""

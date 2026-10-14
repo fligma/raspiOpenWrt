@@ -302,6 +302,16 @@ page says nothing in the tab - only in the log - because there is no
 certificate choice left to make; the page itself is what it is. The switch
 is stored per profile in `ignore_cert_errors`.
 
+Only tabs that opened themselves wear a close button: an addon's page
+(the update addon's releases page, for instance) and a tab a page opened -
+embedded pages may open links that ask for their own tab, which used to be
+swallowed in silence. Pressing the **✕** takes the tab away, and whoever
+opened it simply forgets it. The profile's own tabs and the app's tabs
+carry no button, because they are removed through Settings > Custom tabs,
+not by hand. A page-opened tab starts out called *New page*, takes the
+site's own title as its name once the page has one, and follows its own
+address rather than the active profile's host.
+
 Auto-connect is one switch for the one main connection: **Connect at startup**,
 in the connection panel and saved as `auto_connect`, opens the SSH session -
 with SFTP on it - when the app starts, using the profile's host, user and
@@ -732,7 +742,10 @@ ever written there.
 `api.tabs.add_web_tab(name, url=...)` opens an embedded browser page that
 belongs to the addon rather than to the profile: it is not written to
 `config.json`, never appears in Settings > Custom tabs, is not rebuilt when you
-switch profiles, and closes again when the addon is switched off. Settings >
+switch profiles, and closes again when the addon is switched off. It wears an
+**✕** on its tab so the user can close it by hand whenever they like, and the
+addon forgets it quietly: `api.tabs.exists(name)` answers no from then on, and
+a later `close(name)` is a harmless no. Settings >
 Custom tabs stays exactly as you left it.
 
 `api.tabs.add_tab(name, widget=...)` takes any Qt widget a Python addon builds,

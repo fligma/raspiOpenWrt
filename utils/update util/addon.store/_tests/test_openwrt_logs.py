@@ -615,7 +615,11 @@ def fresh_addon(api: Api) -> None:
 def main() -> int:
     global api_module, FAILURES
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)    # the Test pane wants it live
+        # The Test pane wants it live; and a Windows console often speaks
+        # cp1252, which has no room for the marks these tabs paint (● ○ ✓),
+        # so anything undisplayable becomes "?" rather than stopping the run.
+        sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
+                               errors="replace")
     if not SOURCE.is_file():
         print(f"there is no addon at {SOURCE}")
         return 2
