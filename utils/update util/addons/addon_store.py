@@ -51,6 +51,15 @@ that cannot talk to the app is not an addon. A fetched pair is only what a build
 needs, not what a test needs, so when a test stops on one of the app's other
 modules the rest of them are fetched too and the test is run again.
 
+Loading the catalog also checks what is already installed against it: the version
+written down beside a program as it was installed is compared with the one the
+catalog names now, and where the repository is ahead the row says *update
+available*. Update then runs the same download, test and build as a fresh install
+and puts the result where the old program was, replacing it - what the addon
+saved for itself under ``addons/_data/<id>`` is never part of an install and is
+left exactly as it is, and the switch in Settings > Addons is not touched, so an
+addon that was on stays on.
+
 Deleting one takes that compiled program (or folder) back out of ``addons/`` and
 rescans, leaving the addon's own ``_data`` settings where they are.
 
@@ -64,7 +73,9 @@ editable in ``addons/_data/addon_store/config.json``.
 
 The tab is built from a declarative spec and its buttons report back through
 ``on_widget``, so the same file works imported into the app and compiled into a
-program of its own by the Addon Dev tab.
+program of its own by the Addon Dev tab. It marks itself with
+``assets/storeicon.png`` when the program ships one, and with a drawn store bag
+when it does not, the way the other bundled addons' tabs do.
 """
 
 from __future__ import annotations
@@ -81,12 +92,14 @@ from typing import Any
 from urllib.parse import quote
 
 # Qt-free contract half: runs standalone and in tests.
-from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_origin,
-                          config_get, jsonable, merge_config, write_config_json)
+from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN,
+                          addon_manifest_path, addon_origin, config_get,
+                          jsonable, merge_config, read_config_json,
+                          write_config_json)
 
 ADDON = {
     "name": "Berry addon store",
-    "version": "1.0",
+    "version": "1.1",
     "author": "fligma",
     "description": "Lists the addons published in the repository's addon.store "
                    "folder, downloads a chosen one into a staging folder and "
@@ -103,6 +116,7 @@ api = None                  # filled in by init()
 working = False             # one job at a time
 job: dict | None = None     # the job in progress, or nothing
 entries: list[dict] = []    # the catalog read last time
+updates: dict[str, dict] = {}   # id -> {installed, available}, what the catalog is ahead of
 
 #: A module name PyInstaller can import: anything else becomes an underscore.
 _SAFE = re.compile(r"[^A-Za-z0-9_]")
@@ -154,7 +168,8 @@ FIELDS = [
 
 GROUPS = [("Where addons come from", ["owner", "repo", "ref", "store_path", "token"])]
 
-BUTTONS = (("refresh", "Refresh"), ("install", "Install"), ("delete", "Delete"))
+BUTTONS = (("refresh", "Refresh"), ("install", "Install"),
+           ("update", "Update"), ("delete", "Delete"))
 
 # --- small text helpers ---
 
@@ -180,6 +195,30 @@ def clean_token(value: Any) -> str:
     return one_line(value).replace(" ", "")
 
 
+# --- versions ---
+
+def _version_parts(value: Any) -> tuple:
+    """The digits out of a dotted version, as a tuple that can be compared."""
+    return tuple(int(part) for part in re.findall(r"\d+", str(value or "")))
+
+
+def version_newer(remote: Any, local: Any) -> bool:
+    """Whether the catalog's version is ahead of the one installed here.
+
+    A dotted number is read as digits, so 1.10 beats 1.9 rather than losing to
+    it as text would. An addon with nothing recorded for what is installed is
+    taken for behind whatever the catalog names, since there is no way to prove
+    it is current; a version with no digits at all is only compared as text.
+    """
+    wanted, have = _version_parts(remote), _version_parts(local)
+    if wanted and have:
+        length = max(len(wanted), len(have))
+        return (wanted + (0,) * (length - len(wanted))
+                > have + (0,) * (length - len(have)))
+    clean_remote, clean_local = one_line(remote), one_line(local)
+    return bool(clean_remote) and clean_remote != clean_local
+
+
 # --- the tab ---
 
 TAB_STYLE = """
@@ -197,6 +236,38 @@ BANNER_STYLE = ("QLabel { color: #e8e8e8; font-size: 13pt; font-weight: 600;"
 
 _STATUS_STYLE = ("QLabel { color: #9a9a9a; padding: 2px 6px;"
                  " border: 1px solid #3c3c3c; border-radius: 9px; }")
+
+TAB_ICON = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+    '<path d="M4 7h16l-1.4 12.1a2 2 0 0 1-2 1.9H7.4a2 2 0 0 1-2-1.9Z" '
+    'fill="#3a3a3a" stroke="#c51a4a" stroke-width="1.3"/>'
+    '<path d="M8.5 7V5.5a3.5 3.5 0 0 1 7 0V7" fill="none" stroke="#c51a4a" '
+    'stroke-width="1.3"/>'
+    '<path d="M12 10v5.5M9.8 13.6 12 15.8l2.2-2.2" fill="none" stroke="#23d18b" '
+    'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
+    '</svg>'
+)
+
+#: The picture the tab wears if the assets folder has one.
+TAB_ICON_FILE = "storeicon.png"
+
+
+def tab_icon() -> str:
+    """The shipped picture if the assets folder has one, else the drawn mark."""
+    folder = None
+    try:
+        folder = api.paths.assets
+    except (AddonError, AttributeError, TypeError):    # no api on a bare import
+        folder = None
+    if folder is None:
+        return TAB_ICON
+    try:
+        candidate = Path(str(folder)) / TAB_ICON_FILE
+        if candidate.is_file():
+            return str(candidate)
+    except (OSError, AddonError):
+        return TAB_ICON
+    return TAB_ICON
 
 
 def tab_spec() -> dict:
@@ -236,10 +307,7 @@ def tab_spec() -> dict:
 def build_tab() -> None:
     """The tab as a spec; nothing here holds a widget."""
     api.tabs.add_tab(TAB, spec=tab_spec(), style=TAB_STYLE)
-    try:
-        api.tabs.use_app_icon(TAB)
-    except AddonError as error:
-        api.log(f"addon store tab icon: {error}")
+    api.tabs.set_icon(TAB, tab_icon())
 
 
 def say(text: str, bad: bool = False) -> None:
@@ -466,6 +534,17 @@ def installed(id_value: str) -> bool:
     return False
 
 
+def installed_version(id_value: str) -> str:
+    """The version written down beside an install when it was put there."""
+    name = clean_id(id_value)
+    if not name:
+        return ""
+    path = addon_manifest_path(addons_dir(), name)
+    if path is None:
+        return ""
+    return one_line(read_config_json(path).get("version"))
+
+
 def staging() -> Path:
     """The addon's own folder under ``api.paths.data`` for what it downloads."""
     folder = Path(api.paths.data) / "staging"
@@ -579,19 +658,36 @@ def _tidy(id_value: str) -> None:
 
 # --- the table ---
 
+def check_updates() -> dict[str, dict]:
+    """Installed addons whose version in the catalog is ahead of what is here."""
+    found: dict[str, dict] = {}
+    for entry in entries:
+        if not installed(entry["id"]):
+            continue
+        have = installed_version(entry["id"])
+        if version_newer(entry.get("version"), have):
+            found[entry["id"]] = {"installed": have,
+                                  "available": one_line(entry.get("version"))}
+    return found
+
+
 def show_entries() -> None:
-    """The catalog as rows: last column installed or not, first marks new or updated."""
+    """The catalog as rows: last column installed, up to date or behind."""
     if api is None:
         return
     rows = []
     marks = {"new": "  \u25cf new", "updated": "  \u21bb updated"}
     for entry in entries:
         done = installed(entry["id"])
+        pending = bool(updates.get(entry["id"]))
         mark = marks.get(entry.get("status", ""), "")
+        state = ("update available" if pending
+                 else "installed" if done else "not installed")
         row = {"cells": [entry["id"], entry["version"], entry["name"] + mark,
-                         entry["author"],
-                         "installed" if done else "not installed"]}
-        if done:
+                         entry["author"], state]}
+        if pending:
+            row["color"] = "#ffb020"
+        elif done:
             row["color"] = "#23d18b"
         elif entry.get("status") in marks:
             row["color"] = "#ffb020"
@@ -625,8 +721,8 @@ def entry_for(id_value: str) -> dict | None:
 
 
 def refresh(_checked: bool = False) -> None:
-    """Read the catalog from GitHub and repaint the table."""
-    global entries
+    """Read the catalog from GitHub, check what is behind it and repaint the table."""
+    global entries, updates
     if api is None or working:
         return
     values = merge_config(DEFAULTS, api.config.stored())
@@ -638,9 +734,14 @@ def refresh(_checked: bool = False) -> None:
         say(f"{error}", bad=True)
         note(f"catalog: {error}")
         return
+    updates = check_updates()
     show_entries()
     word = "no addons are published here yet" if not entries \
         else f"{len(entries)} addon(s) in the store"
+    if updates:
+        word += f", {len(updates)} update(s) available"
+        note(f"{len(updates)} installed addon(s) have a newer version in the store: "
+             + ", ".join(sorted(updates)))
     say(f"catalog loaded: {word}")
 
 
@@ -1069,10 +1170,24 @@ def _install_step(id_value: str) -> None:
         return
     _describe(id_value, target, job.get("details") or {}, entry_for(id_value) or {})
     _tidy(id_value)
-    _stay_off(id_value)
+    updating = job.get("verb") == "update"
+    if updating:
+        note(f"{id_value}'s own settings under addons/_data/{id_value}/ were left "
+             "as they are")
+        updates.pop(id_value, None)     # it now matches the catalog, so it is current
+    else:
+        _stay_off(id_value)
     show_entries()
-    _finish(f"installed {target.name}, switched off until you turn it on in "
-            "Settings > Addons")
+    if updating:
+        had = one_line(job.get("from_version"))
+        now = one_line((job.get("details") or {}).get("manifest", {})
+                       .get("version")) \
+            or one_line((entry_for(id_value) or {}).get("version"))
+        _finish(f"updated {target.name}"
+                + (f" from {had} to {now}" if had and now else ""))
+    else:
+        _finish(f"installed {target.name}, switched off until you turn it on in "
+                "Settings > Addons")
     _reload()
 
 
@@ -1130,10 +1245,61 @@ def install_selected(_checked: bool = False) -> None:
         say("the list is empty - press Refresh first", bad=True)
         return
     if installed(id_value):
-        say(f"{id_value} is already installed; use Delete to remove it", bad=True)
+        say(f"{id_value} is already installed; use Update if the store lists a "
+            "newer version, or Delete to remove it", bad=True)
         return
     job_local = _begin("install")
     job_local["id"] = id_value
+    where = _ensure_python()
+    if not where:
+        return
+    ready, _hint = _dev().pyinstaller_ready()
+    if not ready:
+        _pip_install(where)
+        return
+    _compile(id_value)
+
+
+def update_selected(_checked: bool = False) -> None:
+    """Rebuild the chosen addon from the catalog's version, keeping its settings.
+
+    An update is an install over the top of what is already there: the same
+    download, test and compile as a fresh install, and the program already in
+    ``addons`` is replaced as the new one is copied in. What the addon saved for
+    itself under ``addons/_data/<id>`` is never part of what an install clears,
+    so its config keeps the answers already given to it, and the switch in
+    Settings > Addons is not written to, so an addon that was on stays on.
+    """
+    global working
+    if api is None or working:
+        return
+    id_value = selected_id()
+    if not id_value:
+        say("pick an installed addon in the list first", bad=True)
+        return
+    entry = entry_for(id_value)
+    if entry is None:
+        say("the list is empty - press Refresh first", bad=True)
+        return
+    if not installed(id_value):
+        say(f"{id_value} is not installed yet; use Install to add it", bad=True)
+        return
+    have = installed_version(id_value)
+    wanted = one_line(entry.get("version"))
+    if not version_newer(wanted, have):
+        say(f"{id_value} is already up to date (version {have or 'unknown'})")
+        return
+    if not api.ui.question(
+            "Update addon",
+            f"Update {one_line(entry.get('name')) or id_value} from "
+            f"{have or 'an unknown version'} to {wanted}?\n\nIts settings in "
+            f"addons/_data/{id_value}/ are kept, and the switch in Settings > "
+            "Addons is left as it is."):
+        say("the update was declined")
+        return
+    job_local = _begin("update")
+    job_local["id"] = id_value
+    job_local["from_version"] = have
     where = _ensure_python()
     if not where:
         return
@@ -1219,6 +1385,7 @@ def focus_tab(_checked: bool = False) -> None:
 HANDLERS: dict = {
     "refresh": refresh,
     "install": install_selected,
+    "update": update_selected,
     "delete": delete_selected,
 }
 

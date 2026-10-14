@@ -62,6 +62,7 @@ from manager_config import (
 )
 from manager_const import (
     APP_STYLESHEET,
+    APP_VERSION,
     BASE_DIR,
     DEFAULT_PROFILE,
     ICON_FILES,
@@ -1817,9 +1818,9 @@ class BerryManager(
         box = QMessageBox(self)
         box.setWindowTitle("About Berry")
         box.setText(
-            "<b>Berry Manager V1.5.8</b><br>"
+            f"<b>Berry Manager V{APP_VERSION}</b><br>"
             "Manage routers and devices over ssh&sftp<br>"
-            'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
+            f'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt/tags/{UPDATE_TAG_PREFIX}{APP_VERSION}</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'
             "Copyright &copy; 2026 fligma. Licensed under the MIT License".format(
                 repo=PROJECT_GITHUB_URL, license=PROJECT_LICENSE_URL

@@ -18,6 +18,9 @@ Three things get looked at:
   and the table and the log really share one horizontal splitter;
 * what counts as installed, against a temporary addons folder, and how a compiled
   addon finds its own bundled assets;
+* how the store works out that the catalog is ahead of what is installed: the
+  version kept beside an install, the way two dotted versions are compared, and
+  what Update refuses, asks and then does when it goes ahead;
 * the catalog generator that rebuilds ``index.json`` from the store folder, the
   store's rule that an addon's test is run before it is compiled, which Python
   it is allowed to build with, and how a refused pip install is retried;
@@ -166,9 +169,12 @@ def test_the_tab(store: Any) -> None:
     check(api.called("config.declare") and api.called("tabs.add_tab")
           and api.called("ui.menu_item"),
           "init did not declare its config, add its tab and add its menu entry")
-    check((store.TAB,) in [tuple(arguments) for where, arguments, _n in api.calls
-                           if where == "tabs.use_app_icon"],
-          "the tab never asked to wear the program's own icon")
+    icon_call = [arguments for where, arguments, _n in api.calls
+                 if where == "tabs.set_icon"]
+    check(bool(icon_call) and icon_call[0][0] == store.TAB,
+          "the tab never asked to wear its own mark")
+    check(any(where == "tabs.use_app_icon" for where, _a, _n in api.calls) is False,
+          "the tab still wears the program's icon instead of its own")
 
     print("\n3. Refresh fills the table, installed or not")
     store.entries = []
@@ -186,6 +192,10 @@ def test_the_tab(store: Any) -> None:
     store.on_widget(store.TAB, "install", "clicked", {})
     check("pick an addon" in last_status(api),
           f"Install with no row picked did not say so: {last_status(api)!r}")
+    api.calls.clear()
+    store.on_widget(store.TAB, "update", "clicked", {})
+    check("pick an installed addon" in last_status(api),
+          f"Update with no row picked did not say so: {last_status(api)!r}")
     api.calls.clear()
     store.on_widget(store.TAB, "delete", "clicked", {})
     check("pick an installed addon" in last_status(api),
@@ -265,6 +275,156 @@ def test_installed(store: Any) -> None:
             check(not store.installed(""), "an empty id was taken for installed")
         finally:
             store.addons_dir = real
+
+
+# --- three b: the store works out that the catalog is ahead of what is here ---
+
+def test_the_updates(store: Any) -> None:
+    """Versions, the version kept beside an install, and what Update does.
+
+    An update is only ever worth offering when the catalog names a version ahead
+    of the one written down next to the installed program, so this reads the two
+    numbers, marks the behind addon in the table, and drives Update through every
+    thing it refuses before it touches the disk and the one job it starts once
+    you say yes - with nothing really compiled.
+    """
+    print("\n5b. how the store spots a newer version, and what Update does about it")
+
+    # the numbers, before anything reaches the disk
+    check(store._version_parts("1.2.3") == (1, 2, 3),
+          f"the digits did not come out of a dotted version: "
+          f"{store._version_parts('1.2.3')}")
+    check(store.version_newer("1.1", "1.0") is True,
+          "a plainly newer catalog version was not taken for ahead")
+    check(store.version_newer("1.0", "1.0") is False,
+          "the same version on both sides read as an update")
+    check(store.version_newer("1.10", "1.9") is True,
+          "1.10 lost to 1.9 as text instead of winning as digits")
+    check(store.version_newer("1.0", "") is True,
+          "an install with no recorded version was not taken for behind")
+    check(store.version_newer("", "1.0") is False,
+          "a catalog that names no version promised an update anyway")
+    check(store.version_newer("beta", "alpha") is True
+          and store.version_newer("beta", "beta") is False,
+          "a version with no digits was not compared as plain text")
+
+    api = fresh(store)
+    real_dir = store.addons_dir
+    real_entries, real_updates = store.entries, store.updates
+    real_begin, real_python = store._begin, store._ensure_python
+    real_dev, real_compile = store._dev, store._compile
+    try:
+        with tempfile.TemporaryDirectory() as where:
+            folder = Path(where)
+            store.addons_dir = lambda: folder
+            store.entries = store.parse_catalog(CATALOG)
+            store.updates = {}
+
+            print("\n5c. the version beside an install, and the list it makes")
+            check(store.installed_version("hello_store") == "",
+                  "an addon that is not there reported a version")
+            check(not store.check_updates(),
+                  "nothing installed still came back with an update waiting")
+            (folder / "hello_store.exe").write_text("x", encoding="utf-8")
+            (folder / "hello_store.json").write_text('{"version": "1.0"}',
+                                                     encoding="utf-8")
+            check(store.installed_version("hello_store") == "1.0",
+                  f"the version beside an install was not read: "
+                  f"{store.installed_version('hello_store')!r}")
+            check(not store.check_updates(),
+                  "an install already at the catalog's version was said to be behind")
+            (folder / "hello_store.json").write_text('{"version": "0.9"}',
+                                                     encoding="utf-8")
+            found = store.check_updates()
+            check(list(found) == ["hello_store"],
+                  f"a stale install was not the only one noticed: {list(found)}")
+            check(found.get("hello_store")
+                  == {"installed": "0.9", "available": "1.0"},
+                  f"the update did not say from and to: {found.get('hello_store')}")
+
+            # the table marks the behind addon, and only it, as an update waiting
+            store.updates = found
+            api.calls.clear()
+            store.show_entries()
+            rows = last_row_call(api) or []
+            byid = {row["cells"][0]: row for row in rows}
+            check(byid["hello_store"]["cells"][4] == "update available",
+                  f"the behind addon was not marked for update: {byid['hello_store']}")
+            check(byid["hello_store"].get("color") == "#ffb020",
+                  "the update row did not wear the amber mark")
+            check(byid["odd_id"]["cells"][4] == "not installed",
+                  f"a thing not installed was described as an update: "
+                  f"{byid['odd_id']}")
+
+            print("\n5d. Update refuses, asks, and only then starts the job")
+            api.answer("tabs.widget_value", None)          # nothing picked
+            api.calls.clear()
+            store.update_selected()
+            check("pick an installed addon" in last_status(api),
+                  f"Update with nothing picked did not say so: {last_status(api)!r}")
+
+            api.answer("tabs.widget_value", ["odd_id"])    # picked, not installed
+            api.calls.clear()
+            store.update_selected()
+            check("not installed yet" in last_status(api),
+                  f"Update on an addon not installed did not send you to Install: "
+                  f"{last_status(api)!r}")
+
+            api.answer("tabs.widget_value", ["hello_store"])   # installed, current
+            (folder / "hello_store.json").write_text('{"version": "1.0"}',
+                                                     encoding="utf-8")
+            api.calls.clear()
+            store.update_selected()
+            check("already up to date" in last_status(api),
+                  f"Update on a current addon was not turned away: "
+                  f"{last_status(api)!r}")
+
+            (folder / "hello_store.json").write_text('{"version": "0.9"}',
+                                                     encoding="utf-8")
+            api.answer("tabs.widget_value", ["hello_store"])
+            api.answer("ui.question", False)                # you say no
+            api.calls.clear()
+            store.update_selected()
+            check(api.called("ui.question"),
+                  "the update never asked before it touched anything")
+            check("declined" in last_status(api),
+                  f"a refused update still went ahead: {last_status(api)!r}")
+
+            # say yes, and the job that starts is an update remembering its version
+            api.answer("ui.question", True)
+            began: list = []
+
+            def fake_begin(verb):
+                began.append(verb)
+                store.job = {"verb": verb}
+                return store.job
+            store._begin = fake_begin
+            store._ensure_python = lambda: "python"
+
+            class _Ready:
+                @staticmethod
+                def pyinstaller_ready():
+                    return True, ""
+            store._dev = lambda: _Ready()
+            compiled: list = []
+            store._compile = lambda ident: compiled.append(ident)
+            api.calls.clear()
+            store.update_selected()
+            check(began == ["update"],
+                  f"a going update did not begin as an update job: {began}")
+            check(compiled == ["hello_store"],
+                  f"the accepted update did not reach the compile: {compiled}")
+            check(store.job.get("id") == "hello_store"
+                  and store.job.get("from_version") == "0.9",
+                  f"the job did not remember what it was updating from: {store.job}")
+    finally:
+        store.addons_dir = real_dir
+        store.entries, store.updates = real_entries, real_updates
+        store._begin, store._ensure_python = real_begin, real_python
+        store._dev, store._compile = real_dev, real_compile
+        store.job = None
+        store.working = False
+        store.shutdown()
 
 
 # --- four: a compiled addon finds its own bundled assets ---
@@ -1217,6 +1377,7 @@ def main() -> int:
     test_the_tab(store)
     test_the_layout(store)
     test_installed(store)
+    test_the_updates(store)
     test_bundled_assets(store)
     test_the_generator(store)
     test_the_gate(store)

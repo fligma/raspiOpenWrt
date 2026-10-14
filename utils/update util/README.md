@@ -250,8 +250,9 @@ The pages of the Settings bar, and what each holds:
     it.
 - **Installed addons**, last, and a page under its own name for every shipped
   addon
-  - The addons that ship inside the app - Berry, the Web installer and the Berry
-    addon store - each get a Settings page titled with their own name, carrying
+  - The addons that ship inside the app - Berry, the Web installer, the Berry
+    addon store and the Berry Manager update - each get a Settings page titled
+    with their own name, carrying
     their enable switch, their SSH and SFTP switches, their config panel and
     their connection indicators (see below). **Berry** is switched from its page,
     which shows or hides its file tab. The pages are made and unmade with the
@@ -754,11 +755,13 @@ it loses the mark, says so in the log and leaves the tab working, which is all a
 decoration is worth. An embedded page is left alone: it keeps following the
 favicon the page itself sends, which is set by the device and not by the addon.
 
-Three addons use this: `addons/berry.py` (a cluster of drupelets),
-`addon.store/cert_manager.py` (a trophy) and `addon.store/openwrt_logs.py` (a log
+Four addons use this: `addons/berry.py` (a cluster of drupelets),
+`addons/manager_update.py` (a download mark), `addon.store/cert_manager.py` (a
+trophy) and `addon.store/openwrt_logs.py` (a log
 page lined in the device colours). Each holds its mark as an SVG string in
-`TAB_ICON` for exactly that reason, and berry and openwrt_logs look for a real
-picture first - `assets/berryicon.png` and `assets/openwrtlogsicon.png`,
+`TAB_ICON` for exactly that reason, and berry, manager_update and openwrt_logs
+look for a real picture first - `assets/berryicon.png`, `assets/updateicon.png`
+and `assets/openwrtlogsicon.png`,
 through `api.paths.assets` - and wear their drawing only when the file is not
 there - and for an addon installed from the store its picture is there, because
 the build packs it inside the program and a process addon's `api.paths.assets`
@@ -990,13 +993,27 @@ starts the one you chose. Because a compiled addon imports only
 
 ### The Berry addon store
 
-`addons/addon_store.py` is the third addon inside the program. Its **Addon
+`addons/addon_store.py` is one more addon inside the program. Its **Addon
 store** tab reads `index.json` from the `addon.store` folder of this
 repository - so the list of what can be had lives on GitHub and is never baked
 into a build - and shows one row per addon: id, version, name, author, and
-whether it is installed. **Refresh** re-reads the catalog and marks the rows
-*new* and *updated*, **Install** takes the chosen one and **Delete** takes it
-back.
+whether it is installed. **Refresh** re-reads the catalog, marks the rows *new*
+and *updated*, and works out which installed addons the store has since moved
+past, **Install** takes the chosen one, **Update** rebuilds one that is behind
+over the top of what is there, and **Delete** takes it back. The tab wears its
+own mark - `assets/storeicon.png` when that picture is there, otherwise the SVG
+held in `TAB_ICON` - sent through `api.tabs.set_icon`, so a compiled copy keeps
+it too.
+
+An update is only offered when the catalog's version is ahead of the one
+recorded beside the install in `addons/<id>.json`; dotted versions are compared
+as numbers so `1.10` beats `1.9`, and an install with no recorded version is
+taken for behind whatever the catalog names. A row in that state is marked
+*update available* in amber. Choosing **Update** asks first, then runs the same
+steps as an install - the version in `addons/` is replaced as the new program is
+copied in - but leaves the addon's `addons/_data/<id>/` settings and its switch
+in Settings > Addons exactly as they were, so an addon that was on stays on. A
+fresh install still lands switched off; an update does not switch anything.
 
 An install is one job at a time, and the tab says what it is doing the whole
 way through:
@@ -1033,7 +1050,7 @@ without importing or running any of the addon, since the source is parsed with
 `_data` folder is left alone, so a reinstall comes home to the settings you had.
 
 That manifest is also why an install is never filed among the bundled addons:
-`manager_const.SHIPPED_ADDON_IDS` names the only three that came inside the
+`manager_const.SHIPPED_ADDON_IDS` names the only four that came inside the
 program, and anything else is treated as the user's own. The repository,
 branch, folder and token all live in `addons/_data/addon_store/config.json`, so
 pointing the store at a fork or a private repository is a config edit, and
@@ -1283,6 +1300,75 @@ the tab and editor as Qt builds them (the two-page frame, the headers, the
 right-click policy, and the live syntax highlighter on the editor) - and **Run
 test** in the Addon Dev tab runs it.
 
+### Shipped addon: Berry Manager update
+
+`addons/manager_update.py` adds a **Manager update** tab and a Tools menu
+entry, and keeps the program itself up to date. It reads this repository's
+tags off GitHub's API, takes the ones whose names are the prefix `berry` plus
+a version - `berry1.5.9` is version 1.5.9, anything else the tags name is
+ignored - and compares the newest against the version this copy carries. That
+version has exactly one source now, `manager_const.APP_VERSION`: the About
+dialog shows it, `api.session.version()` answers with it, and the update
+check compares against it, so one line changes per release. A repository with
+no `berry` tag yet - the state before the first release is ever published -
+is said plainly as *nothing to compare with* and is not an error.
+
+**How to publish a release the addon can use.** A GitHub tag points at
+source only and carries no files, and the workflow's artifacts can only be
+downloaded by a signed-in browser - an artifact link handed to the addon
+answers with a sign-in page, which the download recognises and refuses by
+name, explaining the fix. So an artifact link in a description is *not* the
+way; the way is the small extra step after verifying a downloaded artifact:
+
+1. make the tag, named `berry` + the new `APP_VERSION` (say `berry1.5.9`);
+2. publish it as a **release** (GitHub -> Releases -> Draft a new release ->
+   tag `berry1.5.9` -> *Create a new release* rather than just the tag);
+3. attach the two programs built by the workflow as release assets, each
+   named so its system shows in the name - something containing `windows`
+   or `.exe` for the Windows build, `linux` for the other. A zip with
+   `berry_manager.exe` / `berry_manager` inside is unpacked happily, so an
+   artifact zip can be attached as it came; a single asset whose name
+   mentions neither system is offered to both.
+
+Nothing has to be typed into the description, but it is a fallback: when a
+release carries no asset for this system, the addon looks for a plain
+`https` link in the description that serves the bytes with no sign-in, and
+prefers one whose address names this system. And when a tag is ahead but
+offers no download at all, the tab says so and spells these options out
+rather than letting the user find a broken button.
+
+**Download and install** then works in one careful line, paced a megabyte a
+tick through `api.schedule.after` so the window keeps breathing while the
+program comes down: redirects followed with the download's one-time signature
+kept, the bytes checked they really are a program for this system (`MZ` or
+ELF, or unpacked from a zip), staged in `addons/_data/manager_update/`, and
+only then swapped into the running file's place. On Windows the running
+program cannot be deleted, only renamed, so it is parked as
+`berry_manager.old`, the new file takes its name, and the leftover is deleted
+- or, if Windows still holds it, by the fresh copy the moment it starts
+(`clear_replaced_program()` in `berry_manager.py` runs before anything else).
+On Linux the new file simply replaces the old in one step. The swap moves
+that one file and nothing else: the `config` folder, the `addons` folder and
+every addon's settings under `addons/_data` are exactly where they were,
+which is what makes an update of the program safe for a machine that has
+installed addons of its own. Then the addon offers to restart through the
+app's own relaunch, and a refusal leaves this copy running until the user
+starts the new one themselves. A copy running from a source checkout is
+turned away with the reason - there is no single file of it to replace.
+
+The tab is a spec: a header line with the status and an `owner/repo @
+prefix*` chip, the last check's account beside the job's log, and three
+buttons - **Check now**, **Download and install** and **Open releases page**
+(the repository's releases in an embedded tab) - that report through
+`on_widget`. It wears `assets/updateicon.png` when the program ships one and
+a drawn download mark when it does not. The repository, tag prefix, token
+and a check-on-startup switch live in
+`addons/_data/manager_update/config.json`, so pointing the update at a fork
+is a config edit. Its own published test, `addons/_tests/test_manager_update.py`,
+drives every state of the check, the asset and link picking, the byte
+sniffing, the swap and the whole job machine without a network, and the build
+runs it like every other addon's.
+
 ### Store addon: OpenWrt Log Viewer
 
 `addon.store/openwrt_logs.py` adds one tab - **OpenWrt Logs** - with two pages:
@@ -1332,7 +1418,8 @@ app reads that copy as a set of *shipped* addons:
   still written beside the `.exe`, in the writable `addons/_data/<id>/config.json`, so
   a shipped addon is configured per installation exactly like a dropped-in one.
 - "Shipped" is decided by a stable list, `manager_const.SHIPPED_ADDON_IDS`
-  (`berry`, `web_installer`, `addon_store`), on top of the `builtin` flag, so a
+  (`berry`, `web_installer`, `addon_store`, `manager_update`), on top of the
+  `builtin` flag, so a
   source checkout - where `HAS_BUILTIN_ADDONS` is off - still gives those addons
   a Settings page of their own rather than a row on the **Installed addons**
   page. The certificate

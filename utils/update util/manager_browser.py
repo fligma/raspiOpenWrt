@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QTimer, QUrl
@@ -116,6 +117,36 @@ def relaunch_process() -> bool:
     except OSError:
         return False
     return True
+
+
+def replaced_program_path() -> Path:
+    """Where the update addon parks the old copy of this program when it
+    swaps in a new one: beside the running file, under the same name plus
+    ``.old``. Only a frozen build has such a file; a checkout is updated by
+    replacing its source, not by moving the interpreter aside."""
+    if not getattr(sys, "frozen", False):
+        raise ValueError("only a compiled build replaces its own program")
+    return Path(sys.executable).with_name(Path(sys.executable).name + ".old")
+
+
+def clear_replaced_program() -> None:
+    """Take away the old copy an update left behind, on the way up.
+
+    Windows will not delete a program while it runs, so the swap moves it
+    aside under a name nobody is holding and this fresh copy - the first one
+    started from the new file - finishes the deletion here. A leftover that
+    still refuses is worth a shrug, not a dialog: it is one dead file beside
+    a program that has already started.
+    """
+    try:
+        leftover = replaced_program_path()
+    except ValueError:
+        return
+    try:
+        if leftover.is_file():
+            leftover.unlink()
+    except OSError:
+        pass
 
 
 if TYPE_CHECKING:

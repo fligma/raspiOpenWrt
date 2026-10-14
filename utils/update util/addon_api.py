@@ -247,6 +247,7 @@ from addon_common import (
 from manager_config import web_tab_url
 from manager_const import (
     APP_STYLESHEET,
+    APP_VERSION,
     LOG_FILE,
     current_zoom,
     scaled_sheet,
@@ -1124,7 +1125,8 @@ class SessionAPI:
         return tab_caption(bar, index)
 
     def version(self) -> str:
-        return "1.11"
+        """The program's own version, as ``manager_const.APP_VERSION`` names it."""
+        return APP_VERSION
 
     def app_stylesheet(self) -> str:
         """The app's dark theme, already scaled to the interface zoom."""

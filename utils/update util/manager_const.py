@@ -44,6 +44,12 @@ def find_asset(filename: str) -> Path | None:
     return None
 
 
+#: The program's own version, the one the About dialog shows and the update
+#: addon compares against the tags published on GitHub (``berry`` + this).
+#: One line to change per release, everything else reads it from here.
+APP_VERSION = "1.5.9"
+UPDATE_TAG_PREFIX = "berry"
+
 # --- file names and fixed identifiers ---
 
 # Separate from ~/.ssh/known_hosts so trusting a host never
@@ -86,7 +92,7 @@ HARNESS_DIR = RESOURCE_DIR / "harness" if IS_COMPILED else BASE_DIR
 # An addon the store installs marks its own manifest instead,
 # so nothing here may claim it: these ids name the files in
 # ``addons`` and nothing published in ``addon.store``.
-SHIPPED_ADDON_IDS = {"berry", "web_installer", "addon_store"}
+SHIPPED_ADDON_IDS = {"berry", "web_installer", "addon_store", "manager_update"}
 
 # Per-addon folder addons/_data/<id>/ holds its config.json
 # and fields.json. The underscore makes the scanner skip it,

@@ -19,8 +19,8 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from addon_common import kill_all_trees
-from manager_browser import (relaunch_process, set_cert_bypass,
-                             take_restart_request)
+from manager_browser import (clear_replaced_program, relaunch_process,
+                             set_cert_bypass, take_restart_request)
 from manager_config import load_app_config
 from manager_const import ICON_FILES, find_asset
 from manager_gui import BerryManager
@@ -28,6 +28,9 @@ from manager_gui import BerryManager
 
 def main() -> int:
     """Build the application, open the window and run it. Returns the exit code."""
+    # An update swaps the new program in while the old one still runs, and
+    # only this fresh copy can take the moved-aside file away.
+    clear_replaced_program()
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     set_cert_bypass(bool(load_app_config().get("ignore_cert_errors")))
     # Whatever way this process goes down, no addon child outlives it;

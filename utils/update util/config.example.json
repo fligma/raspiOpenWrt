@@ -30,10 +30,9 @@
       "tab_order": [
         "Berry",
         "SSH",
-        "Web",
         "LuCI",
         "Addon store",
-        "Web installer"
+        "Manager update"
       ],
       "terminal_font_size": 10,
       "ui_zoom": 100,
@@ -43,20 +42,14 @@
       "web_port": 8989,
       "web_path": "/cgi-bin/index.py",
       "luci_url": "http://192.168.12.1/",
-      "web_tabs": [
-        { "name": "Web", "ip": "", "port": 8989, "path": "/cgi-bin/index.py", "scheme": "http" },  
+      "web_tabs": [ 
         { "name": "LuCI", "ip": "", "port": 443, "path": "/", "scheme": "https" }
       ],
       "addons": {
-        "berry": {
-          "enabled": true, "ssh_enabled": true, "sftp_enabled": true,
-          "settings": {}
-        },
+        "berry": { "enabled": true, "ssh_enabled": true, "sftp_enabled": true,"settings": {} },
         "addon_store": { "enabled": true, "settings": {} },
-        "web_installer": {
-          "enabled": true, "ssh_enabled": true, "sftp_enabled": true,
-          "settings": {}
-        }
+        "web_installer": { "enabled": false, "ssh_enabled": true, "sftp_enabled": true, "settings": {} },
+        "manager_update": { "enabled": true, "settings": {} }
       },
       "quick_commands": [
         { "label": "Show version", "command": "cat /etc/openwrt_release" }
