@@ -24,6 +24,7 @@ addon's row in Settings; it can never take the window down.
 
 from __future__ import annotations
 
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -49,8 +50,8 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QScrollBar,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -74,9 +75,9 @@ from addon_api import (
     write_config_json,
 )
 from addon_common import (addon_data_dir, addon_manifest_path, addon_origin,
-                          build_mark, kill_process_tree, popen_tree,
-                          release_process_tree, terminate_process_tree,
-                          write_build_mark)
+                          build_mark, future_handle, kill_process_tree,
+                          popen_tree, release_process_tree,
+                          terminate_process_tree, write_build_mark)
 from manager_const import (
     ADDON_DATA_DIR,
     ADDONS_DIR,
@@ -87,7 +88,8 @@ from manager_const import (
     LOG_FILE,
     SHIPPED_ADDON_IDS,
 )
-from manager_widgets import ToggleSwitch, tab_caption, tip_on_title
+from manager_widgets import (ToggleSwitch, tab_caption, tip_on_title,
+                             transport_dot)
 
 
 class _Bus(QObject):
@@ -199,6 +201,11 @@ class Addon:
         self.requires: tuple = ()             # manifest "requires"
         self.own_connection = False           # False: share the app connection
         self.connection = "app"               # manifest "connection": app/own/both
+        # The addon's own gates over the two transports, on its Settings row.
+        # The app-wide switch in the Connection panel stays above these, so an
+        # addon reaches a transport only when both are on.
+        self.ssh_enabled = True
+        self.sftp_enabled = True
 
     @property
     def is_bundled(self) -> bool:
@@ -238,6 +245,10 @@ class Addon:
             return bool(self.own_connection)
         return False
 
+    def transport_allowed(self, transport: str) -> bool:
+        """Whether this addon's own switch lets it use that transport."""
+        return bool(getattr(self, f"{transport}_enabled", True))
+
     def has_source_beside(self) -> bool:
         """Whether the file or folder this program was built from is next to it."""
         try:
@@ -247,12 +258,48 @@ class Addon:
         return (folder / f"{self.id}.py").is_file() or (folder / self.id).is_dir()
 
 
+class _Answered:
+    """A finished job wearing a future's face, kept under its old handle.
+
+    The addon's side holds only a number, so the answer has to stay here; and it
+    stays *as an answer*, not as a hole, because a future that was read once is
+    still readable and still reports itself done. This is what a collected or
+    cancelled handle is swapped for.
+    """
+
+    def __init__(self, value: Any = None, error: str = "") -> None:
+        self.value = value
+        self.error = error
+
+    def done(self) -> bool:
+        return True
+
+    def result(self, timeout: Any = None) -> Any:
+        if self.error:
+            raise AddonError(self.error)
+        return self.value
+
+    def cancel(self) -> bool:
+        return False
+
+
 class ProcessBridge:
     """Line-delimited JSON between the app and an executable addon."""
 
     #: Requests served on the GUI thread because they touch Qt.
     GUI_METHODS = ("ui.", "tabs.", "session.", "events.", "settings.", "config.",
                    "schedule.", "peers.")
+
+    #: Asked by the addon about a job the app is still running for it. These
+    #: never reach the api: the bridge answers them from its own registry,
+    #: since the future itself cannot cross a pipe.
+    FUTURE_METHODS = ("device.future_done", "device.future_result",
+                      "device.future_cancel")
+
+    #: How many answered-for handles are kept, oldest dropped first. One
+    #: round's worth of devices stays readable, and an addon that forgets its
+    #: handles cannot grow this without end.
+    FUTURE_KEEP = 64
 
     def __init__(self, manager: "AddonManager", addon: Addon) -> None:
         self.mgr = manager
@@ -265,6 +312,10 @@ class ProcessBridge:
         self.started_at = 0.0
         self.command: list[str] = []
         self.exit_code: int | None = None
+        # token -> the job this addon asked for and has not collected yet.
+        self.futures: dict[int, Any] = {}
+        self.future_lock = threading.Lock()
+        self.future_counter = 0
 
     # --- start and stop ---
 
@@ -337,6 +388,7 @@ class ProcessBridge:
         if proc is None:
             return
         self.stopping = True
+        self._drop_futures()
         self.write({"op": "shutdown"})
         # Wait in slices, serving the queue between them: the addon may be
         # finishing a GUI-thread request right now, and a plain wait on a
@@ -474,6 +526,18 @@ class ProcessBridge:
         if identifier is None:
             identifier = self.counter
         reply: dict = {"id": identifier}
+        if method in self.FUTURE_METHODS:
+            # A question about a job it already started: answered here, from
+            # the registry, without touching the api at all.
+            try:
+                reply["result"] = jsonable(self._answer_future(method, arguments))
+            except AddonError as error:
+                reply["error"] = str(error)
+            except Exception as error:
+                reply["error"] = f"{type(error).__name__}: {error}"
+            if message.get("reply", True):
+                self.write(reply)
+            return
         # No function crosses a pipe: the addon names the callback argument and
         # keeps the real function under a token; this closure calls back.
         token = message.get("token")
@@ -487,13 +551,92 @@ class ProcessBridge:
             else:
                 # Device and file work: this thread is the addon's own.
                 result = self.addon.api.call(method, arguments)
-            reply["result"] = jsonable(result)
+            reply["result"] = self._answer_for(method, result)
         except AddonError as error:
             reply["error"] = str(error)
         except Exception as error:
             reply["error"] = f"{type(error).__name__}: {error}"
         if message.get("reply", True):
             self.write(reply)
+
+    def _answer_for(self, method: str, result: Any) -> Any:
+        """What one api answer becomes on this side of the pipe.
+
+        A job still running is worth nothing to another process - only its
+        handle is, so ``device.run(block=False)`` replies with a token the addon
+        asks about through the ``device.future_*`` methods. ``run_async`` needs
+        no handle: its result already arrives through its own callback token.
+        """
+        if isinstance(result, concurrent.futures.Future):
+            if method == "device.run":
+                return future_handle(self._track_future(result))
+            return None
+        return jsonable(result)
+
+    def _track_future(self, future: concurrent.futures.Future) -> int:
+        """Keep a running job until the addon collects it, and hand out its token."""
+        with self.future_lock:
+            self.future_counter += 1
+            token = self.future_counter
+            self.futures[token] = future
+            spent = [key for key, held in self.futures.items()
+                     if isinstance(held, _Answered)]
+            # Counting the answer this job is about to leave behind, so the
+            # number of remembered ones never goes over the limit.
+            keep = max(0, len(spent) - self.FUTURE_KEEP + 1)
+            for key in spent[:keep]:
+                self.futures.pop(key, None)
+        return token
+
+    def _settle_future(self, token: int, value: Any, error: str = "") -> None:
+        """Swap a job that is over for its answer, keeping the handle honest."""
+        with self.future_lock:
+            self.futures[token] = _Answered(value, error)
+
+    def _answer_future(self, method: str, arguments: dict) -> Any:
+        """Serve one ``device.future_*`` question out of the registry."""
+        try:
+            token = int(arguments.get("token"))
+        except (TypeError, ValueError):
+            raise AddonError("a job handle needs its token")
+        with self.future_lock:
+            future = self.futures.get(token)
+        if future is None:
+            raise AddonError(f"no job is known under handle {token}")
+        if method == "device.future_done":
+            return future.done()
+        if method == "device.future_result":
+            wanted = arguments.get("timeout")
+            try:
+                value = future.result() if wanted is None else \
+                    future.result(timeout=float(wanted))
+            except concurrent.futures.TimeoutError:
+                # Still going: the handle is not spent, so it is left alone.
+                raise AddonError("the job is still running")
+            except concurrent.futures.CancelledError as error:
+                self._settle_future(token, None, str(error) or "the job was cancelled")
+                raise AddonError("the job was cancelled")
+            except Exception as error:      # the worker's own failure, replayed
+                detail = str(error) if isinstance(error, AddonError) \
+                    else f"{type(error).__name__}: {error}"
+                self._settle_future(token, None, detail)
+                raise
+            self._settle_future(token, value)
+            return value
+        cancelled = future.cancel()
+        if cancelled:
+            # The job never ran and never will: answer its handle from here on.
+            self._settle_future(token, None, "the job was cancelled")
+        return cancelled
+
+    def _drop_futures(self) -> None:
+        """Nothing is owed to a process that is going away."""
+        with self.future_lock:
+            pending = list(self.futures.values())
+            self.futures.clear()
+        for held in pending:
+            if not isinstance(held, _Answered):
+                held.cancel()
 
     def _callback_for(self, token: Any, argument: str) -> Callable[..., None]:
         """The closure an in-process API method can call back into the addon."""
@@ -517,6 +660,7 @@ class AddonManager:
         "ssh_connected", "ssh_disconnected", "operation_done", "tab_changed",
         "profile_changed", "settings_applied", "addon_enabled", "addon_disabled",
         "addon_config_changed", "connections_enabled", "connections_disabled",
+        "transport_changed",
     )
 
     def __init__(self, window: Any) -> None:
@@ -525,13 +669,14 @@ class AddonManager:
         self.addons: list[Addon] = []
         self.shadowed: dict[str, list[Addon]] = {}   # lost same-id copies
         self.listeners: dict[str, list[tuple[str, object]]] = {}
-        self.box: QGroupBox | None = None
         self.rows: dict[str, dict] = {}
-        self.body: QVBoxLayout | None = None
+        self.body: QVBoxLayout | None = None       # the Installed addons page
         self.hint: QLabel | None = None
-        self.bundled_box: QGroupBox | None = None   # shipped addons, own category
-        self.bundled_body: QVBoxLayout | None = None
-        self.dot_refs: dict[str, dict] = {}         # id -> SSH/SFTP caption+dot
+        self.settings_tabs: QTabWidget | None = None
+        self.installed_scroll: QScrollArea | None = None
+        # id -> a Settings page of its own, for the addons shipped inside the app
+        self.bundled_tabs: dict[str, dict] = {}
+        self.dot_refs: dict[str, dict] = {}         # id -> transport -> its dot
         self.config_panels: dict[str, tuple] = {}   # id -> editor, per file
         self._started = False
         # Nothing is read or started here; call reload() once the interface is up.
@@ -555,10 +700,13 @@ class AddonManager:
         store = self.records()
         record = store.get(addon_id)
         if not isinstance(record, dict):
-            record = {"enabled": False, "settings": {}, "own_connection": False}
+            record = {"enabled": False, "settings": {}, "own_connection": False,
+                      "ssh_enabled": True, "sftp_enabled": True}
             store[addon_id] = record
         record.setdefault("enabled", False)
         record.setdefault("own_connection", False)
+        record.setdefault("ssh_enabled", True)
+        record.setdefault("sftp_enabled", True)
         if not isinstance(record.get("settings"), dict):
             record["settings"] = {}
         return record
@@ -707,6 +855,8 @@ class AddonManager:
             "enabled": bool(addon.enabled),
             "requires": list(addon.requires),
             "own_connection": bool(addon.own_connection),
+            "ssh_enabled": bool(addon.ssh_enabled),
+            "sftp_enabled": bool(addon.sftp_enabled),
             "connection": addon.connection,
             "uses_own": bool(addon.uses_own),
             "loaded": bool(addon.loaded),
@@ -764,6 +914,9 @@ class AddonManager:
         for addon in discovered:
             record = self.record_for(addon.id)
             addon.enabled = bool(record.get("enabled", False))
+            # Each transport needs its app-wide gate and this addon's own.
+            addon.ssh_enabled = bool(record.get("ssh_enabled", True))
+            addon.sftp_enabled = bool(record.get("sftp_enabled", True))
             # Bundled addons are pinned to the main connection.
             addon.own_connection = (
                 bool(record.get("own_connection", False)) and not addon.is_bundled)
@@ -789,7 +942,10 @@ class AddonManager:
     def reconcile(self) -> None:
         """Apply the enable/disable flags after a profile switch or import."""
         for addon in self.addons:
-            wanted = bool(self.record_for(addon.id).get("enabled", False))
+            record = self.record_for(addon.id)
+            addon.ssh_enabled = bool(record.get("ssh_enabled", True))
+            addon.sftp_enabled = bool(record.get("sftp_enabled", True))
+            wanted = bool(record.get("enabled", False))
             if wanted and not addon.loaded:
                 self.load(addon)
             elif not wanted and addon.loaded:
@@ -999,6 +1155,10 @@ class AddonManager:
                 holder.deleteLater()
             widget.deleteLater()
         addon.setting_widget = None
+        # Forget which transports this run reached for: the dot beside a switch
+        # says whether the addon that is running now has used it, so a stopped
+        # and restarted addon has to earn the green state again.
+        addon.uses_ssh = addon.uses_sftp = False
 
     def mark_stopped(self, addon: Addon) -> None:
         """A process addon exited by itself: keep the row, say why."""
@@ -1064,7 +1224,41 @@ class AddonManager:
         record["own_connection"] = bool(own)
         addon.own_connection = bool(own)
         self.save_records()
+        self._refresh_tab_dots()
         self.bus.post(lambda: self.refresh_connection_dots(addon_id))
+
+    def set_transport_enabled(self, addon_id: str, transport: str,
+                              on: bool) -> None:
+        """One addon's own gate over SSH or SFTP.
+
+        The app-wide switch in the Connection panel stays above this one: a
+        transport is reachable only when both are on, and an addon riding the
+        main connection still has to wait for it to be open.
+        """
+        if transport not in ("ssh", "sftp"):
+            return
+        addon = self.find(addon_id)
+        if addon is None:
+            return
+        record = self.record_for(addon_id)
+        record[f"{transport}_enabled"] = bool(on)
+        setattr(addon, f"{transport}_enabled", bool(on))
+        self.save_records()
+        self.log(addon_id, f"{transport.upper()} "
+                           + ("allowed for this addon" if on
+                              else "switched off for this addon"))
+        self._refresh_tab_dots()
+        self.refresh_connection_dots(addon_id)
+        # Tell every addon: an addon watching another one's gates, or showing a
+        # connection state of its own, redraws from the same event.
+        self.notify("transport_changed", {"addon": addon_id, "transport": transport,
+                                          "scope": "addon", "enabled": bool(on)})
+
+    def _refresh_tab_dots(self) -> None:
+        """Let the dots beside the tabs follow a switch the user just moved."""
+        sync = getattr(self.win, "sync_tab_transport_dots", None)
+        if callable(sync):
+            sync()
 
     def restart(self, addon_id: str) -> None:
         addon = self.find(addon_id)
@@ -1176,21 +1370,34 @@ class AddonManager:
         if bar is not None and hasattr(bar, "refit"):
             bar.refit()
 
-    # --- the Addons section of the Settings tab ---
+    # --- the Settings pages ---
 
-    def build_settings_widget(self) -> QGroupBox:
-        """The category listing every drop-in addon, with a switch for each."""
-        box = QGroupBox("Installed addons")
-        # On the heading only, so no tooltip covers the panel's rows.
-        tip_on_title(box,
-            "Python files and programs you put in the 'addons' folder next to "
-            "Berry Manager. Switching one off stops it and takes away its tabs; "
-            "switching it on starts it again without a restart. Each profile "
-            "remembers its own choices."
-        )
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(16, 12, 12, 10)
+    def build_settings_tabs(self, tabs: QTabWidget) -> None:
+        """Give the addons their pages in the Settings tab bar.
+
+        Everything dropped in later - a hand-written file, a program built here,
+        an addon the store installed - shares the one **Installed addons** page
+        made here. A page for each addon that came inside the program is made
+        with its row in ``refresh_rows``, so an addon found by a later Rescan
+        needs nothing else.
+        """
+        self.settings_tabs = tabs
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(8)
+
+        saying = QLabel(
+            "Python files, addon folders and programs you put in the 'addons' "
+            "folder next to Berry Manager, and the ones the addon store "
+            "installs. Switching one off stops it and takes away its tabs; "
+            "switching it on starts it again without a restart. Each profile "
+            "remembers its own choices, and the addons that came inside the "
+            "program have a page of their own beside this one."
+        )
+        saying.setWordWrap(True)
+        saying.setStyleSheet("color: #8f8f8f;")
+        layout.addWidget(saying)
 
         folder_row = QHBoxLayout()
         path_label = QLabel(str(self.ensure_folder()))
@@ -1225,80 +1432,174 @@ class AddonManager:
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color: #aaaaaa;")
         layout.addWidget(self.hint)
-        self.box = box
-        self.refresh_rows()
-        return box
+        layout.addStretch(1)
 
-    def build_bundled_widget(self) -> QGroupBox:
-        """The empty container ``refresh_rows`` fills with one box per bundled addon."""
-        box = QGroupBox("Bundled with the program")
-        tip_on_title(box,
-            "Addons that come inside Berry Manager. Turn one off to stop it and "
-            "take away its tab; switch it back on to bring it right back, with no "
-            "restart. Each profile remembers its own choices."
-        )
-        body = QVBoxLayout(box)
-        body.setContentsMargins(16, 12, 12, 10)
-        body.setSpacing(8)
-        self.bundled_box = box
-        self.bundled_body = body
-        if self.body is not None:
-            self.refresh_rows()
-        return box
+        self.installed_scroll = QScrollArea()
+        self.installed_scroll.setWidgetResizable(True)
+        self.installed_scroll.setWidget(host)
+        tabs.addTab(self.installed_scroll, "Installed addons")
+
+    def _owns_settings_page(self, addon: Addon) -> bool:
+        """Whether this addon gets a Settings page of its own.
+
+        Only an addon the program carries: ``is_bundled`` reads "came with the
+        program", and in a source checkout that also covers anything dropped
+        into the same folder, so the page follows the ids the build ships and
+        what the store installed. Everything else shares the Installed addons
+        page.
+        """
+        if addon.origin:
+            return False
+        return bool(addon.builtin) or addon.id in SHIPPED_ADDON_IDS
+
+    def _addon_tab_body(self, addon: Addon) -> QVBoxLayout | None:
+        """One shipped addon's Settings page, made the first time its row is built.
+
+        ``None`` for an addon the user put in: it belongs on the shared
+        Installed addons page.
+        """
+        if not self._owns_settings_page(addon) or self.settings_tabs is None:
+            return None
+        title = addon.name or addon.id
+        entry = self.bundled_tabs.get(addon.id)
+        if entry is None:
+            host = QWidget()
+            body = QVBoxLayout(host)
+            body.setContentsMargins(12, 12, 12, 10)
+            body.setSpacing(8)
+            body.addStretch(1)
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setWidget(host)
+            # The shipped pages come before the installed one, in the order the
+            # addons were read; the installed page stays last.
+            at = self.settings_tabs.indexOf(self.installed_scroll)
+            self.settings_tabs.insertTab(max(at, 0), area, title)
+            entry = {"scroll": area, "body": body}
+            self.bundled_tabs[addon.id] = entry
+        else:
+            at = self.settings_tabs.indexOf(entry["scroll"])
+            if at >= 0 and self.settings_tabs.tabText(at) != title:
+                self.settings_tabs.setTabText(at, title)
+        return entry["body"]
+
+    def _forget_tabs(self, kept: set[str]) -> None:
+        """Take away the pages of shipped addons that a rescan no longer finds."""
+        if self.settings_tabs is None:
+            return
+        for identifier in [key for key in self.bundled_tabs if key not in kept]:
+            entry = self.bundled_tabs.pop(identifier)
+            at = self.settings_tabs.indexOf(entry["scroll"])
+            if at >= 0:
+                self.settings_tabs.removeTab(at)
+            entry["scroll"].deleteLater()
 
     # --- connection indicators ---
 
-    def make_transport_dots(self, addon_id: str, head_layout: QHBoxLayout) -> None:
-        """Add an SSH and an SFTP dot for each transport the manifest requires."""
-        refs = {}
-        for transport in ("ssh", "sftp"):
-            caption = QLabel(transport.upper())
-            caption.setStyleSheet("color: #aaaaaa;")
-            caption.setVisible(False)
-            dot = QLabel("\u25CF")
-            dot.setObjectName("statusDotOffline")
-            dot.setVisible(False)
-            dot.setToolTip(f"{transport.upper()}: not connected")
-            head_layout.addWidget(caption)
-            head_layout.addWidget(dot)
-            refs[transport] = (caption, dot)
-        self.dot_refs[addon_id] = refs
-        self.refresh_connection_dots(addon_id)
+    def make_transport_dots(self, addon_id: str, transport: str,
+                            layout: QHBoxLayout) -> None:
+        """The dot that speaks for one transport switch on an addon's row.
+
+        The switch beside it already carries the name, so the dot says only the
+        state: green while the addon can use that transport now, amber while
+        every switch is on but no connection stands up, red while a switch
+        refuses it.
+        """
+        dot = QLabel("\u25CF")
+        dot.setObjectName("statusDotOffline")
+        dot.setToolTip(f"{transport.upper()}: not connected")
+        layout.addWidget(dot)
+        self.dot_refs.setdefault(addon_id, {})[transport] = dot
+        self._apply_dot_state(self.find(addon_id), transport, dot)
+
+    def _live_transport_states(self) -> dict[str, bool]:
+        """Whether the app's one main connection carries each transport now."""
+        reader = getattr(self.win, "_live_transport_states", None)
+        if callable(reader):
+            return dict(reader())
+        shared = getattr(self.win, "shared_conn", None)
+        live = bool(shared.active()) if shared is not None else False
+        live = live or bool(getattr(self.win, "main_connected", False))
+        return {"ssh": live, "sftp": live}
+
+    def transport_state(self, addon: Addon | None, transport: str) -> dict[str, str]:
+        """What one transport's indicator says, for an addon or for the app.
+
+        The gates are walked in the order every device call walks them - the
+        master switch, that transport's app-wide switch, the addon's own switch,
+        the transport on its row - and then the connection decides: an addon
+        sharing the app's session can only work while that session is open,
+        while an addon on a connection of its own brings it up itself, per call,
+        so all the app can say is whether it may and whether it has.
+
+        ``mode`` is ``"on"`` (usable right now), ``"ready"`` (every switch on,
+        nothing connected yet) or ``"off"`` (a switch refuses it), and ``tip``
+        says the whole story, including whose connection it rides.
+        """
+        shown = transport.upper()
+        config = getattr(self.win, "app_config", {}) or {}
+        master = getattr(self.win, "connections_enabled", None)
+        if callable(master) and not master():
+            return self._refused(f"{shown}: off - the master switch in the "
+                                 "connection panel's header is off")
+        if not bool(config.get(f"{transport}_enabled", True)):
+            return self._refused(f"{shown}: off - {shown} is switched off on the "
+                                 "Settings Connection page")
+        if addon is not None:
+            if not bool(getattr(addon, "enabled", True)):
+                return self._refused(f"{shown}: off - this addon is switched off")
+            if transport not in (getattr(addon, "requires", ()) or ()):
+                return self._refused(f"{shown}: off - the addon's manifest does "
+                                     "not declare it, so it cannot use it")
+            if not addon.transport_allowed(transport):
+                return self._refused(f"{shown}: off - its own switch, beside "
+                                     "this dot, is off")
+        live = bool(self._live_transport_states().get(transport))
+        if addon is not None and addon.uses_own:
+            source = ("its own connection, which it opens for every call; the "
+                      "main connection is not involved")
+            if bool(getattr(addon, f"uses_{transport}", False)):
+                return {"mode": "on",
+                        "tip": f"{shown}: it has used {source}"}
+            return {"mode": "ready",
+                    "tip": f"{shown}: it may use {source} - nothing has "
+                           "been asked of it yet"}
+        shared = "" if addon is None else ", which this addon shares"
+        if live:
+            return {"mode": "on",
+                    "tip": f"{shown}: connected - the main connection{shared}"}
+        return {"mode": "ready",
+                "tip": f"{shown}: every switch is on, but the main connection is "
+                       "closed - press Connect"}
+
+    @staticmethod
+    def _refused(tip: str) -> dict[str, str]:
+        """The one answer every switched-off case shares."""
+        return {"mode": "off", "tip": tip}
+
+    def _apply_dot_state(self, addon: Addon | None, transport: str,
+                         dot: QLabel) -> None:
+        """Colour one dot from the shared answer and put the saying in its tip."""
+        state = self.transport_state(addon, transport)
+        transport_dot(dot, state["mode"])
+        dot.setToolTip(state["tip"])
 
     def refresh_connection_dots(self, addon_id: str | None = None) -> None:
-        """Show, hide and recolour the transport dots, and redraw the overview."""
+        """Recolour the dots on the addon rows, then redraw the status list.
+
+        Each dot rides beside the switch it speaks for, so a row only carries
+        dots for the transports its manifest declared, and they stay in view
+        while the addon itself is folded away.
+        """
         win = self.win
-        shell = getattr(win, "shell_worker", None)
-        reader = getattr(win, "_live_transport_states", None)
-        if callable(reader):
-            states = reader()
-        else:
-            shared = getattr(win, "shared_conn", None)
-            live = shared.active() if shared is not None else False
-            states = {
-                "sftp": bool(getattr(win, "sftp_connected", False) or live),
-                "ssh": bool((shell is not None and shell.isRunning()) or live),
-            }
         identifiers = [addon_id] if addon_id else list(self.dot_refs)
         for identifier in identifiers:
             refs = self.dot_refs.get(identifier)
             if not refs:
                 continue
             addon = self.find(identifier)
-            declared = set(getattr(addon, "requires", ()) or ()) if addon else set()
-            uses = {transport: transport in declared for transport in refs}
-            for transport, (caption, dot) in refs.items():
-                visible = uses[transport]
-                caption.setVisible(visible)
-                dot.setVisible(visible)
-                if not visible:
-                    continue
-                online = states[transport]
-                dot.setObjectName("statusDotOnline" if online else "statusDotOffline")
-                dot.setToolTip(f"{transport.upper()}: "
-                               + ("connected" if online else "not connected"))
-                dot.style().unpolish(dot)
-                dot.style().polish(dot)
+            for transport, dot in refs.items():
+                self._apply_dot_state(addon, transport, dot)
         panel = getattr(win, "refresh_connection_overview", None)
         if callable(panel):
             try:
@@ -1528,19 +1829,36 @@ class AddonManager:
                     kept.append(widget)
         return kept
 
-    def _settings_scrollbar(self) -> QScrollBar | None:
-        """The bar the addon page scrolls with; saved around a rebuild."""
-        widget = self.box.parentWidget() if self.box is not None else None
+    def _scroll_of(self, widget: QWidget | None) -> QScrollArea | None:
+        """The Settings page one widget scrolls with; each tab has its own."""
         while widget is not None and not isinstance(widget, QScrollArea):
             widget = widget.parentWidget()
-        return widget.verticalScrollBar() if widget is not None else None
+        return widget
+
+    def _keep_scroll(self) -> dict[int, int]:
+        """Where every addon page stands, before a rebuild moves its rows."""
+        saved: dict[int, int] = {}
+        for holder in self.rows.values():
+            area = self._scroll_of(holder["row"])
+            if area is not None:
+                saved[id(area)] = area.verticalScrollBar().value()
+        return saved
+
+    def _restore_scroll(self, saved: dict[int, int]) -> None:
+        """Put each page back where its reader was, so a rebuild does not jump."""
+        areas = [entry["scroll"] for entry in self.bundled_tabs.values()]
+        if self.installed_scroll is not None:
+            areas.append(self.installed_scroll)
+        for area in areas:
+            where = saved.get(id(area))
+            if where is not None:
+                area.verticalScrollBar().setValue(where)
 
     def refresh_rows(self) -> None:
-        """Rebuild the bundled categories and the installed list from scratch."""
+        """Rebuild every addon page: one per shipped addon, the rest together."""
         if self.body is None:
             return
-        bar = self._settings_scrollbar()
-        where = bar.value() if bar is not None else 0
+        saved = self._keep_scroll()
         carried = {addon_id: self._salvage_row(holder["extra"])
                    for addon_id, holder in self.rows.items()}
         for holder in self.rows.values():
@@ -1550,27 +1868,32 @@ class AddonManager:
         self.dot_refs.clear()
 
         installed = 0
+        shipped: set[str] = set()
         for addon in self.addons:
-            if addon.is_bundled and self.bundled_body is not None:
-                target = self.bundled_body
-            else:
-                target = self.body
-            if not addon.is_bundled:
+            page = self._addon_tab_body(addon)
+            target = self.body if page is None else page
+            row = self._build_row(addon, carried.get(addon.id, []), target)
+            if page is None:
                 installed += 1
-            target.addWidget(self._build_row(addon, carried.get(addon.id, []), target))
+                target.addWidget(row)
+            else:
+                # A shipped addon's page keeps its stretch last, so its one row
+                # is put in at the top rather than after it.
+                shipped.add(addon.id)
+                target.insertWidget(0, row)
+        self._forget_tabs(shipped)
         self.hint.setVisible(not installed)
         if not installed:
             self.hint.setText(
                 "No drop-in addons. Put an 'addon.py' inside a folder named after "
                 f"the addon, or a .py file, in {ADDONS_DIR}, install one from the "
                 "addon store, and press Rescan. The addons that ship with the "
-                "program are switched on and off above."
+                "program have a page of their own beside this one."
             )
-        if bar is not None:
-            bar.setValue(where)
+        self._restore_scroll(saved)
 
     def refresh_row(self, addon_id: str) -> None:
-        """Rebuild one addon's row in place, keeping the scroll position."""
+        """Rebuild one addon's row in place, keeping its page scrolled where it was."""
         if self.body is None:
             return
         holder = self.rows.get(addon_id)
@@ -1578,17 +1901,17 @@ class AddonManager:
         if holder is None or addon is None:
             self.refresh_rows()
             return
-        bar = self._settings_scrollbar()
-        where = bar.value() if bar is not None else 0
+        area = self._scroll_of(holder["row"])
+        where = area.verticalScrollBar().value() if area is not None else 0
         carried = self._salvage_row(holder["extra"])
-        layout = holder.get("layout") or self.body
+        layout = holder.get("layout") or (self._addon_tab_body(addon) or self.body)
         index = layout.indexOf(holder["row"])
         holder["row"].setParent(None)
         holder["row"].deleteLater()
         self.rows.pop(addon_id, None)
         layout.insertWidget(max(index, 0), self._build_row(addon, carried, layout))
-        if bar is not None:
-            bar.setValue(where)
+        if area is not None:
+            area.verticalScrollBar().setValue(where)
 
     def _build_row(self, addon: Addon, carried: list,
                    target_layout: QVBoxLayout | None = None) -> QWidget:
@@ -1622,18 +1945,20 @@ class AddonManager:
         status = QLabel(self._state_text(addon))
         status.setStyleSheet(self._state_style(addon))
         head.addWidget(status)
-        # SSH / SFTP dots, for every transport this addon declared.
-        self.make_transport_dots(addon.id, head)
         if addon.requires and not addon.is_bundled and addon.connection == "both":
             # Declared "both": only here is the user's to choose between the
             # app's session and a fresh connection per call.
             own = ToggleSwitch("own connection")
             own.setToolTip(
-                "Off: the addon shares the app's main SSH/SFTP session.\n"
-                "On: the addon opens a connection of its own, and through\n"
-                "api.device.bind() it can even reach a different device.\n"
-                "Either way the switch in the Connection panel header gates\n"
-                "every connection, this one included."
+                "Off: the addon shares the app's one main connection, and can"
+                " only use it while that connection is open."
+                "\nOn: the addon opens a connection of its own for each call, "
+                "so it works whether or not the main connection is up, and "
+                "through api.device.bind() it can even reach a different "
+                "device."
+                "\nEither way the addon's own switch and the switch in the "
+                "Connection panel header gate every connection, this one "
+                "included."
             )
             own.blockSignals(True)
             own.setChecked(bool(addon.own_connection))
@@ -1645,10 +1970,19 @@ class AddonManager:
             fixed.setStyleSheet("color: #8f8f8f;")
             fixed.setToolTip(
                 "This addon declared \"connection\": \"own\" in its manifest,\n"
-                "so it always opens its own connection; it cannot use the\n"
-                "app's session."
+                "so it always opens its own connection, main connection up or\n"
+                "not; it cannot use the app's session."
             )
             head.addWidget(fixed)
+        elif addon.requires and not addon.is_bundled:
+            rides = QLabel("main connection")
+            rides.setStyleSheet("color: #8f8f8f;")
+            rides.setToolTip(
+                "This addon declared \"connection\": \"app\" in its manifest,\n"
+                "so it only ever uses the app's one main connection, and can\n"
+                "use it no earlier than the connection is open."
+            )
+            head.addWidget(rides)
         if not addon.is_bundled:
             # A shipped addon's file is inside the program, so no restart here.
             restart = QPushButton("Restart")
@@ -1665,14 +1999,63 @@ class AddonManager:
             head.addWidget(jump)
         column.addLayout(head)
 
-        if addon.is_bundled:
+        if addon.requires:
+            # The addon's own gates, one per transport it declared, each with the
+            # dot that says what that transport is doing. Both this switch and
+            # the app-wide one have to be on; an addon sharing the main
+            # connection then waits for that connection as well, while one on a
+            # connection of its own brings it up itself.
+            gates = QHBoxLayout()
+            gates.setContentsMargins(20, 0, 0, 0)
+            gates.setSpacing(6)
+            for transport in ("ssh", "sftp"):
+                if transport not in addon.requires:
+                    continue
+                toggle = ToggleSwitch(transport.upper())
+                toggle.setToolTip(
+                    f"Off: this addon is refused every {transport.upper()} job, "
+                    "even with the main connection open and "
+                    f"{transport.upper()} on in the Connection panel."
+                    "\nOn: it may use "
+                    f"{transport.upper()}, along with that app-wide switch and "
+                    "this addon's own switch above."
+                )
+                toggle.blockSignals(True)
+                toggle.setChecked(bool(addon.transport_allowed(transport)))
+                toggle.blockSignals(False)
+                toggle.toggled.connect(
+                    lambda on, aid=addon.id, part=transport:
+                    self.set_transport_enabled(aid, part, on))
+                gates.addWidget(toggle)
+                # The dot belongs to the switch on its left, so the row says the
+                # name once and the state beside it.
+                self.make_transport_dots(addon.id, transport, gates)
+                gates.addSpacing(6)
+            saying = QLabel("connections this addon may use")
+            saying.setStyleSheet("color: #8f8f8f;")
+            saying.setToolTip(
+                "Green: it can use that transport right now.\n"
+                "Amber: every switch is on, but nothing stands connected - an "
+                "addon on the main connection waits for Connect, one on its own "
+                "has simply not been asked yet.\n"
+                "Red: a switch refuses it, and the tool tip says which."
+            )
+            gates.addWidget(saying)
+            gates.addStretch(1)
+            gate_wrap = QWidget()
+            gate_wrap.setLayout(gates)
+            column.addWidget(gate_wrap)
+
+        if self._owns_settings_page(addon):
             cfg = addon_config_path(addon.id)
             try:
                 shown = cfg.relative_to(BASE_DIR).as_posix()
             except ValueError:
                 shown = str(cfg)
-            shipped = QLabel("Shipped with the program: switch it on or off here. "
-                             f"Its own settings are in {shown}.")
+            shipped = QLabel("Shipped with the program: switch it on or off on this "
+                             f"page. Its own settings are in {shown}, and the "
+                             "switches under its name say which connections it "
+                             "may use.")
             shipped.setWordWrap(True)
             shipped.setStyleSheet("color: #8f8f8f;")
             column.addWidget(shipped)
@@ -1713,18 +2096,11 @@ class AddonManager:
         switch.toggled.connect(holder.setVisible)
         column.addWidget(holder)
 
-        outer = entry
-        if addon.is_bundled:
-            # A shipped addon reads as a top-level category, like the SSH ones.
-            box = QGroupBox(addon.name or addon.id)
-            bl = QVBoxLayout(box)
-            bl.setContentsMargins(14, 8, 12, 8)
-            bl.setSpacing(2)
-            bl.addWidget(entry)
-            outer = box
-        self.rows[addon.id] = {"row": outer, "extra": extra,
+        # The addon's page in the Settings bar is the category now, so the row
+        # needs no box of its own around it.
+        self.rows[addon.id] = {"row": entry, "extra": extra,
                                "layout": target_layout if target_layout is not None else self.body}
-        return outer
+        return entry
 
     def _state_text(self, addon: Addon) -> str:
         if addon.error:

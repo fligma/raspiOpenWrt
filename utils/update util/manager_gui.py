@@ -76,7 +76,7 @@ from manager_const import (
     step_zoom,
     zoom_size,
 )
-from manager_files import FileViewsMixin
+from manager_files import MainConnectionMixin
 from manager_net import (
     RebootWaitWorker,
     RemoteExecWorker,
@@ -91,24 +91,26 @@ from manager_widgets import (
     RightPinnedTabBar,
     RightPinnedTabWidget,
     TabTransportDots,
+    TRANSPORT_DOT,
     ToggleGroup,
     ToggleSwitch,
     settings_tab_icon,
     tab_caption,
     tip_on_title,
+    transport_dot,
 )
 
 
 class BerryManager(
     BrowserMixin,
-    FileViewsMixin,
+    MainConnectionMixin,
     TerminalMixin,
     QMainWindow
 ):
     """The application window: menu, tab shell, connection panel, log and shutdown.
 
     The device tabs live in their own modules - manager_browser and
-    manager_terminal - and are mixed in here, along with the lightweight SFTP
+    manager_terminal - and are mixed in here, along with the one main SSH/SFTP
     connection in manager_files (Berry, a bundled addon, provides the file tab).
     Everything the window itself owns stays in this file: the menu, the Settings
     tab, the profiles and the actions that open a dialog. The reusable widgets
@@ -135,7 +137,7 @@ class BerryManager(
         self.terminal_history: list[str] = load_command_history()
         self.terminal_history_pos = len(self.terminal_history)
         self.connected_once = False
-        self.sftp_connected = False
+        self.main_connected = False
         self.setWindowTitle("Berry Manager")
         self.resize(1180, 780)
 
@@ -151,13 +153,16 @@ class BerryManager(
         self._apply_remembered_order()
         self._select_default_tab()
 
-        want_sftp_auto = bool(self.app_config.get("auto_connect_sftp")) and self.app_config.get("sftp_enabled", True)
-        want_ssh_auto = bool(self.app_config.get("auto_connect_ssh")) and self.app_config.get("ssh_enabled", True)
-        if self.connections_enabled() and (want_sftp_auto or want_ssh_auto):
-            if want_sftp_auto:
+        # One main connection carries both transports, so one switch brings it
+        # up at startup; the terminal attaches to it from there. It comes up for
+        # whichever transport is switched on, and there is no point opening a
+        # session when neither is.
+        if self.connections_enabled() and bool(self.app_config.get("auto_connect")):
+            if (bool(self.app_config.get("ssh_enabled", True))
+                    or bool(self.app_config.get("sftp_enabled", True))):
                 QTimer.singleShot(400, self.connect_remote)
-            if want_ssh_auto:
-                QTimer.singleShot(400, self.connect_shell)
+            else:
+                self.log("Not connecting at startup: SSH and SFTP are both off")
 
     def build_menu(self) -> None:
         menubar = self.menuBar()
@@ -283,9 +288,9 @@ class BerryManager(
         connection_group = ToggleGroup(
             "Connection", bool(self.app_config.get("master_connection", True)),
             body="box",
-            tip="The master switch. Off closes every connection and stops any "
-                "addon from connecting, with the app's session or its own; on "
-                "lets the Connect buttons and the addons work again.",
+            tip="The master switch. Off closes the main connection and stops "
+                "every addon from connecting, with the app's session or its own; "
+                "on lets the Connect button and the addons work again.",
         )
         credentials = QWidget()
         connection_layout = QGridLayout(credentials)
@@ -330,10 +335,16 @@ class BerryManager(
         self.timeout_input.setSuffix(" s")
         self.connect_button = QPushButton("Connect")
         self.connect_button.setObjectName("primaryAction")
+        self.connect_button.setToolTip(
+            "Open the app's one main connection: a single SSH session that "
+            "carries SFTP too, with the profile's credentials below"
+        )
         self.connect_button.clicked.connect(self.connect_remote)
         self.disconnect_button = QPushButton("Disconnect")
         self.disconnect_button.setObjectName("dangerAction")
-        self.disconnect_button.setToolTip("Close the session and disable remote actions until you reconnect")
+        self.disconnect_button.setToolTip(
+            "Close the main connection - the shell and the file transfer with it "
+            "- and disable remote actions until you reconnect")
         self.disconnect_button.setEnabled(False)
         self.disconnect_button.clicked.connect(self.disconnect_remote)
 
@@ -365,6 +376,22 @@ class BerryManager(
         connection_layout.addWidget(self.trust_host_checkbox, 5, 0, 1, 2)
         connection_layout.addLayout(conn_actions, 5, 2, 1, 2)
         connection_group.body_layout.addWidget(credentials)
+
+        # The main connection gets the start-up switch: it is the only session
+        # the app opens, so one switch covers what SSH and SFTP each had.
+        self.auto_connect_check = ToggleSwitch("Connect at startup")
+        self.auto_connect_check.setToolTip(
+            "Open the main connection by itself when the app starts, using this "
+            "profile's host, user and remembered password. One switch covers "
+            "both transports - SSH and SFTP come up together on that single "
+            "session, and the SSH terminal attaches to it as a channel, so a "
+            "shell arrives with it whenever the SSH tab is switched on. SFTP has "
+            "no startup switch of its own. Nothing opens while both SSH and "
+            "SFTP are switched off below."
+        )
+        self.auto_connect_check.setChecked(bool(self.app_config.get("auto_connect", False)))
+        self.auto_connect_check.toggled.connect(self.on_auto_connect_toggled)
+        connection_group.body_layout.addWidget(self.auto_connect_check)
 
         connection_group.switch.toggled.connect(self.on_master_connection_toggled)
 
@@ -488,12 +515,23 @@ class BerryManager(
         self._repin_settings()
 
     def update_connection_ui(self) -> None:
-        """Match the Connection panel's lines and buttons to what is on, following the profile settings."""
+        """Match the Connection panel to what is on, following the profile settings.
+
+        The main connection is a single thing, so its buttons and its start-up
+        switch follow the master switch alone; the SSH and SFTP lines say what
+        each transport's own gate allows."""
+        if not hasattr(self, "connect_button"):
+            return                     # called from a signal before the panel exists
         master_on = self.connections_enabled()
         sftp_on = bool(self.app_config.get("sftp_enabled", True))
         ssh_on = bool(self.app_config.get("ssh_enabled", True))
-        self.connect_button.setVisible(sftp_on)
-        self.disconnect_button.setVisible(sftp_on)
+        busy = self.worker is not None and self.worker.isRunning()
+        connected = self.main_connected and master_on
+        self.connect_button.setVisible(master_on)
+        self.disconnect_button.setVisible(master_on)
+        self.auto_connect_check.setVisible(master_on)
+        self.connect_button.setEnabled(master_on and not busy and not connected)
+        self.disconnect_button.setEnabled(master_on and not busy and connected)
 
         self.remote_dir_label.setVisible(sftp_on)
         self.remote_root_input.setVisible(sftp_on)
@@ -503,15 +541,16 @@ class BerryManager(
         self.ssh_caption.setVisible(ssh_on)
         self.ssh_dot.setVisible(ssh_on)
         self.ssh_state_label.setVisible(ssh_on)
- 
-        self.shell_connect_button.setEnabled(master_on)
+
+        self.refresh_terminal_buttons()
 
     def connections_enabled(self) -> bool:
         """The master switch: is the app allowed to talk to the device at all?"""
         return bool(self.app_config.get("master_connection", True))
 
     def on_master_connection_toggled(self, checked: bool) -> None:
-        """The master switch: off tears down both sessions and blocks all connecting; on connects nothing by itself."""
+        """The master switch: off closes the main connection and blocks all
+        connecting, addons included; on allows it again but connects nothing."""
         self.app_config["master_connection"] = bool(checked)
         self.save_app_config()
         if not checked:
@@ -520,14 +559,25 @@ class BerryManager(
         self.log("Connections enabled" if checked else "Connections switched off")
         self.addon_event("connections_enabled" if checked else "connections_disabled")
 
+    def on_auto_connect_toggled(self, checked: bool) -> None:
+        """The start-up switch: the main connection opens itself with the app.
+
+        Saved straight away, like the master switch: it decides what the next
+        start does, so there is nothing to apply."
+        """
+        self.app_config["auto_connect"] = bool(checked)
+        self.save_app_config()
+        self.log("Main connection will open at startup" if checked
+                 else "Main connection will not open at startup")
+
     def close_all_connections(self) -> None:
-        """Take both main sessions down (the master switch went off)."""
+        """Take the main connection down (the master switch went off)."""
         if self.shell_worker is not None and self.shell_worker.isRunning():
             self.shell_worker.stop()
         if self.worker is not None and self.worker.isRunning():
             return
         self.shared_conn.close()
-        self.mark_shared_closed("connections are switched off")
+        self.mark_main_closed("connections are switched off")
 
     def _set_main_tab(self, page: QWidget, title: str, want: bool, desired_index: int) -> None:
         current = self.tabs.indexOf(page)
@@ -753,20 +803,20 @@ class BerryManager(
         }
 
     def _live_transport_states(self) -> dict[str, bool]:
-        """The app's live SSH/SFTP state; one open main session lights both dots since it carries both transports."""
-        shell = self.shell_worker
-        shared = self.shared_conn.active()
-        return {
-            "sftp": bool(self.sftp_connected or shared),
-            "ssh": bool((shell is not None and shell.isRunning()) or shared),
-        }
+        """The app's live SSH/SFTP state; one open main session lights both dots, since it carries both transports."""
+        shared = bool(self.shared_conn.active() or self.main_connected)
+        return {"sftp": shared, "ssh": shared}
 
-    def _transport_tab_pages(self) -> set[QWidget]:
-        """The tabs that carry transport dots: the SSH terminal and each addon's non-web tab."""
-        pages: set[QWidget] = set()
+    def _transport_tab_pages(self) -> dict[QWidget, str]:
+        """The tabs that carry transport dots, each mapped to its addon.
+
+        An empty id means the app's own SSH terminal tab, which answers to the
+        app-wide switches alone; an addon's tab also answers to the SSH and SFTP
+        switches on that addon's own Settings row."""
+        pages: dict[QWidget, str] = {}
         ssh = getattr(self, "ssh_page", None)
         if ssh is not None and self.tabs.indexOf(ssh) >= 0:
-            pages.add(ssh)
+            pages[ssh] = ""
         manager = getattr(self, "addons", None)
         if manager is not None:
             for addon in manager.addons:
@@ -775,21 +825,40 @@ class BerryManager(
                         continue
                     page = entry.get("page")
                     if page is not None and self.tabs.indexOf(page) >= 0:
-                        pages.add(page)
+                        pages[page] = addon.id
         return pages
+
+    def _tab_transport_states(self, addon_id: str) -> dict[str, str]:
+        """What one tab's dots may say, in the same three states the addon's
+        Settings row uses - and for the app's own terminal tab, with no addon.
+
+        A transport the addon never declared is left out of the answer, so its
+        dot is not drawn at all: an addon that only speaks SSH wears only the
+        ``s`` mark.
+        """
+        manager = getattr(self, "addons", None)
+        if manager is None:
+            return {}
+        addon = manager.find(addon_id) if addon_id else None
+        if addon is None:
+            declared = ("ssh", "sftp")
+        else:
+            declared = tuple(getattr(addon, "requires", ()) or ())
+        return {transport: manager.transport_state(addon, transport)["mode"]
+                for transport in ("ssh", "sftp") if transport in declared}
 
     def sync_tab_transport_dots(self) -> None:
         """Put an s/f dot beside each tab that owns a connection; rebuilt every pass since setTabButton takes ownership."""
         wanted = self._transport_tab_pages()
-        live = self._live_transport_states()
         bar = self.tabs.tabBar()
         keep: list[TabTransportDots] = []
         for index in range(self.tabs.count()):
             if bar.tabButton(index, QTabBar.ButtonPosition.RightSide) is not None:
                 bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
-            if self.tabs.widget(index) in wanted:
+            page = self.tabs.widget(index)
+            if page in wanted:
                 dots = TabTransportDots()
-                dots.set_state(live)
+                dots.set_state(self._tab_transport_states(wanted[page]))
                 keep.append(dots)
                 bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, dots)
         self._tab_dots = keep
@@ -915,19 +984,30 @@ class BerryManager(
         self.addons.refresh_connection_dots()
         self.sync_tab_transport_dots()
 
-    def _transport_state_part(self, transport: str, states: dict[str, bool]) -> QWidget:
-        """One ``SSH ● connected`` trio, for an addon's line in the overview."""
-        online = bool(states.get(transport))
+    def _transport_state_part(self, transport: str,
+                              state: dict[str, str]) -> QWidget:
+        """One ``SSH ● connected`` trio, for an addon's line in the status list.
+
+        The state is the same answer as the dot beside that transport's switch on
+        the addon's own row: ``connected`` while it is usable now, ``ready``
+        while every switch is on but no connection stands up, ``off`` while a
+        switch refuses it. The tool tip says whose connection it rides - the
+        app's one main session carries both transports, and an addon with a
+        connection of its own brings that up itself, per call.
+        """
+        mode = state.get("mode", "off")
+        word_text = TRANSPORT_DOT.get(mode, TRANSPORT_DOT["off"])[1]
+        colour = {"on": "color: #23d18b;",
+                  "ready": "color: #ffb020;"}.get(mode, "color: #c51a4a;")
         row = QHBoxLayout()
         row.setSpacing(4)
         caption = QLabel(transport.upper())
         caption.setStyleSheet("color: #aaaaaa;")
         dot = QLabel("\u25CF")
-        dot.setObjectName("statusDotOnline" if online else "statusDotOffline")
-        dot.setToolTip(f"{transport.upper()}: "
-                       + ("connected" if online else "not connected"))
-        word = QLabel("connected" if online else "closed")
-        word.setStyleSheet("color: #23d18b;" if online else "color: #c51a4a;")
+        transport_dot(dot, mode)
+        dot.setToolTip(state.get("tip", ""))
+        word = QLabel(word_text)
+        word.setStyleSheet(colour)
         for part in (caption, dot, word):
             row.addWidget(part)
         wrap = QWidget()
@@ -935,7 +1015,7 @@ class BerryManager(
         return wrap
 
     def refresh_connection_overview(self) -> None:
-        """List running addons in Settings > Advanced with each declared transport's state and which connection it uses."""
+        """List running addons on the Settings Connection page with each declared transport's state and which connection it uses."""
         layout = getattr(self, "connection_overview_layout", None)
         if layout is None:
             return
@@ -952,7 +1032,6 @@ class BerryManager(
             empty.setStyleSheet("color: #8f8f8f;")
             layout.addWidget(empty)
             return
-        states = self._live_transport_states()
         for addon in running:
             row = QHBoxLayout()
             row.setSpacing(12)
@@ -961,16 +1040,23 @@ class BerryManager(
             used = [transport for transport in ("ssh", "sftp")
                     if transport in declared]
             if used:
-                for transport in used:
-                    row.addWidget(self._transport_state_part(transport, states))
                 own = bool(getattr(addon, "uses_own", addon.own_connection))
+                for transport in used:
+                    row.addWidget(self._transport_state_part(
+                        transport, manager.transport_state(addon, transport)))
                 declared = str(getattr(addon, "connection", "app"))
-                mode = QLabel("own connection" if own else "main connection")
+                mode = QLabel("on its own connection" if own
+                              else "on the main connection")
                 mode.setStyleSheet("color: #8f8f8f;")
                 mode.setToolTip(
-                    "This addon opened its own connection for every call."
+                    "This addon opens a connection of its own for every call, so "
+                    "its dots say whether it may and whether it has, not whether "
+                    "the app's session is up. It still needs its own switch on, "
+                    "the transport's switch on its row, and the master switch."
                     if own else
-                    "This addon shares the app's main SSH/SFTP session.")
+                    "This addon shares the app's one main SSH/SFTP session, so it "
+                    "is connected exactly when that session is and its own "
+                    "switches are on.")
                 mode.setToolTip(mode.toolTip() + f"\nDeclared in its manifest: \"connection\": \"{declared}\".")
                 row.addWidget(mode)
             else:
@@ -1112,14 +1198,30 @@ class BerryManager(
         group = ToggleGroup(title, checked, body="box", tip=tip)
         return group, group.body_layout
 
+    def _settings_category(self, title: str) -> QVBoxLayout:
+        """One page of the Settings tab bar, with its own scrolling column."""
+        host = QWidget()
+        body = QVBoxLayout(host)
+        body.setContentsMargins(12, 12, 12, 12)
+        body.setSpacing(16)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setWidget(host)
+        self.settings_tabs.addTab(area, title)
+        return body
+
     def build_settings_tab(self) -> None:
+        """Settings as a bar of its own: one page per section, one per shipped
+        addon, and one for everything installed later."""
         page = QWidget()
         outer = QVBoxLayout(page)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        inner = QWidget()
-        vbox = QVBoxLayout(inner)
-        vbox.setSpacing(16)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(8)
+        bar = QTabWidget()
+        bar.setObjectName("settingsTabs")
+        self.settings_tabs = bar
+        outer.addWidget(bar, 1)
+        connection_tab = self._settings_category("Connection")
 
         connection_group = self.connection_group
         panel_body = connection_group.body_layout
@@ -1170,8 +1272,9 @@ class BerryManager(
 
         ssh_box = QGroupBox("SSH terminal")
         tip_on_title(ssh_box,
-            "Options for the SSH terminal. Switching SSH off altogether is the "
-            "job of the switch in this panel's header.")
+            "Options for the SSH terminal tab. The terminal is a shell on the "
+            "main connection above, not a session of its own: the startup "
+            "switch on that connection brings it up too.")
         ssh_body = QVBoxLayout(ssh_box)
         ssh_body.setContentsMargins(16, 12, 12, 10)
         ssh_body.setSpacing(8)
@@ -1180,16 +1283,15 @@ class BerryManager(
         self.ssh_tab_check.setToolTip(
             "Add or remove the SSH terminal tab. This switch is also the SSH "
             "gate for the addons and the device API: switched off, they are "
-            "refused SSH work until it is on. The master switch in this "
-            "panel's header stops both protocols for everyone."
+            "refused SSH work, and the terminal closes, until it is on. Each "
+            "addon carries an SSH switch of its own on its Settings row, and "
+            "both have to be on for that addon to use SSH. The master switch in "
+            "this panel's header stops both protocols for everyone, and an "
+            "addon may only work once the main connection is open."
         )
         self.ssh_tab_check.setChecked(bool(self.app_config.get("ssh_enabled", True)))
         ssh_body.addWidget(self.ssh_tab_check)
 
-        self.ssh_auto_connect_check = ToggleSwitch("Auto-connect at startup")
-        self.ssh_auto_connect_check.setToolTip("Open the SSH terminal automatically when the app starts.")
-        self.ssh_auto_connect_check.setChecked(bool(self.app_config.get("auto_connect_ssh", False)))
-        ssh_body.addWidget(self.ssh_auto_connect_check)
         font_row = QHBoxLayout()
         font_row.addWidget(QLabel("Terminal font size"))
         self.terminal_font_spin = QSpinBox()
@@ -1233,31 +1335,29 @@ class BerryManager(
 
         sftp_box = QGroupBox("File transfer (SFTP)")
         tip_on_title(sftp_box,
-            "The connection Berry uses to browse files on the device. Turning the "
-            "Berry tab on or off is done under Bundled with the program below.")
+            "The SFTP channel of the main connection, the one Berry browses "
+            "files with. Berry itself is switched on its own Settings page, "
+            "beside this one.")
         sftp_body = QVBoxLayout(sftp_box)
         sftp_body.setContentsMargins(16, 12, 12, 10)
         sftp_body.setSpacing(8)
 
         self.sftp_enable_check = ToggleSwitch("Enable the SFTP connection")
         self.sftp_enable_check.setToolTip(
-            "The gate for file transfer. Switched off, the connect controls "
-            "and the Remote dir line go away and the addons and the device "
-            "API are refused SFTP work until it is on again. The master "
+            "The gate for file transfer. Switched off, the Remote dir line goes "
+            "away and the addons and the device API are refused SFTP work until "
+            "it is on again; the main connection itself stays open for SSH. Each "
+            "addon carries an SFTP switch of its own on its Settings row, and "
+            "both have to be on for that addon to transfer files. The master "
             "switch in this panel's header stops both protocols for everyone."
         )
         self.sftp_enable_check.setChecked(bool(self.app_config.get("sftp_enabled", True)))
         self.sftp_enable_check.toggled.connect(self._on_sftp_enabled_toggled)
         sftp_body.addWidget(self.sftp_enable_check)
-
-        self.sftp_auto_connect_check = ToggleSwitch("Auto-connect at startup")
-        self.sftp_auto_connect_check.setToolTip("Open the SFTP connection automatically when the app starts.")
-        self.sftp_auto_connect_check.setChecked(bool(self.app_config.get("auto_connect_sftp", False)))
-        sftp_body.addWidget(self.sftp_auto_connect_check)
         panel_body.addWidget(sftp_box)
 
         panel_body.addWidget(status_group)
-        vbox.addWidget(connection_group)
+        connection_tab.addWidget(connection_group)
         self.refresh_connection_overview()
 
         startup_group = QGroupBox("Startup & defaults")
@@ -1315,7 +1415,7 @@ class BerryManager(
         log_path_label.setStyleSheet("color: #aaaaaa;")
         log_form.addRow("Log file", log_path_label)
         startup_form.addRow(self.logging_group)
-        vbox.addWidget(startup_group)
+        self._settings_category("Startup & defaults").addWidget(startup_group)
 
         tabs_category = QGroupBox("Custom tabs")
         tip_on_title(tabs_category, "Embedded browser tabs. These are always shown.")
@@ -1350,16 +1450,11 @@ class BerryManager(
         self.cert_bypass_state_label.setStyleSheet("color: #aaaaaa;")
         tabs_body.addWidget(self.cert_bypass_state_label)
         self._update_cert_bypass_state()
-        vbox.addWidget(tabs_category)
+        self._settings_category("Custom tabs").addWidget(tabs_category)
 
-        installed_widget = self.addons.build_settings_widget()
-        bundled_widget = self.addons.build_bundled_widget()
-        vbox.addWidget(bundled_widget)
-        vbox.addWidget(installed_widget)
-
-        vbox.addStretch(1)
-        scroll.setWidget(inner)
-        outer.addWidget(scroll, 1)
+        # The addons fill the rest of the bar: a page for each that came with the
+        # program, then the shared page for the drop-ins and the installs.
+        self.addons.build_settings_tabs(self.settings_tabs)
 
         save_btn = QPushButton("Apply settings")
         save_btn.setObjectName("primaryAction")
@@ -1392,8 +1487,7 @@ class BerryManager(
 
     def apply_settings_from_form(self) -> None:
         self.app_config["default_tab"] = self.default_tab_combo.currentText()
-        self.app_config["auto_connect_sftp"] = self.sftp_auto_connect_check.isChecked()
-        self.app_config["auto_connect_ssh"] = self.ssh_auto_connect_check.isChecked()
+        self.app_config["auto_connect"] = self.auto_connect_check.isChecked()
         self.app_config["terminal_font_size"] = self.terminal_font_spin.value()
         self.app_config["max_log_lines"] = self.max_log_spin.value()
         self.app_config["logging_enabled"] = self.logging_group.isChecked()
@@ -1416,20 +1510,38 @@ class BerryManager(
         self._sync_cert_bypass()
 
     def _on_tab_category_toggled(self, _checked: bool = False) -> None:
-        """Persist the SSH tab switch state and show/hide the terminal tab. (The
-        Berry tab is switched from its own bundled addon category.)"""
+        """Persist the SSH tab switch state, show or hide the terminal tab and
+        close the shell when SSH goes off. (The Berry tab is switched from its
+        own bundled addon category.)"""
         self.app_config["ssh_enabled"] = self.ssh_tab_check.isChecked()
         self.save_app_config()
+        if not self.ssh_tab_check.isChecked() and self.shell_worker is not None \
+                and self.shell_worker.isRunning():
+            # The gate closed: the shell channel goes, the session stays.
+            self.shell_worker.stop()
         self.ensure_main_tabs()
         self._apply_remembered_order()
         self._reload_default_tab_combo(select=self.app_config.get("default_tab", "Berry"))
+        self.update_connection_ui()
+        self.notify_transport_changed("ssh")
 
     def _on_sftp_enabled_toggled(self, _checked: bool = False) -> None:
-        """Persist the SFTP gate: off hides its controls and refuses SFTP work
-        for the addons and the device API; the master switch stops both."""
+        """Persist the SFTP gate: off hides its line and refuses SFTP work for
+        the addons and the device API; the main connection stays as it is."""
         self.app_config["sftp_enabled"] = self.sftp_enable_check.isChecked()
         self.save_app_config()
         self.update_connection_ui()
+        self.notify_transport_changed("sftp")
+
+    def notify_transport_changed(self, transport: str) -> None:
+        """Tell the addons that one app-wide transport gate moved, so a tab that
+        shows a connection state can redraw it. Every addon has switches of its
+        own as well, and the same event name covers both kinds."""
+        self.addons.refresh_connection_dots()
+        self.sync_tab_transport_dots()
+        self.addon_event(
+            "transport_changed", transport=transport, scope="app",
+            enabled=bool(self.app_config.get(f"{transport}_enabled", True)))
 
     def _on_addon_dev_toggled(self, _checked: bool = False) -> None:
         """Show or hide the Addon Dev tab and its Tools entry as it is switched."""
@@ -1474,6 +1586,13 @@ class BerryManager(
         """Refresh every widget from self.app_config after a profile switch,
         a profile delete or a config import."""
         cfg = self.app_config
+        # A profile names a different device, and the app holds exactly one main
+        # connection: the session belongs to the profile that opened it.
+        if self.main_connected or self.shared_conn.active():
+            if self.shell_worker is not None and self.shell_worker.isRunning():
+                self.shell_worker.stop()
+            self.shared_conn.close()
+            self.mark_main_closed("the profile changed")
         self.host_input.setText(str(cfg.get("host", DEFAULT_PROFILE["host"])))
         self.port_input.setValue(int(cfg.get("port", DEFAULT_PROFILE["port"])))
         self.username_input.setText(str(cfg.get("username", DEFAULT_PROFILE["username"])))
@@ -1488,8 +1607,7 @@ class BerryManager(
         self.password_input.clear()
         self.load_saved_password()
 
-        self.sftp_auto_connect_check.setChecked(bool(cfg.get("auto_connect_sftp", False)))
-        self.ssh_auto_connect_check.setChecked(bool(cfg.get("auto_connect_ssh", False)))
+        self.auto_connect_check.setChecked(bool(cfg.get("auto_connect", False)))
         self.logging_group.setChecked(bool(cfg.get("logging_enabled", True)))
         self.max_log_spin.setValue(int(cfg.get("max_log_lines", 500)))
         self.terminal_font_spin.setValue(int(cfg.get("terminal_font_size", 10)))
@@ -1699,7 +1817,7 @@ class BerryManager(
         box = QMessageBox(self)
         box.setWindowTitle("About Berry")
         box.setText(
-            "<b>Berry Manager V1.5.6</b><br>"
+            "<b>Berry Manager V1.5.7</b><br>"
             "Manage routers and devices over ssh&sftp<br>"
             'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'

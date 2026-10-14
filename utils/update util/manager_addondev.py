@@ -530,10 +530,13 @@ ADDON = {
     "version": "$version",
     "author": "$author",
     "description": "$description",
-    # The transports api.device may use; leave the key out if never.
+    # The transports api.device may use; leave the key out if never. Each one
+    # also gets a switch of its own on this addon's row in Settings > Addons,
+    # and both the app-wide and the addon's own have to be on.
     "requires": ["ssh", "sftp"],
-    # Whose connection the device calls use: "app" (the app's session),
-    # "own" (a fresh connection per call) or "both" (the user picks).
+    # Whose connection the device calls use: "app" (the app's one main SSH+SFTP
+    # session, which the user opens by button or at startup), "own" (a fresh
+    # connection per call) or "both" (the user picks).
     "connection": "app",
     "api": 1,
 }

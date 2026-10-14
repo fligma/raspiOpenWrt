@@ -639,12 +639,21 @@ def show_target(values: dict) -> None:
     except AddonError:
         pass
     host = one_line(str(status.get("host") or ""))
+    # Ask what *this addon* may reach, not just whether the app's session is
+    # up: the SSH and SFTP switches on its own Settings row count too.
+    try:
+        ready = bool(api.device.is_connected("sftp"))
+    except AddonError:
+        ready = False
     up = bool(status.get("sftp_connected"))
-    words = ("\u25cf " if up else "\u25cb ") + (host or "no host yet")
-    words += "  \u00b7  SFTP up" if up else "  \u00b7  not connected"
+    words = ("\u25cf " if ready else "\u25cb ") + (host or "no host yet")
+    words += ("  \u00b7  SFTP up" if ready else
+              "  \u00b7  " + ("SFTP is switched off for this addon" if up
+                              else "not connected"))
     try:
         api.tabs.set_widget(TAB, "state", "text", words)
-        api.tabs.set_widget(TAB, "state", "style", _CHIP_STYLES["green" if up else "gray"])
+        api.tabs.set_widget(TAB, "state", "style",
+                            _CHIP_STYLES["green" if ready else "gray"])
     except AddonError:
         pass
 
@@ -1710,12 +1719,18 @@ def _begin(action: str) -> None:
 
 
 def _ensure_sftp(values: dict) -> None:
-    """Ask the app for a session if there is none, so a missing password says so up front."""
+    """Ask the app for a session if there is none, so a missing password says so up front.
+
+    One connection carries both transports, so this asks the app to open its
+    main session; the addon never connects itself, and the answer says which
+    switch is still in the way.
+    """
     try:
         if api.device.is_connected("sftp"):
             return
         api.device.ensure_connected("sftp")
-        note("SFTP was not up, so the program is opening a session")
+        note("the main connection was not up for this addon, so the program is "
+             "opening it")
     except AddonError as error:
         note(f"SFTP is not connected: {error}")
 
@@ -1794,10 +1809,31 @@ def init(plugin_api: Any) -> None:
     api.ui.menu_item("Rasconf web installer", focus_tab, menu="Tools")
 
 
-def start() -> None:
-    """Say where this profile's files would go, as soon as the tab exists."""
+def _refresh_state(_payload: Any = None) -> None:
+    """Redraw the header line: the connection came or went, or a switch that
+    rules over this addon's use of it moved."""
     if api is not None:
-        show_target(api.config.all())
+        try:
+            show_target(api.config.all())
+        except AddonError:
+            pass
+
+
+def start() -> None:
+    """Say where this profile's files would go, as soon as the tab exists.
+
+    The chip is kept honest from here on: the main connection, either app-wide
+    transport switch and this addon's own switches all redraw it, because the
+    addon may only use file transfer while every one of them is on.
+    """
+    if api is None:
+        return
+    show_target(api.config.all())
+    for name in ("sftp_connected", "sftp_disconnected", "ssh_connected",
+                 "ssh_disconnected", "settings_applied", "profile_changed",
+                 "transport_changed", "connections_enabled",
+                 "connections_disabled"):
+        api.events.on(name, _refresh_state)
 
 
 def shutdown() -> None:

@@ -151,6 +151,17 @@ class SharedConnection:
                 raise RuntimeError("the app's main SSH session is not open")
             return exec_remote(self.client, command, timeout)
 
+    def open_shell(self, cols: int, rows: int) -> paramiko.Channel:
+        """A PTY channel on the main session, for the terminal tab to attach to.
+
+        The channel belongs to the session, not to the caller: closing it never
+        takes the connection, or the SFTP channel, down with it."""
+        with self.lock:
+            if not self.active():
+                raise RuntimeError("the app's main connection is not open")
+            return self.client.invoke_shell(term="xterm-256color",
+                                            width=cols, height=rows)
+
     def close(self) -> None:
         # A bounded grab: a connect killed mid-run can leave this lock held,
         # and the closing app must not wait on a thread that no longer is.
@@ -203,7 +214,12 @@ class SharedSessionWorker(QThread):
 # --- interactive shell ---
 
 class SSHShellWorker(QThread):
-    """Owns one PTY channel, pumping bytes both ways until stopped; the GUI queues input, never writes the socket."""
+    """One PTY channel of the app's main connection, pumped both ways until stopped.
+
+    The shell is a view of the main session rather than a connection of its
+    own: the session is opened by the Connect button, or at startup, and by
+    nothing else - an addon cannot bring it up. Closing the shell leaves the
+    session, and SFTP, running. The GUI queues input, never writes the socket."""
 
     connected = pyqtSignal()
     received = pyqtSignal(str)
@@ -211,14 +227,14 @@ class SSHShellWorker(QThread):
     disconnected = pyqtSignal()
     command_finished = pyqtSignal(int, str)
 
-    def __init__(self, settings: dict, cols: int = 80, rows: int = 24, parent: QObject | None = None) -> None:
+    def __init__(self, shared: SharedConnection, cols: int = 80, rows: int = 24,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self.settings = settings
+        self.shared = shared
         self.cols, self.rows = max(2, int(cols)), max(2, int(rows))
         self.outgoing: queue.Queue = queue.Queue()
         self.stop_requested = threading.Event()
         self.channel: paramiko.Channel | None = None
-        self.client: paramiko.SSHClient | None = None
 
     def send(self, text: str) -> None:
         """Queue raw text for the shell, exactly as typed - no Enter added."""
@@ -242,11 +258,11 @@ class SSHShellWorker(QThread):
                 pass
 
     def run(self) -> None:
-        """Connect, then alternate reading output and flushing queued input; the short timeout keeps it responsive to stop and typing."""
+        """Attach to the main session, then alternate reading output and flushing queued input; the short timeout keeps it responsive to stop and typing."""
         try:
-            self.client = create_ssh_client(self.settings)
-            self.channel = self.client.invoke_shell(term="xterm-256color",
-                                                    width=self.cols, height=self.rows)
+            if self.stop_requested.is_set():
+                return
+            self.channel = self.shared.open_shell(self.cols, self.rows)
             self.channel.settimeout(0.1)
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             self.connected.emit()
@@ -268,13 +284,12 @@ class SSHShellWorker(QThread):
             if not self.stop_requested.is_set():
                 self.failed.emit(str(error))
         finally:
+            # Only the channel goes: the session underneath belongs to the app.
             if self.channel is not None:
                 try:
                     self.channel.close()
                 except Exception:
                     pass
-            if self.client is not None:
-                self.client.close()
             self.disconnected.emit()
 
 
@@ -365,25 +380,37 @@ class RebootWaitWorker(QThread):
 # --- one-off commands (quick buttons, no shell) ---
 
 class RemoteExecWorker(QThread):
-    """Run a list of one-off commands over a fresh SSH connection, stopping at the first failure."""
+    """Run a list of one-off commands, over the main connection when one is open and over a fresh one otherwise; stops at the first failure."""
     log = pyqtSignal(str)
     finished_ok = pyqtSignal()
     failed = pyqtSignal(str)
 
-    def __init__(self, settings: dict, commands: list[str], parent: QObject | None = None) -> None:
+    def __init__(self, settings: dict, commands: list[str],
+                 shared: SharedConnection | None = None,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.settings = settings
         self.commands = commands
+        self.shared = shared
+
+    def _run_one(self, command: str, timeout: int) -> tuple[int, str, str]:
+        """One command, on the app's session if this worker was given a live one."""
+        if self.shared is not None and self.shared.active():
+            return self.shared.run(command, timeout)
+        client = create_ssh_client(self.settings)
+        try:
+            return exec_remote(client, command, timeout)
+        finally:
+            client.close()
 
     def run(self) -> None:
-        client = None
         try:
-            client = create_ssh_client(self.settings)
             for command in self.commands:
                 if self.isInterruptionRequested():
                     return         # the app is closing; run nothing more
                 self.log.emit(f"$ {command}")
-                code, out, err = exec_remote(client, command, timeout=_coerce_int(self.settings.get("ssh_timeout"), 12, 3, 300) * 3)
+                code, out, err = self._run_one(
+                    command, _coerce_int(self.settings.get("ssh_timeout"), 12, 3, 300) * 3)
                 if out.strip():
                     self.log.emit(out.rstrip())
                 if err.strip():
@@ -394,6 +421,3 @@ class RemoteExecWorker(QThread):
             self.finished_ok.emit()
         except Exception as error:
             self.failed.emit(str(error))
-        finally:
-            if client is not None:
-                client.close()

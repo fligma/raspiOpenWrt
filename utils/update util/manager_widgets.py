@@ -435,13 +435,36 @@ class RightPinnedTabWidget(QTabWidget):
         self._announce()
 
 
+#: The three states a transport indicator can be in, each with the style object
+#: name that colours its dot and the short word said beside it. ``on`` means the
+#: transport is usable right now, ``ready`` that every switch is on while
+#: nothing stands connected, ``off`` that a switch refuses it.
+TRANSPORT_DOT: dict[str, tuple[str, str]] = {
+    "on": ("statusDotOnline", "connected"),
+    "ready": ("statusDotReady", "ready"),
+    "off": ("statusDotOffline", "off"),
+}
+
+
+def transport_dot(dot: QLabel, mode: str) -> None:
+    """Put one dot into its state; the colour comes from the app stylesheet, so
+    the widget is repolished instead of painted."""
+    name = TRANSPORT_DOT.get(mode, TRANSPORT_DOT["off"])[0]
+    if dot.objectName() != name:
+        dot.setObjectName(name)
+        dot.style().unpolish(dot)
+        dot.style().polish(dot)
+
+
 class TabTransportDots(QWidget):
     """Two small status dots for a tab's label: 's' for SSH, 'f' for SFTP.
 
     Placed beside a tab's text in the tab bar so the live connection state is
     visible from whichever tab is showing. Each dot is coloured by the app's
-    shared status-dot style (green connected, red not) and carries a one-letter
-    mark, :meth:`set_state` recolouring them from the current transport states.
+    shared status-dot style (green usable, amber waiting, red refused) and
+    carries a one-letter mark; a transport the tab's addon never declared has no
+    dot at all, and :meth:`set_state` drives the rest from the same answer the
+    addon's Settings row gives.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -462,17 +485,19 @@ class TabTransportDots(QWidget):
             layout.addWidget(mark)
             self._dots[transport] = (dot, mark)
 
-    def set_state(self, states: dict[str, bool]) -> None:
-        """Recolour each dot from the app's live transport states."""
-        for transport, (dot, _mark) in self._dots.items():
-            online = bool(states.get(transport))
-            name = "statusDotOnline" if online else "statusDotOffline"
-            if dot.objectName() != name:
-                dot.setObjectName(name)
-                dot.style().unpolish(dot)
-                dot.style().polish(dot)
-            dot.setToolTip(f"{transport.upper()}: "
-                           + ("connected" if online else "not connected"))
+    def set_state(self, states: dict[str, str]) -> None:
+        """Colour each dot from one owner's transport states (``on``, ``ready``
+        or ``off``); a transport missing from the dict is not used at all, so
+        its mark and dot leave the tab's label."""
+        for transport, (dot, mark) in self._dots.items():
+            mode = states.get(transport)
+            dot.setVisible(mode is not None)
+            mark.setVisible(mode is not None)
+            if mode is None:
+                continue
+            transport_dot(dot, mode)
+            word = TRANSPORT_DOT.get(mode, TRANSPORT_DOT["off"])[1]
+            dot.setToolTip(f"{transport.upper()}: {word}")
 
 
 class ToggleSwitch(QCheckBox):

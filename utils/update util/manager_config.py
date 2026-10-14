@@ -131,22 +131,22 @@ def _normalize_values(config: dict) -> dict:
             sanitized_quick.append({"label": str(entry.get("label", entry["command"])), "command": str(entry["command"])})
     config["quick_commands"] = sanitized_quick
 
-    # One auto-connect switch became per-protocol ones. The old
-    # behavior tried SFTP first, SSH only if SFTP was off; seed
-    # that way before dropping the legacy key.
-    legacy_auto = config.get("auto_connect")
-    if legacy_auto is not None and "auto_connect_sftp" not in config and "auto_connect_ssh" not in config:
-        if config.get("sftp_enabled", True):
-            config["auto_connect_sftp"] = bool(legacy_auto)
-        elif config.get("ssh_enabled", True):
-            config["auto_connect_ssh"] = bool(legacy_auto)
-    config.pop("auto_connect", None)
+    # Two per-protocol switches became one for the main connection,
+    # which carries both transports: either one on means the main
+    # connection comes up at startup. The merged key takes over and
+    # the old two are dropped. The old keys decide, not the shipped
+    # default: a merged profile always carries a fresh ``auto_connect``.
+    if "auto_connect_sftp" in config or "auto_connect_ssh" in config:
+        config["auto_connect"] = bool(config.get("auto_connect")) \
+            or bool(config.get("auto_connect_sftp")) \
+            or bool(config.get("auto_connect_ssh"))
+    for key in ("auto_connect_sftp", "auto_connect_ssh"):
+        config.pop(key, None)
 
     for key in (
         "show_hidden_files",
         "master_connection",
-        "auto_connect_sftp",
-        "auto_connect_ssh",
+        "auto_connect",
         "use_alt_icon",
         "log_visible",
         "sftp_enabled",
@@ -228,17 +228,11 @@ def _build_store(config: dict) -> None:
         # Legacy flat layout: top-level keys are the file's settings
         # (mirrored from active). They become the shared start for
         # every profile so no stored value is replaced by a default.
+        # The retired per-protocol auto-connect switches are judged
+        # on the raw file, so ``_normalize_values`` merges them into
+        # one ``auto_connect`` before a default can cover them up.
         base = _deep_copy(DEFAULT_APP_CONFIG)
         base.update({k: v for k, v in config.items() if k not in _STRUCTURAL_KEYS})
-        # Retired single switches must be judged on the raw file:
-        # the merged base already holds the newer keys they seed.
-        legacy_auto = config.get("auto_connect")
-        if legacy_auto is not None and "auto_connect_sftp" not in config and "auto_connect_ssh" not in config:
-            if base.get("sftp_enabled", True):
-                base["auto_connect_sftp"] = bool(legacy_auto)
-            elif base.get("ssh_enabled", True):
-                base["auto_connect_ssh"] = bool(legacy_auto)
-        base.pop("auto_connect", None)
         base = _normalize_values(base)
         raw_list = raw_profiles
 
@@ -455,7 +449,9 @@ def _migrate_web_tabs(config: dict) -> dict:
 # --- addons: which run, and their data ---
 
 def _normalize_addons(config: dict) -> dict:
-    """Keep addons a plain id -> {enabled, own_connection, settings} map; unknown ids kept, each off and on the main connection by default."""
+    """Keep addons a plain id -> {enabled, own_connection, ssh_enabled,
+    sftp_enabled, settings} map; unknown ids kept, each off and on the main
+    connection by default, with both of its transports allowed by default."""
     raw = config.get("addons")
     if not isinstance(raw, dict):
         raw = {}
@@ -469,6 +465,10 @@ def _normalize_addons(config: dict) -> dict:
         cleaned[addon_id] = {
             "enabled": bool(record.get("enabled", False)),
             "own_connection": bool(record.get("own_connection", False)),
+            # The addon's own gates over the two transports; the app-wide
+            # switch stays above them, so both have to be on.
+            "ssh_enabled": bool(record.get("ssh_enabled", True)),
+            "sftp_enabled": bool(record.get("sftp_enabled", True)),
             "settings": settings if isinstance(settings, dict) else {},
         }
     config["addons"] = cleaned

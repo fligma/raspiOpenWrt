@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 
-"""The app's main (shared) connection.
+"""The app's main connection.
 
 Berry owns the file views now, so the app no longer builds an SFTP tab or moves
-files here. What stays is the connection itself: the shared SSH/SFTP session
-the Connect button opens, the ``sftp_connected`` flag, the status dot in
-Settings > Connection, and the ``sftp_connected`` /
-``sftp_disconnected`` events - all of which Berry and
-``device.is_connected("sftp")`` depend on. Addons set to "main" connection mode
-work over this same session; see manager_net.SharedConnection."""
+files here. What stays is the connection itself: the one main SSH/SFTP session
+the Connect button opens, the ``main_connected`` flag, the two status dots in
+Settings > Connection, and the ``sftp_connected`` / ``sftp_disconnected`` /
+``ssh_connected`` / ``ssh_disconnected`` events - all of which Berry, the other
+addons and ``device.is_connected()`` depend on.
+
+One session carries both transports, so there is one Connect, one Disconnect and
+one startup switch: opening it lights the SSH and the SFTP dot together, and the
+terminal tab is only a PTY channel attached to that session. Addons set to the
+main connection work over it and wait for it to be open; an addon on a
+connection of its own opens that one per call and needs no main connection at
+all (see the guards in ``addon_api`` and ``manager_net.SharedConnection``).
+"""
 
 
 from __future__ import annotations
@@ -23,25 +30,30 @@ if TYPE_CHECKING:
     from manager_gui import BerryManager
 
 
-class FileViewsMixin:
-    """SFTP connect / disconnect, mixed into the main window.
+class MainConnectionMixin:
+    """Open and close the app's one main connection, mixed into the main window.
 
     Every method here runs on the main window; the attributes it uses
-    (``worker``, ``sftp_connected``, the connection widgets, ``log``,
+    (``worker``, ``main_connected``, the connection widgets, ``log``,
     ``set_status_dot``, ``addon_event``) are set up by
     :class:`manager_gui.BerryManager`, the class that mixes this in.
     """
 
+    def main_open(self) -> bool:
+        """Is the main connection up? Asked in plain words by the terminal tab."""
+        return self.shared_conn.active()
+
     def connect_remote(self, _checked: bool = False) -> None:
-        """Open the app's shared SSH/SFTP session (the main connection)."""
+        """Open the app's main connection: one SSH session with SFTP on it."""
         if not self.connections_enabled():
             self.log("Connections are switched off (Settings > Connection)")
             return
         if self.worker is not None and self.worker.isRunning():
             return
         if self.shared_conn.active():
-            # Already open (an addon in main mode): just agree.
-            self.mark_shared_connected()
+            # Open already (a double click, or the startup switch won the race):
+            # just agree with what the session says.
+            self.mark_main_connected()
             return
         settings = self.current_settings()
         if settings is None:
@@ -67,39 +79,48 @@ class FileViewsMixin:
         self.worker.failed.connect(self.operation_failed)
         self.worker.finished.connect(self.operation_finished)
         self.set_busy(True)
-        self.log("Connecting (SFTP)...")
+        self.log("Connecting (SSH + SFTP)...")
         self.worker.start()
 
     def disconnect_remote(self, _checked: bool = False) -> None:
-        """Close the shared session and mark the transport offline."""
+        """Close the main connection: the terminal channel goes with the session."""
         if self.worker is not None and self.worker.isRunning():
             return
+        if self.shell_worker is not None and self.shell_worker.isRunning():
+            self.shell_worker.stop()
         self.shared_conn.close()
-        self.mark_shared_closed("closed by the user")
+        self.mark_main_closed("closed by the user")
 
-    def mark_shared_connected(self) -> None:
-        """Agree the shared session is open: flag, dot, words, event (GUI thread only)."""
-        first_connection = not self.sftp_connected
-        self.sftp_connected = True
+    def mark_main_connected(self) -> None:
+        """Agree the main session is open: flag, both dots, words, events (GUI thread only)."""
+        first_connection = not self.main_connected
+        self.main_connected = True
         self.set_status_dot("sftp", "online")
-        self.statusBar().showMessage("Connected (SFTP)", 4000)
+        self.set_status_dot("ssh", "online")
+        self.statusBar().showMessage("Connected (SSH + SFTP)", 4000)
         if first_connection:
-            self.log("SFTP connection established")
-            self.addon_event("sftp_connected", host=self.host_input.text().strip())
+            host = self.host_input.text().strip()
+            self.log("Main connection established (SSH + SFTP)")
+            self.addon_event("sftp_connected", host=host)
+            self.addon_event("ssh_connected", host=host)
+        self.update_connection_ui()
 
-    def mark_shared_closed(self, reason: str = "the session closed") -> None:
-        """Agree that the shared session is gone, and tell the addons once."""
-        was_connected = self.sftp_connected
-        self.sftp_connected = False
+    def mark_main_closed(self, reason: str = "the session closed") -> None:
+        """Agree that the main session is gone, and tell the addons once."""
+        was_connected = self.main_connected
+        self.main_connected = False
         self.set_status_dot("sftp", "offline")
+        self.set_status_dot("ssh", "offline")
         if was_connected:
-            self.log("SFTP session closed")
-            self.statusBar().showMessage("Disconnected (SFTP)", 4000)
+            self.log("Main connection closed")
+            self.statusBar().showMessage("Disconnected", 4000)
             self.addon_event("sftp_disconnected", reason=reason)
+            self.addon_event("ssh_disconnected", reason=reason)
+        self.update_connection_ui()
 
     def set_busy(self, busy: bool) -> None:
-        self.connect_button.setEnabled(not busy)
-        self.disconnect_button.setEnabled(not busy and self.sftp_connected)
+        self.connect_button.setEnabled(not busy and not self.main_connected)
+        self.disconnect_button.setEnabled(not busy and self.main_connected)
 
     def operation_succeeded(self) -> None:
         if getattr(self, "_closing", False):
@@ -108,16 +129,22 @@ class FileViewsMixin:
             # The master switch went off while the connect was in flight.
             self.shared_conn.close()
             return
-        self.mark_shared_connected()
+        self.mark_main_connected()
+        # The terminal is a channel on this session: bring it up with it, when
+        # the SSH tab is switched on at all.
+        if bool(self.app_config.get("ssh_enabled", True)):
+            self.connect_shell()
 
     def operation_failed(self, message: str) -> None:
         if getattr(self, "_closing", False):
             return                     # a cancel at close is not worth a dialog
-        self.statusBar().showMessage("Connection failed (SFTP)", 5000)
+        self.statusBar().showMessage("Connection failed", 5000)
         self.log("Error: " + message)
-        self.sftp_connected = False
+        self.main_connected = False
         self.set_status_dot("sftp", "offline")
-        QMessageBox.critical(self, "SFTP connection failed", message)
+        self.set_status_dot("ssh", "offline")
+        QMessageBox.critical(self, "Connection failed", message)
+        self.update_connection_ui()
 
     def operation_finished(self) -> None:
         if getattr(self, "_closing", False):

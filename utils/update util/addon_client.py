@@ -18,7 +18,7 @@ if __name__ == "__main__":                      # run as a process addon
 to the app as one line of JSON, and answers what the app pushes:
 ``start``, ``event``, ``widget``, ``peer``, ``invoke`` and ``shutdown``.
 
-The four things that cannot cross a pipe are handled like this:
+The five things that cannot cross a pipe are handled like this:
 
 ``schedule.after`` / ``schedule.every``
     Kept here, on a plain timer thread, so the addon's own clock never depends
@@ -26,6 +26,12 @@ The four things that cannot cross a pipe are handled like this:
 ``events.on``
     Kept here too; the app already pushes every event, so the only work is the
     local registry and calling ``on_event``/``on_<event>`` on the addon.
+``device.run(block=False)``
+    A job the app is still running is not something a second process can hold,
+    so the answer comes back as a handle and this module wraps it in a
+    ``RemoteFuture``: ``done()``, ``result()`` and ``cancel()`` ask the app about
+    the job through the ``device.future_*`` methods. ``block=False`` therefore
+    means the same thing in either runtime.
 ``device.run_async`` and ``ui.menu_item``
     Take a function, which JSON cannot carry. The request says which argument is
     the callback (``"callback": "on_done"``) and the app answers with a number;
@@ -55,9 +61,11 @@ from typing import Any
 
 from addon_common import (
     API_VERSION,
+    FUTURE_KEY,
     AddonError,
     addon_config_path,
     config_get,
+    is_future_handle,
     jsonable,
     manifest_from,
     merge_config,
@@ -111,6 +119,33 @@ class _Method:
         return self._api.request(self._method, arguments, named)
 
 
+class RemoteFuture:
+    """A job the app is still running, from the addon's side of the pipe.
+
+    Wears the shape of ``concurrent.futures.Future`` - ``done()``, ``result()``
+    and ``cancel()`` - because that is what an addon written against the
+    in-process api already expects from ``device.run(block=False)``. Each
+    question is one request answered by the bridge's own registry.
+    """
+
+    def __init__(self, api: "ProcessAPI", token: int) -> None:
+        self._api = api
+        self.token = int(token)
+
+    def done(self) -> bool:
+        return bool(self._api.request("device.future_done", (), {"token": self.token}))
+
+    def result(self, timeout: Any = None) -> Any:
+        return self._api.request("device.future_result", (),
+                                 {"token": self.token, "timeout": timeout})
+
+    def cancel(self) -> bool:
+        return bool(self._api.request("device.future_cancel", (), {"token": self.token}))
+
+    def __repr__(self) -> str:
+        return f"<RemoteFuture handle {self.token}>"
+
+
 class ProcessAPI:
     """The ``api`` object of an addon that runs as its own process."""
 
@@ -118,6 +153,9 @@ class ProcessAPI:
     _POSITIONAL = {
         "device.run": ("command", "timeout", "block", "device"),
         "device.run_async": ("command", "on_done", "timeout", "device"),
+        "device.future_done": ("token",),
+        "device.future_result": ("token", "timeout"),
+        "device.future_cancel": ("token",),
         "device.shell_send": ("line",),
         "device.is_connected": ("protocol",),
         "device.ensure_connected": ("protocol",),
@@ -294,6 +332,9 @@ class ProcessAPI:
             if token is not None:
                 self.tokens.pop(token, None)
             raise AddonError(str(result))
+        if is_future_handle(result):
+            # A job the app started for us: what comes back is only its handle.
+            return RemoteFuture(self, result[FUTURE_KEY])
         return result
 
     def read_loop(self) -> None:

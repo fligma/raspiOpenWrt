@@ -96,8 +96,8 @@ per-profile notes), `api.schedule`, `api.peers` (addons talking to each
 other) and `api.session`/`api.paths` make up the full surface - each is
 documented with examples in the app README's **Addons** chapter.
 
-Three addons ship inside the program and are switched on and off under
-**Bundled with the program** in Settings:
+Three addons ship inside the program, and each has a Settings page of its own
+named after it:
 
 - **Berry** - the file manager: device and local pages in one tab, with a
   syntax-coloured editor.
@@ -111,10 +111,11 @@ Everything else comes from that store - **Certificate manager**, **OpenWrt
 Log Viewer**, **Hello from the store** - and an install is not a second-class
 addon. The store writes an `addons/<id>.json` manifest beside the program it
 built (its name, version, author and the transports it needs) and seeds its
-settings form, so the moment it is switched on it sits under **Installed
-addons** in Settings with the same switch, restart, own-connection option and
-config panel as the bundled ones. Deleting it from the store takes the program
-and that manifest back and leaves `addons/_data/<id>` alone, so a reinstall
+settings form, so the moment it is switched on it sits on the Settings
+**Installed addons** page with the same switch, restart, own-connection option
+and config panel as the bundled ones, which each keep a page of their own beside
+it. Deleting it from the store takes the program and that manifest back and
+leaves `addons/_data/<id>` alone, so a reinstall
 keeps your settings.
 
 The **Addon Dev** tab (Tools > Addon Dev) works on addon files themselves:

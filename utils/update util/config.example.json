@@ -15,8 +15,8 @@
       "ssh_timeout": 12,
       "logging_enabled": true,
       "show_hidden_files": true,
-      "auto_connect_sftp": false,
-      "auto_connect_ssh": false,
+      "master_connection": true,
+      "auto_connect": false,
       "use_alt_icon": false,
       "sftp_enabled": true,
       "ssh_enabled": true,
@@ -48,9 +48,15 @@
         { "name": "LuCI", "ip": "", "port": 443, "path": "/", "scheme": "https" }
       ],
       "addons": {
-        "berry": { "enabled": true, "settings": {} },
+        "berry": {
+          "enabled": true, "ssh_enabled": true, "sftp_enabled": true,
+          "settings": {}
+        },
         "addon_store": { "enabled": true, "settings": {} },
-        "web_installer": { "enabled": true, "settings": {} }
+        "web_installer": {
+          "enabled": true, "ssh_enabled": true, "sftp_enabled": true,
+          "settings": {}
+        }
       },
       "quick_commands": [
         { "label": "Show version", "command": "cat /etc/openwrt_release" }

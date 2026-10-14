@@ -72,6 +72,22 @@ def jsonable(value: Any) -> Any:
     return str(value)
 
 
+#: A job the app is still running cannot cross a pipe, so only its handle
+#: does: the answer to a non-blocking call is this one-key dict, and the addon
+#: asks about the job with the ``device.future_*`` methods.
+FUTURE_KEY = "addon_future"
+
+
+def future_handle(token: Any) -> dict:
+    """The reply that stands for a job the app is running in the background."""
+    return {FUTURE_KEY: int(token)}
+
+
+def is_future_handle(value: Any) -> bool:
+    """Whether an api answer is such a handle, and nothing that merely holds one."""
+    return isinstance(value, dict) and set(value) == {FUTURE_KEY}
+
+
 # --- what an addon said about itself ---
 
 def manifest_from(module: Any) -> dict:

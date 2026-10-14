@@ -147,18 +147,19 @@ DEFAULT_APP_CONFIG = {
     "show_hidden_files": False,
     # Master connection switch (Connection panel header). Off
     # closes every session and stops any addon connecting; on
-    # lets the Connect buttons and addons work again.
+    # lets the Connect button and the addons work again.
     "master_connection": True,
-    # Auto-connect is per protocol; each fires at startup.
-    "auto_connect_sftp": False,
-    "auto_connect_ssh": False,
+    # One main connection carries SSH and SFTP together; this
+    # switch opens it at startup. See manager_gui.
+    "auto_connect": False,
     "use_alt_icon": False,
     # Per-transport gates, each with its own switch in Settings >
     # Connection. Off, the transport's controls go away and
     # api.device refuses that transport to every addon (see the
     # guards in addon_api); the header's master switch still stops
     # both at once. ssh_enabled additionally shows or hides the
-    # SSH terminal tab.
+    # SSH terminal tab. An addon may only work over a connection
+    # while the main connection is open and its own switch is on.
     "sftp_enabled": True,
     "ssh_enabled": True,
     # The Addon Dev tab: the addon index, logs, processes, tools.
@@ -339,6 +340,14 @@ QTabBar::tab:disabled {
     padding: 0;
     min-width: 0;
 }
+/* The Settings page has a tab bar of its own, inside a tab of the window's, so
+   its capsules are drawn smaller: the same shapes and colours, less padding,
+   and the two bars still read as one above the other. */
+QTabWidget#settingsTabs > QTabBar::tab {
+    padding: 5px 10px;
+    margin-right: 2px;
+    min-width: 16px;
+}
 /* Tree rows: alternating shades, and selected rows keep the accent colour */
 QTreeWidget::item, QListWidget::item {
     padding: 4px;
@@ -468,12 +477,15 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     height: 0;
     background: none;
 }
-/* Connection status dot, recoloured by set_status_dot() */
+/* Connection status dot, recoloured by set_status_dot(). Three states carry the
+   whole connection story: green while a transport is usable now, amber while
+   every switch is on but nothing stands connected, red while a switch refuses. */
 QLabel#statusDot {
     color: #ffb020;
     font-size: 14pt;
 }
 QLabel#statusDotOnline { color: #23d18b; }
+QLabel#statusDotReady { color: #ffb020; }
 QLabel#statusDotOffline { color: #c51a4a; }
 """
 

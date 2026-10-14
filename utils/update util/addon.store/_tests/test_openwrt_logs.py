@@ -10,7 +10,10 @@ things of its own:
   id the addon later sets or reads, and a sub-page bar that answers to
   ``current`` and ``index``;
 * a hand-held scheduler, so the multi fetch is finished when the test says
-  so instead of from a background thread.
+  so instead of from a background thread;
+* and one answer handed over the way the app's process bridge hands it, since
+  the store compiles this addon and a job still running is not something a
+  second process can hold - that is what ``test_the_pipe`` checks.
 
 What gets looked at: the manifest declares its services; the addon opens the
 one tab with a single and a multi sub-page and declares its config form; the
@@ -43,6 +46,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 import addon_client                                          # noqa: E402
+import addon_common                                          # noqa: E402
 
 #: The addon to test: the copy a store install handed over, else the one in the
 #: tree - the store folder first, the addons folder if it was ever re-shipped.
@@ -197,6 +201,61 @@ def test_the_manifest(addon: Any) -> None:
     positional = addon_client.ProcessAPI._POSITIONAL.get("device.run", ())
     check("device" in positional and "block" in positional,
           f"device.run's one-off device must be reachable by the pipe too: {positional}")
+
+
+def test_the_pipe(addon: Any) -> None:
+    """The multi view fetches with ``block=False`` and polls; a build must cope.
+
+    The stub in this file answers with an already-finished stand-in, which is
+    what an imported addon gets from the app too. Built as a program the addon
+    only ever sees a handle and three questions it may ask about the job, so
+    drive the real client over a pretend pipe and check the logs still arrive.
+    """
+    print("\n1b. a block=False fetch survives being compiled")
+    client = addon_client.ProcessAPI("openwrt_logs", "OpenWrt Log Viewer")
+    asked: list[str] = []
+
+    def answer(identifier: int, **named: Any) -> None:
+        box = client.pending.get(identifier)
+        if box is not None:
+            box.put(("error" if "error" in named else "ok",
+                     named.get("error", named.get("result"))))
+
+    def fake_send(payload: dict) -> bool:
+        method = str(payload.get("api") or "")
+        asked.append(method)
+        if method == "device.run":
+            # A job the app is running: the bridge answers with its handle.
+            answer(payload["id"], result=addon_common.future_handle(1))
+        elif method == "device.future_done":
+            answer(payload["id"], result=True)
+        elif method == "device.future_result":
+            answer(payload["id"],
+                   result={"code": 0, "out": LOGS["10.0.0.4"], "err": ""})
+        elif method == "device.future_cancel":
+            answer(payload["id"], result=False)
+        else:
+            answer(payload["id"], error=f"unknown method {method}")
+        return True
+
+    client.send = fake_send
+    job = client.device.run("logread", timeout=5, block=False,
+                           device={"host": "10.0.0.4"})
+    check(isinstance(job, addon_client.RemoteFuture),
+          f"the compiled addon got {type(job).__name__}, not a job it can poll")
+    check(not isinstance(job, addon._Settled),
+          "and it is not mistaken for an answer already in, so the fetch polls")
+    check(job.done() is True, "done() reached the app as its own question")
+    got = job.result()
+    check(isinstance(got, dict) and got.get("out") == LOGS["10.0.0.4"],
+          f"result() brought the device's log back: {str(got)[:60]!r}")
+    check(job.cancel() is False, "a finished job says it could not be cancelled")
+    check(asked[:2] == ["device.run", "device.future_done"],
+          f"the pipe saw the handle and the questions, nothing else: {asked}")
+    lines = addon.make_entries(str(got.get("out", "")).splitlines(),
+                               device="Attic", color="#4da3ff")
+    check(bool(lines),
+          f"so the multi view has lines to merge, got {len(lines)}")
 
 
 def test_the_tabs(addon: Any, api: Api) -> None:
@@ -572,6 +631,7 @@ def main() -> int:
 
     print(f"openwrt_logs: the addon at {SOURCE.name}")
     test_the_manifest(addon)
+    test_the_pipe(addon)
 
     api = Api(addon_id="openwrt_logs")
     addon.init(api)

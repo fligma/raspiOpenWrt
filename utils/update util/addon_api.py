@@ -28,17 +28,25 @@ The namespaces on ``api``
     (the logo the program wears itself).
 
 ``api.device``
-    SSH and SFTP. Every call passes three gates: the master switch and the
-    transport's own switch in Settings > Connection must be on, the transport
-    must be listed under ``"requires"`` in the manifest, and the connection it
-    reaches must be the one the manifest declared under ``"connection"``:
-    ``"app"`` (the default - only the app's main session), ``"own"`` (only a
-    connection of its own) or ``"both"`` (either, the user's Settings switch
-    picks). An addon shipped with the program always rides the app's session.
+    SSH and SFTP. The program keeps one main connection to the device and it
+    carries both transports. Every call passes the same gates, in this order:
+    the master switch in Settings > Connection, that transport's app-wide switch
+    (``ssh_enabled`` / ``sftp_enabled``), this addon's own switch in
+    Settings > Addons, the same addon's switch for *that transport* on its row,
+    the transport listed under ``"requires"`` in the manifest, and the
+    connection it reaches - which must be the one the manifest declared under
+    ``"connection"``: ``"app"`` (the default - only the app's main session,
+    which must already be open: an addon never brings it up by itself, it asks
+    with ``ensure_connected()``), ``"own"`` (only a connection of its own, which
+    the addon opens and closes per call, main session or not) or ``"both"``
+    (either, the user's Settings switch picks). An addon shipped with the
+    program always rides the app's session.
     ``run(command, timeout=30, device=None)`` -> ``{"code", "out", "err"}`` (runs in
     the background and waits; use ``run_async(command, on_done)`` from ``init``),
-    ``shell_send(line)`` writes to the live terminal tab,
-    ``ensure_connected("ssh"|"sftp")``, ``is_connected()``, ``mode()`` and
+    ``shell_send(line)`` types into the terminal tab, which is a channel of the
+    main connection,
+    ``ensure_connected("ssh"|"sftp")`` asks the app to open its main connection,
+    ``is_connected()`` reports what this addon may use right now, ``mode()`` and
     ``set_mode("main"|"own")`` report and switch a ``"both"`` addon.
     ``device`` on ``run``/``run_async``/``open`` is a one-off dict of connection
     details (``host``, ``port``, ``username``, ``password``, ``key_file``,
@@ -80,8 +88,11 @@ The namespaces on ``api``
     ``shutdown``, ``sftp_connected``, ``sftp_disconnected``, ``ssh_connected``,
     ``ssh_disconnected``, ``operation_done``, ``tab_changed``,
     ``profile_changed``, ``settings_applied``, ``addon_enabled``,
-    ``addon_disabled``, ``addon_config_changed``. A module-level ``on_event(name,
-    payload)`` or ``on_<name>(payload)`` function is called too.
+    ``addon_disabled``, ``addon_config_changed``, ``transport_changed`` (one
+    transport gate moved: ``scope`` says whether the app-wide switch or an
+    addon's own did, with ``transport``, ``addon`` and ``enabled`` beside it).
+    A module-level ``on_event(name, payload)`` or ``on_<name>(payload)``
+    function is called too.
 
 ``api.settings``
     This addon's own persisted dict: ``get``, ``set``, ``update``, ``pop``,
@@ -1071,12 +1082,17 @@ class SessionAPI:
             "username": self._win.username_input.text().strip(),
             "remote_root": self._win.remote_root_input.text().strip(),
             "source": str(self._win.app_config.get("source", "")),
-            "sftp_connected": bool(self._win.sftp_connected or live),
-            "ssh_connected": bool((shell is not None and shell.isRunning()) or live),
+            "main_connected": bool(getattr(self._win, "main_connected", False) or live),
+            # The two transport keys stay, and say the same thing: the one
+            # main connection carries both, so it is either up or it is not.
+            "sftp_connected": bool(getattr(self._win, "main_connected", False) or live),
+            "ssh_connected": bool(getattr(self._win, "main_connected", False) or live),
             # The master switch, and whether the SharedConnection is open now.
             "connections_enabled": bool(getattr(
                 self._win, "connections_enabled", lambda: True)()),
             "main_connection_open": live,
+            # A terminal channel is attached to the main connection or none.
+            "shell_open": bool(shell is not None and shell.isRunning()),
             "web_port": int(self._win.app_config.get("web_port", 8989)),
             "busy": bool(getattr(self._win, "worker", None) is not None
                          and self._win.worker.isRunning()),
@@ -1108,7 +1124,7 @@ class SessionAPI:
         return tab_caption(bar, index)
 
     def version(self) -> str:
-        return "1.9"
+        return "1.11"
 
     def app_stylesheet(self) -> str:
         """The app's dark theme, already scaled to the interface zoom."""
@@ -1233,9 +1249,17 @@ class DeviceAPI:
         """The runtime record for the addon calling, or ``None``."""
         return getattr(self._api, "_addon", None)
 
-    def _guard(self, transport: str) -> None:
-        """Refuse a transport unless the master switch, that transport's own
-        Settings switch and the addon's ``requires`` all allow it."""
+    def _guard(self, transport: str, uses_main: bool | None = None) -> None:
+        """Refuse a transport unless every gate allows it: the master switch,
+        that transport's app-wide switch, this addon's own switch (the addon as
+        a whole, and that transport on its Settings row) and the addon's
+        ``requires`` - and, when the call would ride the app's session, unless
+        that session is actually open.
+
+        ``uses_main`` says whose connection the call reaches; left out, an
+        addon on a connection of its own is judged on its own and only one
+        riding the app's session has to wait for the user to press Connect.
+        """
         win = self._win
         check = getattr(win, "connections_enabled", None)
         if callable(check) and not check():
@@ -1246,6 +1270,16 @@ class DeviceAPI:
             raise AddonError(
                 f"{transport.upper()} is switched off (Settings > Connection)")
         addon = self._addon()
+        if addon is not None and not bool(getattr(addon, "enabled", True)):
+            raise AddonError(
+                "this addon is switched off: turn it on in Settings > Addons "
+                "before it can use a connection")
+        if addon is not None \
+                and not bool(getattr(addon, f"{transport}_enabled", True)):
+            raise AddonError(
+                f"{transport.upper()} is switched off for this addon: its own "
+                f"{transport.upper()} switch, under its name in Settings > "
+                "Addons, has to be on as well as the app-wide one")
         declared = tuple(getattr(addon, "requires", ()) or ()) if addon is not None else ()
         if transport not in declared:
             wanted = sorted(set(declared) | {transport})
@@ -1253,6 +1287,22 @@ class DeviceAPI:
                 f"this addon may not use {transport.upper()}: it has to declare "
                 f"its connection services, e.g. \"requires\": {wanted} "
                 "in its ADDON manifest")
+        if uses_main is None:
+            uses_main = not self._uses_own()
+        if uses_main and not self._main_open():
+            raise AddonError(
+                "the main connection is not open: press Connect in the "
+                "Connection panel, or call device.ensure_connected() to ask "
+                "for it" + (" - or switch this addon onto a connection of its "
+                            "own in Settings > Addons" if self._may_have_own()
+                            else ""))
+
+    def _may_have_own(self) -> bool:
+        """Whether a Settings switch could put this addon on its own connection."""
+        addon = self._addon()
+        if addon is None or getattr(addon, "is_bundled", False):
+            return False
+        return str(getattr(addon, "connection", "app")) == "both"
 
     def _uses_own(self) -> bool:
         """Whether this addon runs on a connection of its own right now."""
@@ -1279,34 +1329,30 @@ class DeviceAPI:
                 f"{reason} reaches the app's main session, but this addon "
                 'declared "connection": "own" in its ADDON manifest')
 
-    def _shared(self) -> Any:
-        """The app's main connection when this addon shares it, else ``None``."""
-        if self._uses_own():
-            return None
+    def _main(self) -> Any:
+        """The one main connection, whoever is allowed to use it."""
         return getattr(self._win, "shared_conn", None)
 
-    def _report_shared(self) -> None:
-        """Tell the window the main session came up from a pool thread."""
-        mark = getattr(self._win, "mark_shared_connected", None)
-        if mark is None:
-            return
-        try:
-            self._api._manager.bus.post(mark)
-        except Exception:
-            pass
-
-    def _open_shared(self, settings: dict) -> Any:
-        """Bring the main session up if it is down, and report its state."""
-        shared = self._shared()
-        if shared is None:
-            return None
-        if not shared.active():
+    def _main_open(self) -> bool:
+        """Whether the app's main connection - SSH and SFTP together - is up."""
+        shared = self._main()
+        if shared is not None:
             try:
-                shared.open(settings)
-            except Exception as error:
-                raise AddonError(f"the main connection could not open: {error}")
-            self._report_shared()
-        return shared
+                return bool(shared.active())
+            except Exception:
+                pass
+        return bool(getattr(self._win, "main_connected", False))
+
+    def _live_main(self) -> Any:
+        """The open main session for an addon that shares it, ``None`` otherwise.
+
+        An addon never opens the main connection from here: that connection is
+        the user's to open, by button or by the startup switch. Asking for it is
+        what ``ensure_connected`` does.
+        """
+        if self._uses_own() or not self._main_open():
+            return None
+        return self._main()
 
     def _mark(self, transport: str) -> None:
         """Note the transport for the Settings dot; never fails the call."""
@@ -1323,13 +1369,13 @@ class DeviceAPI:
         self._trace(f"$ {command}"
                     + (f" @{settings.get('host')}" if device else ""))
         # Re-check the gates in the worker thread; they may have moved.
-        self._guard("ssh")
+        self._guard("ssh", uses_main=not bool(device))
         if device:
             # A one-off device is a connection of its own: declared only.
             self._allow_own()
             shared = None
         else:
-            shared = self._open_shared(settings)
+            shared = self._live_main()
         if shared is not None:
             # Main connection: one command on the app's open session.
             code, out, err = shared.run(command, int(_timeout(timeout)))
@@ -1349,7 +1395,7 @@ class DeviceAPI:
         if not str(command).strip():
             raise AddonError("empty command")
         self._check_device(device)
-        self._guard("ssh")
+        self._guard("ssh", uses_main=not bool(device))
         if device:
             self._allow_own()
         self._mark("ssh")
@@ -1362,7 +1408,7 @@ class DeviceAPI:
                   timeout: Any = 30, device: dict | None = None) -> Any:
         """``run`` without waiting: ``on_done(result)`` arrives on the GUI thread."""
         self._check_device(device)
-        self._guard("ssh")
+        self._guard("ssh", uses_main=not bool(device))
         if device:
             self._allow_own()
         self._mark("ssh")
@@ -1379,7 +1425,11 @@ class DeviceAPI:
         return future
 
     def shell_send(self, line: str) -> bool:
-        """Type into the live terminal tab. False when no shell is open."""
+        """Type into the terminal tab. False when its channel is not open.
+
+        The tab is a channel of the main connection, so this needs that
+        connection up and the addon riding it, never one of its own.
+        """
         self._guard("ssh")
         self._need_app("device.shell_send()")
         self._mark("ssh")
@@ -1391,21 +1441,32 @@ class DeviceAPI:
         return True
 
     def is_connected(self, protocol: str | None = None) -> bool:
-        """Whether a connection this addon could use is up right now."""
+        """Whether this addon could use a connection right now.
+
+        Its own switch, that transport's switch on its row, the master switch
+        and the transport's app-wide switch all count, and an addon sharing the
+        app's session can only use what is open: the one main connection. An
+        addon on a connection of its own brings that connection up itself, so
+        the gates passing is all the app can report.
+        """
         win = self._win
         check = getattr(win, "connections_enabled", None)
         if callable(check) and not check():
             return False
+        addon = self._addon()
+        if addon is not None and not bool(getattr(addon, "enabled", True)):
+            return False
         config = getattr(win, "app_config", {}) or {}
-        shared = getattr(win, "shared_conn", None)
-        live = bool(shared.active()) if shared is not None else False
-        worker = win.shell_worker
-        states = {
-            "sftp": bool(win.sftp_connected or live)
-                    and bool(config.get("sftp_enabled", True)),
-            "ssh": bool((worker is not None and worker.isRunning()) or live)
-                   and bool(config.get("ssh_enabled", True)),
-        }
+        declared = (tuple(getattr(addon, "requires", ()) or ())
+                    if addon is not None else None)
+        live = self._main_open()
+        own = self._uses_own()
+        states = {}
+        for kind in ("sftp", "ssh"):
+            allowed = (bool(config.get(f"{kind}_enabled", True))
+                       and bool(getattr(addon, f"{kind}_enabled", True))
+                       and (declared is None or kind in declared))
+            states[kind] = allowed and (True if own else live)
         if protocol is None:
             return any(states.values())
         return states.get(str(protocol).lower(), False)
@@ -1471,24 +1532,28 @@ class DeviceAPI:
         self._trace("device binding cleared")
 
     def ensure_connected(self, protocol: str = "sftp") -> bool:
-        """Ask the app to connect; returns whether something was already up."""
+        """Ask the app to open its main connection; say whether it was already up.
+
+        There is one connection and it carries both transports, so either
+        protocol asks for the same thing. The connection opens through the
+        window, on the GUI thread, exactly as the Connect button does - an addon
+        only asks and never connects itself. Asking is the one call allowed while
+        the main connection is down, so it skips that part of the gates.
+        """
         kind = str(protocol).lower()
         if kind not in ("sftp", "ssh"):
             raise AddonError("protocol must be 'sftp' or 'ssh'")
-        self._guard(kind)
+        self._guard(kind, uses_main=False)
         self._need_app("device.ensure_connected()")
-        already = self.is_connected(kind)
+        already = self._main_open()
         if not already:
-            if kind == "sftp":
-                self._win.connect_remote()
-            else:
-                self._win.connect_shell()
+            self._api._manager.bus.post(self._win.connect_remote)
         return already
 
     # --- files ---
 
     def _sftp(self, operation: str, action: Callable, timeout: Any = 30) -> Any:
-        """Run `action(client, sftp)` in the pool, on the shared session or a fresh one."""
+        """Run `action(client, sftp)` in the pool, on the main connection or a fresh one."""
         self._guard("sftp")
         self._mark("sftp")
         settings = self._settings()
@@ -1496,7 +1561,7 @@ class DeviceAPI:
         def work() -> Any:
             self._guard("sftp")      # the gates may have moved since submitting
             self._trace(f"sftp {operation}")
-            shared = self._open_shared(settings)
+            shared = self._live_main()
             if shared is not None:
                 with shared.lock:
                     return action(shared.client, shared.sftp,
@@ -1519,16 +1584,22 @@ class DeviceAPI:
     def open(self, timeout: Any = 30, device: dict | None = None) -> Any:
         """with api.device.open() as conn: a session you keep open; always its own connection, device overrides the details for it alone."""
         self._check_device(device)
-        self._guard("sftp")
+        self._guard("sftp", uses_main=False)
         self._allow_own()
         self._mark("sftp")
         settings = self._settings(device)
+
+        def gate(transport: str) -> None:
+            # Whatever this handle reaches is the addon's own connection, never
+            # the app's, so its commands are gated on the switches alone.
+            self._guard(transport, uses_main=False)
+
         client = None
         sftp = None
         try:
             client = _await(POOL.submit(create_ssh_client, settings), _timeout(timeout))
             sftp = client.open_sftp()
-            yield Connection(client, sftp, settings["remote_root"], gate=self._guard)
+            yield Connection(client, sftp, settings["remote_root"], gate=gate)
         finally:
             if sftp is not None:
                 sftp.close()

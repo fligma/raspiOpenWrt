@@ -102,19 +102,19 @@ Fifteen files, each holding one area of the app:
 | `manager_gui.py` | `BerryManager` - menu, tab shell, connection panel, Settings tab, profiles and credentials, dialog-driven menu actions, log, shutdown |
 | `manager_widgets.py` | Reusable pieces: `ToggleSwitch`, `ToggleGroup`, `CollapseGroup`, `TabTransportDots`, the shared file tree and the popup dialogs |
 | `manager_browser.py` | Embedded web tabs and the HTTPS certificate switch |
-| `manager_files.py` | The lightweight SFTP connection - the connect/disconnect probe, the `sftp_connected` flag and its events (Berry owns the file views) |
+| `manager_files.py` | The app's one main connection - the Connect/Disconnect pair, the `main_connected` flag, both status dots and the connected/disconnected events (Berry owns the file views) |
 | `manager_terminal.py` | SSH tab - wiring of the terminal, quick commands, reboot watch |
 | `manager_term.py` | `TerminalScreen` - the xterm-style emulator the SSH tab shows: escape-sequence parser, cell grid, key encoding |
-| `manager_net.py` | paramiko connections, path safety and the background worker threads |
+| `manager_net.py` | `SharedConnection` - the app's one SSH session with its SFTP channel and the shell channels opened on it - plus path safety and the background worker threads |
 | `manager_config.py` | Reading, normalising and writing `config.json` |
-| `manager_addons.py` | The addon runtime - discovery, loading, enable/disable, events, the Settings category with each addon's config panel, the executable-addon bridge and its callback tokens |
+| `manager_addons.py` | The addon runtime - discovery, loading, enable/disable, events, the Settings pages with each addon's config panel, the executable-addon bridge and its callback tokens |
 | `manager_addondev.py` | The Addon Dev tab - details, compile, test script, log and processes; shown by a Settings switch and read-only for the addons that ship inside the program |
 | `addon_api.py` | The `api` object every addon receives and the declarative widget builder; the plain helpers are re-exported from `addon_common` |
 | `addon_common.py` | The Qt-free half of the contract: errors, JSON results, the config and build-mark files. Imported by an addon, by a test and by the app |
 | `addon_client.py` | The addon side of the pipe - the `api` a process addon uses, `serve()` for its own process, and the recording stub a test runs against |
 | `manager_const.py` | Paths, defaults and the app stylesheet |
 
-The three device tabs are mixins (`BrowserMixin`, `FileViewsMixin`,
+The three device tabs are mixins (`BrowserMixin`, `MainConnectionMixin`,
 `TerminalMixin`) that `BerryManager` inherits alongside `QMainWindow`, so the
 code of each tab stays in its own file while the window keeps the shared state.
 What the window itself owns - the menu, the Settings tab, the profiles and the
@@ -155,32 +155,62 @@ field is cleared and a stored credential is picked up again.
 
 ### Settings tab
 
-The Settings tab is grouped into categories so that each section only shows the
-options that belong to it. The **SSH** category can be ticked off: unchecking it
-hides its options, removes the terminal from the window, and refuses SSH to the
+Settings is a tab bar of its own, one page per subject: **Connection**,
+**Startup & defaults** and **Custom tabs**, then a page for every addon that came
+inside the program, and last a single **Installed addons** page for everything
+added afterwards. Each page scrolls on its own, so a section only ever shows the
+options that belong to it, and **Apply settings** sits under the bar and applies
+the whole of it whichever page is showing. The **SSH terminal** options live on
+the Connection page and can be ticked off: unchecking it hides its options,
+removes the terminal from the window, and refuses SSH to the
 addons and the device API until it is back on; the state is saved
-(`ssh_enabled`). The **File transfer (SFTP)** block has its own **Enable the
-SFTP connection** switch (`sftp_enabled`): off, its connect controls go and
-addons are refused SFTP work. The **Custom tabs**
-category is always shown. The file tab is no longer built into the app: the
-bundled **Berry** addon browses files over this SFTP connection, and its on/off
-switch lives with the other shipped addons in **Bundled with the program** below.
-The connection panel is titled **Connection settings**; when the SFTP transport
-is switched off (`sftp_enabled`) it drops the **Remote dir** line, because that
+(`ssh_enabled`). The **File transfer (SFTP)** block on that same page has its own
+**Enable the SFTP connection** switch (`sftp_enabled`): off, the remote directory
+line goes and addons are refused SFTP work. Neither switch opens or closes
+anything by itself: the app keeps **one main connection** - a single SSH session
+that carries SFTP with it - and these two are gates over the parts of it. Each is
+only the app-wide half of the gate: every addon also carries an **SSH** and an
+**SFTP** switch under its name on its own Settings page, and a transport reaches
+the addon only when both are on. The **Custom tabs** page is always shown. The
+file tab is no longer built into the app: the bundled **Berry** addon browses
+files over this connection, and its on/off switch is on **Berry**'s own Settings
+page beside the other shipped addons. The connection panel is titled
+**Connection settings**; when SFTP is switched off
+(`sftp_enabled`) it drops the **Remote dir** line, because that
 directory is the root Berry opens on. Nested toggles (logging) still
 hide their own indented options while off.
 
-- **Advanced connection settings** (folded away until you open it)
+The panel itself is the whole of the app's connecting. **Connect** opens the one
+main connection - an SSH session that carries SFTP, and the terminal's shell as
+a channel on it - **Disconnect** closes it, and **Connect at startup** says
+whether the next launch opens it by itself. It is one switch for both
+transports: SFTP has no startup switch of its own, and the launch connects for
+SSH, for SFTP, or for both, and stays away only when the two transports are
+switched off. The switch in the panel's header
+(`master_connection`) is the master gate: off, the panel hides its controls,
+what was open is closed and nothing may connect at all - neither the app's
+session nor an addon's own.
+
+The pages of the Settings bar, and what each holds:
+
+- **Connection** - the connection panel with its **SSH terminal** and
+  **File transfer (SFTP)** blocks, and **Connection status** (folded away until
+  you open it)
   - Read-only, and nothing here is saved. The program's own **SSH** and **SFTP**
     indicators - the two dots that used to sit in the window header - are here
-    instead, each with the word **connected** or **closed** beside it, and under
-    them one line per running addon naming the transport it has actually used
-    through the device API and whether that connection is open or closed right
-    now. An addon that has used neither says *no connection used yet*. The list
-    is redrawn whenever a connection or an addon changes, so it is never a
-    snapshot of when the page was opened. Both the dots and the whole category
-    disappear when the two transports are switched off.
-- **Startup & defaults** (always visible)
+    instead, each with the word **connected** or **closed** beside it. They are
+    two lines for one thing: both follow the app's single main connection,
+    because that one session carries both transports. Under them is one line per
+    running addon, naming each transport its manifest declared with the dot's
+    own word beside it - **connected**, **ready** or **off** - and saying whose
+    connection it rides: **on the main connection** when the addon shares the
+    app's session, **on its own connection** when it opens one of its own per
+    call. The words are the very same answer as the dot beside that transport's
+    switch on the addon's row (see [Addons](#addons)), so the list and the rows
+    can never disagree. The list is redrawn whenever a connection or an addon
+    changes, so it is never a snapshot of when the page was opened. Both the dots
+    and the whole block disappear when the two transports are switched off.
+- **Startup & defaults** (its own page)
   - Default tab shown at startup (only the currently visible tabs are listed; it
     falls back to the first visible tab when the stored one is gone)
   - **Remember tab order** - keep the tabs in the order you drag them into for
@@ -192,24 +222,25 @@ hide their own indented options while off.
   - **Show the Addon Dev tab** - the addon index with its details, test and
     compile panels, and the Tools > Addon Dev entry that goes with it
     (`addon_dev_enabled`). Off, the tab and the menu entry are gone; the
-    addons themselves are still switched on and off in Settings below.
-- **File transfer (SFTP)** (always visible)
-  - **Enable the SFTP connection** - the gate: off, the connect controls go and
-    the addons and the device API are refused SFTP work (`sftp_enabled`)
-  - Auto-connect at startup (opens the SFTP connection when the app launches)
+    addons themselves are still switched on and off on their own Settings pages.
   - **Enable logging to file** - when off, nothing is written to
     `berry_manager.log`. While on it exposes the maximum on-screen log lines
     and the log file path. The on-screen pane under the tabs is switched
     separately, in View > **Show log console**.
-- **SSH** (checkable tab)
-  - Auto-connect at startup (opens the SSH terminal when the app launches)
+- **File transfer (SFTP)** (a block inside the panel, on the Connection page)
+  - **Enable the SFTP connection** - the gate: off, the addons and the device
+    API are refused SFTP work and the connection panel drops its remote
+    directory line (`sftp_enabled`). It opens and closes nothing by itself: the
+    transports travel on the app's one main connection
+- **SSH terminal** (the panel's other block, on the same page; its **Show the
+  SSH terminal tab** switch is also the app-wide SSH gate)
   - Terminal font size (the terminal's own base size; View > Zoom in/out scales
     it together with everything else)
   - Reboot timing: **Wait before first retry** and **Retry every**, plus the
     option to be asked after a reboot is sent through the button or a quick
     command
   - Edit quick commands
-- **Custom tabs** (always on)
+- **Custom tabs** (its own page, always enabled)
   - **Tabs** - add, edit, or remove the embedded browser tabs. Each tab has a
     display name, an IP/hostname (leave blank to follow the active profile
     host), a port, a path, and http/https.
@@ -217,17 +248,26 @@ hide their own indented options while off.
     pages whose certificate it cannot verify (`ignore_cert_errors`). QtWebEngine
     reads this when it starts, so the manager offers to restart when you change
     it.
-- **Bundled with the program** and **Installed addons**
+- **Installed addons**, last, and a page under its own name for every shipped
+  addon
   - The addons that ship inside the app - Berry, the Web installer and the Berry
-    addon store - each get their own category here, with their enable switch,
-    their config panel and their connection indicators (see
-    below). **Berry** is switched from here, which shows or hides its file tab.
-    Addons you drop in later, and the ones the store installs, are listed under
-    **Installed addons**, and a store install is not marked down for where it
-    came from: it gets the same switch, the same *own connection* option (where
-    its manifest declares `"connection": "both"`) and the
-    same config panel as any other, because the store writes a manifest beside
-    the program it built and seeds its settings folder before it is ever started.
+    addon store - each get a Settings page titled with their own name, carrying
+    their enable switch, their SSH and SFTP switches, their config panel and
+    their connection indicators (see below). **Berry** is switched from its page,
+    which shows or hides its file tab. The pages are made and unmade with the
+    rows: a **Rescan** that finds a
+    shipped addon gives it a page, one that no longer finds it takes the page
+    away, and a name changed in the manifest renames the tab.
+  - Everything that came in after the build shares the **Installed addons** page:
+    a hand-written `.py`, a program built by the Addon Dev tab, an addon the
+    store installed. At its top sits the addons folder path with **Open folder**,
+    **Open addon data** and **Rescan** beside it, and below that one row per
+    addon. A store install is not marked down for where it came from: it gets the
+    same switch, the same *own connection* option (where
+    its manifest declares `"connection": "both"`), its own SSH and SFTP switches
+    and the same config panel as any other, because the store writes a manifest
+    beside the program it built and seeds its settings folder before it is ever
+    started.
 
 ### HTTPS in the embedded tabs
 
@@ -261,12 +301,16 @@ page says nothing in the tab - only in the log - because there is no
 certificate choice left to make; the page itself is what it is. The switch
 is stored per profile in `ignore_cert_errors`.
 
-Auto-connect is per protocol: **File transfer (SFTP)** and **SSH** each have
-their own **Auto-connect at startup** option, and they are independent. With the
-SFTP option on the app opens the SFTP connection at launch - the transport Berry
-browses files over; with the SSH option on it opens the SSH terminal. Turning
-both on starts both connections. The SSH option is ignored while the SSH tab is
-switched off (unticking the category hides the option too).
+Auto-connect is one switch for the one main connection: **Connect at startup**,
+in the connection panel and saved as `auto_connect`, opens the SSH session -
+with SFTP on it - when the app starts, using the profile's host, user and
+remembered password. Nothing is opened when both transports are switched off:
+the app says so in the log rather than starting a session nobody may use. The
+terminal rides that same session, so a shell attaches by itself as the
+connection comes up, unless the SSH tab is switched off. An
+older profile that carries the two per-protocol options is folded into this one
+the first time the new version reads it: either of them on means the main
+connection opens at startup, and the two retired keys are dropped.
 
 The View menu has an **Alternate icon** toggle that switches between
 `assets/icon.png` and `assets/icon2.png`; the choice is saved to
@@ -288,8 +332,9 @@ zoom** (**Ctrl+0**). These set the density of the whole interface rather than
 one font size: every step moves `ui_zoom` along a fixed ladder (60% to 200%),
 and each point size and pixel value in the theme - paddings, the tabs and their
 icons, the checkbox and switch sizes, the log pane height, the header logo, the
-addon panels - is multiplied by it, along with the terminal's font. Settings >
-**Terminal font size** stays the terminal's own base, so the two combine: a
+addon panels - is multiplied by it, along with the terminal's font.
+Settings > **Connection** > **Terminal font size** stays the terminal's own
+base, so the two combine: a
 12 pt terminal at 125% draws at 15 pt. The percentage is saved per profile and
 is applied when the window opens; nothing needs a restart.
 
@@ -302,10 +347,10 @@ is applied when the window opens; nothing needs a restart.
 | `ssh_timeout` | Seconds for SSH connect/auth (3-300) |
 | `logging_enabled` | Master switch for writing `berry_manager.log` |
 | `show_hidden_files` | Include dot-files in Berry's device listing |
-| `auto_connect_sftp` | Open the SFTP connection at startup |
-| `auto_connect_ssh` | Open the SSH terminal at startup (only when the SSH tab is on) |
-| `sftp_enabled` | SFTP gate: its controls show, and addons and the device API may use SFTP, only while it is on |
-| `ssh_enabled` | SSH gate and SSH tab visibility: off, the terminal tab is gone and addons are refused SSH work |
+| `master_connection` | The master switch: off, nothing connects at all - neither the app's main connection nor an addon's own |
+| `auto_connect` | Open the main connection (SSH and SFTP together) when the app starts; the one startup switch, and nothing opens while both transports are off |
+| `sftp_enabled` | App-wide SFTP gate: its options show, and addons and the device API may use SFTP, only while it is on - and only while the addon's own SFTP switch is on too |
+| `ssh_enabled` | App-wide SSH gate and SSH tab visibility: off, the terminal tab is gone and addons are refused SSH work, whatever their own switch says |
 | `addon_dev_enabled` | Show the Addon Dev tab and its Tools menu entry |
 | `reboot_wait_seconds` | Downtime allowed for a reboot before the first reconnect attempt (0-600) |
 | `reboot_retry_interval` | Seconds between reconnect attempts until the device answers (1-300) |
@@ -319,7 +364,7 @@ is applied when the window opens; nothing needs a restart.
 | `log_visible` | Show the log pane at the bottom of the window (View > Show log console) |
 | `terminal_history_limit` | Quick-command runs remembered in `command_history.json` |
 | `web_tabs` | List of embedded browser tabs (name, ip, port, path, scheme) |
-| `addons` | Per-addon record for this profile: `enabled` and the addon's own `settings` |
+| `addons` | Per-addon record for this profile: `enabled`, `own_connection`, the addon's own `ssh_enabled` / `sftp_enabled` transport switches and the addon's `settings` |
 | `ignore_cert_errors` | Load https pages whose certificate the embedded browser cannot verify |
 | `use_alt_icon` | Show `icon2.png` instead of `icon.png` in the toolbar |
 | `quick_commands` | Buttons shown above the terminal |
@@ -339,9 +384,10 @@ and a Local page (this machine), and lets you list, open, edit, rename, copy,
 delete, chmod, upload and download anywhere on the device - see
 [Shipped addon: Berry file manager](#shipped-addon-berry-file-manager).
 
-**Connect (SFTP)** in the connection panel opens the SFTP session Berry works
-over; **Disconnect (SFTP)** closes it. The connection is a quick probe - it no
-longer builds a file tree inside the app itself.
+**Connect** in the connection panel opens the main connection - the SSH session
+Berry works over, with its SFTP channel on it - and **Disconnect** closes it.
+One button covers both transports because one session carries them; there is no
+second connection to make and no file tree built inside the app itself.
 
 ## SSH terminal
 
@@ -364,19 +410,25 @@ jumps back to the bottom), while a full-screen program owns the whole display
 and restores the shell's screen when it exits. A program that sets a window
 title puts it in the SSH tab's tooltip; the bell shows in the status bar.
 
-The quick-command buttons above the terminal type their command into the
-shell, Enter included, when a shell is open - otherwise they run it over a
-one-off connection and log the output. Every quick-command run is saved to
+The quick-command buttons above the terminal type their command into the shell,
+Enter included, when a shell is open - otherwise they run it as a one-off
+command over the main connection and log the output, which needs that
+connection open first. Every quick-command run is saved to
 `command_history.json`; typed commands are the shell's own business now, so
 its arrow-key history is what browses them.
 
-SFTP and SSH have separate connection indicators - in Settings > Advanced
-connection settings, folded away by default - and separate controls.
-**Open SSH terminal** and **Disconnect** drive the live shell;
-**Connect (SFTP)** and **Disconnect (SFTP)** open and close the SFTP session
-Berry browses files over. Disconnecting marks the transport offline and fires
-the `sftp_disconnected` event; Berry reopens its listing the next time you
-connect.
+SSH and SFTP have two connection indicators - on the Settings **Connection**
+page, in **Connection status**, folded away by default - and they are two lines
+for one thing: both
+follow the app's single main connection, so they light up and go dark together.
+**Open terminal** and **Close terminal** in the SSH tab attach and detach the
+shell, which is a channel of that session - closing it leaves the connection,
+and SFTP, alone. **Connect** and **Disconnect** in the connection panel open and
+close the session itself, and nothing in the app connects without them: the
+terminal has no password prompt of its own and says so when the session is down.
+Disconnecting marks both transports offline and fires the
+`sftp_disconnected` / `ssh_disconnected` events; Berry reopens its listing the
+next time you connect.
 
 ## Rebooting the device
 
@@ -390,10 +442,12 @@ early.
 Running the **Reboot device** button, or a quick command that looks like a
 reboot (`sudo reboot`, `busybox reboot`, `shutdown -r ...`), offers to start
 the same watch - the offer is controlled by **Offer to watch for the device
-after a reboot command** in the Settings tab. A `reboot` you type yourself is
-not noticed: the terminal passes keystrokes straight through without reading
+after a reboot command** on the Settings **Connection** page. A `reboot` you
+type yourself is not noticed: the terminal passes keystrokes straight through
+without reading
 the line, so use the button or a quick command when you want the wait. Both
-timings live in the SSH section of Settings and are saved to `config.json`.
+timings live in the **SSH terminal** block on the Settings **Connection** page
+and are saved to `config.json`.
 
 ## OpenWrt SFTP requirement
 
@@ -414,7 +468,8 @@ On older opkg-based OpenWrt releases use `opkg update` then
 An addon is a file you drop next to the program; it extends the app without
 changing it. The folder is `addons` beside `berry_manager.py`, or beside the
 `.exe` when the app is built. It is created the first time the app starts (or
-when you press **Open folder** in Settings), so it exists even if you never add
+when you press **Open folder** on the Settings
+**Installed addons** page), so it exists even if you never add
 anything to it.
 
 Four layouts are recognised, and each one is a separate addon:
@@ -435,8 +490,8 @@ addon. It is switched on and off like any other and keeps its own config file
 beside the `.exe`, but its source belongs to the build - see
 [Addons inside the built executable](#addons-inside-the-built-executable).
 
-Settings splits addons in two: a **Bundled with the program** category, one
-section per shipped addon, and an **Installed addons** list for everything that
+Settings splits addons over its own tab bar: a page per addon that came inside
+the program, and one **Installed addons** page with a row for everything that
 came in after the build - a hand-written `.py`, a program built by the Addon Dev
 tab, and an addon the store installed. Each row carries the addon's enable
 switch, its version and author, what it said about itself, a **Restart**
@@ -447,7 +502,22 @@ a **Show tab** button when the addon opened one. A shipped addon gets the
 switch, its state and its config panel, plus **Show tab** while it has one - but
 no **Restart**: restarting reads the addon's file again, and that file is inside
 the program - and no **own connection**, which is the user's choice to make
-about an addon of theirs and not about the program's own.
+about an addon of theirs and not about the program's own. An addon that declared
+`"connection": "own"`, or the default `"app"`, carries a plain label on its row
+naming the connection it uses instead of a switch: only a `"both"` addon leaves
+that choice to the user.
+Under the addon's name sits its own row of switches, one per transport the
+manifest declared - **SSH** and **SFTP** - each followed by the dot that speaks
+for it, with the quiet line *connections this addon may use* beside them. The
+name is said once: a dot never repeats the label it stands next to. They are the
+addon's half of the app-wide gates in Settings > Connection: a transport is
+handed to the addon only while that switch and the app-wide one are both on, and
+the switches are shown whether or not the addon is running, so an addon can be
+limited before it is ever started.
+They decide who may use a connection, never whether one is opened: the
+transports still travel on the app's one main session. The choice is stored per
+profile in `addons -> <id> -> ssh_enabled` and `sftp_enabled`, both on for an
+addon the profile has never spoken about.
 Switching an addon off stops it and takes
 away everything it added - its tabs, its menu entries, its timers and its
 listeners - without restarting the app; switching it on starts it again. The
@@ -460,14 +530,26 @@ are reading it. The choice is stored per profile in
 `addons -> <id> -> enabled`, and a **Rescan** button picks up files that were
 added or removed meanwhile.
 
-Beside each addon's name are one or two small dots - **SSH** and **SFTP** - that
-appear only once the addon has actually used that transport through the device
-API. A dot is lit while the app's matching connection is live and grey while it
-is down, so an addon that only ever talks over SSH never shows an SFTP dot.
-Berry normally wears both, because its Device page lists files over SFTP and runs
-chmod and find over SSH. The same information, spelled out in words rather than
-in colours, is listed per running addon in **Advanced connection settings** at
-the top of the Settings tab.
+Beside each transport switch sits one dot, in one of three colours, and it answers
+the whole question at once: can this addon use that transport, does it, and over
+which connection? **Green** means it can right now - the one main connection is
+open for an addon that shares it, or an addon on a connection of its own has
+already run a job over it. **Amber** means every switch is on while nothing stands
+connected: an addon riding the main connection is waiting for **Connect**, and one
+on a connection of its own has simply not been asked yet, so *may* and *has* stay
+two different words, in the dot's own tool tip. **Red** means a switch refuses it,
+and the tool tip names which - the master switch in the connection panel's header,
+that transport's app-wide switch on the Settings **Connection** page, the addon's
+own enable switch, the transport's switch beside the dot, or a transport the
+manifest never declared under `"requires"`. The same three states colour the
+`s` and `f` marks on that addon's tabs, so a tab never looks live while its addon
+is refused, and an addon on its own connection keeps a live mark even while the
+main connection is down. The answer holds whether or not the addon is running: one
+that is switched off is refused every connection and says so in red. Berry
+normally wears green on both as soon as the main connection is up, because its
+Device page lists files over SFTP and runs chmod and find over SSH. The same
+information, spelled out in words rather than in colours, is listed per running
+addon in **Connection status** on the Settings **Connection** page.
 
 Beneath a row, when that addon keeps one, sits a **Config** panel: the settings
 that belong to the installation rather than to a profile, edited as a form and
@@ -524,7 +606,7 @@ The object in `init` is the only door into the app:
 | --- | --- |
 | `api.id`, `api.name`, `api.log(text)`, `api.error(text)` | identity and the shared log |
 | `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the two an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request) and `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything) |
-| `api.device` | SSH and SFTP: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download`. Every call is refused unless the master switch and that transport's switch in Settings are on, the transport is listed under `"requires"`, and the connection it reaches is the one `"connection"` declares |
+| `api.device` | SSH and SFTP over the app's one main connection, or a connection of the addon's own: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download`. Every call is refused unless the master switch, that transport's app-wide switch, the addon's own switch on its Settings page and that transport's switch on the same row are all on, the transport is listed under `"requires"`, and the connection it reaches is the one `"connection"` declares - which for an addon sharing the app's session also means that connection has to be open |
 | `api.tabs` | `add_web_tab`, `add_tab`, `close`, `rename`, `activate`, `names`, `exists`, `url`, `navigate`, `reload`, `view`, `widget`, `set_widget`, `widget_value`, `set_html`, `inject_css`, `inject_js`, `set_style`, `set_icon`, `icon`, `use_app_icon` |
 | `api.ui` | `information`, `warning`, `error`, `question`, `input`, `choose`, `notify`, `menu_item`, `dialog`, `set_setting_widget`, `window()` |
 | `api.events` | `on(name, callback)` (returns the unsubscribe callable), `off`, `names` |
@@ -536,26 +618,45 @@ The object in `init` is the only door into the app:
 
 The events are `startup`, `shutdown`, `sftp_connected`, `sftp_disconnected`,
 `ssh_connected`, `ssh_disconnected`, `operation_done`, `tab_changed`,
-`profile_changed`, `settings_applied`, `addon_enabled`, `addon_disabled` and
-`addon_config_changed`.
+`profile_changed`, `settings_applied`, `addon_enabled`, `addon_disabled`,
+`addon_config_changed` and `transport_changed` - the last one carries the
+`transport`, plus a `scope` of `"app"` or `"addon"` saying which switch moved
+and, for an addon's own, its `addon` id; an addon that shows a connection state
+of its own redraws from it.
 
 Device work runs in a small shared thread pool, so a slow command never
 freezes the window. `run()` waits for the result while keeping the interface
 responsive; `run_async()` hands it to a callback instead, which is what you
-want from `init`. Relative file paths are confined to the profile's remote
-directory, and `outside_root=True` opts out of that. Addons use the profile's
-saved connection details, which means a password has to be in the connection
-panel (or saved with **Remember password**) before a device call can connect.
+want from `init`; and `run(command, block=False)` gives back a future -
+`done()`, `result()`, `cancel()` - which is how one command goes to several
+devices at the same time and stays off the GUI thread. It is the same future
+whether the addon was imported into the app or built as its own program, which
+is worth something to an addon the store compiles: see **Addons in other
+languages**. Relative file paths are confined to the profile's remote
+directory, and `outside_root=True` opts out of that. A call that rides the app's
+main connection needs nothing else - no credentials, no password - only that
+the connection is open. A call that opens a connection of its own uses the
+profile's saved connection details, which means a password has to be in the
+connection panel (or saved with **Remember password**) for it to connect at all.
 
-Every `api.device` call passes three gates. The **switches**: the master
-switch in the connection panel and that transport's own switch in Settings
-(`ssh_enabled`, `sftp_enabled`) both have to be on. The **transports**: the
-manifest's `"requires"` list names each transport the API may hand the addon.
+Every `api.device` call passes the same gates, in this order. The **switches**:
+the master switch in the connection panel, that transport's app-wide switch
+(`ssh_enabled`, `sftp_enabled`), the addon's own switch on its Settings page and
+*that transport's* switch on the same row - all four have to be on, since an
+addon switched off, or switched off for one transport, has no business with that
+part of a connection. The **transports**: the manifest's `"requires"` list names
+each transport the API may hand the addon.
 The **connection source**: `"connection"` says whose connection the calls
 use - `"app"` (the default) rides only the app's main session, `"own"` only a
 connection of its own (`run(device=...)`, `open()`, `bind()`), and `"both"`
 lets the user's *own connection* switch in Settings pick, which is also the
 only case where the addon may switch it itself with `api.device.set_mode()`.
+The **main connection**: an addon sharing the app's session may use it only
+while it is open, and no addon may open it - the Connect button, the
+**Connect at startup** switch and the reconnect after a reboot are the only
+things that do, and `ensure_connected()` asks the app for it. An addon on a
+connection of its own is judged on its own and connects whether or not the main
+connection is up.
 An addon that comes inside the program always rides the app's session.
 
 ### Each addon's own config file
@@ -749,6 +850,25 @@ a process addon exactly as they do in a Python one. The two things a process
 addon genuinely cannot have are `device.open()` (a paramiko session belongs to
 one interpreter) and `ui.window()` (a Qt widget belongs to the app).
 
+A job the app is still running is another thing the pipe cannot carry, so
+`device.run(command, block=False)` answers with a handle instead of a future:
+
+```json
+{"id": 7, "result": {"addon_future": 3}}
+```
+
+The addon then asks about the job with three calls the bridge answers out of its
+own registry, never passing them to the api - `device.future_done`,
+`device.future_result` and `device.future_cancel`, each taking that number.
+`addon_client.py` recognises the handle and gives the addon a `RemoteFuture`
+wearing the future's face, so `block=False` means the same thing in either
+runtime and a compiled addon can fetch from several devices at once the way an
+imported one does. The answer stays filed under its number after it was read,
+so a handle keeps reporting itself done and keeps giving the same result - or
+the same failure, in words - instead of turning into a hole; the oldest of
+those remembered answers go after there are 64, and all of them go when the
+process is stopped, which cancels whatever nobody came back for.
+
 `addon_client.py` is the other half of this protocol, so an author does not
 write it: `addon_client.serve(__file__)` gives a Python file the loop, the
 `api` object, the manifest handshake and a clean exit code, and any language
@@ -896,10 +1016,10 @@ way through:
    on Linux), the downloads and the build are thrown away, and the addon is
    written into the active profile as **switched off**, so nothing of it runs
    until you turn it on;
-5. Settings > Addons is rescanned and its row appears under **Installed
-   addons** with a switch, a config panel and - where its manifest declared
-   `"connection": "both"` - an *own connection* option, like any other
-   addon's, waiting to be turned on.
+5. Settings is rescanned and its row appears on the **Installed addons**
+   page with a switch, its own SSH and SFTP switches, a config panel and -
+   where its manifest declared `"connection": "both"` - an *own connection*
+   option, like any other addon's, waiting to be turned on.
 
 Step 4 also writes down what the addon's own source declared, which is what
 makes that row a full one before the program has ever run: an `addons/<id>.json`
@@ -1130,7 +1250,7 @@ folder the device page is showing.
   space in it survives the trip to the shell; a mode that is not three or four
   octal digits is refused before anything runs.
 - Everything worth changing lives in `addons/_data/berry/config.json`, shown as a form
-  under this addon's name in Settings > Bundled with the program: the starting
+  on this addon's own Settings page, under its name: the starting
   folder on each side,
   the bookmarked places, the show-hidden and sort defaults, whether deletes ask
   first, the size at which the editor warns, where downloads land, and the two
@@ -1178,7 +1298,14 @@ sensitivity and regular expressions as switches. Like the other addons the tab
 is a spec and every control reports through `on_widget`, so the program the
 store compiles runs the same code;
 `addon.store/_tests/test_openwrt_logs.py` drives it through the stub, including
-the picture the tab asks to wear.
+the picture the tab asks to wear. The multi page is the one place in the
+store's addons that asks for several devices **at once**, with
+`run(command, block=False)`, and then polls each job - the only api call whose
+answer is a job still running rather than a value, so the build has to be
+compiled against a runtime that carries such a job over the pipe. Version 2.8 is
+the first of those: a 2.7 program in an app that cannot carry the job reads no
+logs in the multi view, and the store's **Install** will not overwrite an addon
+that is already there, so it takes **Delete** and then **Install** to move over.
 
 ### Addons inside the built executable
 
@@ -1199,18 +1326,19 @@ app reads that copy as a set of *shipped* addons:
   same events, same config file - with one flag set, `builtin`, that says the
   file belongs to the build. Nothing writes to it: the Details form is read-only,
   **Save** is refused, and there is no **Restart** in its Settings row.
-- It is switched on and off from its own category under **Bundled with the
-  program** - the same place the SSH category sits - and the
+- It is switched on and off from a Settings page of its own, beside the
+  **Connection** page - and the
   choice stays per profile in `addons -> <id> -> enabled`. Its own settings are
   still written beside the `.exe`, in the writable `addons/_data/<id>/config.json`, so
   a shipped addon is configured per installation exactly like a dropped-in one.
 - "Shipped" is decided by a stable list, `manager_const.SHIPPED_ADDON_IDS`
   (`berry`, `web_installer`, `addon_store`), on top of the `builtin` flag, so a
-  source checkout - where `HAS_BUILTIN_ADDONS` is off - still groups those addons
-  under **Bundled with the program** rather than the drop-in list. The certificate
+  source checkout - where `HAS_BUILTIN_ADDONS` is off - still gives those addons
+  a Settings page of their own rather than a row on the **Installed addons**
+  page. The certificate
   and log addons are not in that list any more: they live in `addon.store` and
   are installed from the store, which marks what it builds with an `origin` of
-  its own so the app files it under **Installed addons** instead.
+  its own so the app puts it on the **Installed addons** page instead.
 - Two addons of one id cannot both be *the* addon called `mytool`, and a file in
   the folder beats the copy inside the program - it is the one the user can read
   and change. The shipped copy is kept as the row's alternative, and the Addon

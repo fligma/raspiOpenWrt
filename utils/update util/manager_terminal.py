@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""The SSH tab: an interactive terminal screen, quick commands and the reboot watch."""
+"""The SSH tab: a terminal channel on the main connection, quick commands and the reboot watch."""
 
 
 from __future__ import annotations
@@ -11,8 +11,6 @@ from typing import TYPE_CHECKING
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QHBoxLayout,
-    QInputDialog,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -32,27 +30,32 @@ if TYPE_CHECKING:
 class TerminalMixin:
     """The SSH terminal tab, mixed into the main window.
 
-    Every method here runs on the main window; the attributes it uses are set up
-    by :class:`manager_gui.BerryManager`, the class that mixes this in.
+    The terminal shows one shell channel of the app's main connection: it is
+    opened from that session, never by connecting again, so closing it leaves
+    the connection and SFTP alone. Every method here runs on the main window;
+    the attributes it uses are set up by :class:`manager_gui.BerryManager`, the
+    class that mixes this in.
     """
 
     def build_ssh_tab(self) -> None:
         ssh_page = QWidget()
         ssh_layout = QVBoxLayout(ssh_page)
         terminal_actions = QHBoxLayout()
-        # The SSH connect/disconnect pair lives here rather than in the
-        # connection panel: the tab that shows the shell is the place to open
-        # and close it.
-        self.shell_connect_button = QPushButton("Connect (SSH)")
+        # The terminal attaches to the app's main connection, so its own pair of
+        # buttons opens and closes the shell only - the session itself is the
+        # Connection panel's business, and this is the place to look for a shell.
+        self.shell_connect_button = QPushButton("Open terminal")
         self.shell_connect_button.setObjectName("primaryAction")
         self.shell_connect_button.setToolTip(
-            "Open the interactive shell with the profile's credentials "
-            "(Settings > Connection)"
+            "Attach a shell to the main connection (Connect above). Nothing "
+            "opens while the main connection is down."
         )
         self.shell_connect_button.clicked.connect(self.connect_shell)
-        self.shell_disconnect_button = QPushButton("Disconnect (SSH)")
+        self.shell_disconnect_button = QPushButton("Close terminal")
         self.shell_disconnect_button.setObjectName("dangerAction")
-        self.shell_disconnect_button.setToolTip("Close the SSH terminal session")
+        self.shell_disconnect_button.setToolTip(
+            "Close this shell; the main connection, and SFTP with it, stay open"
+        )
         self.shell_disconnect_button.setEnabled(False)
         self.shell_disconnect_button.clicked.connect(self.disconnect_shell)
         clear_button = QPushButton("Clear")
@@ -133,11 +136,16 @@ class TerminalMixin:
             # the tool waits and reconnects afterwards.
             self.reboot_device()
             return
+        if not self.main_open():
+            # One connection for the whole app: no hidden session for a button.
+            self.log("Connect first (Connection panel) to run a quick command")
+            return
         if self.exec_worker is not None and self.exec_worker.isRunning():
             QMessageBox.information(self, "Busy", "Another command is still running.")
             return
         self.save_history_entry(command)
-        self.exec_worker = RemoteExecWorker(settings, [command], parent=self)
+        self.exec_worker = RemoteExecWorker(settings, [command],
+                                            shared=self.shared_conn, parent=self)
         self.exec_worker.log.connect(self.log)
         self.exec_worker.finished_ok.connect(lambda: self.statusBar().showMessage("Quick command completed", 4000))
         self.exec_worker.failed.connect(lambda msg: QMessageBox.critical(self, "Command failed", msg))
@@ -167,36 +175,27 @@ class TerminalMixin:
         self.terminal.clear()
 
     def connect_shell(self, _checked: bool = False) -> None:
+        """Attach a PTY channel to the app's main connection; never opens a
+        session of its own, so a shell cannot appear without the connection."""
         if not self.connections_enabled():
             self.terminal.write_local(
                 "Connections are switched off (Settings > Connection).\n")
             return
         if self.shell_worker is not None and self.shell_worker.isRunning():
             return
-        settings = self.current_settings()
-        if settings is None:
+        if not self.main_open():
+            self.terminal.write_local(
+                "The main connection is not open. Press Connect in the "
+                "Connection panel first.\n")
             return
-        if not settings["password"] and not settings["key_file"]:
-            password, accepted = QInputDialog.getText(
-                self,
-                "SSH password",
-                f"Password for {settings['username']}@{settings['host']} "
-                "(leave blank to try SSH agent/default keys):",
-                QLineEdit.EchoMode.Password,
-            )
-            if not accepted:
-                return
-            self.password_input.setText(password)
-            settings["password"] = password
-
-        self.store_password()
         self.save_current_profile_edits()
         self.terminal.clear()
         cols, rows = self.terminal.grid_size()
         self.terminal.write_local(
-            f"Connecting to {settings['username']}@{settings['host']}:{settings['port']}...\n"
+            f"Opening a terminal on {self.host_input.text().strip()}...\n"
         )
-        self.shell_worker = SSHShellWorker(settings, cols=cols, rows=rows, parent=self)
+        self.shell_worker = SSHShellWorker(self.shared_conn, cols=cols, rows=rows,
+                                           parent=self)
         self.shell_worker.connected.connect(self.shell_connected)
         self.shell_worker.received.connect(self.terminal.feed)
         self.shell_worker.failed.connect(self.shell_failed)
@@ -209,11 +208,9 @@ class TerminalMixin:
     def shell_connected(self) -> None:
         if getattr(self, "_closing", False):
             return
-        self.terminal.write_local("SSH shell connected.\n")
-        self.shell_disconnect_button.setEnabled(True)
+        self.terminal.write_local("Terminal attached to the main connection.\n")
         self.terminal.setFocus()
-        self.set_status_dot("ssh", "online")
-        self.addon_event("ssh_connected", host=self.host_input.text().strip())
+        self.refresh_terminal_buttons()
 
     def shell_failed(self, message: str) -> None:
         if getattr(self, "_closing", False):
@@ -224,11 +221,8 @@ class TerminalMixin:
     def shell_disconnected(self) -> None:
         if getattr(self, "_closing", False):
             return                     # the whole window goes down anyway
-        self.terminal.write_local("SSH shell disconnected.\n")
-        self.shell_connect_button.setEnabled(True)
-        self.shell_disconnect_button.setEnabled(False)
-        self.set_status_dot("ssh", "offline")
-        self.addon_event("ssh_disconnected", reason="the session closed")
+        self.terminal.write_local("Terminal closed.\n")
+        self.refresh_terminal_buttons()
         if self.shell_worker is not None:
             # The terminal is no one's to type into until the next shell opens.
             try:
@@ -240,8 +234,18 @@ class TerminalMixin:
             self.shell_worker = None
 
     def disconnect_shell(self, _checked: bool = False) -> None:
+        """Close the shell channel; the main connection stays as it was."""
         if self.shell_worker is not None:
             self.shell_worker.stop()
+
+    def refresh_terminal_buttons(self) -> None:
+        """Match the terminal's two buttons to the main connection and the shell."""
+        shell_live = self.shell_worker is not None and self.shell_worker.isRunning()
+        busy = self.worker is not None and self.worker.isRunning()
+        can_attach = (self.connections_enabled() and self.main_open()
+                      and not shell_live and not busy)
+        self.shell_connect_button.setEnabled(can_attach)
+        self.shell_disconnect_button.setEnabled(shell_live)
 
     # --- reboot watch ---
 
@@ -330,8 +334,11 @@ class TerminalMixin:
             return                     # must not open a fresh shell mid-close
         self.statusBar().showMessage("Device is back online", 5000)
         self.log("Device is back online after reboot")
-        if self.app_config.get("ssh_enabled", True):
-            self.connect_shell()
+        # The session this app held is gone with the device; bring the one main
+        # connection back, and the terminal comes up with it.
+        self.shared_conn.close()
+        self.mark_main_closed("the device rebooted")
+        self.connect_remote()
 
     def reboot_watch_finished(self) -> None:
         if getattr(self, "_closing", False):
