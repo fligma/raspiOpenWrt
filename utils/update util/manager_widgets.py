@@ -500,6 +500,71 @@ class TabTransportDots(QWidget):
             dot.setToolTip(f"{transport.upper()}: {word}")
 
 
+class TabCloseButton(QToolButton):
+    """The X worn by a tab that opened itself: an addon's page, or a page's own.
+
+    The app's tabs and the profile's configurable tabs are never given one -
+    closing those by hand would only confuse - so this widget appears on the
+    tabs that have nowhere to be saved and are expected to go away.
+
+    It is painted instead of styled because the app sheet hands every
+    ``QToolButton`` ``padding: 6px 12px`` along with its border and background,
+    and a button's own sheet only replaces the properties it spells out. Inside
+    a sixteen-pixel square that padding leaves no content rect at all, so a
+    *typed* mark is clipped to nothing: the button is there and clickable and
+    draws no pixel. Painting in ``paintEvent`` ignores the style's content rect
+    entirely, and needs no font to carry a glyph either.
+    """
+
+    SIDE = 18          # the box's edge at 100% zoom
+    INK = "#9a9a9a"    # the bar's own caption grey
+    HOT = "#ff6b6b"    # and the warning red it takes up under the pointer
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        # The name is what tells the transport-dot pass to leave this button in
+        # place: it strips every other widget sitting in a tab's right slot.
+        self.setObjectName("tabCloseButton")
+        self.setAccessibleName("Close tab")
+        self.setAutoRaise(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Close this tab")
+
+    def sizeHint(self) -> QSize:
+        """The box at the zoom the window is drawn at; the tab measures this to hold its caption clear of the mark."""
+        side = zoom_size(self.SIDE)
+        return QSize(side, side)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def enterEvent(self, event: QEvent) -> None:
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event: QEvent) -> None:
+        super().leaveEvent(event)
+        self.update()
+
+    def paintEvent(self, _event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        box = min(self.width(), self.height())
+        # The strokes cross over a square a little under half the box, and are
+        # drawn as thick in proportion: a hairline X of that size vanishes into
+        # the capsule's border, while a mark past this reads as a smudge.
+        mark = box * 0.44
+        left = (self.width() - mark) / 2.0
+        top = (self.height() - mark) / 2.0
+        pen = QPen(QColor(self.HOT if self.underMouse() or self.isDown()
+                          else self.INK))
+        pen.setWidthF(max(1.5, box * 0.11))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(left, top), QPointF(left + mark, top + mark))
+        painter.drawLine(QPointF(left + mark, top), QPointF(left, top + mark))
+
+
 class ToggleSwitch(QCheckBox):
     """A pill-shaped on/off switch that replaces checkboxes in Settings,
     painted in the raspberry accent colours of the app theme."""

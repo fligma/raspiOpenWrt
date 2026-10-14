@@ -55,7 +55,12 @@ with its `<name>.json` manifest, or a folder whose program is `addon.exe`,
 `addon.bin` or `<folder>.exe`), and folder addons built from `addon.py` or
 `main.py`; `__pycache__` and any `tests`/`_tests` folder are stripped from the
 copy. The `addons` folder that ships beside the built program is left empty
-for the user's own drop-ins.
+for the user's own drop-ins. Last, a build that got this far is published: a
+`release` job tags the commit `berry` + `APP_VERSION`, opens a release at that
+tag and attaches one archive per system, each holding the program with its
+`addons` folder - which is what the in-app **Manager update** tab downloads, and
+what a person clicking through to the releases page is handed (see [Berry
+Manager update](#shipped-addon-berry-manager-update)).
 
 The store's addons are therefore checked by CI only on a push that also moves
 the program: `addon.store/_tests` is run by the same packaging step. A new
@@ -100,7 +105,7 @@ Fifteen files, each holding one area of the app:
 | --- | --- |
 | `berry_manager.py` | Entry point: Qt application, window icon, startup |
 | `manager_gui.py` | `BerryManager` - menu, tab shell, connection panel, Settings tab, profiles and credentials, dialog-driven menu actions, log, shutdown |
-| `manager_widgets.py` | Reusable pieces: `ToggleSwitch`, `ToggleGroup`, `CollapseGroup`, `TabTransportDots`, the shared file tree and the popup dialogs |
+| `manager_widgets.py` | Reusable pieces: `ToggleSwitch`, `ToggleGroup`, `CollapseGroup`, `TabTransportDots`, `TabCloseButton`, the shared file tree and the popup dialogs |
 | `manager_browser.py` | Embedded web tabs and the HTTPS certificate switch |
 | `manager_files.py` | The app's one main connection - the Connect/Disconnect pair, the `main_connected` flag, both status dots and the connected/disconnected events (Berry owns the file views) |
 | `manager_terminal.py` | SSH tab - wiring of the terminal, quick commands, reboot watch |
@@ -1326,29 +1331,33 @@ check compares against it, so one line changes per release. A repository with
 no `berry` tag yet - the state before the first release is ever published -
 is said plainly as *nothing to compare with* and is not an error.
 
-**How to publish a release the addon can use.** A GitHub tag points at
-source only and carries no files, and the workflow's artifacts can only be
-downloaded by a signed-in browser - an artifact link handed to the addon
-answers with a sign-in page, which the download recognises and refuses by
-name, explaining the fix. So an artifact link in a description is *not* the
-way; the way is the small extra step after verifying a downloaded artifact:
+**How a release gets published.** The workflow publishes it. A push that
+rebuilt the program ends in a `release` job that reads `APP_VERSION`, makes the
+tag `berry` + that version when it is not there, publishes it as a **release**,
+and attaches `berry_manager-windows.zip` and `berry_manager-linux.zip` - each
+the program with the drop-in `addons` folder beside it, the same shape the
+artifact has. Shipping a version is therefore one edit: change `APP_VERSION`
+and push. The two names are what tells the builds apart, which is exactly the
+rule the addon reads (a name saying `windows` or `.exe`, or one saying `linux`),
+and a re-run at the same version replaces that release's files instead of
+putting up a second pair to choose from.
 
-1. make the tag, named `berry` + the new `APP_VERSION` (say `berry1.5.9`);
-2. publish it as a **release** (GitHub -> Releases -> Draft a new release ->
-   tag `berry1.5.9` -> *Create a new release* rather than just the tag);
-3. attach the two programs built by the workflow as release assets, each
-   named so its system shows in the name - something containing `windows`
-   or `.exe` for the Windows build, `linux` for the other. A zip with
-   `berry_manager.exe` / `berry_manager` inside is unpacked happily, so an
-   artifact zip can be attached as it came; a single asset whose name
-   mentions neither system is offered to both.
-
-Nothing has to be typed into the description, but it is a fallback: when a
-release carries no asset for this system, the addon looks for a plain
-`https` link in the description that serves the bytes with no sign-in, and
-prefers one whose address names this system. And when a tag is ahead but
-offers no download at all, the tab says so and spells these options out
-rather than letting the user find a broken button.
+That automation exists because a GitHub tag points at source only and carries
+no files, so the bytes have to ride on a release under the tag; and the
+workflow's artifacts can only be downloaded by a signed-in browser - an
+artifact link handed to the addon answers with a sign-in page, which the
+download recognises and refuses by name, explaining the fix. Publishing by hand
+still works on the same terms: tag `berry1.5.9`, *Create a new release* rather
+than just the tag, attach one file per system named for its system - a zip
+holding `berry_manager.exe` / `berry_manager` is unpacked happily whatever
+folder it sits in, and on Linux the swap puts the executable bit back - and a
+hand-made tag that never got a release is picked up by the next build. Nothing
+has to be typed into the description, but it is a fallback: when a release
+carries no asset for this system, the addon looks for a plain `https` link in
+the description that serves the bytes with no sign-in, and prefers one whose
+address names this system. And when a tag is ahead but offers no download at
+all, the tab says so and spells these options out rather than letting the user
+find a broken button.
 
 **Download and install** then works in one careful line, paced a megabyte a
 tick through `api.schedule.after` so the window keeps breathing while the
@@ -1448,7 +1457,8 @@ The rest of the frozen path model is unchanged:
 
 - `addons` itself resolves to a folder **beside the `.exe`** (`BASE_DIR`), not
   inside the archive, so it is writable: drop files in it and press **Rescan**.
-  The folder in the downloaded artifact is empty apart from a note saying so.
+  The folder in a downloaded build - artifact or release archive - is empty
+  apart from a note saying so.
 - `from addon_api import ...` in an addon reaches the bundled copy of the
   module, because PyInstaller's frozen importer answers before the addon
   folder that the runtime puts on `sys.path`. The addon folder stays on the

@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QTimer, QUrl
+from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -32,15 +32,13 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTabBar,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from addon_common import clean_child_env
 from manager_config import web_tab_url
-from manager_const import zoom_size
-from manager_widgets import TabEditDialog
+from manager_widgets import TabCloseButton, TabEditDialog
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -394,16 +392,7 @@ class BrowserMixin:
         index = self.tabs.indexOf(page)
         if index < 0:
             return
-        button = QToolButton(bar)
-        button.setObjectName("tabCloseButton")     # the dot sync spares this name
-        button.setText("\u2715")
-        button.setAutoRaise(True)
-        button.setFixedSize(zoom_size(16), zoom_size(16))
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setToolTip("Close this tab")
-        button.setStyleSheet(
-            "QToolButton { border: none; background: transparent; color: #9a9a9a; }"
-            "QToolButton:hover { color: #ff6b6b; }")
+        button = TabCloseButton(bar)
         button.clicked.connect(
             lambda _=False, p=page: self.close_transient_web_tab(p))
         bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, button)

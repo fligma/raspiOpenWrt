@@ -308,3 +308,112 @@ jobs:
           utils/update util/dist/berry_manager
           utils/update util/dist/addons/
         retention-days: 7
+
+  # A build that passed its tests and packaged its two programs *is* a release:
+  # the tag the Manager update addon reads and the files it downloads are made
+  # here out of what this very run built, so a published version can never be a
+  # commit nobody packaged. Nothing is published for a build that did not
+  # happen (this job waits on all of the matrix), and a re-run at the same
+  # version replaces that release's files instead of leaving a broken one up.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Collect the two builds
+      uses: actions/download-artifact@v4
+      with:
+        # One folder per artifact: built/berry_manager-Windows and
+        # built/berry_manager-Linux, each holding the program with the drop-in
+        # addons folder beside it - the shape the workflow staged.
+        pattern: berry_manager-*
+        path: built
+        merge-multiple: false
+
+    - name: Pack one archive per system
+      id: pack
+      run: |
+        # The version is read from the one place it lives, so a release is made
+        # by editing manager_const.APP_VERSION and pushing: no tag to type,
+        # no button to press. Each archive is named for the system it holds -
+        # the update addon tells the two apart by exactly that word.
+        version=$(sed -n 's/^APP_VERSION *= *"\([^"]*\)".*/\1/p' \
+                  'utils/update util/manager_const.py')
+        if [ -z "$version" ]; then
+          echo "APP_VERSION could not be read from manager_const.py"; exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "tag=berry$version" >> "$GITHUB_OUTPUT"
+        echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        mkdir -p release
+        for pair in Windows:windows Linux:linux; do
+          folder="built/berry_manager-${pair%%:*}"
+          if [ ! -d "$folder" ]; then
+            echo "there is no $folder to publish from"; exit 1
+          fi
+          # zipped from inside its own folder, so the program and addons/ land
+          # at the top of the archive; -X keeps the archive free of the
+          # packer's own junk, and the file modes come along with it.
+          ( cd "$folder" && zip -q -r -X "$GITHUB_WORKSPACE/release/berry_manager-${pair##*:}.zip" . )
+        done
+        echo "archives to publish:"; ls -l release
+
+    - name: Publish the release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ steps.pack.outputs.tag }}
+        VERSION: ${{ steps.pack.outputs.version }}
+        COMMIT: ${{ steps.pack.outputs.commit }}
+        SHA: ${{ github.sha }}
+      run: |
+        # A tag carries source and nothing else, so the files have to ride on a
+        # release under that tag - which is what the app downloads. Three
+        # states: this version is being published, its tag was made by hand and
+        # never got a release, or a release is already up and its files are
+        # being replaced.
+        cat > note.md <<EOF
+        Built by the Actions workflow from commit \`$COMMIT\`.
+
+        - **berry_manager-windows.zip** - the program and the empty drop-in
+          \`addons\` folder, for Windows.
+        - **berry_manager-linux.zip** - the same for Linux.
+
+        Unpack it anywhere and run the program; keep \`addons\` beside it. An
+        addon dropped in that folder is read when the app starts, and each
+        addon keeps its own settings under \`addons/_data\`. Nothing in a
+        release changes what an installed copy already holds: the in-app update
+        swaps the program file alone.
+
+        The **Manager update** tab reads this tag as version \`$VERSION\` and
+        takes the archive whose name says its own system.
+        EOF
+        title="Berry Manager $VERSION"
+        if gh release view "$TAG" >/dev/null 2>&1; then
+          echo "release $TAG is already published: its note and files are replaced"
+          # The tag is left where it was made - moving a published tag would
+          # pull the source out from under anyone who already fetched it - so
+          # this just says when the build came from a later commit than the tag.
+          at=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
+               --jq '.object.sha' 2>/dev/null || echo unknown)
+          if [ "$at" != "unknown" ] && [ "$at" != "$SHA" ]; then
+            echo "note: the tag still points at ${at:0:8}, not at this run's $SHA"
+            echo "the release's files are this build; its source archive is not"
+          fi
+          gh release edit "$TAG" --title "$title" --notes-file note.md
+        elif [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+          echo "tag $TAG exists with no release: publishing one at it"
+          gh release create "$TAG" --title "$title" --notes-file note.md
+        else
+          gh release create "$TAG" --target "$SHA" --title "$title" \
+            --notes-file note.md
+        fi
+        # --clobber: an asset of this name from an earlier run is replaced, so
+        # a re-run at the same version cannot leave two files to choose from.
+        gh release upload "$TAG" release/*.zip --clobber
+        gh release view "$TAG" --json tagName,assets \
+          --jq '"published \(.tagName) with: \([.assets[].name] | join(", "))"'
