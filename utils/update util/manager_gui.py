@@ -1817,7 +1817,7 @@ class BerryManager(
         box = QMessageBox(self)
         box.setWindowTitle("About Berry")
         box.setText(
-            "<b>Berry Manager V1.5.7</b><br>"
+            "<b>Berry Manager V1.5.8</b><br>"
             "Manage routers and devices over ssh&sftp<br>"
             'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt</a><br>'
             'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'

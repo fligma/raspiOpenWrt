@@ -27,6 +27,9 @@ Three things get looked at:
 * what an install leaves where: the build staged and then cleared inside the
   store's own ``_data`` folder, the new addon written into the profile as
   switched off, and the rescan that shuts the store down done last of all;
+* the environment a built app hands to anything it starts: a restarted copy of
+  itself, and everything it compiles, has to be an instance of its own rather
+  than a worker left holding the dying copy's unpacked folder;
 * what an install says about itself afterwards: the manifest beside the program
   that marks it as installed and names the transports it may use, the settings
   form left in its ``_data`` folder for Settings to show, and the two files
@@ -1101,6 +1104,104 @@ def test_the_manifest(store: Any) -> None:
           f"an addon that declares nothing gained inventions: {quiet}")
 
 
+# --- ten: what a built app hands to a child ---
+
+def test_the_child_env() -> None:
+    """The environment the app gives to everything it starts, itself included.
+
+    A PyInstaller onefile tells a process spawned from its own executable that
+    the folder it unpacked into is there for the taking, which is right for a
+    worker and wrong for a restart: that folder is deleted as the dying copy
+    exits, so the fresh one is left running with its code - which comes out of
+    the executable - and none of the loose files beside it. The app has to turn
+    the handoff down for every child, and say so in the way the bootloader of
+    whatever version built it understands.
+    """
+    print("\n13. a child of a built app unpacks itself instead of reusing another's")
+    import addon_common
+    import manager_browser
+
+    started: list = []
+    real_popen = addon_common.subprocess.Popen
+    devnull = addon_common.subprocess.DEVNULL
+
+    class _Started:
+        """A child that was only ever written down."""
+
+        def __init__(self, command: Any, **kwargs: Any) -> None:
+            self.command, self.kwargs = list(command), kwargs
+            self.pid = 0
+
+    bundle = os.path.join(os.environ.get("TEMP", "."), "_MEIfake")
+    handed_on = {"PATH": os.pathsep.join([bundle, r"C:\Windows"]),
+                 "LD_LIBRARY_PATH": bundle,
+                 "_PYI_APPLICATION_HOME_DIR": bundle,
+                 "_PYI_ARCHIVE_FILE": r"C:\elsewhere\berry_manager.exe",
+                 "_PYI_PARENT_PROCESS_LEVEL": "2",
+                 "_PYI_SPLASH_IPC": "0", "MEIPASS2": bundle, "KEEP": "kept"}
+    saved_mei = sys.__dict__.pop("_MEIPASS", None)
+    saved_frozen = sys.__dict__.pop("frozen", None)
+    try:
+        sys._MEIPASS = bundle
+        cleaned = addon_common.clean_child_env(handed_on)
+        check(cleaned.get(addon_common.PYI_RESET) == "1",
+              "a child was never told to start as an instance of its own")
+        kept = [key for key in cleaned
+                if key.startswith("_PYI_") or key == "MEIPASS2"]
+        check(not kept, f"the dying copy's own folder was passed on anyway: {kept}")
+        check(bundle not in cleaned.get("PATH", "")
+              and "LD_LIBRARY_PATH" not in cleaned,
+              f"the unpack folder stayed in the search path: {cleaned.get('PATH')!r}")
+        check(cleaned.get("KEEP") == "kept",
+              "the cleaning took something it had no business touching")
+
+        sys.__dict__.pop("_MEIPASS", None)
+        check(addon_common.clean_child_env(handed_on) == handed_on,
+              "a program run from source had the environment of its children changed")
+        sys._MEIPASS = bundle
+
+        def fake(command: Any, **kwargs: Any) -> _Started:
+            started.append(_Started(command, **kwargs))
+            return started[-1]
+
+        addon_common.subprocess.Popen = fake
+        sys.frozen = True
+        proc = addon_common.popen_tree(["anything"], env=dict(handed_on))
+        given = proc.kwargs.get("env") or {}
+        check(given.get(addon_common.PYI_RESET) == "1",
+              f"a child started with popen_tree kept this app's state on {os.name}")
+        addon_common.release_process_tree(proc)
+
+        started.clear()
+        check(manager_browser.relaunch_process(),
+              "the restart gave up on starting a fresh copy")
+        check(bool(started) and started[0].command[:1] == [sys.executable],
+              f"the restart did not start this program again: {started[:1]}")
+        if started:
+            env = started[0].kwargs.get("env") or {}
+            check(env.get(addon_common.PYI_RESET) == "1",
+                  "the fresh copy was left to work out of the dying one's folder")
+            check(not [key for key in env if key.startswith("_PYI_")],
+                  "the fresh copy was handed the folders the dying one unpacked into")
+            check(started[0].kwargs.get("stdout") == devnull,
+                  "the fresh copy was started still speaking to the one that is going")
+            if os.name == "nt":
+                check(started[0].kwargs.get("creationflags", 0)
+                      & addon_common.subprocess.DETACHED_PROCESS,
+                      "the fresh copy was started as a child that dies with its parent")
+            else:
+                check(started[0].kwargs.get("start_new_session"),
+                      "the fresh copy was started as a child that dies with its parent")
+    finally:
+        addon_common.subprocess.Popen = real_popen
+        sys.__dict__.pop("_MEIPASS", None)
+        sys.__dict__.pop("frozen", None)
+        if saved_mei is not None:
+            sys._MEIPASS = saved_mei
+        if saved_frozen is not None:
+            sys.frozen = saved_frozen
+
+
 # --- run it ---
 
 def main() -> int:
@@ -1124,6 +1225,7 @@ def main() -> int:
     test_the_pip_fallback(store)
     test_the_install(store)
     test_the_manifest(store)
+    test_the_child_env()
 
     if FAILURES:
         print()

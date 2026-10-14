@@ -474,9 +474,22 @@ def _win_terminate_pid(pid: int) -> None:
             _kernel32.CloseHandle(handle)
 
 
+#: What a PyInstaller bootloader passes between its own processes to say that
+#: a folder is already unpacked and its contents are there to be worked from.
+#: Whoever holds them decides whether a program started from the same file is
+#: a copy of its own or a worker of the one that is going away.
+PYI_WORKER_VARS = ("_PYI_APPLICATION_HOME_DIR", "_PYI_ARCHIVE_FILE",
+                   "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC", "MEIPASS2")
+
+#: The public way of answering the same question: a program that starts with
+#: this set forgets what it inherited and unpacks itself again.
+PYI_RESET = "PYINSTALLER_RESET_ENVIRONMENT"
+
+
 def clean_child_env(env: Any = None) -> dict:
-    """A child's environment: a copy of ``env`` (the parent's when none),
-    with the frozen app's own unpack folder taken out of the search paths.
+    """A child's environment: a copy of ``env`` (the parent's when none), with
+    the frozen app's own unpack folder taken out of the search paths and its
+    hold on the child's idea of what it is.
 
     A PyInstaller onefile puts its unpacked folder - bundled libcrypto and
     friends and all - into LD_LIBRARY_PATH (and PATH on Windows), and the
@@ -484,6 +497,16 @@ def clean_child_env(env: Any = None) -> dict:
     own Python would then resolve system modules against those older
     libraries and die on a version mismatch; a relaunched copy of the app
     brings its own unpack folder and must not look in the dying one's.
+
+    The second half is the same mistake from the other side. A program
+    started from the same executable as its parent is taken for a worker of
+    that parent, and a worker reuses the folder it was handed instead of
+    unpacking. On a restart that folder is deleted as the dying copy exits,
+    so the fresh one runs with its code - which comes out of the executable
+    itself - and none of the loose files beside it: a built paramiko, say,
+    finds its module and not the metadata next to it. So the handoff is
+    dropped and the reset asked for, and every child of a built app is an
+    instance of its own.
     """
     env = dict(os.environ if env is None else env)
     bundle = getattr(sys, "_MEIPASS", None)
@@ -497,6 +520,9 @@ def clean_child_env(env: Any = None) -> dict:
             env[key] = os.pathsep.join(entries)
         else:
             env.pop(key, None)
+    for key in PYI_WORKER_VARS:
+        env.pop(key, None)
+    env[PYI_RESET] = "1"
     return env
 
 
@@ -504,12 +530,12 @@ def popen_tree(command: Any, **kwargs: Any) -> subprocess.Popen:
     """``subprocess.Popen`` for a child that must never outlive the app.
 
     Takes the same arguments; the child starts in a place where
-    ``kill_process_tree`` reaches it and everything it spawns.
+    ``kill_process_tree`` reaches it and everything it spawns, and with an
+    environment that is its own rather than this program's.
     """
+    kwargs["env"] = clean_child_env(kwargs.get("env"))
     if os.name != "nt":
         kwargs.setdefault("start_new_session", True)
-        if getattr(sys, "_MEIPASS", None):
-            kwargs["env"] = clean_child_env(kwargs.get("env"))
         proc = subprocess.Popen(command, **kwargs)
         _TREES.append(proc)
         return proc
