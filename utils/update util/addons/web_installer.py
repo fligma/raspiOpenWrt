@@ -45,17 +45,19 @@ from pathlib import Path
 from urllib.parse import quote
 
 # Qt-free contract half: runs standalone and in tests.
-from addon_common import AddonError, config_get, merge_config
+from addon_common import AddonError, config_get, find_icon, merge_config
 
 ADDON = {
     "name": "Rasconf web installer",
-    "version": "1.0",
+    "version": "1.1",
     "author": "fligma",
     "description": "Downloads src/www_rasconf from GitHub and writes it into the "
                    "profile's remote folder over SFTP, with a backup, the exec "
                    "bit on the CGI entry, a web server restart and a check that "
                    "the page answers afterwards.",
     "requires": ["ssh", "sftp"],
+    # The files go up over the profile's own SFTP session; none is opened here.
+    "connection": "app",
     "api": 1,
 }
 
@@ -541,13 +543,33 @@ def tab_spec(values: dict) -> dict:
     ]}
 
 
+#: The picture the tab wears when the assets folder holds one. A file named for
+#: the standard rule - ``web_installericon.png`` - is found without this being
+#: touched; the name below is the one shipped before the rule existed.
+TAB_ICON_FILE = "webinstallericon.png"
+
+
+def tab_icon() -> str:
+    """The addon's own picture as a path, or nothing when it has none."""
+    folder = None
+    try:
+        folder = api.paths.assets
+    except (AddonError, AttributeError, TypeError):    # no api on a bare import
+        folder = None
+    return find_icon(folder, "web_installer", TAB_ICON_FILE)
+
+
 def build_tab() -> None:
     """The tab as a spec, and its buttons as reports; nothing holds a widget."""
     api.tabs.add_tab(TAB, spec=tab_spec(merge_config(DEFAULTS, api.config.stored())),
                      style=TAB_STYLE)
     try:
-        # Use the program's own mark for the tab icon.
-        api.tabs.use_app_icon(TAB)
+        picture = tab_icon()
+        if picture:
+            api.tabs.set_icon(TAB, picture)
+        else:
+            # Nothing of its own to wear: keep the program's mark, as before.
+            api.tabs.use_app_icon(TAB)
     except AddonError as error:             # an app with no icon of its own
         api.log(f"web installer tab icon: {error}")
 

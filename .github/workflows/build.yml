@@ -144,6 +144,55 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
+    - name: Check for names that do not exist
+      working-directory: "utils/update util"
+      run: |
+        # A Qt program dies on an exception raised inside a slot rather than
+        # printing it and carrying on, so a name nothing binds is a crash for
+        # whoever opens that dialog - not a warning somewhere in a log. One
+        # shipped exactly that way, over an f-string written for a .format() that
+        # never reached it. That class is visible without running anything, so it
+        # is looked for here, before either program is built. The tool keeps only
+        # the answers that mean a crash; see tools/check_names.py.
+        python -m pip install --quiet pyflakes
+        python tools/check_names.py
+
+    - name: Check the addon API says what it does
+      working-directory: "utils/update util"
+      run: |
+        # The Addon Dev tab's Docs pane makes its reference out of the docstrings
+        # in addon_api, and a call without one is printed as saying nothing rather
+        # than given invented words. Honest, and no use to whoever is reading it -
+        # and the pane is only opened by someone who already has a question, so the
+        # gap would sit there through build after build. The tool walks the same
+        # namespaces the pane does; see tools/check_api_docs.py.
+        python tools/check_api_docs.py
+
+    - name: Check the guides link to pages that exist
+      working-directory: "utils/update util"
+      run: |
+        # The same pane's guides are markdown stitched to the reference by links -
+        # guide:config to another page, api:tabs.add_tab to a call. A link whose
+        # target was renamed or never added does not raise: the words print and
+        # the click does nothing, noticed only by whoever tries it. The tool also
+        # parses the templates New addon... writes, since a mistake there is a
+        # syntax error an author meets after the app has handed them the file.
+        # See tools/check_guide_links.py.
+        python tools/check_guide_links.py
+
+    - name: Check what a row says about its addon
+      working-directory: "utils/update util"
+      run: |
+        # An addon's Settings row and the Settings Connection list both say whose
+        # connection the addon rides, out of one decision over its transports, its
+        # being shipped with the program and its manifest's declaration. A wrong
+        # answer crashes nothing: it just tells the user an addon waits for a
+        # connection it never opens, or offers a switch the app would refuse - and
+        # the published catalog is read by the same rules, so a row and the entry
+        # it was built from cannot drift apart. See
+        # tools/check_connection_saying.py.
+        python tools/check_connection_saying.py
+
     - name: Run the addon test scripts
       shell: pwsh
       working-directory: "utils/update util"
@@ -317,6 +366,10 @@ jobs:
   # version replaces that release's files instead of leaving a broken one up.
   release:
     needs: build
+    # Only what reached main is published. Without this a manual run started on
+    # a side branch would put a version up under a tag nobody merged, and the
+    # update addon would offer it to every copy of the program.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -358,7 +411,14 @@ jobs:
           fi
           # zipped from inside its own folder, so the program and addons/ land
           # at the top of the archive; -X keeps the archive free of the
-          # packer's own junk, and the file modes come along with it.
+          # packer's own junk. The modes an artifact comes back with are not the
+          # ones it was built with - upload-artifact does not carry the
+          # executable bit - so the Linux program is made runnable here: someone
+          # installing from the release page runs ./berry_manager and nothing
+          # else puts that bit back for them.
+          if [ -f "$folder/berry_manager" ]; then
+            chmod 755 "$folder/berry_manager"
+          fi
           ( cd "$folder" && zip -q -r -X "$GITHUB_WORKSPACE/release/berry_manager-${pair##*:}.zip" . )
         done
         echo "archives to publish:"; ls -l release
@@ -398,8 +458,11 @@ jobs:
           # The tag is left where it was made - moving a published tag would
           # pull the source out from under anyone who already fetched it - so
           # this just says when the build came from a later commit than the tag.
-          at=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
-               --jq '.object.sha' 2>/dev/null || echo unknown)
+          # The commits endpoint is asked, not the ref itself: a hand-made tag
+          # is an annotated object, and its ref would name the tag rather than
+          # the commit it points at, which would read as a difference always.
+          at=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" \
+               --jq '.sha' 2>/dev/null || echo unknown)
           if [ "$at" != "unknown" ] && [ "$at" != "$SHA" ]; then
             echo "note: the tag still points at ${at:0:8}, not at this run's $SHA"
             echo "the release's files are this build; its source archive is not"

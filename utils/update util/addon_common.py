@@ -38,7 +38,16 @@ from typing import Any, Callable
 API_VERSION = 1
 
 #: Manifest keys the app copies onto an addon's record. See ``manifest_from``.
-MANIFEST_KEYS = ("name", "version", "author", "description", "notes")
+#: ``icon`` is the picture an addon ships under a name that is not the standard
+#: ``<id>icon.png``; ``connection`` says how it reaches the device.
+MANIFEST_KEYS = ("name", "version", "author", "description", "notes",
+                 "requires", "connection", "icon")
+
+
+def one_line(value: Any) -> str:
+    """One clean line of text out of whatever a manifest or a config holds."""
+    text = str("" if value is None else value).strip()
+    return text.splitlines()[0].replace("\r", "") if text else ""
 
 
 class AddonError(RuntimeError):
@@ -198,6 +207,113 @@ ORIGIN_KEY = "origin"
 
 #: What the addon store writes there for the addons it installs.
 STORE_ORIGIN = "addon store"
+
+# --- an addon's own picture ---
+
+#: The one ending an addon's picture is shipped under, so an id and this make
+#: the name: ``openwrt_logs`` is found by ``openwrt_logsicon.png``.
+ICON_SUFFIX = "icon.png"
+
+#: The picture a listing shows for an addon that brought none of its own. It
+#: lives in the program's assets folder, next to the logos.
+DEFAULT_ADDON_ICON = "storedefaultaddon.png"
+
+
+def icon_filename(addon_id: str) -> str:
+    """The standard name of one addon's picture, from its id."""
+    return f"{config_name(addon_id)}{ICON_SUFFIX}"
+
+
+def find_icon(folder: Any, addon_id: str, *extra: str) -> str:
+    """The addon's picture inside ``folder``, as a path; nothing when it has none.
+
+    The standard name is tried first, then each further name the caller offers -
+    an older file the addon shipped under its own name, or one its manifest
+    declares. So an addon that follows the rule needs no code at all, and one
+    that predates it keeps the picture it has. Nothing is guessed from a plain
+    ``icon.png``: the folder an addon is shown its assets in is the program's own
+    in a checkout, where that name belongs to the program rather than to the
+    addon. A folder that is missing, or holds nothing readable, is only a folder
+    with no pictures: the caller draws its own mark or shows the default.
+    """
+    if folder is None:
+        return ""
+    try:
+        base = Path(str(folder))
+    except (TypeError, ValueError):
+        return ""
+    names = [icon_filename(addon_id)] if str(addon_id or "").strip() else []
+    names += [str(item or "").strip() for item in extra]
+    for name in names:
+        if not name or Path(name).is_absolute() or "/" in name or "\\" in name:
+            continue                      # a name, not an address
+        candidate = base / name
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return ""
+
+
+def default_icon_path(folder: Any) -> str:
+    """The picture an addon with none of its own is shown with."""
+    return find_icon(folder, "", DEFAULT_ADDON_ICON)
+
+
+# --- what an addon says it needs ---
+
+#: How an addon talks to the device, and the words a listing shows for it. An
+#: addon names one of these in its manifest as ``"connection"``; the app and the
+#: store both read it the same way, so a person can see before installing
+#: whether the addon works on the machine in front of them or reaches a router.
+#: The two extra spellings are the ones ``manager_addons`` already accepts, so a
+#: fork's own wording still lands on the same sentence.
+CONNECTION_MEANINGS = {
+    "": "needs no device",
+    "none": "needs no device",
+    "app": "uses the app's own connection",
+    "main": "uses the app's own connection",
+    "own": "opens a connection of its own",
+    "private": "opens a connection of its own",
+    "both": "uses the app's connection and opens its own",
+}
+
+
+def connection_kind(manifest: Any) -> str:
+    """One manifest's ``connection`` word, or ``""`` when it says nothing.
+
+    An addon that names nothing is an addon that needs no device, which is what
+    most of them are; a word nothing recognises is kept as it came, so a fork's
+    own vocabulary still shows rather than being quietly dropped.
+    """
+    data = manifest if isinstance(manifest, dict) else {}
+    return one_line(data.get("connection")).lower()
+
+
+def connection_words(manifest: Any) -> str:
+    """The sentence a listing shows for how an addon reaches the device."""
+    kind = connection_kind(manifest)
+    return CONNECTION_MEANINGS.get(kind, f"says about its connection: {kind}")
+
+
+def requires_list(manifest: Any) -> list[str]:
+    """One manifest's ``requires`` as a clean list of names, however it was written."""
+    data = manifest if isinstance(manifest, dict) else {}
+    raw = data.get("requires")
+    if raw is None:
+        raw = data.get("needs") or []
+    if isinstance(raw, str):
+        raw = [part for part in re.split(r"[,; ]+", raw) if part]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in raw:
+        name = one_line(item)
+        if name and name not in out:
+            out.append(name)
+    return out
+
 
 #: The names a compiled addon's manifest is looked for under, in that order.
 MANIFEST_NAMES = ("addon.json", "manifest.json")

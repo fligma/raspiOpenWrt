@@ -4,17 +4,64 @@ Audits installed packages, updates repositories, and manages software via apk (d
 """
 
 from __future__ import annotations
+import shlex
 from typing import Any
-from addon_common import AddonError
+from addon_common import AddonError, find_icon
+
+#: Every word this addon sends to a device shell that came from anywhere other
+#: than the addon itself - the search box, a name a table cell is showing -
+#: goes through this first. A command string is handed to the remote shell
+#: exactly as written, so one of ';', '$(' or a backquote in a search term
+#: would otherwise be run on the router as a second command. Same rule the
+#: files addon keeps (``addons/berry.py``).
+SHQ = shlex.quote
 
 ADDON = {
     "name": "OpenWrt Package Manager",
-    "version": "1.0",
+    "version": "1.2",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh", "sftp"],
+    # Every command runs over the profile's own session; none is opened here.
+    "connection": "app",
+    # The picture this addon ships, under the name its own assets folder uses
+    # rather than the standard one, so the store can show it before install.
+    "icon": "openwrtpkgmgr.png",
     "description": "Audits installed OpenWrt packages and manages software installation via apk or opkg.",
 }
+
+#: The tab's mark when the assets folder carries no picture: a package box.
+TAB_ICON = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+    '<path d="M12 2.6 20.4 6.4v11.2L12 21.4 3.6 17.6V6.4Z" fill="#3a3a3a"'
+    ' stroke="#c51a4a" stroke-width="1.2"/>'
+    '<path d="M3.6 6.4 12 10.2l8.4-3.8" fill="none" stroke="#ffb020"'
+    ' stroke-width="1.3"/>'
+    '<path d="M12 10.2v11.2" fill="none" stroke="#ffb020" stroke-width="1.3"/>'
+    '<path d="M7.4 4.4 15.8 8.2" fill="none" stroke="#23d18b"'
+    ' stroke-width="1.3"/>'
+    '</svg>'
+)
+
+#: The picture named in the manifest and shipped in the store's assets folder.
+TAB_ICON_FILE = "openwrtpkgmgr.png"
+
+
+def tab_icon() -> str:
+    """The shipped picture if the assets folder has one, else the drawn mark.
+
+    ``openwrtpkgmgr.png`` is the name this addon's picture is published under, so
+    it is offered after the standard ``openwrt_package_managericon.png``: follow
+    the rule and the file is found with nothing here to change.
+    """
+    folder = None
+    try:
+        folder = api.paths.assets
+    except (AddonError, AttributeError, TypeError):    # no api in a bare import
+        folder = None
+    if folder is None:
+        return TAB_ICON
+    return find_icon(folder, "openwrt_package_manager", TAB_ICON_FILE) or TAB_ICON
 
 CONFIG_FIELDS = [
     {
@@ -79,6 +126,7 @@ def init(plugin_api: Any) -> None:
     api = plugin_api
     api.config.declare(fields=CONFIG_FIELDS, defaults=CONFIG_DEFAULTS, title="Package Manager Settings")
     api.tabs.add_tab("Package Manager", spec=TAB_SPEC)
+    api.tabs.set_icon("Package Manager", tab_icon())
     api.events.on("tab_changed", _on_tab_changed)
     api.log("Package Manager addon initialized.")
 
@@ -171,7 +219,8 @@ def search_online(term: str) -> None:
     backend = _pm_backend()
     api.ui.notify(f"Searching feeds for '{term}' using {backend}...")
     
-    cmd = f"apk search {term}" if backend == "apk" else f"opkg list '{term}*'"
+    cmd = (f"apk search {SHQ(term)}" if backend == "apk"
+           else f"opkg list {SHQ(term + '*')}")
     api.device.run_async(cmd, on_done=_got_search)
 
 def _got_search(result: dict) -> None:
@@ -232,7 +281,8 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
             return
         pkg_name = selected[0]
         if api.ui.question("Confirm Removal", f"Are you sure you want to remove '{pkg_name}' via {backend}?"):
-            cmd = f"apk del {pkg_name}" if backend == "apk" else f"opkg remove {pkg_name}"
+            cmd = (f"apk del {SHQ(pkg_name)}" if backend == "apk"
+                   else f"opkg remove {SHQ(pkg_name)}")
             api.device.run_async(cmd, on_done=lambda r, name=pkg_name: _done_change(r, "Removal", name))
     elif identifier == "btn_install" and event == "clicked":
         selected = api.tabs.widget_value("Package Manager", "browse_table", "selected")
@@ -241,5 +291,6 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
             return
         pkg_name = selected[0].split()[0] # Handle potential version suffixes in apk search
         if api.ui.question("Confirm Install", f"Do you want to install '{pkg_name}' via {backend}?"):
-            cmd = f"apk add {pkg_name}" if backend == "apk" else f"opkg install {pkg_name}"
+            cmd = (f"apk add {SHQ(pkg_name)}" if backend == "apk"
+                   else f"opkg install {SHQ(pkg_name)}")
             api.device.run_async(cmd, on_done=lambda r, name=pkg_name: _done_change(r, "Installation", name))

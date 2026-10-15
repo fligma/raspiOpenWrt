@@ -10,7 +10,7 @@ of their own and import the app's protocol modules from disk, which is why a
 build carries a plain copy of them; a program built without that copy says so
 rather than start something that cannot finish.
 
-Five things live here:
+Six things live here:
 
 Details
     The manifest - name, version, author, description, api - edited in a form
@@ -33,6 +33,11 @@ Test
     process. It uses :mod:`addon_client`'s recording stub, so an addon can be
     checked without a device and without opening a window.
 
+Docs
+    The API reference and the guides. Every method, property and one-line
+    summary in it is read off the protocol module as it runs, so the panel
+    cannot describe an API the app no longer has.
+
 Log / Processes
     The addon's own lines out of the app log, and what is running: the child
     process of every process addon (pid, state, exit code, command, uptime) and
@@ -47,6 +52,8 @@ runtime through ``AddonManager.describe``.
 from __future__ import annotations
 
 import ast
+import dis
+import inspect
 import json
 import os
 from pathlib import Path
@@ -63,6 +70,7 @@ from typing import Any
 from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont, QHideEvent, QShowEvent
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -73,15 +81,19 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -110,6 +122,7 @@ from manager_const import (
     ICON_FILES,
     IS_COMPILED,
     LOG_FILE,
+    PROJECT_GITHUB_URL,
     find_asset,
 )
 from manager_widgets import tip_on_title
@@ -518,10 +531,17 @@ $description
 Written by the Addon Dev tab. Everything the addon needs from the app comes
 through ``api``, and nothing here touches Qt, so the same file runs imported
 into Berry Manager and compiled into a program of its own: the tab is built
-from a declarative spec and its button is reported back through ``on_widget``.
+from a declarative spec, and what its controls do is reported back through
+``on_widget``.
+
+Every call used below has a page of its own in Addon Dev > Docs, read off the
+app as it runs. The four worth a new author first are ``api.tabs.add_tab``,
+``api.settings_pages.add``, ``api.config.declare`` and ``api.events.on``.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from addon_common import AddonError, config_get
 
@@ -536,52 +556,114 @@ ADDON = {
     "requires": ["ssh", "sftp"],
     # Whose connection the device calls use: "app" (the app's one main SSH+SFTP
     # session, which the user opens by button or at startup), "own" (a fresh
-    # connection per call) or "both" (the user picks).
+    # connection per call), "both" (the user chooses on this addon's Settings
+    # row) or "none" - which says no more than leaving "requires" out above.
     "connection": "app",
+    # A picture called <id>icon.png in this addon's assets folder is found on
+    # its own, both for the tab's mark and for its card in the addon store, so
+    # only a file named differently needs this key.
+    # "icon": "oldname.png",
     "api": 1,
 }
 
-#: The name of the tab this addon adds.
+#: The tab this addon adds, the page it adds to Settings, and what it has said.
 TAB = "$tab"
+PAGE = "$id-settings"
+HISTORY: list[str] = []
 
 #: The settings the user can change in Settings > Addons, and their defaults.
 #: A key with a dot reads and writes inside a section of the config file.
 FIELDS = [
     {"key": "greeting", "label": "Text to show", "kind": "text",
      "hint": "What the button on the tab prints", "placeholder": "Hello"},
+    {"key": "lines", "label": "Lines to remember", "kind": "number",
+     "hint": "How much of what it said the tab keeps on screen"},
+    {"key": "show_page", "label": "Add a Settings page", "kind": "bool",
+     "hint": "A page of this addon's own, outside the installed addons"},
 ]
-DEFAULTS = {"greeting": "Hello from $id"}
+DEFAULTS = {"greeting": "Hello from $id", "lines": 12, "show_page": True}
 
 #: Set by init(); the app hands the addon its API there.
 api = None
 
 
-def say(text: str) -> None:
-    """One line on the tab and one in the app log, always in both."""
-    if api is None:
-        return
+def value(key: str, fallback: Any = None) -> Any:
+    """One config value, read the same way everywhere in this file."""
+    return config_get(api.config.all(), key, DEFAULTS.get(key, fallback))
+
+
+def remembered() -> int:
+    """How many lines the history keeps; a hand-edited file can say anything."""
     try:
-        api.tabs.set_widget(TAB, "status", "text", str(text))
+        return max(1, int(float(value("lines"))))
+    except (TypeError, ValueError):
+        return max(1, int(DEFAULTS["lines"]))
+
+
+def show(identifier: str, prop: str, what: Any) -> None:
+    """Write one control on the tab, thinking nothing of it when it is gone."""
+    try:
+        api.tabs.set_widget(TAB, identifier, prop, what)
     except AddonError:
         pass
+
+
+def say(text: str) -> None:
+    """One line on the tab, one in its history and one in the app log."""
+    if api is None:
+        return
+    text = str(text)
+    HISTORY.append(text)
+    del HISTORY[:-remembered()]
+    show("status", "text", text)
+    show("history", "items", list(HISTORY))
     api.log(text)
+
+
+def greeting() -> str:
+    """What to say: the line on the tab first, then the config file."""
+    text = ""
+    if api is not None:
+        try:
+            text = str(api.tabs.widget_value(TAB, "greeting") or "").strip()
+        except AddonError:
+            text = ""
+    return text or str(value("greeting", DEFAULTS["greeting"]))
 
 
 def pressed() -> None:
     """The tab's button: read the form and report what it said."""
     if api is None:
         return
-    try:
-        greeting = str(api.tabs.widget_value(TAB, "greeting") or "").strip()
-    except AddonError:
-        greeting = ""
-    if not greeting:
-        greeting = str(config_get(api.config.all(), "greeting", DEFAULTS["greeting"]))
-    say(f"you asked me to say: {greeting}")
+    say(f"you asked me to say: {greeting()}")
+
+
+def about() -> None:
+    """The Settings page's button: a dialog out of what the addon knows."""
+    if api is None:
+        return
+    lines = [
+        "$description",
+        "",
+        f"greeting: {greeting()}",
+        f"starts so far: {api.settings.get('runs', 0)}",
+        f"Berry Manager: {api.session.version()}",
+        f"config file: {api.config.path()}",
+    ]
+    # chr(10) rather than a backslash: this file is written out of a template.
+    api.ui.information("$name", chr(10).join(lines))
 
 
 def build_tab(values: dict) -> None:
-    """A spec, not widgets: a process addon can only describe what it wants."""
+    """A spec, not widgets: a process addon can only describe what it wants.
+
+    Two things a tab can ask for that this one does not: ``pinned=True`` with
+    ``icon_only=True`` holds it in the short run beside Settings, showing the
+    mark and no caption - and a mark has nothing but its tooltip left to say who
+    it belongs to, which is why the app fills that in with this addon's name -
+    while a second ``add_tab`` names a child tab, which
+    the app puts to the left of the tab that made it.
+    """
     api.tabs.add_tab(TAB, spec={
         "kind": "column",
         "children": [
@@ -591,7 +673,42 @@ def build_tab(values: dict) -> None:
             {"kind": "line", "id": "greeting",
              "placeholder": str(config_get(values, "greeting", DEFAULTS["greeting"]))},
             {"kind": "button", "id": "press", "text": "Say it", "on": ["clicked"]},
+            {"kind": "label", "text": "what it said, newest last", "font_size": 8,
+             "style": "color: #7a7a7a;"},
+            {"kind": "list", "id": "history", "items": list(HISTORY)},
             {"kind": "spacer"},
+        ],
+    })
+    # Three other shapes, each one a call away rather than a rewrite:
+    #
+    #   api.tabs.add_tab(TAB, spec={...}, pinned=True, icon_only=True)
+    #       holds the tab in the short run beside Settings: its mark, no caption
+    #   api.tabs.add_web_tab(TAB + ' page', url='http://192.168.1.1/')
+    #       shows a page the device serves, with the app's own address bar; give
+    #       ip / port / path instead of a url to follow the active profile
+    #   api.tabs.add_tab('Child', spec={...})
+    #       opens a second tab, which the app places to the left of this one
+
+
+def build_page(values: dict) -> None:
+    """A page of the app's own Settings window, outside Installed addons.
+
+    ``add`` replaces whatever holds the name, so building the page again after
+    a config change is safe. Its controls arrive at ``on_widget`` with ``tab``
+    set to :data:`PAGE`, which is how one handler serves both of them.
+    """
+    if not bool(config_get(values, "show_page", DEFAULTS["show_page"])):
+        api.settings_pages.remove(PAGE)
+        return
+    api.settings_pages.add(PAGE, title="$name", spec={
+        "kind": "form",
+        "children": [
+            {"kind": "label", "label": "About", "text": "$description",
+             "word_wrap": True},
+            {"kind": "check", "id": "show_page", "label": "", "text":
+             "Keep this page in Settings", "checked": True},
+            {"kind": "button", "id": "about", "label": "", "text": "About $name",
+             "on": ["clicked"]},
         ],
     })
 
@@ -602,9 +719,16 @@ def init(plugin_api: Any) -> None:
     api = plugin_api
     values = api.config.declare(FIELDS, DEFAULTS,
                                 title="$title - addons/_data/$id/config.json")
+    HISTORY.clear()
     build_tab(values)
+    build_page(values)
     api.ui.menu_item("$menu", focus, menu="Tools")
     api.events.on("ssh_connected", on_connected)
+    # Work that paces itself: api.schedule.every(30, tick) is called on the GUI
+    # thread, and the app stops the timer when the addon is switched off.
+    # News worth interrupting someone for, even with this tab closed:
+    # api.ui.popup("$name", "the run finished") - the status line, and a
+    # notification from the app's tray icon while Settings allows them.
     api.log("ready")
 
 
@@ -613,11 +737,12 @@ def start() -> None:
     if api is None:
         return
     runs = int(api.settings.get("runs", 0) or 0) + 1
-    api.settings.set("runs", runs)
+    api.settings.set("runs", runs)          # the profile's own copy, per profile
     say(f"$title is running (start no. {runs})")
 
 
 def shutdown() -> None:
+    """Switched off: drop the API, so nothing here asks the app for anything."""
     global api
     api = None
 
@@ -630,8 +755,15 @@ def focus() -> None:
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     """What a spec-built control reported. Works in both kinds of addon."""
-    if identifier == "press" and event == "clicked":
+    if api is None or event not in ("clicked", "changed"):
+        return
+    if identifier == "press" and tab == TAB:
         pressed()
+    elif identifier == "about":
+        about()
+    elif identifier == "show_page" and event == "changed":
+        # The switch writes its own key; on_config then adds or drops the page.
+        api.config.set("show_page", bool(payload.get("checked")))
 
 
 def on_connected(payload: dict) -> None:
@@ -644,7 +776,9 @@ def on_config(payload: dict) -> None:
     """Called when addons/_data/$id/config.json changed: read it again."""
     if api is None:
         return
-    build_tab(api.config.all())
+    values = api.config.all()
+    build_tab(values)
+    build_page(values)
     say("the config file was read again")
 
 
@@ -652,6 +786,12 @@ def on_event(name: str, payload: dict) -> None:
     """Every event the app broadcasts arrives here as well."""
     if api is not None and name == "operation_done":
         say('the app finished a ' + str(payload.get("operation", "job")))
+
+
+def on_message(sender: str, data: Any) -> None:
+    """Another addon wrote here; api.peers.list() says who answers a send."""
+    if api is not None:
+        say(f"{sender} sent {data!r}")
 
 
 if __name__ == "__main__":                     # run as a process addon
@@ -668,6 +808,18 @@ the app: nothing is opened on screen, nothing is sent to a device, and every
 call the addon makes is written down. So the test checks what the addon *asked
 for*, which is the part an addon author owns.
 
+Four questions are worth asking of any addon, and the checks below are grouped
+by them:
+
+- does ``init`` build what the addon promises, and name its controls?
+- does a value the user set reach the code that uses it?
+- does every button do the thing it sits there for?
+- and does the addon go quiet once ``shutdown`` has taken the API back?
+
+What the app answers is the test's to decide: ``api.answer("device.run", {"code": 1})``
+makes a command look as if it failed, and ``api.asked("tabs.add_tab", "spec")``
+reads back the spec the addon handed the app.
+
 Run it from the Test panel, or on the command line::
 
     python addons/_tests/test_$id.py
@@ -677,6 +829,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 #: The folder Berry Manager and addon_client live in, two levels up.
 ROOT = Path(__file__).resolve().parents[2]
@@ -685,13 +838,42 @@ sys.path.insert(0, str(ROOT))
 import addon_client                                            # noqa: E402
 
 SOURCE = ROOT / "addons" / "$id.py"
+TAB = "$tab"
+PAGE = "$id-settings"
 FAILURES: list[str] = []
+CHECKS = 0
 
 
 def check(condition: Any, text: str) -> None:
-    """One thing the addon has to do; all of them are reported, not just the first."""
+    """One thing the addon has to do; every one is reported, not just the first."""
+    global CHECKS
+    CHECKS += 1
     if not condition:
         FAILURES.append(text)
+
+
+def nodes(spec: Any):
+    """Every dict in a widget spec, so the ids it was built with can be counted."""
+    if isinstance(spec, dict):
+        yield spec
+        for child in spec.get("children") or []:
+            yield from nodes(child)
+    elif isinstance(spec, (list, tuple)):
+        for item in spec:
+            yield from nodes(item)
+
+
+def ids_of(spec: Any) -> set:
+    return {str(node["id"]) for node in nodes(spec) if node.get("id")}
+
+
+def shown(entry: tuple) -> str:
+    """One recorded call on one line: a whole spec is not worth a screenful."""
+    method, arguments, named = entry
+    text = f"{method}{list(arguments)}"
+    if named:
+        text += " " + str(named)
+    return text if len(text) <= 150 else text[:147] + "..."
 
 
 def main() -> int:
@@ -702,28 +884,73 @@ def main() -> int:
     api = addon_client.stub_api("$id", config={"greeting": "hello from the test"})
     addon = addon_client.load_addon(SOURCE)
 
+    # --- init: what the addon asks the app to build ---
     addon.init(api)
     check(api.called("config.declare"), "init did not declare its config keys")
+    check(api.asked("config.declare", "fields"), "the declared schema is empty")
     check(api.called("tabs.add_tab"), "init did not add a tab")
+    named = api.asked("tabs.add_tab", "name")
+    check(named == TAB, f"the tab is not named as the addon says: {named!r}")
+    ids = ids_of(api.asked("tabs.add_tab", "spec"))
+    check({"press", "status"} <= ids,
+          f"the tab spec gives its controls no ids to write back to: {sorted(ids)}")
     check(api.called("ui.menu_item"), "init did not add its Tools menu entry")
-    check(api.called("events.on"), "init did not listen for any event")
+    check(api.times("events.on") >= 1, "init did not listen for any event")
+    if api.called("settings_pages.add"):
+        page_ids = ids_of(api.asked("settings_pages.add", "spec"))
+        check(bool(page_ids),
+              f"the Settings page has no named controls: {sorted(page_ids)}")
+
+    # --- what the user set reaches the code that uses it ---
     check(api.config.get("greeting") == "hello from the test",
           "the config value did not reach the addon")
 
+    # --- start: a record of its own, kept per profile ---
     addon.start()
     check(api.times("settings.set") >= 1, "start recorded nothing in api.settings")
 
-    addon.on_widget("$tab", "press", "clicked", {})
-    check(any("hello from the test" in line for line in api.logs)
-          or any("say" in line for line in api.logs),
-          "pressing the button left no trace in the log")
+    # --- every control does the thing it is there for ---
+    api.logs.clear()
+    addon.on_widget(TAB, "press", "clicked", {})
+    check(any("hello from the test" in line for line in api.logs),
+          "pressing the button left nothing in the log to show for it")
+    addon.on_widget(PAGE, "about", "clicked", {})
+    check(api.called("ui.information"), "the page's button opened no dialog")
 
+    # --- another addon speaking to this one, if it listens ---
+    peer = getattr(addon, "on_message", None)
+    if callable(peer):
+        api.logs.clear()
+        peer("tester", {"hello": 1})
+        check(any("tester" in line for line in api.logs),
+              "on_message took a peer's message and said nothing of it")
+
+    # --- a config change is read again, not remembered from init ---
+    mark = len(api.calls)
     addon.on_config({"addon": "$id", "source": "test", "file": "x"})
-    addon.shutdown()
+    check(len(api.calls) > mark, "on_config asked the app for nothing at all")
 
-    print(f"$id: {len(api.calls)} api calls")
-    for method, arguments, named in api.calls[:12]:
-        print(f"  {method}{arguments or ()}{' ' + str(sorted(named)) if named else ''}")
+    # --- and shutdown is really the end of it ---
+    addon.shutdown()
+    mark = len(api.calls)
+    addon.start()
+    addon.on_widget(TAB, "press", "clicked", {})
+    addon.on_config({"addon": "$id"})
+    check(len(api.calls) == mark,
+          "the addon still talks to the app after shutdown()")
+
+    # --- what the addon did, for whoever has to read this ---
+    tally: dict[str, int] = {}
+    for method, _arguments, _named in api.calls:
+        where = str(method).split(".")[0]
+        tally[where] = tally.get(where, 0) + 1
+    print(f"$id: {len(api.calls)} api call(s)"
+          + (", " + ", ".join(f"{count} {where}"
+                             for where, count in sorted(tally.items())) if tally else ""))
+    for entry in api.calls[:20]:
+        print(f"  {shown(entry)}")
+    if len(api.calls) > 20:
+        print(f"  ... and {len(api.calls) - 20} more")
     print("log lines written by the addon:")
     for line in api.logs:
         print(f"  {line}")
@@ -731,9 +958,10 @@ def main() -> int:
         print()
         for text in FAILURES:
             print(f"FAILED: {text}")
+        print(f"{CHECKS - len(FAILURES)} of {CHECKS} checks passed")
         return 1
     print()
-    print("all checks passed")
+    print(f"all {CHECKS} checks passed")
     return 0
 
 
@@ -1194,10 +1422,613 @@ class NewAddonDialog(QDialog):
         }
 
 
+# --- the guides: what the Docs pane shows before the reference ---
+
+#: The README as published. A packaged program carries no markdown, so the
+#: guide's "whole manual" link falls back to this when ``README.md`` is not on
+#: disk next to the running program.
+README_URL = PROJECT_GITHUB_URL + "/blob/main/utils/update%20util/README.md"
+
+#: The pane's reading order: a guide, its title, and the markdown it is written
+#: in. Links of the form ``[text](api:tabs.add_tab)`` and ``[text](guide:tabs)``
+#: move around inside the panel; anything else opens in the browser.
+GUIDES: tuple[tuple[str, str, str], ...] = (
+    ("start", "Start here", """
+# Start here
+
+An addon is one Python file in the ``addons`` folder beside Berry Manager, or a
+program compiled from such a file. The app reads it, calls ``init(api)`` and
+hands it the one object through which everything else is reached: ``api``. An
+addon never touches the app's widgets directly - a tab is described in a dict
+and the app builds it - which is why the same file runs both imported into the
+app and as a program of its own.
+
+## Three minutes
+
+- Press **New addon...** above: it writes ``addons/<id>.py`` and, when asked,
+  ``addons/_tests/test_<id>.py``.
+- Switch it on - the checkbox above, or Settings > Addons. Its tab appears in
+  the bar.
+- Edit the file in any editor, then press **Restart** here. Only the addon is
+  read again; the app does not move.
+
+## Where things live
+
+- ``addons`` - the addon's file, and the program built from it.
+- ``addons/_data/<id>`` - its ``config.json``, shared by every profile.
+- ``addons/_tests`` - its test script.
+- ``config/berry_manager.log`` - what ``api.log`` writes; the Log pane above
+  filters it to this one addon.
+
+The reference in this panel is read off the running ``addon_api`` module, so it
+cannot describe an API this program does not have.
+"""),
+
+    ("anatomy", "Anatomy of an addon", """
+# Anatomy of an addon
+
+    ADDON = {...}         the manifest: name, version, author, description,
+                          requires, connection, icon, api
+    TAB = "My addon"      the name of the tab the addon owns
+    FIELDS, DEFAULTS      the settings the user can change
+    def init(api)         the entry point: declare the config, then build
+    def start()           called at startup and whenever the switch goes on
+    def shutdown()        called before the app forgets the addon
+
+Everything else is a hook the app calls when something happens:
+
+- ``on_widget(tab, id, event, payload)`` - a control the addon asked for was
+  clicked, typed in, picked from a list.
+- ``on_config(payload)`` - ``config.json`` changed under its feet.
+- ``on_event(name, payload)`` and ``on_<name>(payload)`` - an event arrived.
+- ``on_message(sender, data)`` - another addon wrote to it through
+  [api.peers.send](api:peers.send).
+
+## The manifest
+
+Only ``name`` is needed. ``api`` should stay at the version the app speaks, and
+``requires`` names the transports ``api.device`` may use - ``["ssh", "sftp"]``,
+or leave the key out for an addon that never connects. Each transport gets a
+switch of its own on the addon's Settings row, and both the app-wide and the
+addon's own have to be on. ``connection`` says whose session the calls go over:
+``"app"`` for the program's one main connection, ``"own"`` for a connection the
+addon opens for itself per call, ``"both"`` where the user picks with a switch on
+the row, or ``"none"`` - which says no more than leaving ``requires`` out, and is
+answered on the row and in **Connection status** as *no device connection*
+rather than with a dot that could never go green. An addon that ships inside the
+program always rides its session, whatever it declared. ``icon`` names the
+picture the addon wears; a file named by the ``{package}icon.png`` rule is found
+without being declared at all (see [Notices and icons](guide:notice)).
+
+## Mind the process boundary
+
+A compiled addon is a separate program: everything it sends and receives has to
+fit in JSON. So a tab is a spec dict rather than a widget, values come back as
+plain data, and no module of the app is imported. Write it that way from the
+start and the source and the build behave the same.
+"""),
+
+    ("tabs", "Tabs, pinned and plain", """
+# Tabs, pinned and plain
+
+[api.tabs.add_tab](api:tabs.add_tab) takes a spec dict - the language the app
+turns into widgets - or any QWidget in an imported addon. A new tab does not
+steal the view; [activate](api:tabs.activate) puts it on screen.
+
+    api.tabs.add_tab("My addon", spec={
+        "kind": "column",
+        "children": [
+            {"kind": "label", "text": "Hello", "font_size": 12},
+            {"kind": "line", "id": "who", "placeholder": "name"},
+            {"kind": "button", "id": "go", "text": "Go", "on": ["clicked"]},
+            {"kind": "tree", "id": "rows", "columns": ["Thing", "State"]},
+        ],
+    })
+
+Layouts: ``column`` / ``vbox``, ``row`` / ``hbox``, ``grid``, ``form``,
+``group``, ``scroll``, ``splitter``, ``tabs``. Leaves: ``label``, ``button``,
+``line``, ``color``, ``multi``, ``check``, ``combo``, ``list``, ``tree``,
+``table``, ``progress``, ``spin``, ``slider``, ``spacer``, ``image``, ``web``.
+
+Anything with an ``id`` can be read and written afterwards with
+[set_widget](api:tabs.set_widget) and [widget_value](api:tabs.widget_value).
+The property names are the spec's own: ``text``, ``value``, ``rows``,
+``items``, ``clear``, ``append``, ``placeholder``, ``tooltip``, ``style``,
+``enabled``, ``visible``, ``checked``, ``highlight``, ``maximum``, ``format``,
+``current``.
+
+An ``image`` leaf is a picture of its own: ``size`` caps how far it may measure
+in either direction (at the interface zoom), and its ``value`` - or
+``set_widget(tab, id, "image", ...)`` - is an image file's path or an SVG
+document as text, the same two shapes [set_icon](api:tabs.set_icon) takes. A
+picture that cannot be read leaves the leaf blank rather than showing the user a
+path. A ``list``, ``tree`` or ``table`` entry can wear a mark as well: a list
+item as ``{"text": ..., "icon": ...}``, a row as a dict with ``"icon"`` beside
+``"cells"``, and that picture is drawn in front of the row's first cell - which
+is how one list can carry a device's own mark next to its own colour.
+
+## Where a tab lands
+
+A tab an addon opens goes immediately to the left of the tab that addon already
+owns, so a report or a helper sits beside its parent instead of at the far end
+of the bar where the user has to go looking for it. Pass ``position`` to choose
+otherwise.
+
+## Pinned, icon-only tabs
+
+``pinned=True`` holds the tab in the block at the right edge, beside Settings:
+out of the row the user drags about, out of the saved tab order, and keeping its
+place while other tabs come and go. ``icon_only=True`` draws it as a mark with
+no caption - the name still identifies it to the addon, and the tooltip says it
+aloud. Both work on an embedded page from
+[add_web_tab](api:tabs.add_web_tab) as well, and can be changed afterwards with
+[set_pinned](api:tabs.set_pinned). The addon store and the manager updater's own
+tabs are made this way. A mark has nothing left but its tooltip to say who it
+belongs to, so the app fills that in with the addon's name and its tab's - an
+addon that asks to be drawn as a mark should send a picture of its own with it
+(see [Notices and icons](guide:notice)).
+
+## Pages on the device
+
+[add_web_tab](api:tabs.add_web_tab) embeds an address; from there
+[set_html](api:tabs.set_html), [inject_css](api:tabs.inject_css) and
+[inject_js](api:tabs.inject_js) shape what it shows, and
+[view](api:tabs.view) hands over the whole page object - in an imported addon
+only.
+"""),
+
+    ("notice", "Notices and icons", """
+# Notices and icons
+
+## Speaking when the tab is not on screen
+
+    api.ui.popup("My addon", "the run finished - 3 packages installed")
+
+[information](api:ui.information) stops the user with a dialog and wants an
+answer; [popup](api:ui.popup) does neither. The app puts the line in its status
+bar and, while **Pop up notifications** in Settings > Startup & defaults is on,
+sends it to the system's notification area as well - which is how an addon can
+report a long job to someone who has already gone back to another window.
+
+The addon's own name is put on the title unless the addon wrote it in, so every
+notice says who is talking: several addons sharing one notification area is only
+readable if each line is named. The words always
+reach the status line and the log, switch or no switch, so a notice that cannot
+be shown is only quieter, never lost - and an addon has no way to reach the tray
+or the window itself, because whether its words become a toast is the user's
+setting rather than the addon's decision.
+
+Use it for news the user would want even with the tab closed: a job that
+finished, a device that stopped answering, an update that arrived. Anything that
+only matters while they are watching belongs on the tab or in
+[api.log](api:log). Keep it to a sentence or two - a notification is a nudge, and
+the detail is one click away.
+
+## Wearing a picture
+
+Put the file in the addon's own assets folder, named after the addon:
+``{package}icon.png`` built from the id, so ``mytool`` wears
+``mytoolicon.png``. That name is looked for on its own, both for the tab's mark
+and for the card in the addon store, so a picture costs no code and no manifest
+key. A file named anything else is declared instead:
+
+    ADDON = {..., "icon": "oldname.png"}
+
+Nothing is ever required. A tab with no picture draws the SVG document it sends
+with [set_icon](api:tabs.set_icon), and the store shows the program's own
+``storedefaultaddon.png``, so an addon is never filed under a blank box and still
+found by eye. A compiled build keeps its assets packed inside it and
+[api.paths.assets](api:paths.assets) is where they are read from;
+``addon_common.find_icon`` is the same rule for an addon drawing a picture into a
+widget of its own, and [api.session.app_icon](api:session.app_icon) is the
+program's own mark when it wants to sit beside it.
+"""),
+
+    ("settings-pages", "A page in Settings", """
+# A page in Settings
+
+``api.settings_pages`` builds a page of the app's Settings window: the same
+controls as a tab, on a page that stands beside the program's own categories -
+outside the shared **Installed addons** page, which keeps the switches and the
+form built from the declared fields.
+
+    api.settings_pages.add("planner", title="My planner", spec={
+        "kind": "form",
+        "children": [
+            {"label": "Days ahead", "kind": "spin", "id": "days"},
+        ],
+    })
+
+- The page is the app's furniture: it goes away by itself when the addon is
+  switched off or removed, so an addon never has to clean it up.
+- Its controls report to the same ``on_widget`` hook, with the page's name where
+  a tab's would be.
+- [activate](api:settings_pages.activate) opens Settings on the page,
+  [set_title](api:settings_pages.set_title) renames it, and
+  [widget](api:settings_pages.widget) / [set_widget](api:settings_pages.set_widget)
+  and [widget_value](api:settings_pages.widget_value) read and write its
+  controls exactly as a tab's.
+- A page wears no icon: [set_icon](api:settings_pages.set_icon) says so and
+  answers False.
+
+For one or two switches use [api.ui.set_setting_widget](api:ui.set_setting_widget)
+instead - the same controls, but under the addon's own row.
+"""),
+
+    ("config", "Config, settings and defaults", """
+# Config, settings and defaults
+
+Two stores, and picking the right one is most of it:
+
+- [api.config](api:config.all) is the addon's own file,
+  ``addons/_data/<id>/config.json``. It belongs to the installation rather than
+  to one profile, is what the Settings form edits, and is a plain JSON file a
+  user can open and change.
+- [api.settings](api:settings.all) is the addon's private keys inside the
+  profile's record - per profile, never shown to the user, good for counters
+  and last-used values.
+
+Declare what the user may change once, from ``init``:
+
+    FIELDS = [{"key": "greeting", "label": "Text to show", "kind": "text",
+               "hint": "What the button prints"}]
+    DEFAULTS = {"greeting": "Hello"}
+
+    values = api.config.declare(FIELDS, DEFAULTS, title="My addon")
+
+``declare`` writes the file with the defaults when it is missing, keeps a side
+copy of the schema so the form still shows while the addon is off, and returns
+the merged values. Kinds: ``text``, ``number``, ``bool``, ``choice``, ``list``,
+``multiline``. A dotted key - ``"window.width"`` - reads and writes inside that
+section of the file.
+
+- [get](api:config.get), [update](api:config.update) and
+  [pop](api:config.pop) work on the merged view;
+  [stored](api:config.stored) is the file with nothing filled in.
+- [text](api:config.text) and [save_text](api:config.save_text) are the file as
+  JSON, for an editor; anything invalid is refused.
+- When the user changes the form the app calls ``on_config`` - rebuild what the
+  tab shows there.
+"""),
+
+    ("events", "Events and hooks", """
+# Events and hooks
+
+    api.events.on("ssh_connected", lambda payload: ...)
+
+[on](api:events.on) returns the callable that unregisters again;
+[off](api:events.off) drops what the addon had for one event, and
+[names](api:events.names) lists everything the app broadcasts. A listener runs on
+the GUI thread and is caught if it raises - the failure is written to the log
+against the addon's name rather than taking the window down.
+
+The same message arrives two ways:
+
+- ``on_event(name, payload)`` is told everything.
+- ``on_<name>(payload)`` - ``on_ssh_connected`` - is told just that one.
+
+Keep a hook short; it runs in the app's event loop. Longer work goes to
+[api.schedule.after](api:schedule.after) or to a device call with
+``block=False``, and anything that has to wait for the user goes through
+[api.ui](api:ui.question) rather than a sleep.
+"""),
+
+    ("device", "The device: SSH and SFTP", """
+# The device: SSH and SFTP
+
+The manifest says which transports an addon needs, and both the app-wide switch
+and the addon's own have to be on;
+[is_connected](api:device.is_connected) says whether a call would go through
+right now.
+
+    api.device.run("cat /etc/openwrt_release")
+    # {'code': 0, 'out': '...', 'err': ''}
+
+Every call runs off the GUI thread. [run](api:device.run) waits and returns the
+result; [run_async](api:device.run_async) hands it to ``on_done`` later and lets
+the interface breathe - prefer that one in a button.
+
+Files: [list](api:device.list), [exists](api:device.exists),
+[stat](api:device.stat), [read_text](api:device.read_text),
+[write_text](api:device.write_text), [append_text](api:device.append_text),
+[mkdir](api:device.mkdir), [remove](api:device.remove),
+[rename](api:device.rename), [upload](api:device.upload),
+[download](api:device.download). Paths are relative to the profile's remote root
+unless ``outside_root=True``, and a path is never allowed to delete the root
+itself.
+
+    with api.device.open() as conn:
+        conn.run("opkg update")
+        conn.run("opkg install foo")
+
+[open](api:device.open) holds one session for several calls instead of making
+one per call, and [shell_send](api:device.shell_send) types into the terminal
+tab when the user should watch it happen.
+"""),
+
+    ("test", "Testing an addon", """
+# Testing an addon
+
+The Test panel runs ``addons/_tests/test_<id>.py`` as its own program, using the
+recording stub in ``addon_client``: the addon is loaded and driven, nothing is
+drawn, nothing is sent to a device, and every call it made is written down. So
+the test checks what the addon *asked for*, which is the part an addon author
+owns.
+
+    api = addon_client.stub_api("myaddon", config={"greeting": "hi"})
+    addon = addon_client.load_addon(SOURCE)
+    addon.init(api)
+    check(api.called("tabs.add_tab"), "init added no tab")
+    addon.on_widget("My addon", "go", "clicked", {})
+    check(any("hi" in line for line in api.logs), "the button said nothing")
+
+- ``stub_api(id, config=..., settings=..., answers=...)``: ``config`` is what
+  the config file would hold, ``settings`` the profile's keys, and ``answers``
+  what ``ui.question`` / ``ui.choose`` reply.
+- ``api.called(name)``, ``api.times(name)``, ``api.calls`` and ``api.logs`` are
+  what the addon asked for. A stub records and changes no state of its own, so
+  hand it the values the addon will read back.
+- Check everything and print every failure: one run should say all is well, not
+  stop at the first crack.
+- The same script runs from the command line, which is what the store's index
+  and the app's CI can do before an addon is published.
+"""),
+
+    ("build", "Compiling and publishing", """
+# Compiling and publishing
+
+**Compile** builds the addon with PyInstaller into ``addons/<id>.exe`` beside
+its source, from a generated launcher that calls ``addon_client.serve``. The id
+does not change, so exactly one of the two copies runs, and *Which copy runs*
+above says which; the choice is kept in ``config/_build.json``.
+
+A build carries a plain copy of the protocol modules it imports
+(``addon_common``, ``addon_client``). A program built without that copy says so
+rather than start a test that cannot finish.
+
+## Publishing on the addon store
+
+The store reads one or more GitHub repositories, each with an ``index.json`` in
+its store folder:
+
+- ``tools/gen_addon_store_index.py`` writes the index from the addons in a
+  checkout - their manifests, their icons, their test scripts.
+- ``addons/_data/<id>/config.json`` and ``fields.json`` travel with the file, so
+  an installed addon shows a settings form of its own.
+- A source is a repository: owner, repository, branch or tag, and the store
+  folder inside it. **Sources...** on the store's tab adds one, puts it first or
+  drops it, and the first source wins an id that two of them publish.
+
+Installing fetches the addon from the source its catalog row came out of, then
+runs its test script against the harness before the app starts it.
+"""),
+)
+
+
+# --- the API reference: read off the protocol module as it runs ---
+
+#: Which guide an addon should read after each namespace, by the attribute the
+#: namespace sits on. ``""`` is ``api`` itself, ``conn`` the connection object.
+GUIDE_FOR_NAMESPACE = {
+    "": "anatomy",
+    "session": "start",
+    "device": "device",
+    "ui": "notice",
+    "tabs": "tabs",
+    "events": "events",
+    "settings": "config",
+    "settings_pages": "settings-pages",
+    "config": "config",
+    "schedule": "anatomy",
+    "paths": "anatomy",
+    "peers": "anatomy",
+    "conn": "device",
+}
+
+#: The reference is built once per run: the module cannot change under a window
+#: that is open, and rebuilding it walks a hundred docstrings for nothing.
+_API_REFERENCE: list[dict] | None = None
+
+_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^) ]+)\)")
+_CODE_RE = re.compile(r"``([^`]+)``")
+_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+
+
+def _escape(text: Any) -> str:
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _inline(text: Any) -> str:
+    """The inline markup a guide or a docstring is allowed to use."""
+    out = _escape(text)
+    out = _LINK_RE.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', out)
+    out = _CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", out)
+    return _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", out)
+
+
+def _html(text: Any) -> str:
+    """A page out of the small slice of markdown the guides and docstrings are
+    written in: headings, bullets, indented code and ``inline`` markup."""
+    out: list[str] = []
+    bullets: list[str] = []
+    indented: list[str] = []
+
+    def close() -> None:
+        if bullets:
+            out.append("<ul>" + "".join(bullets) + "</ul>")
+            bullets.clear()
+        if indented:
+            out.append("<pre>" + "\n".join(indented) + "</pre>")
+            indented.clear()
+
+    for raw in str(text or "").expandtabs().rstrip().splitlines():
+        if raw.startswith(("    ", "\t")):
+            # An indented run is code: keep it, and drop the list that was open.
+            if bullets:
+                out.append("<ul>" + "".join(bullets) + "</ul>")
+                bullets.clear()
+            indented.append(_escape(raw.strip()))
+            continue
+        close()
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("- "):
+            bullets.append(f"<li>{_inline(line[2:])}</li>")
+            continue
+        if line.startswith("# "):
+            out.append(f"<h2>{_inline(line[2:])}</h2>")
+        elif line.startswith("## "):
+            out.append(f"<h3>{_inline(line[3:])}</h3>")
+        else:
+            out.append(f"<p>{_inline(line)}</p>")
+    close()
+    return "\n".join(out)
+
+
+def _addon_api_module() -> Any:
+    """The protocol module the app itself runs, or ``None`` when it cannot be had."""
+    try:
+        import addon_api
+    except Exception:                            # a program without its protocol
+        return None
+    return addon_api
+
+
+def _api_namespaces() -> list[tuple[str, str]]:
+    """``(attribute, class name)`` for every namespace on api, in the order the
+    app builds them.
+
+    Read out of ``AddonAPI.__init__``'s bytecode rather than its text: a packaged
+    program carries no source to search, and the instructions are the same in a
+    checkout and in a build.
+    """
+    module = _addon_api_module()
+    if module is None:
+        return []
+    classes = {name for name, value in vars(module).items()
+               if inspect.isclass(value) and name.endswith("API")}
+    found: list[tuple[str, str]] = []
+    wanted = ""
+    for instruction in dis.get_instructions(module.AddonAPI.__init__):
+        if instruction.opname == "LOAD_GLOBAL":
+            wanted = str(instruction.argval or "")
+        elif instruction.opname == "STORE_ATTR":
+            if wanted in classes and wanted not in {one[1] for one in found}:
+                found.append((str(instruction.argval), wanted))
+            wanted = ""
+    return found
+
+
+def _signature_of(func: Any) -> str:
+    """The call as an addon writes it, with the hidden ``self`` taken out."""
+    try:
+        text = str(inspect.signature(func))
+    except (TypeError, ValueError):                # a built-in has no signature
+        return "(...)"
+    if text.startswith("(self, "):
+        return "(" + text[len("(self, "):]
+    if text.startswith("(self)"):
+        return "()" + text[len("(self)"):]
+    return text
+
+
+def _api_entry(name: str, func: Any, kind: str) -> dict:
+    """One method or property, with the summary lifted from its docstring."""
+    doc = inspect.getdoc(func) or ""
+    lines = [line.rstrip() for line in doc.splitlines()]
+    return {
+        "name": name,
+        "kind": kind,
+        "call": f"{name}{_signature_of(func)}" if kind == "method" else name,
+        "summary": lines[0] if lines else "(nothing said about this one yet)",
+        "detail": "\n".join(lines[1:]).strip(),
+    }
+
+
+def _namespace_page(addr: str, title: str, cls: Any) -> dict:
+    """One namespace: its methods and properties, in the order the class defines
+    them, with the private machinery left out."""
+    entries: list[dict] = []
+    for name, value in vars(cls).items():
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        if isinstance(value, property):
+            if value.fget is None or name.startswith("_"):
+                continue
+            entries.append(_api_entry(name, value.fget, "property"))
+        elif inspect.isfunction(value):
+            if name.startswith("_"):
+                continue
+            entries.append(_api_entry(name, value, "method"))
+    lines = (inspect.getdoc(cls) or "").splitlines()
+    return {"addr": addr, "title": title, "cls": cls.__name__,
+            "summary": lines[0].strip() if lines else "", "entries": entries}
+
+
+def api_reference() -> list[dict]:
+    """The whole API as the Docs panel lays it out.
+
+    ``api`` itself first - it has three calls of its own - then every namespace
+    in the order the app builds them, then the connection object that
+    ``api.device.open()`` hands out, which an addon reads like any namespace.
+    """
+    global _API_REFERENCE
+    if _API_REFERENCE is not None:
+        return _API_REFERENCE
+    module = _addon_api_module()
+    pages: list[dict] = []
+    if module is not None:
+        pages.append(_namespace_page("", "api", module.AddonAPI))
+        for attr, cls_name in _api_namespaces():
+            cls = getattr(module, cls_name, None)
+            if inspect.isclass(cls):
+                pages.append(_namespace_page(attr, f"api.{attr}", cls))
+        connection = getattr(module, "Connection", None)
+        if inspect.isclass(connection):
+            pages.append(_namespace_page(
+                "conn", "connection - from api.device.open()", connection))
+    _API_REFERENCE = pages
+    return pages
+
+
+def api_entry(key: str) -> tuple[dict, dict] | None:
+    """``(namespace, entry)`` for a reference key such as ``tabs.add_tab``.
+
+    A key with no dot is one of the calls on ``api`` itself (``log``, ``error``,
+    ``call``); when nothing at that level answers to it, the namespaces are
+    tried in order, so a link whose prefix was left off still opens a page.
+    """
+    head, sep, tail = str(key).partition(".")
+    pages = api_reference()
+    wanted = tail if sep else head
+    if sep:
+        ordered = [page for page in pages if page["addr"] == head]
+    else:
+        ordered = ([page for page in pages if page["addr"] == ""]
+                   + [page for page in pages if page["addr"] != ""])
+    for page in ordered:
+        for entry in page["entries"]:
+            if entry["name"] == wanted:
+                return page, entry
+    return None
+
+
+def api_counts() -> tuple[int, int]:
+    """How much of the API the panel has to show: namespaces and entries."""
+    pages = api_reference()
+    return len(pages), sum(len(page["entries"]) for page in pages)
+
+
 # --- the tab itself ---
 
 class AddonDevWidget(QWidget):
-    """The Addon Dev panel: one addon selected at a time, five views of it."""
+    """The Addon Dev panel: one addon selected at a time, six views of it."""
+
+    #: What 'find' in the Docs pane reads beyond the row's own label: the key,
+    #: the summary and the call, kept in one lower-case string per row.
+    SEARCH_ROLE = Qt.ItemDataRole.UserRole + 1
 
     def __init__(self, window: Any) -> None:
         super().__init__()
@@ -1221,6 +2052,7 @@ class AddonDevWidget(QWidget):
         self.panes.addTab(self._build_details(), "Details")
         self.panes.addTab(self._build_compile(), "Compile")
         self.panes.addTab(self._build_test(), "Test")
+        self.panes.addTab(self._build_docs(), "Docs")
         self.panes.addTab(self._build_log(), "Log")
         self.panes.addTab(self._build_processes(), "Processes")
         root.addWidget(self.panes, 1)
@@ -1284,6 +2116,8 @@ class AddonDevWidget(QWidget):
             ("New addon...", "Write a new addon, with a header and a test script",
              self.new_addon),
             ("Open folder", "The addons folder, where an addon is dropped", self.open_folder),
+            ("Docs", "The API reference and the guides, read off the running app",
+             self.show_docs),
         ):
             button = QPushButton(text)
             button.setToolTip(tip)
@@ -1463,8 +2297,12 @@ class AddonDevWidget(QWidget):
         self.reveal_button = QPushButton("Show the file")
         self.reveal_button.setToolTip("Open the addons folder, where the program is put")
         self.reveal_button.clicked.connect(self.open_folder)
+        self.build_guide_button = QPushButton("Build guide")
+        self.build_guide_button.setToolTip(
+            "What a compiled addon carries, and how to publish it on the store")
+        self.build_guide_button.clicked.connect(lambda: self._open_guide("build"))
         for button in (self.compile_button, self.cancel_button, self.clean_button,
-                       self.reveal_button):
+                       self.reveal_button, self.build_guide_button):
             actions.addWidget(button)
         actions.addStretch(1)
         self.build_note = QLabel("")
@@ -1509,8 +2347,13 @@ class AddonDevWidget(QWidget):
         self.test_folder_button = QPushButton("Open folder")
         self.test_folder_button.setToolTip("addons/_tests")
         self.test_folder_button.clicked.connect(self.open_test_folder)
+        self.test_guide_button = QPushButton("Testing guide")
+        self.test_guide_button.setToolTip(
+            "What the stub records, and the checks a test script should make")
+        self.test_guide_button.clicked.connect(lambda: self._open_guide("test"))
         for button in (self.create_test_button, self.run_test_button,
-                       self.open_test_button, self.test_folder_button):
+                       self.open_test_button, self.test_folder_button,
+                       self.test_guide_button):
             row.addWidget(button)
         row.addStretch(1)
         self.test_note = QLabel("")
@@ -1593,6 +2436,227 @@ class AddonDevWidget(QWidget):
         column.addWidget(self.holdings_table)
         layout.addWidget(second, 1)
         return page
+
+    # --- docs: the guides and the reference generated from the code ---
+
+    def _build_docs(self) -> QWidget:
+        page = QWidget()
+        self.docs_pane = page
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        pages, entries = api_counts()
+        self.docs_note = note_label(QLabel(
+            f"{max(0, pages - 1)} namespaces, {entries} methods and properties, read "
+            "from addon_api as this program runs it - and the docstrings under "
+            "them are the whole story, so the panel cannot go out of date."))
+        layout.addWidget(self.docs_note)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("find"))
+        self.docs_filter = QLineEdit()
+        self.docs_filter.setPlaceholderText("tabs, pinned, config, peers...")
+        self.docs_filter.textChanged.connect(self._filter_docs)
+        row.addWidget(self.docs_filter, 1)
+        for text, tip, slot in (
+            ("Start here", "The first page an addon author should read",
+             lambda: self._show_docs_key("guide:start")),
+            ("README", "The program's own manual, in the system's viewer or online",
+             self.open_readme),
+            ("On GitHub", "The manual as published, with the addon chapters",
+             self.open_online_docs),
+        ):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            row.addWidget(button)
+        layout.addLayout(row)
+
+        split = QSplitter()
+        self.docs_list = QListWidget()
+        self.docs_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self.docs_list.currentItemChanged.connect(self._docs_moved)
+        self.docs_list.setMinimumWidth(210)
+        split.addWidget(self.docs_list)
+        self.docs_view = QTextBrowser()
+        self.docs_view.setOpenLinks(False)
+        self.docs_view.setMinimumWidth(380)
+        # QTextBrowser wraps to its own width and takes html, which is what the
+        # generated pages are; the links below are handled by hand.
+        self.docs_view.anchorClicked.connect(self._docs_link)
+        split.addWidget(self.docs_view)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([240, 620])
+        layout.addWidget(split, 1)
+
+        self._fill_docs()
+        return page
+
+    def _add_docs_header(self, text: str) -> None:
+        """A line in the list that names a group and cannot be picked."""
+        item = QListWidgetItem(text)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setForeground(QBrush(QColor("#c51a4a")))
+        self.docs_list.addItem(item)
+
+    def _add_docs_item(self, key: str, text: str, tip: str = "",
+                       search: str = "") -> None:
+        """A page in the list, addressed by the same key its links carry."""
+        item = QListWidgetItem(text)
+        item.setData(Qt.ItemDataRole.UserRole, key)
+        item.setToolTip(tip)
+        # What 'find' reads: the key and the call as well as the label and the
+        # first line, so typing 'pinned' still turns up add_tab, whose signature
+        # is the place the option is actually spelled out.
+        item.setData(self.SEARCH_ROLE,
+                     f"{key} {text} {tip} {search}".casefold())
+        self.docs_list.addItem(item)
+
+    def _fill_docs(self) -> None:
+        """The list down the left: the guides first, then the reference itself."""
+        self.docs_list.blockSignals(True)
+        self.docs_list.clear()
+        self._add_docs_header("Guides")
+        for key, title, text in GUIDES:
+            self._add_docs_item(f"guide:{key}", title,
+                                text.strip().splitlines()[0] if text.strip() else title,
+                                search=text)
+        for page in api_reference():
+            head = f"{page['title']}  ({len(page['entries'])})"
+            self._add_docs_header(head)
+            for entry in page["entries"]:
+                addr = f"{page['addr']}." if page["addr"] else ""
+                self._add_docs_item(f"api:{addr}{entry['name']}", entry["name"],
+                                    entry["summary"], search=entry["call"])
+        self.docs_list.blockSignals(False)
+        self._show_docs_key("guide:start")
+
+    def _filter_docs(self, text: str) -> None:
+        """Only the pages that answer to what was typed; a heading is not a result.
+
+        Every word typed has to turn up somewhere in the row - label, summary or
+        call - which lets 'tabs pinned' narrow the list to the one line asked for.
+        """
+        words = str(text or "").strip().casefold().split()
+        for index in range(self.docs_list.count()):
+            item = self.docs_list.item(index)
+            if item is None:
+                continue
+            if not str(item.data(Qt.ItemDataRole.UserRole) or ""):
+                item.setHidden(bool(words))
+                continue
+            haystack = str(item.data(self.SEARCH_ROLE) or "")
+            item.setHidden(not all(word in haystack for word in words))
+
+    def _show_docs_key(self, key: str) -> bool:
+        """Jump the list to one page, by the key its links carry."""
+        for index in range(self.docs_list.count()):
+            item = self.docs_list.item(index)
+            if item is not None and str(item.data(Qt.ItemDataRole.UserRole) or "") == key:
+                self.docs_list.setCurrentRow(index)
+                return True
+        return False
+
+    def _docs_moved(self, current: QListWidgetItem | None,
+                   _previous: QListWidgetItem | None) -> None:
+        if current is None:
+            return
+        self._render_docs(str(current.data(Qt.ItemDataRole.UserRole) or ""))
+
+    def _open_guide(self, key: str) -> None:
+        """Come to the Docs pane and show one guide: the way a Test or Compile
+        pane hands a developer the page that explains it."""
+        self.panes.setCurrentWidget(self.docs_pane)
+        self.docs_filter.blockSignals(True)
+        self.docs_filter.setText("")
+        self.docs_filter.blockSignals(False)
+        self._show_docs_key(f"guide:{key}")
+
+    def _docs_link(self, url: QUrl) -> None:
+        """A link clicked in the page: inside the panel, into a file, or out to
+        the browser - the panel itself never leaves the tab."""
+        text = url.toString()
+        if text.startswith(("guide:", "api:")):
+            self._show_docs_key(text)
+            return
+        if text.startswith("file:"):
+            self.open_path(Path(text[len("file:"):]))
+            return
+        QDesktopServices.openUrl(url)
+
+    def _readme_link(self) -> str:
+        """Where the manual is: the file beside the program, or its page online."""
+        where = find_asset("README.md")
+        return f"file:{where.as_posix()}" if where is not None else README_URL
+
+    def _guide_page(self, key: str) -> str:
+        """One guide, with the way back out at the bottom."""
+        text = next((body for one, _title, body in GUIDES if one == key), "")
+        back = ('<p><a href="guide:start">Start here</a> \u00b7 '
+                '<a href="api:tabs.add_tab">api.tabs.add_tab</a> \u00b7 '
+                f'<a href="{self._readme_link()}">the full README</a></p>')
+        return _html(text) + back
+
+    def _entry_page(self, key: str) -> str:
+        """One method or property: how it is called, what its docstring says, and
+        the neighbours an addon would read next to it."""
+        found = api_entry(key)
+        if found is None:
+            return "<p>nothing in the API answers to that.</p>"
+        page, entry = found
+        addr = f"api.{page['addr']}" if page["addr"] else "api"
+        usage = f"{addr}.{entry['call']}" if entry["kind"] == "method" \
+            else f"{addr}.{entry['name']}"
+        names = [one["name"] for one in page["entries"]]
+        where = names.index(entry["name"])
+        parts = [f"<h2>{_escape(entry['name'])}</h2>",
+                 f"<p><i>{_escape(page['title'])} \u00b7 {entry['kind']}</i></p>",
+                 f"<pre>{_escape(usage)}</pre>",
+                 f"<p>{_inline(entry['summary'])}</p>"]
+        if entry["detail"]:
+            parts.append(_html(entry["detail"]))
+        walk = []
+        if where:
+            previous = names[where - 1]
+            walk.append(f'<a href="api:{page["addr"] + "." if page["addr"] else ""}{previous}">'
+                        f'\u2190 {previous}</a>')
+        if where + 1 < len(names):
+            following = names[where + 1]
+            walk.append(f'<a href="api:{page["addr"] + "." if page["addr"] else ""}{following}">'
+                        f'{following} \u2192</a>')
+        guide = GUIDE_FOR_NAMESPACE.get(page["addr"])
+        if guide:
+            title = next((one for one, text, _body in GUIDES if one == guide), "")
+            walk.append(f'<a href="guide:{guide}">{_escape(title)}</a>')
+        if walk:
+            parts.append("<p>" + " \u00b7 ".join(walk) + "</p>")
+        return "".join(parts)
+
+    def _render_docs(self, key: str) -> None:
+        kind, _, rest = str(key).partition(":")
+        if not rest:
+            return
+        self.docs_view.setHtml(self._guide_page(rest) if kind == "guide"
+                               else self._entry_page(rest))
+
+    def show_docs(self) -> None:
+        """The Docs button above: come to this pane and read the selected addon."""
+        self.panes.setCurrentWidget(self.docs_pane)
+
+    def open_readme(self) -> None:
+        """The manual: the file when the program carries one, the published page
+        when it does not - a packaged build ships no markdown."""
+        where = find_asset("README.md")
+        if where is not None:
+            self.open_path(where)
+            return
+        QDesktopServices.openUrl(QUrl(README_URL))
+
+    def open_online_docs(self) -> None:
+        QDesktopServices.openUrl(QUrl(README_URL + "#addons"))
 
     # --- the index ---
 

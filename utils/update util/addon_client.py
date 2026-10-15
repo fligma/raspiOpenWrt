@@ -188,9 +188,12 @@ class ProcessAPI:
         "ui.menu_item": ("text", "callback", "menu", "shortcut"),
         "ui.dialog": ("spec", "title", "ok"),
         "ui.set_setting_widget": ("widget_or_spec",),
-        "tabs.add_web_tab": ("name", "url", "ip", "port", "path", "scheme", "position"),
-        "tabs.add_tab": ("name", "widget", "spec", "style", "position"),
+        "tabs.add_web_tab": ("name", "url", "ip", "port", "path", "scheme",
+                             "position", "pinned", "icon_only"),
+        "tabs.add_tab": ("name", "widget", "spec", "style", "position",
+                         "pinned", "icon_only"),
         "tabs.close": ("name",),
+        "tabs.set_pinned": ("name", "pinned", "icon_only"),
         "tabs.rename": ("name", "new_name"),
         "tabs.activate": ("name",),
         "tabs.exists": ("name",),
@@ -211,6 +214,16 @@ class ProcessAPI:
         "settings.set": ("key", "value"),
         "settings.update": ("values",),
         "settings.pop": ("key", "default"),
+        "settings_pages.add": ("name", "title", "widget", "spec", "style"),
+        "settings_pages.remove": ("name",),
+        "settings_pages.exists": ("name",),
+        "settings_pages.activate": ("name",),
+        "settings_pages.title": ("name",),
+        "settings_pages.set_title": ("name", "title"),
+        "settings_pages.widget": ("name", "identifier"),
+        "settings_pages.set_widget": ("name", "identifier", "prop", "value"),
+        "settings_pages.widget_value": ("name", "identifier", "what"),
+        "settings_pages.set_icon": ("name", "icon"),
         "config.get": ("key", "default"),
         "config.set": ("key", "value"),
         "config.update": ("values",),
@@ -252,7 +265,8 @@ class ProcessAPI:
         self.module = None                      # the addon, set by serve()
         self.base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) \
             else Path(__file__).resolve().parent
-        for namespace in ("device", "ui", "tabs", "settings", "config", "peers", "session"):
+        for namespace in ("device", "ui", "tabs", "settings", "settings_pages",
+                          "config", "peers", "session"):
             setattr(self, namespace, _Namespace(self, namespace))
         self.events = _Events(self)
         self.schedule = _Schedule(self)
@@ -699,8 +713,8 @@ class StubAPI:
         # The name an addon calls, so a test can drive a job that paces itself
         # through ``api.schedule.after``.
         self.schedule = self.timers
-        for namespace in ("device", "ui", "tabs", "settings", "config", "peers",
-                          "session", "events"):
+        for namespace in ("device", "ui", "tabs", "settings", "settings_pages",
+                          "config", "peers", "session", "events"):
             setattr(self, namespace, _StubNamespace(self, namespace))
         # The real folders, from the same environment a compiled addon reads.
         self.paths = _Paths(self)
@@ -778,7 +792,8 @@ class StubAPI:
                       "device.download", "tabs.close", "tabs.activate", "tabs.rename",
                       "peers.send", "settings.remove"):
             return True
-        if method in ("device.is_connected", "tabs.exists", "config.exists"):
+        if method in ("device.is_connected", "tabs.exists", "config.exists",
+                      "settings_pages.exists"):
             return bool(self.config_values) if method == "config.exists" else False
         if method == "device.read_text":
             return ""
@@ -799,9 +814,22 @@ class StubAPI:
             # gets nothing, so the addon's own ``is not None`` guard does the rest.
             if method in ("tabs.widget", "tabs.view", "tabs.widget_value"):
                 return None
-            if method in ("tabs.set_icon", "tabs.icon", "tabs.use_app_icon"):
+            if method in ("tabs.set_icon", "tabs.icon", "tabs.use_app_icon",
+                          "tabs.set_pinned"):
                 # The app would say whether the mark was read; a test reads the call.
                 return True
+            return ""
+        if method.startswith("settings_pages."):
+            if method == "settings_pages.add":
+                return ask("name", "page")
+            if method == "settings_pages.names":
+                return []
+            if method in ("settings_pages.remove", "settings_pages.activate",
+                          "settings_pages.set_title", "settings_pages.set_widget",
+                          "settings_pages.set_icon"):
+                return True
+            if method in ("settings_pages.widget", "settings_pages.widget_value"):
+                return None
             return ""
         if method.startswith("settings."):
             if method == "settings.all":

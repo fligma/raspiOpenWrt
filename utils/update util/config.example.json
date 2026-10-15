@@ -18,6 +18,7 @@
       "master_connection": true,
       "auto_connect": false,
       "use_alt_icon": false,
+      "system_notifications": true,
       "sftp_enabled": true,
       "ssh_enabled": true,
       "addon_dev_enabled": false,
@@ -30,9 +31,7 @@
       "tab_order": [
         "Berry",
         "SSH",
-        "LuCI",
-        "Addon store",
-        "Manager update"
+        "LuCI"
       ],
       "terminal_font_size": 10,
       "ui_zoom": 100,

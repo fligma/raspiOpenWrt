@@ -1,31 +1,44 @@
 #!/usr/bin/env python3
 """A test for addons/manager_update.py.
 
-The update addon's whole job is to read this program's own tags off GitHub,
-work out whether one is ahead of the running copy, fetch the release made for
-it and swap the downloaded program into place without touching the config or
-the addons. None of that needs a device or the network, and nothing here
-reaches either: the Qt-free half is driven directly - how tags read as
-versions, what a release offers this machine, what downloaded bytes really
-are - and the file work happens inside a temporary folder with dummy files
+The update addon's job is to read this program's own published tags off GitHub,
+say where each of them stands against the copy running here - an update, this
+copy, a way back, or further back than it will go - tell the story of the one
+picked from its release, its commit and its file list, and put any installable
+one in the running program's place without touching the config or the addons.
+None of that needs a device or the network, and nothing here reaches either:
+every GitHub read goes through one patched ``get_json`` answering from the
+records below, and the file work happens in a temporary folder with dummy files
 standing in for the program.
 
 What gets looked at:
 
-* the pure helpers: version compares, tag names, the address split that has
-  to keep a download's one-time signature;
-* what a release offers: assets named for one system or the other, the
-  fallback to plain links in the description, and the refusal of an artifact
-  page that would only answer with a sign-in;
-* the tab on a stub api: init declares and builds it, and every check answer
-  says the right thing - no tags yet (normal, not an error), a tag ahead with
-  a download, a tag ahead without one, and a copy already newest;
-* the download's byte sniffing: a real program, a zip like the workflow
-  ships, and a page masquerading as one;
+* the pure helpers: version compares and equality, tag names, the floor a way
+  back stops at, where each version stands, and the address split that has to
+  keep a download's one-time signature;
+* what a release offers: assets named for one system or the other, the fallback
+  to plain links in the description, and the refusal of an artifact page that
+  would only answer with a sign-in;
+* the tab on a stub api: init declares and builds it, and a check reads the tags
+  and the releases in two requests whatever their number, sorting them newest
+  first and chaining each one to the version before it for the comparison;
+* the list and the pane that goes with it: what each row says beside a version,
+  and what the picked version's title, its line of facts, its state, its account
+  and its file table come out as - including the commit's words standing in for
+  a release whose author wrote nothing;
+* going back: the same offer down as up, the floor refusing anything older, and
+  a moved floor moving the line rather than the code;
+* the notice: a check that ran on its own puts the version it found up through
+  the app's notifications, once per version, and says nothing when the switch is
+  off or nothing is ahead;
+* the download's byte sniffing: a real program, a zip like the workflow ships,
+  and a page masquerading as one;
 * the swap itself in a temporary folder: new bytes land where the old program
   ran, the leftover goes, nothing else moved;
-* the job machine: what the buttons refuse, and the full redirect-to-swap
-  walk driven through a patched scheduler with a fake answer on the wire.
+* the job machine: what Install refuses with nothing picked, with a version
+  below the floor and with no file attached, the full redirect-to-swap walk
+  driven through a patched scheduler, the list re-placed afterwards without a
+  second read, and the schedule set up and taken down again.
 
 No internet, no GitHub and no device are needed. Run it from the Test panel,
 or::
@@ -58,12 +71,63 @@ FAILURES: list[str] = []
 #: A body big enough to pass for this program when bytes get sniffed.
 PROGRAM_BYTES = b"MZ" + b"\x90" * (200_000)
 
+#: Every tag the repository is pretending to publish, oldest last, one of them
+#: not a version at all. The order is GitHub's, not the list's: the check has to
+#: sort it.
+TAG_ROWS = [{"name": "berry1.6.1", "commit": {"sha": "aaa1111aaa"}},
+            {"name": "berry1.6.0", "commit": {"sha": "bbb2222bbb"}},
+            {"name": "berry1.5.9", "commit": {"sha": "ccc3333ccc"}},
+            {"name": "v-older-thing", "commit": {"sha": ""}}]
+
+#: The releases made for those tags. 1.6.1 has a file and a written account,
+#: 1.6.0 has a file and no words, and 1.5.9 is a bare tag - the three states a
+#: version can be in as far as installing it is concerned.
+RELEASES: dict[str, dict] = {
+    "berry1.6.1": {
+        "tag_name": "berry1.6.1", "name": "Berry 1.6.1",
+        "published_at": "2026-10-12T10:00:00Z",
+        "body": "The store got a pane to read a listing in.",
+        "author": {"login": "fligma"},
+        "assets": [{"name": "berry_manager-windows.exe",
+                    "browser_download_url": "https://x/win"}],
+    },
+    "berry1.6.0": {
+        "tag_name": "berry1.6.0", "name": "berry1.6.0",
+        "published_at": "2026-10-01T09:00:00Z", "body": "",
+        "assets": [{"name": "berry_manager-windows.exe",
+                    "browser_download_url": "https://x/older"}],
+    },
+}
+
+#: The commit under every tag, and the file list between each version and the
+#: one before it.
+COMMIT = {
+    "sha": "aaa1111aaa1111",
+    "commit": {"message": "Berry Manager v1.6.1 - the store pane\n\n"
+                          "second line of the commit",
+               "author": {"name": "fligma", "date": "2026-10-12T09:55:00Z"}},
+    "author": {"login": "fligma"},
+}
+COMPARISON = {"status": "ahead", "files": [
+    {"filename": "utils/update util/addons/addon_store.py", "status": "changed",
+     "additions": 40, "deletions": 3},
+    {"filename": "utils/update util/assets/storedefaultaddon.png",
+     "status": "added", "additions": 1, "deletions": 0},
+    {"filename": "utils/update util/old_thing.py", "status": "removed",
+     "additions": 0, "deletions": 12},
+]}
+
 
 def check(condition: object, text: str) -> None:
     """One thing the addon has to do; all of them are reported, not just the first."""
     if not condition:
         FAILURES.append(text)
     print(("  ok   " if condition else "  FAIL ") + text)
+
+
+def look(text: str) -> None:
+    """Say what a run produced, without judging it."""
+    print(f"       {text}")
 
 
 @contextmanager
@@ -120,10 +184,38 @@ class FakeFetcher:
         raise AssertionError("the download path must stream, not slurp")
 
 
+#: Every address tail the patched GitHub reader has been asked for since the
+#: last ``wire`` - what lets a test say "and it read nothing afterwards".
+TAILS: list[str] = []
+
+
+def wire(upd: Any) -> list[str]:
+    """Patch the one function that touches GitHub; hand back what it was asked."""
+    asked = TAILS
+    del asked[:]
+
+    def answering(values: dict, tail: str) -> Any:
+        asked.append(tail)
+        if tail.startswith("tags"):
+            return TAG_ROWS
+        if tail.startswith("releases?"):
+            return list(RELEASES.values())
+        if tail.startswith("releases/tags/"):
+            return RELEASES.get(tail.split("/", 1)[1], {})
+        if tail.startswith("commits/"):
+            return COMMIT
+        if tail.startswith("compare/"):
+            return COMPARISON
+        raise AssertionError(f"the addon asked GitHub for {tail!r} in a test")
+
+    upd.get_json = answering
+    return asked
+
+
 # --- one: the pure helpers, with no api standing up ---
 
 def test_the_helpers(upd: Any) -> None:
-    print("\n1. versions, tags and addresses")
+    print("\n1. versions, tags, the floor and addresses")
     check(upd.tag_version("berry1.5.9", "berry") == "1.5.9",
           "berry1.5.9 did not read as version 1.5.9")
     check(upd.tag_version("BERRY1.6", "berry") == "1.6",
@@ -142,12 +234,55 @@ def test_the_helpers(upd: Any) -> None:
     check(upd.version_newer("1.6", ""), "a remote version lost the empty compare")
     check(not upd.version_newer("", "1.6"), "nothing remote still counted as newer")
 
+    check(upd.versions_equal("1.6", "1.6.0"),
+          "1.6 and 1.6.0 were called different programs")
+    check(not upd.versions_equal("1.6.1", "1.6.0"), "two versions one apart matched")
+    check(not upd.versions_equal("", "1.6"), "nothing at all matched a version")
+
+    ordered = sorted(["1.6.0", "1.10", "1.5.9", "1.6"], key=upd._sort_key)
+    check(ordered[0] == "1.5.9" and ordered[-1] == "1.10"
+          and upd.versions_equal(ordered[1], ordered[2])
+          and upd.version_newer(ordered[1], ordered[0]),
+          f"a list of versions did not sort: {ordered}")
+
     best = upd.pick_latest(["v2.0", "berry1.5.9", "berry1.6.0", "berry1.5.10"], "berry")
     check(best == ("berry1.6.0", "1.6.0"),
           f"the newest tag out of an unordered list is wrong: {best!r}")
     check(upd.pick_latest(["v2.0"], "berry") is None,
           "a list with no update tags produced one anyway")
     check(upd.pick_latest([], "berry") is None, "an empty tag list produced a winner")
+
+    # Where one version stands, and how far back the swap is willing to go.
+    check(upd.stance_of("1.6.1", "1.6.0", "1.6.0") == "newer",
+          "a version ahead of this copy was not called an update")
+    check(upd.stance_of("1.6.0", "1.6", "1.6.0") == "this",
+          "this copy's own version, spelled shorter, was not recognised")
+    check(upd.stance_of("1.6.0", "1.6.1", "1.6.0") == "older",
+          "a version at the floor and behind was not a way back")
+    check(upd.stance_of("1.5.9", "1.6.1", "1.6.0") == "too old",
+          "a version below the floor was offered anyway")
+    check(upd.stance_of("", "1.6.1", "1.6.0") == "unknown",
+          "a version nothing reads was given a stance")
+    check(upd.stance_of("1.5.9", "1.6.1", "1.5.0") == "older",
+          "a moved floor did not move the line")
+    check(upd._floor({}) == upd.OLDEST_ALLOWED,
+          "the default floor is not the one named in the module")
+    check(upd._floor({"min_version": "  "}) == upd.OLDEST_ALLOWED,
+          "a blank floor left the default behind")
+    check(upd._floor({"min_version": "1.4.2"}) == "1.4.2",
+          "a named floor was not the one used")
+    check(upd._prefix({}) == "berry" and upd._prefix({"tag_prefix": "fork"}) == "fork",
+          "the tag prefix was not read, or not defaulted")
+
+    check(upd.offer_of({"stance": "newer", "download": ("a", "b", "c")})
+          == "an update - file attached",
+          f"an update with a file did not say so: {upd.offer_of({'stance': 'newer', 'download': 1})!r}")
+    check(upd.offer_of({"stance": "older", "download": None}) == "a way back - no file",
+          f"a way back with nothing attached did not say so: {upd.offer_of({'stance': 'older'})!r}")
+    check(upd.offer_of({"stance": "this"}) == "this copy",
+          "this copy's own row said something else")
+    check(upd.offer_of({"stance": "too old"}) == "older than the floor",
+          "a version below the floor was not called that")
 
     check(upd.one_line("  a\nb ") == "a", "one_line did not take the first clean line")
     check(upd.safe_segment("../../wi rd!") == "wi rd",
@@ -218,109 +353,245 @@ def test_the_release(upd: Any) -> None:
           "an empty release offered a download anyway")
 
 
-# --- three: the tab and the check, on a stub api ---
+# --- three: the tab, the check and the two panes, on a stub api ---
 
-def fresh(upd: Any, config: dict | None = None, version: str = "1.5.8") -> Any:
-    """The addon on a stub api: no startup check, no network, a known version."""
+def fresh(upd: Any, config: dict | None = None, version: str = "1.6.0",
+          ask: bool = True, keep_timers: bool = False) -> Any:
+    """The addon on a stub api: no start-up check, no network, a known version."""
     upd.api = None
     upd.working = False
     upd.job = None
     upd.found = None
+    upd.published = []
+    upd.picked = -1
+    upd.ticker = None
+    upd.announced.clear()
+    if ask:
+        wire(upd)
     api = addon_client.StubAPI(addon_id="manager_update",
-                               config={"check_startup": False, **dict(config or {})})
+                               config={"check_startup": False,
+                                       **dict(config or {})})
     api.answer("session.version", version)
     upd.init(api)
-    api.timers.cancel_all()
+    if not keep_timers:
+        api.timers.cancel_all()     # kill init's queued check; tests drive it
     return api
 
 
+def last_set(api: Any, identifier: str, prop: str) -> Any:
+    """The last thing the addon sent one widget, whatever it was."""
+    for where, arguments, _named in reversed(api.calls):
+        if where == "tabs.set_widget" and len(arguments) >= 4 \
+                and arguments[1] == identifier and arguments[2] == prop:
+            return arguments[3]
+    return None
+
+
 def last_status(api: Any) -> str:
-    for where, arguments, _named in reversed(api.calls):
-        if where == "tabs.set_widget" and len(arguments) >= 4 \
-                and arguments[1] == "status" and arguments[2] == "text":
-            return str(arguments[3])
-    return ""
+    return str(last_set(api, "status", "text") or "")
 
 
-def last_info(api: Any) -> str:
-    for where, arguments, _named in reversed(api.calls):
-        if where == "tabs.set_widget" and len(arguments) >= 4 \
-                and arguments[1] == "info" and arguments[2] == "value":
-            return str(arguments[3])
-    return ""
+def rows_for(api: Any, identifier: str) -> list:
+    return list(last_set(api, identifier, "rows") or [])
+
+
+def cells(row: Any) -> list:
+    return list(row.get("cells") or []) if isinstance(row, dict) else list(row)
 
 
 def test_the_tab(upd: Any) -> None:
     print("\n3. init builds the tab and its parts")
-    calls: list[int] = []
-    upd.list_tags = lambda values: calls.append(1) or []
     api = fresh(upd)
+    asked = TAILS                 # wire() cleared it: anything in it was really read
     check(api.called("config.declare") and api.called("tabs.add_tab")
           and api.called("tabs.set_icon") and api.called("ui.menu_item"),
           "init did not declare its config, add and icon its tab and its menu entry")
-    check(not calls, "a start-up check fired even though check_startup was off")
+    check(not asked, "a start-up check fired even though check_startup was off")
+    check(str(last_set(api, "source", "text")) == "fligma/raspiOpenWrt @ berry*",
+          f"the header chip does not name where tags come from: "
+          f"{last_set(api, 'source', 'text')!r}")
+    held = api.last("tabs.add_tab")
+    check(held is not None and bool(held[2].get("pinned"))
+          and bool(held[2].get("icon_only")),
+          f"the update tab is not pinned and icon-only where furniture holds: "
+          f"{None if held is None else held[2]}")
 
-    print("\n4. the check, in the four states it can end in")
-    with patched(upd, system_name=lambda: "windows"):
-        # no tags at all: the state of a program never published from here
-        upd.list_tags = lambda values: []
-        upd.release_for = lambda values, tag: {}
-        upd.check_now()
-        check("no berry<version> tag is published yet" in last_status(api),
-              f"no tags yet was not said calmly: {last_status(api)!r}")
-        check(upd.found is None, "the empty tag state still found an update")
-        check("normal for a program that has never been released" in last_info(api),
-              "the no-tags account did not explain that nothing is wrong yet")
-
-        # a tag ahead, with a release asset both systems can accept
-        upd.list_tags = lambda values: ["berry1.5.9", "v-old"]
-        upd.release_for = lambda values, tag: {
-            "assets": [{"name": "berry_build",
-                        "browser_download_url": "https://x/one"}]}
-        upd.check_now()
-        check(upd.found and upd.found["tag"] == "berry1.5.9"
-              and upd.found["version"] == "1.5.9"
-              and upd.found["download"]
-              and upd.found["download"][2] == "release asset",
-              f"the newer tag did not come with its download: {upd.found!r}")
-        check("Download and install will replace this copy" in last_status(api),
-              f"an available update did not offer the button: {last_status(api)!r}")
-        check("This copy is behind" in last_info(api),
-              "the account did not say this copy is behind")
-
-        # a tag ahead, but nothing downloadable attached to it
-        upd.release_for = lambda values, tag: {}
-        upd.check_now()
-        check(upd.found and upd.found["download"] is None,
-              f"a bare tag gained a download anyway: {upd.found!r}")
-        check("nothing for this system is attached" in last_status(api),
-              f"a tag without a download was not called out: {last_status(api)!r}")
-        check("publish the tag as a release" in last_info(api).lower()
-              and "artifact" in last_info(api).lower(),
-              "the account did not tell the author how to fix a tag with no files")
-
-        # up to date
-        api2 = fresh(upd, version="1.5.9")
-        with patched(upd, system_name=lambda: "windows"):
-            upd.check_now()
-            check("berry1.5.9 is the newest published tag" in last_status(api2),
-                  f"being up to date said something else: {last_status(api2)!r}")
-            check(upd.found is None, "an equal tag was still counted as newer")
-
-    # a broken check is a status line, not a crash
-    api3 = fresh(upd)
-
-    def boom(values: dict) -> list[str]:
-        raise upd.AddonError("GitHub refused the tags")
-
-    upd.list_tags = boom
+    print("\n4. the check reads the published versions, in two requests")
+    del asked[:]
     upd.check_now()
-    check("GitHub refused the tags" in last_status(api3),
-          f"a failed check did not say why: {last_status(api3)!r}")
-    upd.list_tags = lambda values: []
+    check(asked.count("tags?per_page=100") == 1
+          and asked.count("releases?per_page=100") == 1,
+          f"a check cost more than the tags and the releases: {asked}")
+    # Only the version the pane opened on has its story read; the rest wait for
+    # a pick, so a list of thirty costs two requests rather than ninety.
+    check(sum(1 for tail in asked if tail.startswith("commits/")) == 1
+          and sum(1 for tail in asked if tail.startswith("compare/")) == 1
+          and "commits/aaa1111aaa" in asked,
+          f"the check read the story of more versions than the one it opened "
+          f"on: {asked}")
+    versions = [str(entry["version"]) for entry in upd.published]
+    check(versions == ["1.6.1", "1.6.0", "1.5.9"],
+          f"the list is not the published versions newest first: {versions}")
+    check([entry["tag"] for entry in upd.published][-1] == "berry1.5.9"
+          and upd.published[0]["previous"] == "berry1.6.0"
+          and upd.published[-1]["previous"] == "",
+          f"a version is not chained to the one before it: "
+          f"{[(e['tag'], e['previous']) for e in upd.published]}")
+    check("berry1.6.1 is out" in last_status(api) and "1 update ahead" in last_status(api),
+          f"an update out did not lead the status line: {last_status(api)!r}")
+    check("floor for going back is 1.6.0" in " ".join(api.logs),
+          f"the log does not account for the floor: {api.logs[-2:]}")
 
-    print("\n5. the tab's buttons and the config change route through")
-    api4 = fresh(upd)
+
+def test_the_list_and_the_pane(upd: Any) -> None:
+    print("\n5. the list, and the pane beside it, say the same thing")
+    api = fresh(upd)
+    upd.check_now()
+    rows = rows_for(api, "list")
+    check([cells(row)[0] for row in rows] == ["1.6.1", "1.6.0", "1.5.9"],
+          f"the rows are not the versions: {[cells(row) for row in rows]}")
+    check([cells(row)[1] for row in rows]
+          == ["an update - file attached", "this copy", "older than the floor"],
+          f"a row does not say where its version stands: {[cells(row)[1] for row in rows]}")
+    check([row.get("color") for row in rows]
+          == [upd.STANCE_COLOUR["newer"], upd.STANCE_COLOUR["this"],
+              upd.STANCE_COLOUR["too old"]],
+          "the rows are not tinted by where they stand")
+
+    # The pane opens on the update, since that is what a person came for.
+    check(upd.picked == 0, f"the check did not open on the update: {upd.picked}")
+    check(str(last_set(api, "vtitle", "text")) == "berry1.6.1  \u2014  Berry 1.6.1",
+          f"the pane's title is not the tag and the release's own name: "
+          f"{last_set(api, 'vtitle', 'text')!r}")
+    meta = str(last_set(api, "vmeta", "text"))
+    check("fligma" in meta and "2026-10-12" in meta and "commit aaa1111" in meta
+          and "release asset: berry_manager-windows.exe" in meta
+          and "3 file(s) moved" in meta,
+          f"the line of facts is not the facts: {meta!r}")
+    state = str(last_set(api, "vstate", "text"))
+    check("An update is ready" in state and "berry1.6.1" in state
+          and "berry1.6.0" in state and "stay exactly where they are" in state,
+          f"the state line does not say what installing would do: {state!r}")
+    detail = str(last_set(api, "vdetail", "value"))
+    check("The store got a pane" in detail,
+          f"the release's own words did not reach the pane: {detail!r}")
+    check("The commit it was made from" in detail and "second line" in detail,
+          f"the commit under the release is not accounted for: {detail!r}")
+    files = rows_for(api, "vfiles")
+    check([cells(row)[1] for row in files]
+          == ["changed +40 -3", "added +1 -0", "removed +0 -12"],
+          f"the file list is not what GitHub compared: {[cells(row) for row in files]}")
+    check([row.get("color") for row in files]
+          == [upd.FILE_COLOUR["changed"], upd.FILE_COLOUR["added"],
+              upd.FILE_COLOUR["removed"]],
+          "the files are not tinted by what happened to them")
+
+    print("\n6. a release with no words of its own, and one with no file")
+    upd.pick_row(1)
+    check(str(last_set(api, "vtitle", "text")) == "berry1.6.0",
+          f"a release named for its own tag gained a title anyway: "
+          f"{last_set(api, 'vtitle', 'text')!r}")
+    check("Berry Manager v1.6.1 - the store pane" in str(last_set(api, "vdetail", "value")),
+          "the commit's title did not stand in for a release that wrote nothing")
+    upd.pick_row(2)
+    check("no file attached" in str(last_set(api, "vmeta", "text")),
+          f"a bare tag did not say it has nothing: {last_set(api, 'vmeta', 'text')!r}")
+    check("is older than 1.6.0" in str(last_set(api, "vstate", "text")),
+          f"the refusal did not reach the state line: {last_set(api, 'vstate', 'text')!r}")
+    check("publish the tag as a release" not in str(last_set(api, "vdetail", "value")),
+          "a version below the floor was told how to attach a file instead")
+
+    print("\n7. picking a row by what the list reported")
+    upd.on_widget(upd.TAB, "list", "selected", {"count": 1})
+    api.answer("tabs.widget_value", ["1.6.0"])
+    upd.on_widget(upd.TAB, "list", "selected", {"count": 1})
+    check(upd.picked == 1, f"a picked label did not move the pane: {upd.picked}")
+    upd.on_widget(upd.TAB, "list", "selected", {"text": "not-a-version"})
+    check(upd.picked == 1, "an unknown label moved the pane off what it was showing")
+    upd.on_widget("Other tab", "list", "selected", {"text": "1.6.1"})
+    check(upd.picked == 1, "another tab's list was read as this one's")
+    upd.on_widget(upd.TAB, "list", "clicked", {"text": "1.6.1"})
+    check(upd.picked == 1, f"a click on a row was taken as a pick: {upd.picked}")
+    upd.pick_row(99)
+    check(upd.picked == 1, "a row that does not exist moved the pane")
+
+
+def test_the_way_back(upd: Any) -> None:
+    print("\n8. going back, and the floor that says how far")
+    api = fresh(upd, version="1.6.1")
+    upd.check_now()
+    check([entry["stance"] for entry in upd.published]
+          == ["this", "older", "too old"],
+          f"against 1.6.1 the versions do not stand right: "
+          f"{[(e['version'], e['stance']) for e in upd.published]}")
+    check("newest published version" in last_status(api)
+          and "1 older one(s) can still be gone back to" in last_status(api),
+          f"an up-to-date copy was not told what it can still go back to: "
+          f"{last_status(api)!r}")
+    check(upd.picked == 0, f"with nothing ahead the pane did not open on this copy: "
+                           f"{upd.picked}")
+    values = upd.merge_config(upd.DEFAULTS, {})
+    ok, why = upd.installable(upd.published[1], values, "1.6.1", "1.6.0")
+    check(ok and why == "", f"a version at the floor was refused: {why!r}")
+    ok, why = upd.installable(upd.published[2], values, "1.6.1", "1.6.0")
+    check(not ok and "berry1.5.9 is older than 1.6.0" in why and "setting" in why,
+          f"the floor refusal did not name itself: {why!r}")
+    ok, why = upd.installable(upd.published[0], values, "1.6.1", "1.6.0")
+    check(not ok and "already running here" in why,
+          f"this copy's own version offered to replace itself: {why!r}")
+    entry = dict(upd.published[1])
+    entry["download"] = None
+    ok, why = upd.installable(entry, values, "1.6.1", "1.6.0")
+    check(not ok and "carries no download" in why,
+          f"a way back with nothing attached was installable: {why!r}")
+    upd.pick_row(1)
+    check("A way back" in str(last_set(api, "vstate", "text")),
+          f"the pane did not call a downgrade a way back: "
+          f"{last_set(api, 'vstate', 'text')!r}")
+
+    print("\n9. a moved floor moves the line, not the code")
+    api = fresh(upd, version="1.6.1", config={"min_version": "1.5.0"})
+    upd.check_now()
+    check([entry["stance"] for entry in upd.published] == ["this", "older", "older"],
+          f"a lowered floor did not let 1.5.9 back in: "
+          f"{[(e['version'], e['stance']) for e in upd.published]}")
+    check("2 older one(s)" in last_status(api),
+          f"the count of ways back did not follow the floor: {last_status(api)!r}")
+
+
+def test_the_notice(upd: Any) -> None:
+    print("\n10. the notice a check sends up on its own")
+    api = fresh(upd, version="1.6.0")
+    upd.check_now()
+    notices = [arguments for where, arguments, _n in api.calls
+               if where == "ui.popup"]
+    check(len(notices) == 1 and notices[0][0] == "Berry Manager update"
+          and "berry1.6.1 is out" in str(notices[0][1])
+          and "this copy is berry1.6.0" in str(notices[0][1])
+          and "file is attached" in str(notices[0][1]),
+          f"the version out was not announced once, in full: {notices}")
+    upd.check_now()
+    check(api.times("ui.popup") == 1,
+          f"the same version was announced twice: {api.times('ui.popup')}")
+    upd.announced.discard("1.6.1")
+    upd.check_now()
+    check(api.times("ui.popup") == 2,
+          "a version the addon had stopped holding was not announced again")
+
+    api = fresh(upd, config={"notify_found": False})
+    upd.check_now()
+    check(not api.called("ui.popup"),
+          "the notice came through with the switch off")
+
+    api = fresh(upd, version="1.6.1")
+    upd.check_now()
+    check(not api.called("ui.popup"),
+          "a copy already newest was announced anyway")
+
+
+def test_the_buttons(upd: Any) -> None:
+    print("\n11. the buttons and the config change route through")
+    api = fresh(upd)
     seen: list[str] = []
     with patched(upd, check_now=lambda c=False: seen.append("check"),
                  update_selected=lambda c=False: seen.append("update"),
@@ -330,6 +601,7 @@ def test_the_tab(upd: Any) -> None:
         upd.on_widget(upd.TAB, "page", "clicked", {})
         upd.on_widget("Other tab", "check", "clicked", {})
         upd.on_widget(upd.TAB, "check", "toggled", {})
+        upd.on_widget(upd.TAB, "nonsense", "clicked", {})
     check(seen == ["check", "update", "page"],
           f"the buttons did not route by their ids: {seen}")
     seen.clear()
@@ -339,14 +611,66 @@ def test_the_tab(upd: Any) -> None:
         upd.on_config({"addon": "something else"})
         check(seen == ["check"], "another addon's config change set this one off")
     upd.shutdown()
-    check(upd.api is None and upd.found is None and not upd.working,
-          "shutdown left the addon holding an api or a job")
+    check(upd.api is None and upd.found is None and not upd.working
+          and not upd.published and upd.picked == -1,
+          "shutdown left the addon holding an api, a job or a list")
+
+
+def test_the_schedule(upd: Any) -> None:
+    print("\n12. when it checks, and what changing that does")
+    api = fresh(upd)
+    check(upd.ticker is None, "a repeat check was set up with the switch off")
+    api = fresh(upd, config={"check_again": True, "check_minutes": 90})
+    check(upd.ticker is not None and upd.ticker.repeat
+          and abs(float(upd.ticker.seconds) - 90 * 60.0) < 0.01,
+          f"the repeat check is not on the interval asked for: {upd.ticker}")
+    check("every 90 min" in " ".join(api.logs),
+          f"the schedule was not written down: {api.logs[-2:]}")
+    upd.apply_schedule(upd.merge_config(upd.DEFAULTS,
+                                        {"check_again": True, "check_minutes": 5}))
+    check(abs(float(upd.ticker.seconds) - 5 * 60.0) < 0.01,
+          f"changing the interval left the old timer running: {upd.ticker}")
+    upd.apply_schedule(upd.merge_config(upd.DEFAULTS, {"check_again": False}))
+    check(upd.ticker is None, "switching the repeat off left a timer standing")
+    api = fresh(upd, config={"check_minutes": "not a number"})
+    upd.apply_schedule(upd.merge_config(upd.DEFAULTS,
+                                        {"check_again": True,
+                                         "check_minutes": "not a number"}))
+    check(upd.ticker is not None
+          and abs(float(upd.ticker.seconds) - upd.DEFAULTS["check_minutes"] * 60.0) < 0.01,
+          f"a nonsense interval did not fall back: {upd.ticker}")
+    upd.shutdown()
+    check(upd.ticker is None, "shutdown left the repeat check running")
+
+    print("\n13. the start-up check is the config's, not the addon's")
+    original = upd.check_now
+    fired: list[int] = []
+    upd.check_now = lambda _checked=False: fired.append(1)   # type: ignore[assignment]
+    try:
+        api = fresh(upd, config={"check_startup": True},
+                    ask=False, keep_timers=True)
+        once = [timer for timer in api.timers.handles if not timer.repeat]
+        check(upd.ticker is None, "a start-up check was put on the repeat timer")
+        check(len(once) == 1 and abs(float(once[0].seconds) - 1.0) < 0.01,
+              f"the start-up check is not queued once, a moment after the window: "
+              f"{[timer.seconds for timer in once]}")
+        for timer in once:
+            timer.callback()
+        check(fired == [1], "the queued start-up check did not reach check_now")
+        api.timers.cancel_all()
+        api = fresh(upd, config={"check_startup": False},
+                    ask=False, keep_timers=True)
+        check(not api.timers.handles,
+              "a start-up check was queued with the switch off")
+        api.timers.cancel_all()
+    finally:
+        upd.check_now = original
 
 
 # --- four: what downloaded bytes really are ---
 
 def test_the_bytes(upd: Any) -> None:
-    print("\n6. a program, a zip, and a page dressed up as one")
+    print("\n14. a program, a zip, and a page dressed up as one")
     check(not upd.looks_like_program(b"MZ tiny", "windows"),
           "a stub too small to be the program passed as one")
     check(upd.looks_like_program(PROGRAM_BYTES, "windows"),
@@ -400,7 +724,7 @@ def test_the_bytes(upd: Any) -> None:
 # --- five: the swap, in a temporary folder ---
 
 def test_the_swap(upd: Any) -> None:
-    print("\n7. the new program takes the old one's place")
+    print("\n15. the new program takes the old one's place")
     with tempfile.TemporaryDirectory() as raw:
         folder = Path(raw)
         target = folder / "berry_manager.exe"
@@ -424,27 +748,40 @@ def test_the_swap(upd: Any) -> None:
                   f"a missing staged file said the wrong thing: {error}")
 
 
-# --- six: what the buttons refuse, and the job all the way through ---
+# --- six: what Install refuses, and the job all the way through ---
 
 def test_the_job(upd: Any) -> None:
-    print("\n8. the update refuses what it has no business doing")
-    api = fresh(upd)
-    upd.found = None
+    print("\n16. Install refuses what it has no business doing")
+    api = fresh(upd, version="1.6.0")
     upd.update_selected()
-    check("press Check first" in last_status(api),
-          f"Update with nothing found did not say so: {last_status(api)!r}")
+    check("no version picked yet" in last_status(api),
+          f"Install with nothing picked did not say so: {last_status(api)!r}")
 
-    upd.found = {"tag": "berry1.6.0", "version": "1.6.0", "installed": "1.5.8",
-                 "download": None}
+    upd.check_now()
+    upd.published[2]["stance"] = "too old"
+    upd.pick_row(2)
     upd.update_selected()
-    check("no download for this system" in last_status(api),
-          f"Update with no download did not say so: {last_status(api)!r}")
+    check("older than 1.6.0" in last_status(api),
+          f"a version below the floor was not refused before the download: "
+          f"{last_status(api)!r}")
 
-    upd.found = {"tag": "berry1.6.0", "version": "1.6.0", "installed": "1.5.8",
-                 "download": ("build", "https://x/one", "release asset")}
-    upd.update_selected()               # not frozen here: the checkout refusal
+    bare = dict(upd.published[0])
+    bare["download"] = None
+    upd.published[0] = bare
+    upd.pick_row(0)
+    upd.update_selected()
+    check("carries no download" in last_status(api),
+          f"Install with no file attached did not say so: {last_status(api)!r}")
+
+    # A re-check reads the release again and puts its file back, and this copy
+    # runs from its source files, so the swap is turned away before anything
+    # is fetched.
+    upd.check_now()
+    upd.pick_row(0)
+    upd.update_selected()
     check("runs from its source files" in last_status(api),
-          f"a copy running from source was not turned away kindly: {last_status(api)!r}")
+          f"a copy running from source was not turned away kindly: "
+          f"{last_status(api)!r}")
 
     with tempfile.TemporaryDirectory() as raw:
         folder = Path(raw)
@@ -461,8 +798,10 @@ def test_the_job(upd: Any) -> None:
               f"a declined update did not say so: {last_status(api)!r}")
         check(target.read_bytes() == b"the old program",
               "a declined update still touched the program")
+        check(not upd.working and upd.found is None,
+              "a declined update left a job or a picked version standing")
 
-        print("\n9. the job: redirects, bytes, the swap, the offer to restart")
+        print("\n17. the job: redirects, bytes, the swap, the offer to restart")
         api.answer("ui.question", True)
         body = b"MZ" + b"\xAA" * 200_000
         fetcher = FakeFetcher([
@@ -471,10 +810,8 @@ def test_the_job(upd: Any) -> None:
         ])
         restarts: list[int] = []
         steps: list[Any] = []
-        upd.found = {"tag": "berry1.6.0", "version": "1.6.0", "installed": "1.5.8",
-                     "download": ("berry-windows.exe",
-                                  "https://github.example/dl/berry.exe",
-                                  "release asset")}
+        asked_before = len(api.calls)
+        tails_before = len(TAILS)
         with patched(upd, program_path=lambda: target,
                      staging_target=lambda name: stage / name,
                      system_name=lambda: "windows",
@@ -494,18 +831,68 @@ def test_the_job(upd: Any) -> None:
                   "the staged file survived the swap")
             check(not (folder / "berry_manager.exe.old").exists(),
                   "the moved-aside leftover survived the swap")
-            check(upd.found is None, "a done update still holds the tag it used")
+            check(upd.found is None, "a done update still holds the version it used")
             status = last_status(api)
             check("is in place" in status and "not touched" in status,
                   f"the finish line does not account for the config: {status!r}")
             check(restarts == [1],
-                  f"the finished update did not offer a restart through the app: {restarts}")
+                  f"the finished update did not offer a restart through the app: "
+                  f"{restarts}")
+            # The list is re-placed against the version that just landed, and
+            # that re-place must not read GitHub again.
+            check([entry["stance"] for entry in upd.published]
+                  == ["this", "older", "too old"],
+                  f"the list was not re-placed after the update: "
+                  f"{[(e['version'], e['stance']) for e in upd.published]}")
+            check(len([1 for where, arguments, _n in api.calls[asked_before:]
+                       if where == "config.stored"]) >= 1
+                  and not any(tail.startswith("tags")
+                              for tail in TAILS[tails_before:]),
+                  f"the list read the versions again after installing one: "
+                  f"{TAILS[tails_before:]}")
 
-        print("\n10. a page on the wire stops the update without touching anything")
+        print("\n18. going back asks the plainer question and says it backwards")
         target.write_bytes(b"the old program")
+        api2 = fresh(upd, version="1.6.1")
+        api2.answer("ui.question", True)
+        upd.check_now()
+        upd.pick_row(1)
+        body2 = b"MZ" + b"\xBB" * 200_000
+        restarts2: list[int] = []
+        with patched(upd, program_path=lambda: target,
+                     staging_target=lambda name: stage / name,
+                     system_name=lambda: "windows",
+                     _http=lambda values: FakeFetcher(
+                         [FakeResp(200, body2, {"Content-Length": str(len(body2))})]),
+                     _later=lambda seconds, callback: callback(),
+                     restart_app=lambda: restarts2.append(1)):
+            upd.update_selected()
+        asked = [arguments for where, arguments, _n in api2.calls
+                 if where == "ui.question"]
+        check(any(row[0] == "Go back to this version?"
+                  and "older program" in str(row[1]) for row in asked),
+              f"a downgrade asked the update's question: {asked}")
+        check(asked and asked[-1][0] == "Restart Berry Manager?"
+              and "Go back to it now?" in str(asked[-1][1]),
+              f"the finished downgrade did not ask to start the older copy: "
+              f"{asked[-1]}")
+        check("berry1.6.0 is in place" in last_status(api2)
+              and "were not touched" in last_status(api2),
+              f"a downgrade did not say which older copy had landed: "
+              f"{last_status(api2)!r}")
+        check(target.read_bytes() == body2,
+              "a downgrade did not land where the newer program ran")
+        check([entry["stance"] for entry in upd.published][1] == "this",
+              f"the list still calls the downgraded-to version a way back: "
+              f"{[(e['version'], e['stance']) for e in upd.published]}")
+        check(restarts2 == [1], "the downgrade did not offer to start the older copy")
+
+        print("\n19. a page on the wire stops the update without touching anything")
+        target.write_bytes(b"the old program")
+        api3 = fresh(upd, version="1.6.0")
+        upd.check_now()
+        upd.pick_row(0)
         page = b"<!doctype html>\n<html>" + b" " * 200_000
-        upd.found = {"tag": "berry1.6.0", "version": "1.6.0", "installed": "1.5.8",
-                     "download": ("art", "https://x/artifact", "release asset")}
         with patched(upd, program_path=lambda: target,
                      staging_target=lambda name: stage / name,
                      system_name=lambda: "windows",
@@ -513,18 +900,19 @@ def test_the_job(upd: Any) -> None:
                      _later=lambda seconds, callback: callback(),
                      restart_app=lambda: None):
             upd.update_selected()      # _later immediate runs the whole walk at once
-        check("the update stopped" in last_status(api),
-              f"an artifact page did not stop the update: {last_status(api)!r}")
-        check("sign-in" in last_status(api),
-              f"the refusal did not name the sign-in problem: {last_status(api)!r}")
+        check("the update stopped" in last_status(api3),
+              f"an artifact page did not stop the update: {last_status(api3)!r}")
+        check("sign-in" in last_status(api3),
+              f"the refusal did not name the sign-in problem: {last_status(api3)!r}")
         check(target.read_bytes() == b"the old program",
               "a refused download still replaced the program")
         check(not upd.working and upd.job is None and upd.found is not None,
               "the stopped job left the addon in a state the user cannot retry from")
 
-        print("\n11. a short body is an early stop, not a program")
-        upd.found = {"tag": "berry1.6.0", "version": "1.6.0", "installed": "1.5.8",
-                     "download": ("x", "https://x/one", "release asset")}
+        print("\n20. a short body is an early stop, not a program")
+        api4 = fresh(upd, version="1.6.0")
+        upd.check_now()
+        upd.pick_row(0)
         short = b"MZ" + b"\x00" * 500
         with patched(upd, program_path=lambda: target,
                      staging_target=lambda name: stage / name,
@@ -534,8 +922,28 @@ def test_the_job(upd: Any) -> None:
                      _later=lambda seconds, callback: callback(),
                      restart_app=lambda: None):
             upd.update_selected()
-        check("stopped early" in last_status(api),
-              f"a body shorter than promised passed as a program: {last_status(api)!r}")
+        check("stopped early" in last_status(api4),
+              f"a body shorter than promised passed as a program: "
+              f"{last_status(api4)!r}")
+
+        print("\n21. a redirect that never ends is given up on")
+        api5 = fresh(upd, version="1.6.0")
+        upd.check_now()
+        upd.pick_row(0)
+        hops = [FakeResp(302, b"", {"Location": f"https://x/{n}"})
+                for n in range(upd.MAX_REDIRECTS + 2)]
+        with patched(upd, program_path=lambda: target,
+                     staging_target=lambda name: stage / name,
+                     system_name=lambda: "windows",
+                     _http=lambda values: FakeFetcher(hops),
+                     _later=lambda seconds, callback: callback(),
+                     restart_app=lambda: None):
+            upd.update_selected()
+        check("pointed somewhere else" in last_status(api5),
+              f"a download that kept being redirected was not given up on: "
+              f"{last_status(api5)!r}")
+        check(target.read_bytes() == b"the old program",
+              "a given-up download still touched the program")
 
     upd.found = None
     upd.working = False
@@ -561,6 +969,11 @@ def main() -> int:
     test_the_helpers(upd)
     test_the_release(upd)
     test_the_tab(upd)
+    test_the_list_and_the_pane(upd)
+    test_the_way_back(upd)
+    test_the_notice(upd)
+    test_the_buttons(upd)
+    test_the_schedule(upd)
     test_the_bytes(upd)
     test_the_swap(upd)
     test_the_job(upd)

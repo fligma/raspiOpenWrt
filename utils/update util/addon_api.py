@@ -65,16 +65,28 @@ The namespaces on ``api``
     it opens a connection of its own, so it needs the same declaration.
 
 ``api.tabs``
-    ``add_web_tab(name, url=None, ip="", port=80, path="/", scheme="http")``
-    embeds a browser tab that belongs to no profile: it is not stored in the
-    settings and never shows up in Settings > Custom tabs.
-    ``add_tab(name, widget=None, spec=None)`` adds a tab holding any QWidget
-    (Python) or a widget built from a declarative spec (see SPEC FORMAT).
+    ``add_web_tab(name, url="", ip="", port=0, path="", scheme="",
+    position=None, pinned=False, icon_only=False)`` embeds a browser tab that
+    belongs to no profile: it is not stored in the settings and never shows up in
+    Settings > Custom tabs.
+    ``add_tab(name, widget=None, spec=None, style="", position=None,
+    pinned=False, icon_only=False)`` adds a tab holding any QWidget (Python) or a
+    widget built from a declarative spec (see SPEC FORMAT). With ``position`` left
+    out the tab goes immediately left of the leftmost movable tab this addon
+    already owns - a helper or a report sits beside the tab that opened it, not at
+    the far end of the bar - and an addon with nothing open starts at the end of
+    the movable row. ``pinned=True`` holds the tab in the run at the right edge,
+    beside Settings: not draggable, not part of the saved order, keeping its place
+    while the tabs around it come and go. ``icon_only=True`` draws it as its mark
+    with no caption (the name still addresses it and is its tooltip); both apply to
+    a web tab as well, and ``set_pinned(name, pinned=True, icon_only=None)``
+    changes either afterwards - ``pinned=False`` lets the tab back into the row
+    with its caption restored.
     ``set_html``, ``inject_css``, ``inject_js``, ``set_style``, ``view``,
     ``widget``, ``set_widget``, ``widget_value``, ``activate``, ``close``,
-    ``names``, ``exists``, ``set_icon`` (a mark beside the tab's label, the way
-    a page's favicon sits beside its title), ``use_app_icon`` (wear the logo the
-    program uses and keep following it when it is switched).
+    ``rename``, ``names``, ``exists``, ``set_icon`` (a mark beside the tab's label,
+    the way a page's favicon sits beside its title), ``use_app_icon`` (wear the logo
+    the program uses and keep following it when it is switched).
 
 ``api.ui``
     ``information/warning/error(title, text)``, ``question(title, text)`` ->
@@ -98,6 +110,18 @@ The namespaces on ``api``
     This addon's own persisted dict: ``get``, ``set``, ``update``, ``pop``,
     ``all``, ``remove``. Stored in config.json under ``addons -> <id> ->
     settings``, so it travels with the profile like every other setting.
+
+``api.settings_pages``
+    A page of the app's own Settings window that this addon owns, standing with
+    the program's categories and outside the shared **Installed addons** page:
+    ``add(name, title="", widget=None, spec=None, style="")`` (re-adding a name
+    replaces that page rather than stacking a second), ``remove``, ``names``,
+    ``exists``, ``title``, ``set_title``, ``activate``, ``widget``,
+    ``set_widget``, ``widget_value``. The spec is the same language as a tab's and
+    its controls report to the addon's ``on_widget`` with the page's name where a
+    tab's would be; the page is the app's furniture and goes away by itself when
+    the addon is switched off or removed. ``set_icon`` answers False - a Settings
+    page wears no mark of its own.
 
 ``api.config``
     The addon's own settings *file*: ``addons/_data/<id>/config.json``, in the
@@ -134,15 +158,23 @@ between the sub-pages with ``set_widget(tab, id, "current", n)`` and read the
 visible one back with ``widget_value(tab, id, "index")``).
 ``label``, ``button``, ``line``, ``multi`` (plain text edit), ``check``,
 ``combo``, ``list``, ``tree``, ``table``, ``progress``, ``spin``, ``slider``,
-``spacer``, ``web`` - all take ``id``, ``text``, ``tooltip``, ``style``
-(a stylesheet, so an addon can style its own tab), ``enabled``, ``visible``,
-``font_size`` (drawn at the interface zoom), ``items``, ``value``,
+``spacer``, ``image``, ``web`` - all take ``id``, ``text``, ``tooltip``,
+``style`` (a stylesheet, so an addon can style its own tab), ``enabled``,
+``visible``, ``font_size`` (drawn at the interface zoom), ``items``, ``value``,
 ``placeholder``, ``checked``, ``minimum``,
 ``maximum``, ``columns``, ``word_wrap``, ``readonly``, ``multi``, ``expand``
 (claim the width its row or column leaves over, so one status line can stretch
 while its neighbours keep the room their text needs).
-``value`` sets whatever the kind holds: text, the chosen entry, the number, or
-the tick for a ``check``; ``widget_value`` reads it back the same way.
+``value`` sets whatever the kind holds: text, the chosen entry, the number, the
+tick for a ``check``, or the picture for an ``image``; ``widget_value`` reads it
+back the same way.
+An ``image`` is a picture of its own: ``size`` is the most it may measure in
+either direction (at the interface zoom), and its ``value``, or
+``set_widget(..., "image", ...)``, is an image file's path or an SVG document as
+text - the same two shapes a tab's ``set_icon`` takes. Nothing there is an error:
+the leaf goes blank rather than showing a path to the user.
+A ``list`` entry may be a bare string or ``{"text": ..., "icon": ...}``, so one
+row can wear a mark of its own.
 A ``multi`` may name a ``highlight`` language (``python``, ``json``, ``html``,
 ``css``, ``javascript``, ``ini``) for syntax colors; change it later with
 ``set_widget(tab, id, "highlight", lang)``.
@@ -150,10 +182,11 @@ A ``multi`` may name a ``highlight`` language (``python``, ``json``, ``html``,
 ``changed``, ``returned``, ``selected`` and, for a ``table``/``tree``/``list``,
 ``context`` (a right-click, carrying the text of the row under the cursor).
 ``rows`` on a ``table``/``tree`` takes a list of cell lists, or of dicts:
-``{"cells": [...], "color": "#rrggbb", "background": "...", "overlay": "..."}``
-- the colours ride along with the row, so one line can wear the colour of its
-own device, and an overlay (a search highlight) can wash over it without
-hiding it. A table paints its rows through its own delegate: the app sheet
+``{"cells": [...], "color": "#rrggbb", "background": "...", "overlay": "...",
+"icon": "..."}`` - the colours ride along with the row, so one line can wear the
+colour of its own device, and an overlay (a search highlight) can wash over it
+without hiding it. ``icon`` puts the addon's own picture in front of the first
+cell. A table paints its rows through its own delegate: the app sheet
 names ``::item`` colours, and a stylesheet colour would otherwise win over
 every per-item brush and drop all of this on the floor.
 """
@@ -173,6 +206,7 @@ from typing import Any, Callable
 from PyQt6.QtCore import (
     QEventLoop,
     QModelIndex,
+    QSize,
     Qt,
     QTimer,
     QUrl,
@@ -205,6 +239,7 @@ from PyQt6.QtWidgets import (
     QLayout,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
@@ -344,13 +379,24 @@ class _RowStyleDelegate(QStyledItemDelegate):
                 painter.setBrush(brush)
                 painter.drawRect(rect)
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        box = rect.adjusted(zoom_size(4), 0, -zoom_size(4), 0)
+        mark = index.data(Qt.ItemDataRole.DecorationRole)
+        if mark is not None:
+            # A row wearing an icon of its own: the picture keeps its shape and
+            # the row's height, and the text starts after it.
+            side = max(zoom_size(14), rect.height() - zoom_size(6))
+            got = mark.pixmap(QSize(side, side)) if isinstance(mark, QIcon) else None
+            if got is not None and not got.isNull():
+                painter.drawPixmap(
+                    rect.left() + zoom_size(4),
+                    rect.center().y() - got.height() // 2, got)
+                box = box.adjusted(got.width() + zoom_size(6), 0, 0, 0)
         if text:
             fore = index.data(Qt.ItemDataRole.ForegroundRole)
             colour = (fore.color() if isinstance(fore, QBrush)
                       else _ROW_TEXT_SELECTED if selected else _ROW_TEXT)
             painter.setPen(colour)
             painter.setFont(option.font)
-            box = rect.adjusted(zoom_size(4), 0, -zoom_size(4), 0)
             elided = painter.fontMetrics().elidedText(
                 text, Qt.TextElideMode.ElideRight, box.width())
             painter.drawText(
@@ -374,6 +420,57 @@ def _swatch_icon(colour: QColor) -> QIcon:
     painter.end()
     icon = QIcon(canvas)
     return icon
+
+
+def load_picture(source: Any) -> QPixmap | None:
+    """A picture out of an SVG document (as text) or an image file at a path;
+    nothing readable is ``None``, so a missing file leaves a blank, not a
+    traceback."""
+    from PyQt6.QtCore import QByteArray
+
+    text = str("" if source is None else source).strip()
+    if not text:
+        return None
+    if text.startswith(("<svg", "<?xml")):
+        image = QPixmap()
+        if not image.loadFromData(QByteArray(text.encode("utf-8")), "SVG"):
+            return None
+        return None if image.isNull() else image
+    path = Path(text)
+    if not path.is_file():
+        return None
+    image = QPixmap(str(path))
+    return None if image.isNull() else image
+
+
+def widget_pixmap(source: Any, side: int) -> QPixmap | None:
+    """A picture sized to fit inside `side` pixels, its shape kept; a picture
+    already small enough is drawn as it is."""
+    image = load_picture(source)
+    if image is None:
+        return None
+    wanted = max(1, int(side))
+    if image.width() > wanted or image.height() > wanted:
+        image = image.scaled(wanted, wanted, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+    return None if image.isNull() else image
+
+
+def set_widget_picture(widget: QLabel, source: Any) -> None:
+    """Draw, or clear, the picture an ``image`` leaf holds.
+
+    An empty source takes the picture away and lets the placeholder text, if
+    the addon set one, show again.
+    """
+    side = int(getattr(widget, "_addon_picture_side", 0) or 0)
+    if not side:
+        image = load_picture(source)
+    else:
+        image = widget_pixmap(source, side)
+    if image is None:
+        widget.clear()
+        return
+    widget.setPixmap(image)
 
 
 def build_spec(spec: dict, registry: dict[str, QWidget] | None = None,
@@ -409,8 +506,7 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
         widget.setChecked(bool(spec["checked"]))
     # Fill a combo or list first so "value" can pick from it.
     if spec.get("items") is not None and hasattr(widget, "addItems"):
-        widget.clear()
-        widget.addItems([str(item) for item in (spec["items"] or [])])
+        apply_widget_property(widget, "items", spec["items"])
     if spec.get("value") is not None:
         apply_widget_property(widget, "value", spec["value"])
     if spec.get("tooltip") is not None:
@@ -744,6 +840,20 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         return label
     if kind == "button":
         return QPushButton()
+    if kind == "image":
+        # A picture of its own - an addon's mark, a store item's icon - named by
+        # a file path or drawn from an SVG document. "size" is the widest (or
+        # tallest) it is allowed to be, so a badge and a banner are the same
+        # kind; the size is taken at the interface zoom, like everything else.
+        view = QLabel()
+        view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        try:
+            side = int(spec.get("size", 48))
+        except (TypeError, ValueError):
+            side = 48
+        view._addon_picture_side = max(8, zoom_size(side))
+        view.setText("")
+        return view
     if kind == "line":
         return QLineEdit()
     if kind == "color":
@@ -912,7 +1022,10 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
         widget.setChecked(bool(value))
     elif prop == "value":
         # "value" is the state of the control, whatever kind it is.
-        if isinstance(widget, QCheckBox):
+        if getattr(widget, "_addon_picture_side", None) is not None:
+            # An ``image`` leaf's value is the picture itself.
+            set_widget_picture(widget, value)
+        elif isinstance(widget, QCheckBox):
             widget.setChecked(bool(value))
         elif isinstance(widget, (QSpinBox, QSlider, QProgressBar)):
             widget.setValue(int(value or 0))
@@ -939,19 +1052,35 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
         elif hasattr(widget, "setText"):
             widget.setText(text)
     elif prop == "items":
-        items = [str(item) for item in (value or [])]
+        raw = list(value or [])
+        names = [str(entry.get("text", "") if isinstance(entry, dict) else entry)
+                 for entry in raw]
         if hasattr(widget, "setHeaderLabels"):
-            widget.setHeaderLabels(items)
+            widget.setHeaderLabels(names)
+        elif isinstance(widget, QListWidget):
+            # A list entry may wear a mark of its own: naming it in a dict
+            # ({"text": ..., "icon": ...}) puts the picture before the words.
+            widget.clear()
+            for entry, name in zip(raw, names):
+                item = QListWidgetItem(name)
+                mark = entry.get("icon") if isinstance(entry, dict) else None
+                icon = build_icon(mark) if mark else None
+                if icon is not None:
+                    item.setIcon(icon)
+                widget.addItem(item)
         elif hasattr(widget, "clear") and hasattr(widget, "addItems"):
             # A combo keeps its choice; a list widget has no currentText.
             current = widget.currentText() if hasattr(widget, "currentText") else None
             widget.clear()
-            widget.addItems(items)
-            if current is not None and current in items:
+            widget.addItems(names)
+            if current is not None and current in names:
                 widget.setCurrentText(current)
         elif hasattr(widget, "clear"):
             widget.clear()
-            widget.addItems(items)
+            widget.addItems(names)
+    elif prop == "image":
+        if isinstance(widget, QLabel):
+            set_widget_picture(widget, value)
     elif prop in ("current", "index"):
         # Which page a ``tabs`` container shows, or a list's picked row.
         if hasattr(widget, "setCurrentRow"):
@@ -962,15 +1091,19 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
         if hasattr(widget, "clear"):
             widget.clear()
         for row in value or []:
-            # A row is a list of cells, or a dict carrying colours:
+            # A row is a list of cells, or a dict carrying colours and a mark:
             # ``{"cells": [...], "color": "#rrggbb", "background": "...",
-            #   "overlay": "..."}`` - painted by the table's delegate.
+            #   "overlay": "...", "icon": "<path or svg>"}`` - painted by the
+            # table's delegate. The icon rides in front of the first cell, which
+            # is what lets a list of addons show each one's own picture.
             cells, fore, back, over = row, None, None, None
+            mark = None
             if isinstance(row, dict):
                 cells = row.get("cells", row.get("row", ""))
                 fore = row.get("color", row.get("foreground"))
                 back = row.get("background", row.get("bg"))
                 over = row.get("overlay", row.get("highlight"))
+                mark = row.get("icon")
             cells = cells if isinstance(cells, (list, tuple)) else [cells]
             item = QTreeWidgetItem([str(cell) for cell in cells])
             for column, cell in enumerate(cells):
@@ -992,6 +1125,10 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
                     brush = QBrush(tint)
                     for column in range(len(cells)):
                         item.setData(column, ROW_OVERLAY_ROLE, brush)
+            if mark:
+                icon = build_icon(mark)
+                if icon is not None:
+                    item.setIcon(0, icon)
             widget.addTopLevelItem(item)
     elif prop == "clear":
         if hasattr(widget, "clear"):
@@ -1073,6 +1210,8 @@ class SessionAPI:
         return jsonable(cfg)
 
     def status(self) -> dict:
+        """What the app looks like from the inside now: profile, host, ports,
+        and which connections stand up."""
         shell = self._win.shell_worker
         shared = getattr(self._win, "shared_conn", None)
         live = bool(shared.active()) if shared is not None else False
@@ -1178,11 +1317,15 @@ class Connection:
         self._gate = gate
 
     def run(self, command: str, timeout: int = 30) -> dict:
+        """One command over this connection, in the same ``{"code", "out", "err"}``
+        shape as :meth:`DeviceAPI.run`."""
         if self._gate is not None:
             self._gate("ssh")
         return exec_remote(self.client, command, timeout)
 
     def remote(self, path: str = "", outside_root: bool = False) -> str:
+        """A path as the device sees it: joined to this connection's remote root
+        unless ``outside_root``."""
         return resolve_remote(self.remote_root, path, outside_root)
 
 
@@ -1631,6 +1774,7 @@ class DeviceAPI:
         return self._sftp("list", work)
 
     def exists(self, path: str, outside_root: bool = False) -> bool:
+        """Whether something on the device answers to this path."""
         def work(client: Any, sftp: Any, root: str) -> Any:
             try:
                 sftp.stat(resolve_remote(root, path, outside_root))
@@ -1641,6 +1785,8 @@ class DeviceAPI:
         return self._sftp("stat", work)
 
     def stat(self, path: str, outside_root: bool = False) -> dict | None:
+        """``{size, mtime, mode, directory}`` for a device path, ``None`` when it
+        is not there."""
         def work(client: Any, sftp: Any, root: str) -> Any:
             try:
                 info = sftp.stat(resolve_remote(root, path, outside_root))
@@ -1656,6 +1802,7 @@ class DeviceAPI:
         return self._sftp("stat", work)
 
     def read_bytes(self, path: str, outside_root: bool = False) -> bytes:
+        """A whole file off the device, as bytes."""
         def work(client: Any, sftp: Any, root: str) -> Any:
             with sftp.open(resolve_remote(root, path, outside_root), "rb") as handle:
                 return handle.read()
@@ -1664,10 +1811,14 @@ class DeviceAPI:
 
     def read_text(self, path: str, encoding: str = "utf-8",
                   outside_root: bool = False) -> str:
+        """A device file as text; bytes the encoding cannot read are replaced
+        rather than raised on."""
         return self.read_bytes(path, outside_root).decode(encoding, errors="replace")
 
     def write_bytes(self, path: str, payload: bytes, mkdir: bool = True,
                     outside_root: bool = False) -> int:
+        """Replace a file on the device with these bytes, making the folders above
+        it when ``mkdir``; returns how many were written."""
         data = bytes(payload)
 
         def work(client: Any, sftp: Any, root: str) -> Any:
@@ -1682,9 +1833,12 @@ class DeviceAPI:
 
     def write_text(self, path: str, text: Any, encoding: str = "utf-8", mkdir: bool = True,
                    outside_root: bool = False) -> int:
+        """``write_bytes`` with the text encoded first."""
         return self.write_bytes(path, str(text).encode(encoding), mkdir, outside_root)
 
     def append_text(self, path: str, text: Any, outside_root: bool = False) -> int:
+        """Add one line to the end of a device file, making the file when it is
+        not there; returns the bytes it now holds."""
         def work(client: Any, sftp: Any, root: str) -> Any:
             target = resolve_remote(root, path, outside_root)
             _make_dirs(sftp, posixpath.dirname(target))
@@ -1702,6 +1856,8 @@ class DeviceAPI:
         return self._sftp("append", work)
 
     def mkdir(self, path: str) -> str:
+        """A folder on the device with every parent above it; returns the whole
+        remote path."""
         def work(client: Any, sftp: Any, root: str) -> Any:
             target = resolve_remote(root, path, outside_root=True)
             _make_dirs(sftp, target)
@@ -1711,6 +1867,8 @@ class DeviceAPI:
 
     def remove(self, path: str, recursive: bool = False,
                outside_root: bool = False) -> bool:
+        """Take a file off the device, or a folder whole when ``recursive``; the
+        remote root itself is never touched."""
         def work(client: Any, sftp: Any, root: str) -> Any:
             target = resolve_remote(root, path, outside_root)
             if target.rstrip("/") == (root.rstrip("/") or "/"):
@@ -1727,6 +1885,7 @@ class DeviceAPI:
         return self._sftp("remove", work)
 
     def rename(self, path: str, new_path: str, outside_root: bool = False) -> str:
+        """Move or rename something on the device; returns where it is now."""
         def work(client: Any, sftp: Any, root: str) -> Any:
             source = resolve_remote(root, path, outside_root)
             target = resolve_remote(root, new_path, outside_root)
@@ -1736,6 +1895,8 @@ class DeviceAPI:
         return self._sftp("rename", work)
 
     def upload(self, local: Any, remote_path: str, outside_root: bool = False) -> str:
+        """Send a local file to the device, into ``remote_path`` or the remote
+        root when it is empty; returns the path it was written to."""
         source = Path(str(local)).expanduser()
         if not source.is_file():
             raise AddonError(f"no such local file: {source}")
@@ -1750,6 +1911,8 @@ class DeviceAPI:
 
     def download(self, remote_path: str, local: Any = None,
                  outside_root: bool = False) -> str:
+        """Copy a device file locally, under ``local`` or its own name; returns
+        the file that was made."""
         target = Path(str(local or Path(str(remote_path)).name)).expanduser()
 
         def work(client: Any, sftp: Any, root: str) -> Any:
@@ -1791,15 +1954,19 @@ class UIAPI:
         return self._api.win
 
     def information(self, title: str, text: str) -> None:
+        """An information box, with this addon's name on its title."""
         QMessageBox.information(self._win, self._titled(title), str(text))
 
     def warning(self, title: str, text: str) -> None:
+        """A warning box, with this addon's name on its title."""
         QMessageBox.warning(self._win, self._titled(title), str(text))
 
     def error(self, title: str, text: str) -> None:
+        """A critical error box; worth an :meth:`AddonAPI.error` in the log too."""
         QMessageBox.critical(self._win, self._titled(title), str(text))
 
     def question(self, title: str, text: str, default: bool = False) -> bool:
+        """Yes or no, with ``default`` saying which button answers to Enter."""
         button = QMessageBox.StandardButton.Yes if default else QMessageBox.StandardButton.No
         answer = QMessageBox.question(
             self._win, self._titled(title), str(text),
@@ -1808,6 +1975,8 @@ class UIAPI:
         return answer == QMessageBox.StandardButton.Yes
 
     def input(self, title: str, label: str, default: str = "", secret: bool = False) -> str | None:
+        """One line of text, ``None`` when the box was cancelled; ``secret`` hides
+        what is typed."""
         from PyQt6.QtWidgets import QInputDialog
 
         mode = QLineEdit.EchoMode.Password if secret else QLineEdit.EchoMode.Normal
@@ -1844,10 +2013,26 @@ class UIAPI:
         return colour.name() if colour.isValid() else ""
 
     def popup(self, title: str, text: str) -> None:
-        """A tray-style notice: the status line plus the log."""
-        self._win.statusBar().showMessage(str(text), 6000)
+        """A notice for the user, named for the addon raising it: a toast from the
+        app's tray icon when it has one and notifications are allowed, and the
+        status line either way.
+
+        Use it for something worth interrupting a person for - an update found,
+        a job that finished, a device that came back - not for progress, which
+        is what ``notify`` and the tab's own status label are for.
+        """
+        head = self._titled(title)
+        say = getattr(self._win, "notify_popup", None)
+        if callable(say):
+            try:
+                say(head, str(text or ""))
+                return
+            except Exception:                # an app that cannot toast still hears
+                pass
+        self._win.statusBar().showMessage(f"{head}: {text}", 6000)
 
     def notify(self, text: str, ms: int = 5000) -> None:
+        """A message in the status line that goes away by itself after ``ms``."""
         self._win.statusBar().showMessage(str(text), max(500, int(ms)))
 
     def window(self) -> QWidget:
@@ -1869,6 +2054,8 @@ class UIAPI:
         return action
 
     def remove_menu_item(self, action: QAction) -> None:
+        """Take away an entry added with :meth:`menu_item`, given the QAction it
+        handed back."""
         for stored_menu, stored in list(self._api._addon.actions):
             if stored is action:
                 stored_menu.removeAction(action)
@@ -1937,25 +2124,20 @@ def app_icon_path(win: Any) -> str:
 
 def build_icon(source: Any, home: Path | None = None) -> QIcon | None:
     """A tab's mark out of an SVG document (as text) or a picture file (absolute, or beside the addon's folder); anything unreadable returns None."""
-    from PyQt6.QtCore import QByteArray
-
     text = str("" if source is None else source).strip()
     if not text:
         return None
-    if text.startswith(("<svg", "<?xml")):
-        image = QPixmap()
-        if not image.loadFromData(QByteArray(text.encode("utf-8")), "SVG"):
-            return None
-        image = image.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
-                             Qt.TransformationMode.SmoothTransformation)
-        return None if image.isNull() else QIcon(image)
-    path = Path(text)
-    if not path.is_absolute() and home is not None:
-        path = Path(home) / text
-    if not path.is_file():
+    if not text.startswith(("<svg", "<?xml")):
+        path = Path(text)
+        if not path.is_absolute() and home is not None:
+            path = Path(home) / text
+        text = str(path)
+    image = load_picture(text)
+    if image is None:
         return None
-    icon = QIcon(str(path))
-    return None if icon.isNull() else icon
+    image = image.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    return None if image.isNull() else QIcon(image)
 
 
 class TabsAPI:
@@ -1986,19 +2168,45 @@ class TabsAPI:
         return index if index >= 0 else self._win.tabs.count()
 
     def _index(self, position: Any) -> int:
-        """Where to put a new tab: before Settings, unless the addon says otherwise."""
+        """Where to put a new tab: beside the tabs this addon already owns,
+        unless the addon says otherwise."""
         if position is None:
-            return self._before_settings()
+            return self._child_position()
         return max(0, min(int(position), self._win.tabs.count()))
 
+    def _child_position(self) -> int:
+        """The spot for a tab this addon is opening now.
+
+        A tab an addon opens on top of its own work - a report, a page, a helper -
+        belongs next to the tab that spawned it, not at the far end of the bar
+        where the user has to go looking for it. So: the place immediately left
+        of this addon's own leftmost tab. An addon whose tab is pinned beside
+        Settings has no movable tab to sit beside, and an addon with no tab yet
+        has none either; both fall back to the end of the reorderable row.
+        """
+        bar = self._win.tabs.tabBar()
+        pinned = getattr(bar, "is_pinned", None)
+        indices = sorted(self._win.tabs.indexOf(entry.get("page"))
+                         for entry in self._store.values())
+        for index in indices:
+            if index < 0:
+                continue
+            if callable(pinned) and pinned(index):
+                continue
+            return index
+        return self._before_settings()
+
     def names(self) -> list[str]:
+        """The tabs this addon has open, under the names it gave them."""
         return list(self._store)
 
     def exists(self, name: str) -> bool:
+        """Whether this addon holds a tab under that name."""
         return str(name) in self._store
 
     def add_web_tab(self, name: str, url: str = "", ip: str = "", port: int = 0,
-                    path: str = "", scheme: str = "", position: int | None = None) -> str:
+                    path: str = "", scheme: str = "", position: int | None = None,
+                    pinned: bool = False, icon_only: bool = False) -> str:
         """An embedded page belonging to no profile: not stored, not rebuilt; give either a full url or ip/port/path/scheme. The tab wears an X, and closing it by hand simply takes it away."""
         name = str(name).strip()
         if not name:
@@ -2014,6 +2222,8 @@ class TabsAPI:
             "page": entry["page"], "url_input": entry["url_input"],
             "view": entry["view"], "tab": tab, "web": True, "registry": {},
         }
+        if pinned or icon_only:
+            self.set_pinned(name, pinned, icon_only=icon_only)
         self._api.log(f"opened web tab '{name}' -> {entry['url_input'].text()}")
         return name
 
@@ -2025,8 +2235,15 @@ class TabsAPI:
                 self._store.pop(name)
 
     def add_tab(self, name: str, widget: QWidget | None = None, spec: dict | None = None,
-                style: str = "", position: int | None = None) -> str:
-        """A custom tab: any QWidget, or one built from a spec dict; the new tab does not steal the view, use activate to show it."""
+                style: str = "", position: int | None = None,
+                pinned: bool = False, icon_only: bool = False) -> str:
+        """A custom tab: any QWidget, or one built from a spec dict; the new tab does not steal the view, use activate to show it.
+
+        ``pinned`` holds the tab in the block at the right edge of the bar, beside
+        Settings, out of the row of tabs the user drags about; ``icon_only``
+        shows it as a mark with no caption (it still answers to its name, and the
+        name is its tooltip). Either one asked for on a web tab works there too.
+        """
         name = str(name).strip()
         if not name:
             raise AddonError("a tab needs a name")
@@ -2045,11 +2262,68 @@ class TabsAPI:
             "page": widget, "url_input": None, "view": widget if _is_web_view(widget) else None,
             "tab": {"name": name}, "web": False, "registry": registry,
         }
+        if pinned or icon_only:
+            self.set_pinned(name, pinned, icon_only=icon_only)
         self._refresh_tab_dots()
         self._api.log(f"opened tab '{name}'")
         return name
 
+    def set_pinned(self, name: str, pinned: bool = True,
+                   icon_only: bool | None = None) -> bool:
+        """Hold one of this addon's tabs beside Settings, or let it back into the row.
+
+        A pinned tab is window furniture: the user cannot drag it into the
+        reorderable run, it keeps its place while other tabs come and go, and it
+        is left out of the saved tab order. ``icon_only`` draws it as a mark with
+        no caption - the name still identifies it, and the tooltip shows it - and
+        only a pinned tab may keep a blank caption, because the bar puts a
+        movable tab's name back the moment it re-measures.
+        """
+        entry = self._store.get(str(name))
+        if entry is None:
+            raise AddonError(f"no addon tab called {name!r}")
+        page = entry["page"]
+        show = bool(icon_only) if icon_only is not None else bool(entry.get("icon_only"))
+        if not pinned:
+            unpin = getattr(self._win, "unpin_tab", None)
+            if callable(unpin):
+                unpin(page)
+            entry.pop("pinned", None)
+            entry.pop("icon_only", None)
+            self._refit()
+            self._refresh_tab_dots()
+            return True
+        if not callable(getattr(self._win, "pin_tab", None)):
+            return False
+        mark = self._icon_mark(str(name))
+        placed = self._win.pin_tab(page, str(name), icon_only=show)
+        if placed:
+            entry["pinned"] = True
+            entry["icon_only"] = show
+            if mark is not None:
+                # Pinning blanks the caption and re-measures the row; the mark the
+                # addon chose has to be put back on the tab in its new place.
+                index = self._win.tabs.indexOf(page)
+                if index >= 0:
+                    self._win.tabs.setTabIcon(index, mark)
+        self._refit()
+        self._refresh_tab_dots()
+        return bool(placed)
+
+    def _icon_mark(self, name: str) -> Any:
+        """The picture this tab was given, if it still has one."""
+        entry = self._store.get(str(name)) or {}
+        wanted = entry.get("icon_mark")
+        return build_icon(wanted, self._api._addon.home) if wanted else None
+
+    def _refit(self) -> None:
+        """Let the bar re-measure the row after a tab joined or left the pinned block."""
+        bar = self._win.tabs.tabBar() if hasattr(self._win.tabs, "tabBar") else None
+        if bar is not None and hasattr(bar, "refit"):
+            bar.refit()
+
     def close(self, name: str) -> bool:
+        """Close one of this addon's tabs; ``True`` when it had it."""
         entry = self._store.pop(str(name), None)
         if entry is None:
             return False
@@ -2071,14 +2345,25 @@ class TabsAPI:
                 pass
 
     def rename(self, name: str, new_name: str) -> bool:
+        """Change what the tab's caption says; afterwards the tab is addressed by
+        the new name."""
         entry = self._store.get(str(name))
         if entry is None:
             return False
-        self._win.tabs.setTabText(self._win.tabs.indexOf(entry["page"]), str(new_name))
+        index = self._win.tabs.indexOf(entry["page"])
+        if index < 0:
+            return False
+        self._win.tabs.setTabText(index, str(new_name))
+        if entry.get("pinned"):
+            # A pinned tab shows no caption, so the name lives in its data and
+            # tooltip; setTabText alone would leave the old one on the tip.
+            self._win.pin_tab(entry["page"], str(new_name),
+                              icon_only=bool(entry.get("icon_only", True)))
         self._store[str(new_name)] = self._store.pop(str(name))
         return True
 
     def activate(self, name: str) -> bool:
+        """Put this addon's tab on screen; ``True`` when it had it."""
         entry = self._store.get(str(name))
         if entry is None:
             return False
@@ -2086,12 +2371,15 @@ class TabsAPI:
         return True
 
     def url(self, name: str) -> str:
+        """The address an embedded page is showing; empty for a custom tab."""
         entry = self._store.get(str(name))
         if entry is None or entry["url_input"] is None:
             return ""
         return entry["url_input"].text()
 
     def navigate(self, name: str, url: str) -> None:
+        """Point an embedded page at another address; raises when the addon has no
+        such tab."""
         entry = self._store.get(str(name))
         if entry is None:
             raise AddonError(f"no addon tab called {name!r}")
@@ -2101,6 +2389,7 @@ class TabsAPI:
             entry["view"].setUrl(QUrl(str(url)))
 
     def reload(self, name: str) -> None:
+        """Load an embedded page again, doing nothing when the tab is gone."""
         entry = self._store.get(str(name))
         if entry is None:
             return
@@ -2115,6 +2404,8 @@ class TabsAPI:
         return None if entry is None else entry["view"]
 
     def widget(self, name: str, identifier: str | None = None) -> QWidget | None:
+        """The tab itself, or with an id one control inside a tab built from a
+        spec; ``None`` when the addon has no such tab."""
         entry = self._store.get(str(name))
         if entry is None:
             return None
@@ -2124,6 +2415,8 @@ class TabsAPI:
 
     def set_widget(self, name: str, identifier: str, prop: str = "text",
                    value: Any = None) -> bool:
+        """Write one property of one control by its spec id - ``text``, ``value``,
+        ``rows``, ``items``, ``enabled``, ...; ``False`` when the id is not there."""
         widget = self.widget(name, identifier)
         if widget is None:
             return False
@@ -2131,6 +2424,7 @@ class TabsAPI:
         return True
 
     def widget_value(self, name: str, identifier: str, what: str = "value") -> Any:
+        """What one control holds now; raises when the tab has no such id."""
         widget = self.widget(name, identifier)
         if widget is None:
             raise AddonError(f"{name!r} has no widget with id {identifier!r}")
@@ -2166,6 +2460,8 @@ class TabsAPI:
 
     def inject_js(self, name: str, code: Any,
                   callback: Callable[[Any], None] | None = None) -> None:
+        """Run JavaScript in an embedded page; ``callback`` takes whatever the
+        script returns, on the GUI thread."""
         view = self.view(name)
         if view is None:
             raise AddonError(f"{name!r} is not an embedded page")
@@ -2275,9 +2571,12 @@ class EventsAPI:
         return self._api._manager.add_listener(str(name), self._api.id, callback)
 
     def off(self, name: str, callback: Callable[[dict], None] | None = None) -> int:
+        """Drop every listener for one event, or just the callback given; returns
+        how many went away."""
         return self._api._manager.remove_listener(str(name), self._api.id, callback)
 
     def names(self) -> list[str]:
+        """Every event the app broadcasts, whether this addon listens or not."""
         return list(self._api._manager.EVENT_NAMES)
 
 
@@ -2291,15 +2590,19 @@ class SettingsAPI:
         return self._api._manager.record_for(self._api.id)
 
     def all(self) -> dict:
+        """Every key this addon has stored with the profile."""
         return jsonable(dict(self._record().get("settings") or {}))
 
     def get(self, key: str, default: Any = None) -> Any:
+        """One stored key, or ``default`` when it was never set."""
         return jsonable((self._record().get("settings") or {}).get(str(key), default))
 
     def set(self, key: str, value: Any) -> None:
+        """Store one key; it travels with the profile, beside the addon's switch."""
         self.update({key: value})
 
     def update(self, values: dict) -> None:
+        """Store several keys at once, leaving the rest of the record alone."""
         record = self._record()
         store = dict(record.get("settings") or {})
         store.update({str(k): v for k, v in (values or {}).items()})
@@ -2307,6 +2610,7 @@ class SettingsAPI:
         self._api._manager.save_records()
 
     def pop(self, key: str, default: Any = None) -> Any:
+        """Take one key away and say what it held."""
         record = self._record()
         store = dict(record.get("settings") or {})
         gone = store.pop(str(key), default)
@@ -2315,9 +2619,159 @@ class SettingsAPI:
         return jsonable(gone)
 
     def remove(self) -> None:
+        """Forget everything this addon has stored with the profile."""
         record = self._record()
         record.pop("settings", None)
         self._api._manager.save_records()
+
+
+class SettingsPagesAPI:
+    """A page of the app's Settings window that this addon owns.
+
+    ``api.settings`` is a private key store the user never sees. This is the
+    other thing: real controls, on a page of the Settings bar that stands beside
+    the program's own categories - *outside* the shared **Installed addons** page,
+    so an addon with a lot of options gets the room an option deserves. The page
+    is the app's furniture: it goes away by itself when the addon is switched off
+    or removed, and it is built the same way a tab is - from a widget spec, whose
+    controls report back through ``on_widget`` with this page's name.
+    """
+
+    def __init__(self, api: "AddonAPI") -> None:
+        self._api = api
+
+    @property
+    def _store(self) -> dict:
+        return self._api._addon.settings_pages
+
+    @property
+    def _win(self) -> QWidget:
+        return self._api.win
+
+    def names(self) -> list[str]:
+        """Every page this addon has added, in the order it added them."""
+        return list(self._store)
+
+    def exists(self, name: str) -> bool:
+        """Whether this addon owns a page under that name."""
+        return str(name) in self._store
+
+    def add(self, name: str, title: str = "", widget: QWidget | None = None,
+            spec: dict | None = None, style: str = "") -> str:
+        """Put a new page into the Settings bar; ``name`` is how the addon addresses it, ``title`` is what the tab says.
+
+        Give a spec dict (the same language as :meth:`TabsAPI.add_tab`) or any
+        QWidget. Re-adding a name replaces that page rather than stacking a second
+        one beside it. Returns the name, or raises when nothing could be built or
+        the window has no Settings bar to add to.
+        """
+        name = str(name).strip()
+        if not name:
+            raise AddonError("a settings page needs a name")
+        if widget is None and spec is None:
+            raise AddonError("settings_pages.add needs a widget or a spec")
+        self.remove(name)
+        registry: dict[str, QWidget] = {}
+        if widget is None:
+            events = lambda identifier, event, payload, page=name: (
+                self._api._manager.push_widget_event(self._api.id, page, identifier,
+                                                     event, payload))
+            widget, registry = build_spec(spec, events=events)
+        if style:
+            widget.setStyleSheet(str(style))
+        caption = str(title or name)
+        host = self._win.add_settings_page(caption, widget)
+        if host is None:
+            raise AddonError("no Settings bar to add a page to")
+        self._store[name] = {"body": widget, "host": host, "title": caption,
+                             "registry": registry}
+        self._api.log(f"added settings page '{caption}'")
+        return name
+
+    def remove(self, name: str) -> bool:
+        """Take one page away; True when this addon had it."""
+        entry = self._store.pop(str(name), None)
+        if entry is None:
+            return False
+        self._win.remove_settings_page(entry["body"])
+        entry["body"].deleteLater()
+        return True
+
+    def _bar(self) -> Any:
+        return getattr(self._win, "settings_tabs", None)
+
+    def _index(self, name: str) -> int:
+        """Where this page sits in the Settings bar, or -1 when it is not there."""
+        entry = self._store.get(str(name))
+        bar = self._bar()
+        if entry is None or bar is None:
+            return -1
+        return bar.indexOf(entry["host"])
+
+    def title(self, name: str) -> str:
+        """The caption the Settings bar wears for this page."""
+        index = self._index(name)
+        if index < 0:
+            return ""
+        return str(self._bar().tabText(index))
+
+    def set_title(self, name: str, title: str) -> bool:
+        """Rename the tab without touching the page's contents."""
+        index = self._index(name)
+        entry = self._store.get(str(name))
+        if index < 0 or entry is None:
+            return False
+        caption = str(title or entry.get("title") or str(name))
+        entry["title"] = caption
+        self._bar().setTabText(index, caption)
+        return True
+
+    def activate(self, name: str) -> bool:
+        """Show Settings with this page selected."""
+        index = self._index(name)
+        if index < 0:
+            return False
+        settings = getattr(self._win, "settings_page", None)
+        if settings is not None:
+            self._win.tabs.setCurrentWidget(settings)
+        self._bar().setCurrentIndex(index)
+        return True
+
+    def widget(self, name: str, identifier: str | None = None) -> QWidget | None:
+        """The page itself, or with an id one control inside it."""
+        entry = self._store.get(str(name))
+        if entry is None:
+            return None
+        if identifier is None:
+            return entry["body"]
+        return entry["registry"].get(str(identifier))
+
+    def set_widget(self, name: str, identifier: str, prop: str = "text",
+                   value: Any = None) -> bool:
+        """Write one property of one control, exactly as ``tabs.set_widget`` does."""
+        widget = self.widget(name, identifier)
+        if widget is None:
+            return False
+        apply_widget_property(widget, str(prop), value)
+        return True
+
+    def widget_value(self, name: str, identifier: str,
+                     what: str = "value") -> Any:
+        """What one control on the page holds right now."""
+        widget = self.widget(name, identifier)
+        if widget is None:
+            raise AddonError(f"{name!r} has no widget with id {identifier!r}")
+        return jsonable(read_widget_value(widget, what))
+
+    def set_icon(self, name: str, icon: Any = None) -> bool:
+        """No use here: a Settings page has no tab mark of its own to change.
+
+        Kept so an addon that copies its tab code across gets a plain answer
+        instead of an AttributeError; the real tab API is
+        :meth:`TabsAPI.set_icon`.
+        """
+        self._api.log("a settings page wears no icon; only a main-window tab can")
+        return False
 
 
 class ConfigAPI:
@@ -2334,6 +2788,7 @@ class ConfigAPI:
 
     @property
     def file(self) -> Path:
+        """Where this addon's config file sits, as a path."""
         return addon_config_path(self._api.id)
 
     def path(self) -> str:
@@ -2341,6 +2796,7 @@ class ConfigAPI:
         return str(self.file)
 
     def exists(self) -> bool:
+        """Whether the addon has written its file yet."""
         return self.file.is_file()
 
     def open_folder(self) -> None:
@@ -2380,6 +2836,7 @@ class ConfigAPI:
         return jsonable(read_config_json(addon_schema_path(self._api.id)).get("fields") or [])
 
     def defaults(self) -> dict:
+        """The defaults handed to ``declare``, as the addon named them."""
         stored = getattr(self._addon, "config_defaults", None)
         if stored:
             return jsonable(dict(stored))
@@ -2397,9 +2854,11 @@ class ConfigAPI:
         return jsonable(merge_config(self.defaults(), self.stored()))
 
     def get(self, key: str, default: Any = None) -> Any:
+        """One value out of the merged file, dotted keys and all."""
         return jsonable(config_get(self.all(), str(key), default))
 
     def set(self, key: str, value: Any) -> None:
+        """Write one key into the file."""
         self.update({key: value})
 
     def update(self, values: dict) -> dict:
@@ -2464,9 +2923,12 @@ class SchedulerAPI:
         self._api = api
 
     def after(self, seconds: Any, callback: Callable[[], None]) -> QTimer:
+        """Call this once, ``seconds`` later, on the GUI thread."""
         return self._start(float(seconds) * 1000.0, callback, False)
 
     def every(self, seconds: Any, callback: Callable[[], None]) -> QTimer:
+        """Call this again every ``seconds`` until it is stopped or the addon is
+        switched off."""
         return self._start(max(100.0, float(seconds) * 1000.0), callback, True)
 
     def _start(self, ms: float, callback: Callable[[], None], repeat: bool) -> QTimer:
@@ -2491,10 +2953,13 @@ class PathsAPI:
 
     @property
     def addon(self) -> Path:
+        """The folder the addon's own file sits in."""
         return self._addon.home
 
     @property
     def data(self) -> Path:
+        """The addon's data folder, made when asked for: anything the addon keeps
+        for itself goes here."""
         folder = self._addon.data_dir
         folder.mkdir(parents=True, exist_ok=True)
         return folder
@@ -2513,12 +2978,14 @@ class PathsAPI:
 
     @property
     def base(self) -> Path:
+        """The folder Berry Manager runs from."""
         from manager_const import BASE_DIR
 
         return BASE_DIR
 
     @property
     def addons(self) -> Path:
+        """The addons folder, where a drop-in file is picked up on the next scan."""
         from manager_const import ADDONS_DIR
 
         return ADDONS_DIR
@@ -2532,6 +2999,7 @@ class PathsAPI:
 
     @property
     def log(self) -> Path:
+        """The app log file - the one :meth:`AddonAPI.log` writes into."""
         return LOG_FILE
 
 
@@ -2542,9 +3010,12 @@ class PeersAPI:
         self._api = api
 
     def list(self) -> list[str]:
+        """The addons running right now, by id."""
         return [addon.id for addon in self._api._manager.loaded()]
 
     def info(self, addon_id: str) -> dict | None:
+        """``{id, name, version, enabled, kind}`` for one addon, ``None`` when it
+        is not running."""
         addon = self._api._manager.find(str(addon_id))
         if addon is None:
             return None
@@ -2552,6 +3023,8 @@ class PeersAPI:
                          "enabled": addon.enabled, "kind": addon.kind})
 
     def send(self, addon_id: str, data: Any = None) -> bool:
+        """Hand data to another addon's ``on_message``; ``False`` when nobody took
+        it."""
         return self._api._manager.deliver(self._api.id, str(addon_id), data)
 
 
@@ -2574,6 +3047,7 @@ class AddonAPI:
         self.tabs = TabsAPI(self)
         self.events = EventsAPI(self)
         self.settings = SettingsAPI(self)
+        self.settings_pages = SettingsPagesAPI(self)
         self.config = ConfigAPI(self)
         self.schedule = SchedulerAPI(self)
         self.paths = PathsAPI(self)
@@ -2584,6 +3058,7 @@ class AddonAPI:
         self._manager.log(self.id, str(text))
 
     def error(self, text: Any) -> None:
+        """Write an error line to the app log under this addon's name."""
         self._manager.log(self.id, f"error: {text}", warning=True)
 
     def call(self, method: str, arguments: dict | None = None) -> Any:

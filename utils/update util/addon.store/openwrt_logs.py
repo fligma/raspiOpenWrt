@@ -11,21 +11,19 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
-from addon_common import AddonError
+from addon_common import AddonError, find_icon
 
 ADDON = {
     "name": "OpenWrt Log Viewer",
-    "version": "2.7",
+    "version": "2.9",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],
     # Single mode rides the app's session, multi mode dials out on its own.
     "connection": "both",
-    "description": ("a single-device log viewer "
-                    "and a multi-device view,"
-                    "colour-coded connections,"
-                    "log by time. The search highlights matching lines,"
-                    ),
+    "description": ("a single-device log viewer and a multi-device view, "
+                    "colour-coded connections, the log in time order. "
+                    "The search highlights or filters the matching lines."),
 }
 
 #: The window tab and its sub-page bar (berry style).
@@ -45,12 +43,21 @@ TAB_ICON = (
     '</svg>'
 )
 
-#: The user-supplied tab picture in the assets folder.
-TAB_ICON_FILE = "openwrtlogsicon.png"
+#: The user-supplied tab picture in the assets folder, named by the standard
+#: rule: this addon's id and then ``icon.png``.
+TAB_ICON_FILE = "openwrt_logsicon.png"
+
+#: The name the picture was shipped under before that rule existed.
+OLD_ICON_FILE = "openwrtlogsicon.png"
 
 
 def tab_icon() -> str:
-    """What to mark the tab with: the shipped picture, else the drawing."""
+    """What to mark the tab with: the shipped picture, else the drawing.
+
+    ``find_icon`` looks for the standard name first, so a picture dropped in the
+    assets folder is worn without a code change; the older name is tried after
+    it, for a build that still carries the file this addon used to ship.
+    """
     folder = None
     try:
         folder = api.paths.assets
@@ -58,13 +65,7 @@ def tab_icon() -> str:
         folder = None
     if folder is None:
         return TAB_ICON
-    try:
-        candidate = Path(str(folder)) / TAB_ICON_FILE
-        if candidate.is_file():
-            return str(candidate)
-    except (OSError, AddonError):
-        return TAB_ICON
-    return TAB_ICON
+    return find_icon(folder, "openwrt_logs", OLD_ICON_FILE) or TAB_ICON
 
 #: What each device is asked for unless the config names another command.
 LOG_COMMAND = "logread"

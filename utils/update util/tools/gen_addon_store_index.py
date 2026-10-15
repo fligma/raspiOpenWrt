@@ -4,10 +4,15 @@
 index.json is the catalog the Berry addon store reads off GitHub. Keeping it by
 hand means it drifts the moment an addon is added, renamed or versioned, so this
 generates it instead: every ``.py`` in ``addon.store`` becomes an entry, its name,
-version, author and description read from the ``ADDON`` manifest in the file, its
-pictures read from ``addon.store/assets/<id>/`` and its test from
-``addon.store/_tests/test_<id>.py`` when one is there. Entries the previous index
-did not have are marked ``new``; ones whose version moved are marked ``updated``.
+version, author, description, ``requires`` and ``connection`` read from the
+``ADDON`` manifest in the file, its pictures read from
+``addon.store/assets/<id>/`` and its test from ``addon.store/_tests/test_<id>.py``
+when one is there. The picture that stands for the addon is picked by the name the
+addon rules use - ``<id>icon.png`` first, then a name its manifest declares, then
+``icon.png``, then whatever single picture the folder holds - so an addon that
+follows the rule needs no code and an older one keeps the picture it shipped.
+Entries the previous index did not have are marked ``new``; ones whose version
+moved are marked ``updated``.
 
 The output is stable: with nothing changed it writes byte-for-byte the same file,
 so a build that regenerates it only has something to commit when the catalog
@@ -24,7 +29,7 @@ import argparse
 import ast
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 #: The store folder this sits one level under (``utils/update util``/tools).
@@ -33,8 +38,19 @@ STORE_DIR = Path(__file__).resolve().parents[1] / "addon.store"
 #: A catalog id is a name Python and PyInstaller can both import.
 _UNSAFE = re.compile(r"[^A-Za-z0-9_]")
 
+#: What an addon's own picture is always called: its id, then this. The same
+#: rule ``addon_common`` uses when it looks in a program's assets folder, kept
+#: here as well because a tool run from CI imports nothing of the app.
+ICON_TAIL = "icon.png"
+
+#: A plain name for an addon that has one picture and no standard name.
+GENERIC_ICON = "icon.png"
+
 #: Icon suffixes worth passing to PyInstaller, most preferred first.
 ICON_SUFFIXES = (".ico", ".icns", ".png")
+
+#: Endings a folder picture may have at all, for a last look for something.
+PICTURE_SUFFIXES = ICON_SUFFIXES + (".svg", ".jpg", ".jpeg", ".webp")
 
 
 def clean_id(value: str) -> str:
@@ -69,12 +85,66 @@ def list_assets(store: Path, addon_id: str) -> list[str]:
                   for path in folder.rglob("*") if path.is_file())
 
 
-def pick_icon(assets: list[str], addon_id: str) -> str:
-    """The asset to build as the executable's icon, or nothing."""
-    for suffix in ICON_SUFFIXES:
-        wanted = f"{addon_id}{suffix}".lower()
+def words(value: Any) -> list[str]:
+    """One manifest value written as a list, however it was written in the file.
+
+    ``requires`` is published as a list and an addon may have written it as a
+    comma separated line, so both are read the same way here and in the app.
+    """
+    if isinstance(value, str):
+        value = [part for part in re.split(r"[,; ]+", value) if part]
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in value:
+        word = " ".join(str(item or "").split())
+        if word and word not in out:
+            out.append(word)
+    return out
+
+
+def flat(value: Any) -> str:
+    """A manifest sentence on the one line a catalog row and a label both need."""
+    return " ".join(str(value or "").split())
+
+
+def connection_of(manifest: dict) -> str:
+    """How one addon reaches a device, as the catalog should say it.
+
+    The manifest's own word wins. An addon that names nothing but does need a
+    transport talks over the app's connection - that is what ``requires`` gates
+    on - so it is reported as ``app`` rather than as needing no device, and an
+    addon needing nothing is ``none``. A word nothing recognises is kept, so a
+    fork's own vocabulary still shows.
+    """
+    said = flat(manifest.get("connection")).lower()
+    if said:
+        return said
+    return "app" if words(manifest.get("requires")) else "none"
+
+
+def pick_icon(assets: list[str], addon_id: str, declared: str = "") -> str:
+    """The asset that stands for one addon, picked by the naming rule.
+
+    The standard name goes first, so an addon that follows the rule needs no
+    declaration; then the name its own manifest declares, then the build icons
+    under its id, then a plain ``icon.png``, and last the one picture its folder
+    holds - which is how an addon that predates the rule keeps the file it has.
+    """
+    named = {name.lower(): name for name in assets}
+
+    def take(value: Any) -> str:
+        return named.get(flat(value).lower(), "")
+
+    wanted = [take(f"{addon_id}{ICON_TAIL}"), take(declared)]
+    wanted += [take(f"{addon_id}{suffix}") for suffix in ICON_SUFFIXES]
+    wanted.append(take(GENERIC_ICON))
+    for item in wanted:
+        if item:
+            return item
+    for suffix in PICTURE_SUFFIXES:
         for name in assets:
-            if name.lower() == wanted:
+            if PurePosixPath(name).suffix.lower() == suffix:
                 return name
     return ""
 
@@ -111,12 +181,17 @@ def build_index(store: Path, previous: dict | None = None) -> dict:
             "name": str(manifest.get("name") or addon_id),
             "version": str(manifest.get("version") or ""),
             "author": str(manifest.get("author") or ""),
-            "description": str(manifest.get("description") or ""),
+            "description": flat(manifest.get("description")),
             "filename": path.name,
+            # What the addon says it needs, and how it reaches the device. The
+            # store shows both, so a person can see before installing whether
+            # this works on the machine in front of them or talks to a router.
+            "requires": words(manifest.get("requires")),
+            "connection": connection_of(manifest),
         }
         if assets:
             entry["assets"] = assets
-        icon = pick_icon(assets, addon_id)
+        icon = pick_icon(assets, addon_id, str(manifest.get("icon") or ""))
         if icon:
             entry["icon"] = icon
         test_name = list_test(store, addon_id)

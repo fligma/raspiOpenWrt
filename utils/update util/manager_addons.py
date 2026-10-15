@@ -193,6 +193,8 @@ class Addon:
         self.config_defaults: dict = {}
         self.config_title = ""
         self.tabs: dict[str, dict] = {}       # everything created, for undo
+        # Pages this addon owns in the app's Settings bar, beside its tabs.
+        self.settings_pages: dict[str, dict] = {}
         self.timers: list[QTimer] = []
         self.actions: list[tuple] = []
         self.setting_widget = None
@@ -288,7 +290,7 @@ class ProcessBridge:
 
     #: Requests served on the GUI thread because they touch Qt.
     GUI_METHODS = ("ui.", "tabs.", "session.", "events.", "settings.", "config.",
-                   "schedule.", "peers.")
+                   "settings_pages.", "schedule.", "peers.")
 
     #: Asked by the addon about a job the app is still running for it. These
     #: never reach the api: the bridge answers them from its own registry,
@@ -651,6 +653,23 @@ class ProcessBridge:
 
 # --- the manager ---
 
+def connection_choice(requires, is_bundled: bool, connection: str) -> str:
+    """Which connection saying an addon's row shows, from its three answers.
+
+    A row shows one of four words, and the order matters: an addon that named
+    no transport reaches no device whatever it declares next, and a shipped
+    addon runs on the app's session whatever its source says. Only an addon
+    that declared ``both`` gets the switch, because only there is the choice
+    the user's to make.
+    """
+    if not requires:
+        return "none"
+    if is_bundled:
+        return "app"
+    text = str(connection or "app").strip().lower()
+    return text if text in ("none", "app", "own", "both") else "app"
+
+
 class AddonManager:
     """Everything the app knows about its addons."""
 
@@ -975,11 +994,14 @@ class AddonManager:
                 {str(part).strip().lower() for part in value} & {"ssh", "sftp"}))
         # "connection" declares whose connection the addon uses; undeclared
         # means the app's, and an addon may never use another kind than the
-        # one it declared here.
+        # one it declared here. "none" is the fourth answer: it says the addon
+        # never reaches a device at all, whatever its transports say.
         value = manifest.get("connection")
         if value is not None:
             text = str(value).strip().lower()
-            if text in ("app", "main"):
+            if text in ("", "none"):
+                addon.connection = "none"
+            elif text in ("app", "main"):
                 addon.connection = "app"
             elif text in ("own", "private"):
                 addon.connection = "own"
@@ -1139,7 +1161,13 @@ class AddonManager:
                     addon.api.tabs.close(name)
                 except Exception:
                     pass
+            for name in list(addon.settings_pages):
+                try:
+                    addon.api.settings_pages.remove(name)
+                except Exception:
+                    pass
         addon.tabs.clear()
+        addon.settings_pages.clear()
         for timer in addon.timers:
             timer.stop()
         addon.timers.clear()
@@ -1913,6 +1941,67 @@ class AddonManager:
         if area is not None:
             area.verticalScrollBar().setValue(where)
 
+    @staticmethod
+    def _chip(text: str, tip: str) -> QLabel:
+        """One grey word on a row, with the whole saying in its tool tip."""
+        chip = QLabel(text)
+        chip.setStyleSheet("color: #8f8f8f;")
+        chip.setToolTip(tip)
+        return chip
+
+    def _connection_chip(self, addon: Addon) -> QWidget | None:
+        """The one control on a row that says whose connection the addon rides.
+
+        Only an addon that declared ``"both"`` gets a switch: for every other
+        kind the manifest has already decided, and the row says so in words
+        rather than offering a choice the app would then refuse. A shipped addon
+        always rides the app's session, whatever its source declares, and an
+        addon that named no transport reaches no device at all - both answers
+        are shown too, so a row never leaves the connection to be guessed.
+        """
+        kind = connection_choice(addon.requires, addon.is_bundled,
+                                 addon.connection)
+        if kind == "none":
+            return self._chip(
+                "no device connection",
+                "This addon declared no transport and no connection, so it never "
+                "reaches a device: what it does, it does on this machine and over "
+                "the network.")
+        if kind == "both":
+            # Declared "both": only here is the user's to choose between the
+            # app's session and a fresh connection per call.
+            own = ToggleSwitch("own connection")
+            own.setToolTip(
+                "Off: the addon shares the app's one main connection, and can"
+                " only use it while that connection is open."
+                "\nOn: the addon opens a connection of its own for each call, "
+                "so it works whether or not the main connection is up, and "
+                "through api.device.bind() it can even reach a different "
+                "device."
+                "\nEither way the addon's own switch and the switch in the "
+                "Connection panel header gate every connection, this one "
+                "included."
+            )
+            own.blockSignals(True)
+            own.setChecked(bool(addon.own_connection))
+            own.blockSignals(False)
+            own.toggled.connect(lambda on, aid=addon.id: self.set_own_connection(aid, on))
+            return own
+        if kind == "own":
+            return self._chip(
+                "own connection",
+                'This addon declared "connection": "own" in its manifest,\n'
+                "so it always opens its own connection, main connection up or\n"
+                "not; it cannot use the app's session.")
+        return self._chip(
+            "main connection",
+            'This addon declared "connection": "app" in its manifest,\n'
+            "so it only ever uses the app's one main connection, and can\n"
+            "use it no earlier than the connection is open."
+            + ("" if not addon.is_bundled else
+               "\nIt ships with the program, which always runs on that "
+               "connection."))
+
     def _build_row(self, addon: Addon, carried: list,
                    target_layout: QVBoxLayout | None = None) -> QWidget:
         entry = QWidget()
@@ -1945,44 +2034,7 @@ class AddonManager:
         status = QLabel(self._state_text(addon))
         status.setStyleSheet(self._state_style(addon))
         head.addWidget(status)
-        if addon.requires and not addon.is_bundled and addon.connection == "both":
-            # Declared "both": only here is the user's to choose between the
-            # app's session and a fresh connection per call.
-            own = ToggleSwitch("own connection")
-            own.setToolTip(
-                "Off: the addon shares the app's one main connection, and can"
-                " only use it while that connection is open."
-                "\nOn: the addon opens a connection of its own for each call, "
-                "so it works whether or not the main connection is up, and "
-                "through api.device.bind() it can even reach a different "
-                "device."
-                "\nEither way the addon's own switch and the switch in the "
-                "Connection panel header gate every connection, this one "
-                "included."
-            )
-            own.blockSignals(True)
-            own.setChecked(bool(addon.own_connection))
-            own.blockSignals(False)
-            own.toggled.connect(lambda on, aid=addon.id: self.set_own_connection(aid, on))
-            head.addWidget(own)
-        elif addon.requires and not addon.is_bundled and addon.connection == "own":
-            fixed = QLabel("own connection")
-            fixed.setStyleSheet("color: #8f8f8f;")
-            fixed.setToolTip(
-                "This addon declared \"connection\": \"own\" in its manifest,\n"
-                "so it always opens its own connection, main connection up or\n"
-                "not; it cannot use the app's session."
-            )
-            head.addWidget(fixed)
-        elif addon.requires and not addon.is_bundled:
-            rides = QLabel("main connection")
-            rides.setStyleSheet("color: #8f8f8f;")
-            rides.setToolTip(
-                "This addon declared \"connection\": \"app\" in its manifest,\n"
-                "so it only ever uses the app's one main connection, and can\n"
-                "use it no earlier than the connection is open."
-            )
-            head.addWidget(rides)
+        head.addWidget(self._connection_chip(addon))
         if not addon.is_bundled:
             # A shipped addon's file is inside the program, so no restart here.
             restart = QPushButton("Restart")

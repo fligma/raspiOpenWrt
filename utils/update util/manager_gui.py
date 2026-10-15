@@ -15,6 +15,7 @@ from typing import Any
 from PyQt6.QtCore import QEvent, QObject, QSize, QTimer, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QKeySequence, QPixmap, QResizeEvent, QTextCursor
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -27,6 +28,8 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLayout,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -35,6 +38,8 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QStatusBar,
+    QStyle,
+    QSystemTrayIcon,
     QTabBar,
     QTabWidget,
     QTextEdit,
@@ -44,7 +49,7 @@ from PyQt6.QtWidgets import (
 )
 import keyring
 
-from manager_addons import AddonManager
+from manager_addons import AddonManager, connection_choice
 from manager_addondev import AddonDevWidget
 from manager_browser import BrowserMixin, cert_bypass_active, set_cert_bypass
 from manager_config import (
@@ -71,6 +76,7 @@ from manager_const import (
     PROJECT_GITHUB_URL,
     PROJECT_LICENSE_URL,
     UI_ZOOM_DEFAULT,
+    UPDATE_TAG_PREFIX,
     find_asset,
     scaled_sheet,
     set_zoom,
@@ -91,11 +97,13 @@ from manager_widgets import (
     CollapseGroup,
     RightPinnedTabBar,
     RightPinnedTabWidget,
+    TabCloseButton,
     TabTransportDots,
     TRANSPORT_DOT,
     ToggleGroup,
     ToggleSwitch,
     settings_tab_icon,
+    label_tab,
     tab_caption,
     tip_on_title,
     transport_dot,
@@ -126,6 +134,8 @@ class BerryManager(
         self.exec_worker: RemoteExecWorker | None = None
         self.reboot_worker: RebootWaitWorker | None = None
         self.shared_conn = SharedConnection()
+        self.tray: QSystemTrayIcon | None = None
+        self.tray_menu: QMenu | None = None
         self.app_config = load_app_config()
         self.addons = AddonManager(self)
         self._cert_bypass_session = cert_bypass_active()
@@ -139,13 +149,16 @@ class BerryManager(
         self.terminal_history_pos = len(self.terminal_history)
         self.connected_once = False
         self.main_connected = False
-        self.setWindowTitle("Berry Manager")
+        # The version the window is running, where a user looks first: the
+        # About box says the same thing, from the same constant.
+        self.setWindowTitle(f"Berry Manager V{APP_VERSION}")
         self.resize(1180, 780)
 
         self.build_menu()
         self.build_ui()
         self.apply_runtime_settings()
         self.apply_window_icon()
+        self.build_tray()
 
         self.addons.reload()
         self.addons.start_done()
@@ -416,6 +429,15 @@ class BerryManager(
         self._web_tab_entries = []
         self._transient_tab_entries = []
         self.build_web_tabs()
+        # The tabs held against the right edge, in the order they registered.
+        # Settings is always the last of the run and needs no entry: the window
+        # knows it by name, so it cannot be unpinned by accident.
+        self._pinned_pages: list[QWidget] = []
+        self._pinned_labels: dict[QWidget, str] = {}
+        self._pinned_icon_only: dict[QWidget, bool] = {}
+        # An addon's own Settings page: its content widget mapped to the scroll
+        # area that was built around it.
+        self._addon_settings_pages: dict[QWidget, QScrollArea] = {}
         self.build_settings_tab()
 
         self.addon_dev = None
@@ -461,7 +483,7 @@ class BerryManager(
         self.update_connection_ui()
 
     def _content_insert_index(self) -> int:
-        """Where a new content tab belongs: just left of the pinned gap + Settings pair."""
+        """Where a new content tab belongs: just left of the pinned gap and its run."""
         gap = getattr(self, "_gap_page", None)
         if gap is not None:
             index = self.tabs.indexOf(gap)
@@ -474,25 +496,160 @@ class BerryManager(
                 return index
         return self.tabs.count()
 
-    def _sync_pinned_settings(self) -> None:
-        """Snap the gap and Settings tabs back to the far right, in that order, then recompute the gap width."""
-        bar = self.tabs.tabBar()
+    # --- the pinned run beside Settings ---
+
+    def _pinned_block(self) -> list[QWidget]:
+        """The tabs that sit at the right edge, left to right: the gap, every
+        system tab in the order it registered, then Settings.
+
+        Empty until the window is built enough to pin: a missing gap or a
+        missing Settings page means nothing here is in its final place yet.
+        A page the window no longer holds (an addon reloaded, a tab closed) is
+        dropped here, so a registry cannot outlive the widget it named.
+        """
         gap = getattr(self, "_gap_page", None)
         settings = getattr(self, "settings_page", None)
         if gap is None or settings is None:
+            return []
+        alive = [page for page in getattr(self, "_pinned_pages", [])
+                 if page is not settings and self.tabs.indexOf(page) >= 0]
+        if len(alive) != len(getattr(self, "_pinned_pages", [])):
+            self._pinned_pages = alive
+            for page in list(getattr(self, "_pinned_labels", {})):
+                if page not in alive:
+                    self._pinned_labels.pop(page, None)
+                    self._pinned_icon_only.pop(page, None)
+        return [gap] + alive + [settings]
+
+    def pin_tab(self, page: QWidget, label: str = "",
+                icon_only: bool = True) -> bool:
+        """Hold one tab in the pinned run beside Settings, out of the drag order.
+
+        The tab keeps its full name in its data (so the start-tab picker and any
+        lookup by caption still find it) but may wear no caption at all, which is
+        what makes a system tab read as furniture rather than as a page the user
+        arranged. Returns False when there is nothing to pin it beside.
+        """
+        if page is None or self.tabs.indexOf(page) < 0:
+            return False
+        if getattr(self, "settings_page", None) is None \
+                or getattr(self, "_gap_page", None) is None:
+            return False
+        if page is self.settings_page:
+            return True
+        if page not in self._pinned_pages:
+            self._pinned_pages.append(page)
+        text = str(label or "") or tab_caption(
+            self.tabs.tabBar(), self.tabs.indexOf(page))
+        self._pinned_labels[page] = text
+        self._pinned_icon_only[page] = bool(icon_only)
+        self._sync_pinned_settings()
+        return True
+
+    def unpin_tab(self, page: QWidget) -> None:
+        """Let one tab back into the reorderable run, with its caption restored."""
+        if page is None or page is getattr(self, "settings_page", None):
             return
-        last = self.tabs.count() - 1
-        gi = self.tabs.indexOf(gap)
-        if gi >= 0 and gi != last - 1:
-            bar.moveTab(gi, last)
-        si = self.tabs.indexOf(settings)
-        if si >= 0 and si != last:
-            bar.moveTab(si, last)
+        if page in getattr(self, "_pinned_pages", []):
+            self._pinned_pages.remove(page)
+        self._pinned_labels.pop(page, None)
+        self._pinned_icon_only.pop(page, None)
+        index = self.tabs.indexOf(page)
+        if index >= 0:
+            label_tab(self.tabs.tabBar(), index,
+                      tab_caption(self.tabs.tabBar(), index))
+        self._sync_pinned_settings()
+
+    # --- a Settings page an addon owns ---
+
+    def add_settings_page(self, title: str, body: QWidget) -> QWidget | None:
+        """Give an addon a page of its own in the Settings bar.
+
+        The page sits with the program's own categories and the shipped addons',
+        ahead of the shared **Installed addons** page, and is wrapped in a scroll
+        area the same way those are, so a long form stays usable however tall the
+        window is. Returns the scroll host - the thing to hand back to
+        :meth:`remove_settings_page` - or ``None`` when there is no Settings bar
+        to put it in.
+        """
+        bar = getattr(self, "settings_tabs", None)
+        if bar is None or body is None:
+            return None
+        host = QScrollArea()
+        host.setWidgetResizable(True)
+        host.setWidget(body)
+        manager = getattr(self, "addons", None)
+        installed = getattr(manager, "installed_scroll", None)
+        at = bar.indexOf(installed) if installed is not None else -1
+        bar.insertTab(at if at >= 0 else bar.count(), host, str(title or "Page"))
+        self._addon_settings_pages[body] = host
+        return host
+
+    def remove_settings_page(self, body: QWidget) -> bool:
+        """Take away one page and its scroll host; True when it was here."""
+        bar = getattr(self, "settings_tabs", None)
+        host = getattr(self, "_addon_settings_pages", {}).pop(body, None)
+        if bar is None or host is None:
+            return False
+        index = bar.indexOf(host)
+        if index >= 0:
+            bar.removeTab(index)
+        host.deleteLater()
+        return True
+
+    def _label_pinned_tabs(self) -> None:
+        """Put every pinned tab's caption and tooltip back the way its owner asked.
+
+        Called from the pinning pass itself, because a tab move can land a pinned
+        tab on a new index after the bar has already measured the row.
+        """
+        bar = self.tabs.tabBar()
+        settings = getattr(self, "settings_page", None)
+        for page in self._pinned_block():
+            index = self.tabs.indexOf(page)
+            if index < 0 or page is getattr(self, "_gap_page", None):
+                continue
+            if page is settings:
+                label_tab(bar, index, "Settings", icon_only=True,
+                          tooltip="Settings")
+                continue
+            label = self._pinned_labels.get(page) or tab_caption(bar, index)
+            label_tab(bar, index, label,
+                      icon_only=bool(self._pinned_icon_only.get(page, True)),
+                      tooltip=label)
+
+    def _sync_pinned_settings(self) -> None:
+        """Snap the gap and the pinned run back to the far right, in that order, then recompute the gap width.
+
+        The block is moved a tab at a time, and a move is measured against every
+        tab the bar holds now, so a tab that has just been added after Settings
+        (or taken out of the middle) shifts the rest of the run along with it.
+        One pass is therefore not always enough: the passes repeat until the bar
+        agrees with the block, with the block's own length as the brake.
+        """
+        bar = self.tabs.tabBar()
+        block = self._pinned_block()
+        gap = getattr(self, "_gap_page", None)
+        if not block or gap is None:
+            return
+        start = self.tabs.count() - len(block)
+        for _pass in range(len(block) + 1):
+            settled = True
+            for offset, page in enumerate(block):
+                index = self.tabs.indexOf(page)
+                if index < 0:
+                    continue
+                if index != start + offset:
+                    bar.moveTab(index, start + offset)
+                    settled = False
+            if settled:
+                break
         gi = self.tabs.indexOf(gap)
         if gi >= 0:
             bar.setTabEnabled(gi, False)
             if hasattr(bar, "set_gap_index"):
-                bar.set_gap_index(gi)
+                bar.set_gap_index(gi, pinned=max(1, len(block) - 1))
+        self._label_pinned_tabs()
 
     def _on_tab_count_changed(self, _count: int) -> None:
         """A tab was added or removed: defer a tick, then re-pin the gap and Settings pair."""
@@ -509,6 +666,8 @@ class BerryManager(
             return
         self._sync_pinned_settings()
         self._stretch_tab_bar()
+        # A tab that arrived or left is the order list's business too.
+        self._refresh_tab_order_list()
 
     def restore_tab_layout(self) -> None:
         """Put every tab back in its saved position and re-pin Settings (called after the addon manager reloads)."""
@@ -663,6 +822,94 @@ class BerryManager(
         self.setWindowIcon(icon)
         QApplication.setWindowIcon(icon)
         self.paint_header_logo()
+        self.refresh_tray_icon()
+
+    # Tray icon and notices
+
+    def build_tray(self) -> None:
+        """The app's mark in the notification area, so a notice has somewhere to
+        come from when the window is under everything else.
+
+        Closing is untouched: the icon is an address for toasts and a place to
+        raise or quit the program from, not a way to hide the window. Where
+        there is no notification area nothing is built and every notice falls
+        to the status line, which is what a plain window has always done.
+        """
+        if self.tray is not None:
+            self.refresh_tray_icon()
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        menu = QMenu(self)
+        raise_action = QAction("Show Berry Manager", self)
+        raise_action.setToolTip("Bring the window up in front of the others")
+        raise_action.triggered.connect(self.raise_from_tray)
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self.close)
+        menu.addAction(raise_action)
+        menu.addSeparator()
+        menu.addAction(quit_action)
+        tray = QSystemTrayIcon(self)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        self.tray_menu = menu           # the window holds it, or Qt drops it
+        self.tray = tray
+        self.refresh_tray_icon()
+        tray.show()
+
+    def refresh_tray_icon(self) -> None:
+        """Keep the tray mark the picture the window is wearing."""
+        if self.tray is None:
+            return
+        path = self.current_icon_path()
+        icon = QIcon(str(path)) if path is not None else self.windowIcon()
+        if icon.isNull():               # a logo-less build still needs a mark
+            icon = QApplication.style().standardIcon(
+                QStyle.StandardPixmap.SP_ComputerIcon)
+        self.tray.setIcon(icon)
+        self.tray.setToolTip(f"Berry Manager V{APP_VERSION}")
+
+    def raise_from_tray(self) -> None:
+        """Come back from whatever it was minimised to, under the pointer."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        """A left click on the tray mark raises the window; the menu is the
+        right click's, and Qt shows it itself."""
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.raise_from_tray()
+
+    def notify_popup(self, title: str, text: str, ms: int = 6000) -> None:
+        """One notice for the user: the status line always, and a toast from the
+        tray icon on top of it while Settings allows them.
+
+        Everything that calls this is a speaker the user cannot see - an addon
+        through ``api.ui.popup``, or this program's own update check - so the
+        title names who is talking and the toast repeats it. A toast that will
+        not come out is never a failure: the status line and the log already
+        carry the same words.
+        """
+        heading = str(title or "Berry Manager").strip() or "Berry Manager"
+        body = str(text or "").strip()
+        if not body:
+            return
+        try:
+            held = max(1000, int(ms))
+        except (TypeError, ValueError):
+            held = 6000
+        self.statusBar().showMessage(f"{heading}: {body}", held)
+        self.log(f"notice ({heading}): {body}")
+        if not bool(self.app_config.get("system_notifications", True)):
+            return
+        if self.tray is None or not self.tray.isVisible():
+            return
+        try:
+            self.tray.showMessage(heading, body,
+                                  QSystemTrayIcon.MessageIcon.Information, held)
+        except Exception as error:          # a toast is never worth a traceback
+            self.log(f"tray notice failed: {error}")
 
     # Interface zoom
 
@@ -857,7 +1104,9 @@ class BerryManager(
             existing = bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
             # A close button belongs to the tab itself, not to this pass:
             # strip everything else and re-put the dots that are still wanted.
-            if existing is not None and existing.objectName() != "tabCloseButton":
+            # The name is read off the widget that wears it, so the two cannot
+            # drift apart and leave every close button stripped.
+            if existing is not None and existing.objectName() != TabCloseButton.NAME:
                 bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
             page = self.tabs.widget(index)
             if page in wanted:
@@ -873,15 +1122,17 @@ class BerryManager(
     # Tab order
 
     def capture_tab_order(self) -> list[str]:
-        """The titles of the reorderable tabs, left to right. The pinned gap and
-        Settings tabs are always last and never moved, so they are left out."""
-        gap = getattr(self, "_gap_page", None)
-        settings = getattr(self, "settings_page", None)
+        """The titles of the reorderable tabs, left to right.
+
+        The pinned gap and the whole run beside it - Settings and every system
+        tab - are always last and never moved, so they are left out. Leaving one
+        in would let a later apply drag a pinned tab back into the movable row.
+        """
         bar = self.tabs.tabBar()
+        pinned = getattr(bar, "is_pinned", None)
         titles = []
         for i in range(self.tabs.count()):
-            widget = self.tabs.widget(i)
-            if widget is gap or widget is settings:
+            if callable(pinned) and pinned(i):
                 continue
             titles.append(tab_caption(bar, i))
         return titles
@@ -891,17 +1142,29 @@ class BerryManager(
         if not order:
             return
         bar = self.tabs.tabBar()
+        pinned = getattr(bar, "pinned_indices", None)
+        held = set(pinned() if callable(pinned) else [])
+        gap = getattr(self, "_gap_page", None)
+        if gap is not None:
+            held.add(self.tabs.indexOf(gap))
         target = 0
+        moved = False
         for title in order:
             current = next(
-                (i for i in range(target, self.tabs.count()) if tab_caption(bar, i) == title),
+                (i for i in range(target, self.tabs.count())
+                 if i not in held and tab_caption(bar, i) == title),
                 None,
             )
             if current is None:
                 continue
             if current != target:
                 bar.moveTab(current, target)
+                moved = True
             target += 1
+        if moved:
+            self._sync_pinned_settings()
+        if hasattr(bar, "refit"):
+            bar.refit()
 
     def _apply_remembered_order(self) -> None:
         """Reorder to the stored arrangement when remembering is on; no-op until the built-in order is captured."""
@@ -922,12 +1185,116 @@ class BerryManager(
         if self.tabs.currentIndex() < 0 and self.tabs.count():
             self.tabs.setCurrentIndex(0)
 
-    def save_tab_order_now(self) -> None:
-        self._sync_pinned_settings()
-        order = self.capture_tab_order()
+    def _build_tab_order_controls(self) -> QWidget:
+        """The order editor on the Startup page: the movable tabs as rows.
+
+        One row per tab that the user may place, in the order the bar shows them.
+        A row can be dragged, or selected and moved with the arrows, and either
+        way the tabs follow at once and the order is written down then - there is
+        nothing to remember to save. The pinned run (the gap, the system tabs and
+        Settings) stays at the right edge and is deliberately not listed, so it
+        cannot be reordered into the middle by accident.
+        """
+        listed = QListWidget()
+        listed.setObjectName("tabOrderList")
+        listed.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        listed.setDefaultDropAction(Qt.DropAction.MoveAction)
+        listed.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        listed.setUniformItemSizes(True)
+        listed.setSpacing(zoom_size(2))
+        listed.setMaximumHeight(zoom_size(150))
+        listed.setToolTip(
+            "Every tab you can place, in the order they appear on the bar. Drag a "
+            "row, or pick one and use the arrows: the tabs move straight away and "
+            "this order is what the app starts with next time.")
+        self.tab_order_list = listed
+        # An internal drag is reported by the model, which is the one signal that
+        # also covers the arrows' take-and-reinsert.
+        model = listed.model()
+        if model is not None:
+            model.rowsMoved.connect(self._commit_tab_order_list)
+
+        up = QPushButton("Up")
+        up.setToolTip("Move the selected tab one place left on the bar")
+        up.clicked.connect(lambda: self._move_order_row(-1))
+        down = QPushButton("Down")
+        down.setToolTip("Move the selected tab one place right on the bar")
+        down.clicked.connect(lambda: self._move_order_row(1))
+        reset = QPushButton("Reset to built-in order")
+        reset.setToolTip("Put every tab back the way the program builds them")
+        reset.clicked.connect(self.reset_tab_order)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(zoom_size(6))
+        for control in (up, down, reset):
+            buttons.addWidget(control)
+        buttons.addStretch(1)
+        button_wrap = QWidget()
+        button_wrap.setLayout(buttons)
+
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(zoom_size(4))
+        column.addWidget(listed)
+        column.addWidget(button_wrap)
+        wrap = QWidget()
+        wrap.setLayout(column)
+        listed.setEnabled(bool(self.app_config.get("remember_tab_order", True)))
+        self._refresh_tab_order_list()
+        return wrap
+
+    def _refresh_tab_order_list(self) -> None:
+        """Refill the rows from the bar, after a tab went in, came out or moved."""
+        listed = getattr(self, "tab_order_list", None)
+        if listed is None:
+            return
+        self._order_list_syncing = True
+        try:
+            listed.clear()
+            for title in self.capture_tab_order():
+                listed.addItem(QListWidgetItem(title))
+        finally:
+            self._order_list_syncing = False
+
+    def _order_list_rows(self) -> list[str]:
+        """What the list says the order is, top to bottom."""
+        listed = getattr(self, "tab_order_list", None)
+        if listed is None:
+            return []
+        return [listed.item(i).text() for i in range(listed.count())]
+
+    def _commit_tab_order_list(self, *_args: Any) -> None:
+        """Apply and store the order the list shows, the moment it changes."""
+        if getattr(self, "_order_list_syncing", False):
+            return
+        if getattr(self, "_natural_tab_order", None) is None:
+            return
+        order = self._order_list_rows()
+        if not order:
+            return
         self.app_config["tab_order"] = order
         self.save_app_config()
-        self.log("Tab order saved: " + " \u2192 ".join(order))
+        self.apply_tab_order(order)
+        # Reordering must not change what is on screen, so the tab being looked
+        # at is put back where it was rather than left wherever the moves land.
+        shown = next((tab_caption(self.tabs.tabBar(), i)
+                      for i in range(self.tabs.count())
+                      if self.tabs.widget(i) is self.tabs.currentWidget()), "")
+        if shown:
+            self._select_default_tab(shown)
+
+    def _move_order_row(self, step: int) -> None:
+        """One arrow click: trade the selected row for its neighbour."""
+        listed = getattr(self, "tab_order_list", None)
+        if listed is None:
+            return
+        row = listed.currentRow()
+        to = row + int(step)
+        if row < 0 or not (0 <= to < listed.count()):
+            return
+        item = listed.takeItem(row)
+        listed.insertItem(to, item)
+        listed.setCurrentRow(to)
+        self._commit_tab_order_list()
 
     def reset_tab_order(self) -> None:
         """Put the tabs back the way the program builds them and forget the
@@ -937,6 +1304,7 @@ class BerryManager(
         self._sync_pinned_settings()
         self.app_config["tab_order"] = list(natural)
         self.save_app_config()
+        self._refresh_tab_order_list()
         self._reload_default_tab_combo(select=self.app_config.get("default_tab", "Berry"))
         self._select_default_tab()
         self.log("Tab order reset to default")
@@ -954,6 +1322,9 @@ class BerryManager(
         if order != (self.app_config.get("tab_order") or []):
             self.app_config["tab_order"] = order
             self.save_app_config()
+        # The list on the Startup page is a window onto the bar, so a drag there
+        # has to show up here.
+        self._refresh_tab_order_list()
 
     def _on_tab_order_toggled(self, checked: bool) -> None:
         """Settings > Startup: start (or stop) remembering the tab order. Switching
@@ -962,7 +1333,11 @@ class BerryManager(
         if checked:
             self.app_config["tab_order"] = self.capture_tab_order()
         self.save_app_config()
-        self.log("Tab order will be remembered" if checked else "Tab order will not be remembered")
+        listed = getattr(self, "tab_order_list", None)
+        if listed is not None:
+            listed.setEnabled(bool(checked))
+        self.log("Tab order will be remembered" if checked
+                 else "Tab order will not be remembered")
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is getattr(self, "_order_tab_bar", None) \
@@ -1043,31 +1418,48 @@ class BerryManager(
             declared = tuple(getattr(addon, "requires", ()) or ())
             used = [transport for transport in ("ssh", "sftp")
                     if transport in declared]
+            # The same four answers the addon's row gives, out of the same one
+            # decision, so the two lists cannot tell the user different things.
+            saying = connection_choice(
+                declared, bool(addon.is_bundled),
+                str(getattr(addon, "connection", "")))
             if used:
-                own = bool(getattr(addon, "uses_own", addon.own_connection))
                 for transport in used:
                     row.addWidget(self._transport_state_part(
                         transport, manager.transport_state(addon, transport)))
-                declared = str(getattr(addon, "connection", "app"))
-                mode = QLabel("on its own connection" if own
-                              else "on the main connection")
+                own_now = bool(getattr(addon, "uses_own", addon.own_connection))
+                if saying == "own":
+                    words = "on its own connection"
+                    why = ("Its manifest declares \"connection\": \"own\", so it "
+                           "opens a connection of its own for every call and never "
+                           "the app's session: its dots say whether it may and "
+                           "whether it has, not whether the app's session is up.")
+                elif saying == "both":
+                    # It may ride either, so the line says which it is on right
+                    # now and where the choice is made.
+                    words = ("on its own connection now" if own_now
+                             else "on the main connection now")
+                    why = ("Its manifest declares \"connection\": \"both\", so "
+                           "either is allowed and the switch on its row picks one: "
+                           "the app's one main session, or a connection of its own "
+                           "per call, which then needs no Connect press.")
+                else:
+                    words = "on the main connection"
+                    why = ("This addon shares the app's one main SSH/SFTP session, "
+                           "so it is connected exactly when that session is and its "
+                           "own switches are on.")
+                mode = QLabel(words)
                 mode.setStyleSheet("color: #8f8f8f;")
                 mode.setToolTip(
-                    "This addon opens a connection of its own for every call, so "
-                    "its dots say whether it may and whether it has, not whether "
-                    "the app's session is up. It still needs its own switch on, "
-                    "the transport's switch on its row, and the master switch."
-                    if own else
-                    "This addon shares the app's one main SSH/SFTP session, so it "
-                    "is connected exactly when that session is and its own "
-                    "switches are on.")
-                mode.setToolTip(mode.toolTip() + f"\nDeclared in its manifest: \"connection\": \"{declared}\".")
+                    why + "\nDeclared in its manifest: \"connection\": "
+                    + repr(str(getattr(addon, "connection", "") or "")) + ".")
                 row.addWidget(mode)
             else:
-                quiet = QLabel("no connection declared")
+                quiet = QLabel("no device connection")
                 quiet.setStyleSheet("color: #6a6a6a;")
-                quiet.setToolTip("This addon has not declared any transport under "
-                                 '\"requires\" in its manifest, so it cannot connect.')
+                quiet.setToolTip("This addon declared no transport under "
+                                 '\"requires\" in its manifest, so it reaches no '
+                                 "device: what it does, it does on this machine.")
                 row.addWidget(quiet)
             row.addStretch(1)
             wrap = QWidget()
@@ -1150,6 +1542,8 @@ class BerryManager(
         self.addons.bus.dead = True           # late jobs only reach deleted widgets
         self._quiesce_web_views()
         self._close_shared_conn()
+        if self.tray is not None:
+            self.tray.hide()    # a dead app must not leave a mark to click
         super().closeEvent(event)
 
     def _close_shared_conn(self) -> None:
@@ -1376,25 +1770,17 @@ class BerryManager(
 
         self.tab_order_check = ToggleSwitch("Remember tab order")
         self.tab_order_check.setToolTip(
-            "Keep the tabs in the order you drag them into, next time the app "
+            "Keep the tabs in the order you set them, next time the app "
             "starts. Turn off to use the built-in order on every launch."
         )
         self.tab_order_check.setChecked(bool(self.app_config.get("remember_tab_order", True)))
         self.tab_order_check.toggled.connect(self._on_tab_order_toggled)
         startup_form.addRow(self.tab_order_check)
 
-        order_row = QHBoxLayout()
-        save_order_btn = QPushButton("Save current order")
-        save_order_btn.setToolTip("Store the tabs exactly as they are arranged now.")
-        save_order_btn.clicked.connect(self.save_tab_order_now)
-        reset_order_btn = QPushButton("Reset to default order")
-        reset_order_btn.clicked.connect(self.reset_tab_order)
-        order_row.addWidget(save_order_btn)
-        order_row.addWidget(reset_order_btn)
-        order_row.addStretch(1)
-        order_wrap = QWidget()
-        order_wrap.setLayout(order_row)
-        startup_form.addRow("Tab order", order_wrap)
+        # The order is edited here rather than only by dragging the bar: what
+        # you see is the list of tabs, what you drag is the order that gets
+        # saved, and it takes effect the moment you let go.
+        startup_form.addRow("Tab order", self._build_tab_order_controls())
 
         self.addon_dev_check = ToggleSwitch("Show the Addon Dev tab")
         self.addon_dev_check.setToolTip(
@@ -1406,6 +1792,20 @@ class BerryManager(
         self.addon_dev_check.setChecked(self.addon_dev_wanted())
         self.addon_dev_check.toggled.connect(self._on_addon_dev_toggled)
         startup_form.addRow(self.addon_dev_check)
+
+        self.notify_check = ToggleSwitch("Pop up notifications")
+        self.notify_check.setToolTip(
+            "Send a notice to the system's notification area as well as the "
+            "status line: an addon speaking through api.ui.popup, and this "
+            "program's own news, such as an update being available. The app "
+            "holds an icon in the area while it runs, which is what the notice "
+            "comes from - right-click it to quit, left-click to bring the "
+            "window back. Switching this off leaves the window the only place "
+            "a message appears."
+        )
+        self.notify_check.setChecked(
+            bool(self.app_config.get("system_notifications", True)))
+        startup_form.addRow(self.notify_check)
 
         self.logging_group, log_form = self._make_toggle_group(
             "Enable logging to file", bool(self.app_config.get("logging_enabled", True))
@@ -1502,6 +1902,7 @@ class BerryManager(
         self.app_config["reboot_auto_watch"] = self.reboot_auto_watch_check.isChecked()
         self.app_config["ignore_cert_errors"] = self.cert_bypass_check.isChecked()
         self.app_config["addon_dev_enabled"] = self.addon_dev_check.isChecked()
+        self.app_config["system_notifications"] = self.notify_check.isChecked()
         self.app_config["remember_tab_order"] = self.tab_order_check.isChecked()
         self.save_app_config()
         self.apply_runtime_settings()
@@ -1627,6 +2028,10 @@ class BerryManager(
         self.tab_order_check.blockSignals(True)
         self.tab_order_check.setChecked(bool(cfg.get("remember_tab_order", True)))
         self.tab_order_check.blockSignals(False)
+
+        self.notify_check.blockSignals(True)
+        self.notify_check.setChecked(bool(cfg.get("system_notifications", True)))
+        self.notify_check.blockSignals(False)
 
         set_cert_bypass(bool(cfg.get("ignore_cert_errors")))
         self._update_cert_bypass_state()
@@ -1820,14 +2225,15 @@ class BerryManager(
     def show_about(self) -> None:
         box = QMessageBox(self)
         box.setWindowTitle("About Berry")
+        tag = f"{UPDATE_TAG_PREFIX}{APP_VERSION}"
         box.setText(
             f"<b>Berry Manager V{APP_VERSION}</b><br>"
             "Manage routers and devices over ssh&sftp<br>"
-            f'GitHub: <a href="{repo}" style="color: #c51a4a">fligma/raspiOpenWrt/tags/{UPDATE_TAG_PREFIX}{APP_VERSION}</a><br>'
-            'License: <a href="{license}" style="color: #c51a4a">MIT License</a><br><br>'
-            "Copyright &copy; 2026 fligma. Licensed under the MIT License".format(
-                repo=PROJECT_GITHUB_URL, license=PROJECT_LICENSE_URL
-            )
+            f'GitHub: <a href="{PROJECT_GITHUB_URL}/tags/{tag}" '
+            f'style="color: #c51a4a">{tag}</a><br>'
+            f'License: <a href="{PROJECT_LICENSE_URL}" '
+            'style="color: #c51a4a">MIT License</a><br><br>'
+            "Copyright &copy; 2026 fligma. Licensed under the MIT License"
         )
         box.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextBrowserInteraction

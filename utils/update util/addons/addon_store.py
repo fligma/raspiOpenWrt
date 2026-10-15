@@ -2,12 +2,24 @@
 """Berry addon store: pull addon sources from GitHub and build them here.
 
 Adds an ``Addon store`` tab. The catalog of what is available is read from
-``index.json`` in the ``addon.store`` folder of this project's repository, so the
-list of installable addons lives on GitHub and is never baked into the program.
-Each catalog entry names a plain ``.py`` addon sitting beside that index, and an
-optional list of asset files under ``addon.store/assets/<id>/``. ``index.json``
-is generated from the store folder on build, so it carries every addon's name,
-version, author and assets, with new and updated entries marked.
+``index.json`` in the ``addon.store`` folder of one or more GitHub repositories,
+so the list of installable addons lives on GitHub and is never baked into the
+program. Each catalog entry names a plain ``.py`` addon sitting beside that
+index, and an optional list of asset files under ``addon.store/assets/<id>/``.
+``index.json`` is generated from the store folder on build, so it carries every
+addon's name, version, author and assets, with new and updated entries marked.
+
+Where the addons come from is a list rather than one repository. The store starts
+with this program's own repository and any number more can be added, changed,
+moved to the front or removed from the tab's ``Sources`` button: a source names an
+owner, a repository, a branch, tag or commit, and the store folder inside it. The
+sources are read in order and their catalogs put together, so an addon published
+by two of them is taken from the first and the rest of that catalog still shows
+what its own repository has; a source that cannot be reached is reported and
+skipped rather than losing the others. Which one an entry came from is kept with
+it, and is what the download, the assets, the test and the modules an addon
+imports are all fetched from, so an addon arrives with exactly what sat beside
+the catalog entry naming it.
 
 Installing one mirrors what the web installer does with its files: the addon's
 ``.py`` and any assets it ships are fetched over HTTPS into the addon's own
@@ -68,14 +80,21 @@ interpreter is looked for as ``python3``, then ``python``, then the Windows ``py
 launcher, and a name that turns out to be the Microsoft Store's stand-in rather
 than a Python is passed over. When PyInstaller is missing the store installs it
 itself with ``pip`` - for this user alone when the plain install is refused -
-and the user is not asked to. The repository, branch, folder and token are all
-editable in ``addons/_data/addon_store/config.json``.
+and the user is not asked to. The token is editable in
+``addons/_data/addon_store/config.json``, and so are the sources, in that file's
+``sources`` list - a list of records rather than the one value per line the
+Settings form can hold, which is why they get their own button on the tab.
 
-The tab is built from a declarative spec and its buttons report back through
-``on_widget``, so the same file works imported into the app and compiled into a
-program of its own by the Addon Dev tab. It marks itself with
-``assets/storeicon.png`` when the program ships one, and with a drawn store bag
-when it does not, the way the other bundled addons' tabs do.
+The tab is laid out like the app store on a phone: a filter line over a list of
+what is on offer, each row wearing the addon's own picture, and a detail pane
+beside it that fills in when a row is picked - the description, who wrote it,
+which repository published it, which commit the file came out of, what it needs
+on the device and how it reaches that device, with the job log underneath the
+pair. Everything is built from a declarative spec and its buttons and rows report
+back through ``on_widget``, so the same file works imported into the app and
+compiled into a program of its own by the Addon Dev tab. It marks itself with
+``assets/addon_storeicon.png`` when the program ships one, and with a drawn store
+bag when it does not, the way the other bundled addons' tabs do.
 """
 
 from __future__ import annotations
@@ -92,14 +111,14 @@ from typing import Any
 from urllib.parse import quote
 
 # Qt-free contract half: runs standalone and in tests.
-from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN,
-                          addon_manifest_path, addon_origin, config_get,
-                          jsonable, merge_config, read_config_json,
-                          write_config_json)
+from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_manifest_path,
+                          addon_origin, config_get, connection_kind,
+                          connection_words, default_icon_path, find_icon, jsonable,
+                          merge_config, read_config_json, requires_list, write_config_json)
 
 ADDON = {
     "name": "Berry addon store",
-    "version": "1.1",
+    "version": "1.2",
     "author": "fligma",
     "description": "Lists the addons published in the repository's addon.store "
                    "folder, downloads a chosen one into a staging folder and "
@@ -107,6 +126,8 @@ ADDON = {
                    "or removes it from the addons folder. Installs PyInstaller "
                    "itself when it is not already present.",
     "requires": [],
+    # GitHub over HTTPS and this machine's disk: it never reaches a device.
+    "connection": "none",
     "api": 1,
 }
 
@@ -116,7 +137,14 @@ api = None                  # filled in by init()
 working = False             # one job at a time
 job: dict | None = None     # the job in progress, or nothing
 entries: list[dict] = []    # the catalog read last time
+shown: list[dict] = []      # the rows the list is painting right now
+picked = ""                 # the id the detail pane is describing
 updates: dict[str, dict] = {}   # id -> {installed, available}, what the catalog is ahead of
+#: An addon id to the picture of it this machine has, and the ids still waiting
+#: for theirs. The pictures are only ever fetched once each and kept under
+#: ``icons``, so a catalog with fifty addons in it costs fifty downloads once.
+icon_paths: dict[str, str] = {}
+icon_queue: list[str] = []
 
 #: A module name PyInstaller can import: anything else becomes an underscore.
 _SAFE = re.compile(r"[^A-Za-z0-9_]")
@@ -143,33 +171,39 @@ _MISSING = re.compile(r"No module named ['\"]([^'\"]+)['\"]")
 
 # --- what can be configured, and what it starts out as ---
 
-DEFAULTS = {
+#: The repository the store was written against, and the one it offers back when
+#: a source is added by name or every source has been removed.
+MAIN_SOURCE = {
     "owner": "fligma",
     "repo": "raspiOpenWrt",
     "ref": "main",
     "store_path": "utils/update util/addon.store",
+}
+
+#: What one source holds: the four pieces of a GitHub address, nothing else.
+SOURCE_KEYS = ("owner", "repo", "ref", "store_path")
+
+#: The answer a source field starts out with when it has none of its own.
+SOURCE_HINTS = {"owner": "", "repo": "", "ref": "main",
+                "store_path": MAIN_SOURCE["store_path"]}
+
+DEFAULTS = {
+    "sources": [dict(MAIN_SOURCE)],
     "token": "",
 }
 
 FIELDS = [
-    {"key": "owner", "label": "GitHub owner", "kind": "text",
-     "hint": "The account or organisation the repository belongs to"},
-    {"key": "repo", "label": "Repository", "kind": "text"},
-    {"key": "ref", "label": "Branch, tag or commit", "kind": "text",
-     "hint": "main, a tag like v1.4, or a full commit sha"},
-    {"key": "store_path", "label": "Store folder inside the repository",
-     "kind": "text",
-     "hint": "The folder holding index.json and the addon .py files"},
     {"key": "token", "label": "GitHub token", "kind": "text",
-     "hint": "Only needed for a private repository, or when anonymous requests "
-             "are refused",
+     "hint": "Used for every source. Only needed for a private repository, or "
+             "when anonymous requests are refused",
      "placeholder": "blank for a public repository"},
 ]
 
-GROUPS = [("Where addons come from", ["owner", "repo", "ref", "store_path", "token"])]
+GROUPS = [("How the store reaches GitHub", ["token"])]
 
 BUTTONS = (("refresh", "Refresh"), ("install", "Install"),
-           ("update", "Update"), ("delete", "Delete"))
+           ("update", "Update"), ("delete", "Delete"),
+           ("sources", "Sources..."))
 
 # --- small text helpers ---
 
@@ -193,6 +227,121 @@ def safe_segment(value: Any) -> str:
 def clean_token(value: Any) -> str:
     """A token stripped of the spaces a copy-paste tends to add."""
     return one_line(value).replace(" ", "")
+
+
+# --- the sources: which repositories the catalog is read from ---
+
+def normalize_source(raw: Any) -> dict:
+    """One source, cleaned: what a person typed, turned into the parts of an address.
+
+    A branch that was left blank is ``main``, and a store folder left blank is
+    this program's own, since that is the layout a published addon store uses.
+    """
+    data = raw if isinstance(raw, dict) else {}
+    out: dict[str, str] = {}
+    for key in SOURCE_KEYS:
+        text = (one_line(data.get(key)) if key != "store_path" else
+                one_line(data.get(key)).strip("/"))
+        if not text:
+            text = str(SOURCE_HINTS.get(key) or "")
+        out[key] = (safe_segment(text) if key in ("owner", "repo", "store_path")
+                    else text.strip("/"))
+    return out
+
+
+def source_label(source: dict) -> str:
+    """One source as a person names it: ``owner/repo @ ref``."""
+    data = source if isinstance(source, dict) else {}
+    return (f"{one_line(data.get('owner'))}/{one_line(data.get('repo'))}"
+            f" @ {one_line(data.get('ref') or 'main')}")
+
+
+def source_values(source: dict, token: str = "") -> dict:
+    """One source as the flat values dict every fetch already knows how to read.
+
+    The address builders take ``owner``/``repo``/``ref``/``store_path``/``token``,
+    so a source shaped like the old single-source config means none of them had
+    to learn about a list.
+    """
+    data = source if isinstance(source, dict) else {}
+    return {"owner": one_line(data.get("owner")),
+            "repo": one_line(data.get("repo")),
+            "ref": one_line(data.get("ref")) or "main",
+            "store_path": one_line(data.get("store_path")).strip("/")
+                         or MAIN_SOURCE["store_path"],
+            "token": clean_token(token)}
+
+
+def _source_key(source: dict) -> tuple:
+    return tuple(str(source.get(key) or "") for key in SOURCE_KEYS)
+
+
+def read_sources(values: dict) -> list[dict]:
+    """Every source the config names, in the order they are read.
+
+    A config from before the list existed named one repository with four plain
+    keys, and that is migrated rather than lost. An empty ``sources`` list is
+    what the user asked for - they removed every source - and stays empty; only
+    a config that names no list at all falls back to this program's own.
+    """
+    data = values if isinstance(values, dict) else {}
+    raw = config_get(data, "sources", None)
+    if not isinstance(raw, list):
+        named = [normalize_source({key: config_get(data, key, "")
+                                   for key in SOURCE_KEYS})]
+        raw = named if any(one_line(config_get(data, key, ""))
+                           for key in ("owner", "repo")) else [dict(MAIN_SOURCE)]
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for item in raw:
+        source = normalize_source(item)
+        if not source["owner"] or not source["repo"]:
+            continue                      # a half-typed source is not a source
+        key = _source_key(source)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(source)
+    return out
+
+
+def current_sources(values: dict | None = None) -> list[dict]:
+    """What the config names now, read from the file when nothing is to hand."""
+    if values is None:
+        return read_sources(source_config())
+    return read_sources(values)
+
+
+def source_config() -> dict:
+    """The values the sources are read out of: the file, with the defaults under it.
+
+    ``sources`` and the four flat keys a single-source config used cannot both
+    answer for where the addons come from, and only the file knows which one the
+    user actually wrote - so the shipped list of sources is held back from under
+    a repository that is still sitting in the file under its old keys, and the
+    main source answers only when the file names neither.
+    """
+    stored = api.config.stored() if api is not None else {}
+    if isinstance(stored, dict) and isinstance(stored.get("sources"), list):
+        return merge_config(DEFAULTS, stored)
+    under = {key: value for key, value in DEFAULTS.items() if key != "sources"}
+    return merge_config(under, stored if isinstance(stored, dict) else {})
+
+
+def write_sources(sources: list[dict]) -> list[dict]:
+    """Put the list in the config, and clear the old flat keys out of the file.
+
+    ``sources`` replaces the whole list, so it is written as the cleaned one;
+    the four keys a single-source config used go back to being what the list
+    says, so nothing reads a repository the tab no longer shows.
+    """
+    kept = read_sources({"sources": list(sources or [])})
+    if api is None:
+        return kept
+    api.config.update({"sources": jsonable(kept)})
+    for key in SOURCE_KEYS:
+        api.config.pop(key, None)
+    return kept
 
 
 # --- versions ---
@@ -237,6 +386,45 @@ BANNER_STYLE = ("QLabel { color: #e8e8e8; font-size: 13pt; font-weight: 600;"
 _STATUS_STYLE = ("QLabel { color: #9a9a9a; padding: 2px 6px;"
                  " border: 1px solid #3c3c3c; border-radius: 9px; }")
 
+#: The status line's two colours: the news it carries is the only thing that
+#: changes between them, so ``say`` and the spec cannot disagree about padding.
+_STATUS_OK = "color: #23d18b; padding: 2px 4px;"
+
+_STATUS_BAD = "color: #ffb020; padding: 2px 4px;"
+
+_STATUS_TEXT = _STATUS_OK
+
+#: The detail pane's own type, down the side of the picked addon's picture:
+#: its name, who published it, and how it stands against what is installed.
+_DETAIL_TITLE = ("QLabel { color: #f2f2f2; font-size: 15pt; font-weight: 700;"
+                 " padding: 0px; }")
+
+_DETAIL_SUB = "QLabel { color: #9a9a9a; font-size: 9pt; padding: 0px; }"
+
+_DETAIL_STATE = ("QLabel { color: #23d18b; font-size: 10pt; font-weight: 600;"
+                 " padding: 2px 0px 0px 0px; }")
+
+#: The small red line that starts each block of the pane off.
+_DETAIL_HEAD = ("QLabel { color: #c51a4a; font-size: 9pt; font-weight: 700;"
+                " padding: 8px 0px 2px 0px; }")
+
+#: The description, which is prose: it is set in the interface's own face rather
+#: than the monospace the log and the facts keep.
+_ABOUT_STYLE = ("QPlainTextEdit { color: #d6d6d6; background-color: #1c1c1c;"
+                " border: 1px solid #303030; border-radius: 6px; padding: 6px;"
+                " font-family: 'Segoe UI', sans-serif; }")
+
+#: The one word the filter line is answered with, and the count beside it.
+_FILTER_LABEL = "QLabel { color: #9a9a9a; font-weight: 600; padding: 0px 4px 0px 2px; }"
+
+#: The list's columns. A row is read by its picture and its name first, so the
+#: id - what every command takes - is not crowding the front of it; the detail
+#: pane says the id, and picking the row remembers it.
+LIST_COLUMNS = ("In the store", "Version", "Where it stands")
+
+#: The detail pane's facts are a label and what it answers, two columns wide.
+FACT_COLUMNS = ("", "")
+
 TAB_ICON = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
     '<path d="M4 7h16l-1.4 12.1a2 2 0 0 1-2 1.9H7.4a2 2 0 0 1-2-1.9Z" '
@@ -248,12 +436,21 @@ TAB_ICON = (
     '</svg>'
 )
 
-#: The picture the tab wears if the assets folder has one.
+#: The picture the tab wears if the assets folder has one, under the name it was
+#: shipped with before the ``<id>icon.png`` rule.
 TAB_ICON_FILE = "storeicon.png"
+
+#: This addon's own id, which is what its picture is named from.
+OWN_ID = "addon_store"
 
 
 def tab_icon() -> str:
-    """The shipped picture if the assets folder has one, else the drawn mark."""
+    """The shipped picture if the assets folder has one, else the drawn mark.
+
+    ``addon_storeicon.png`` is the standard name and is tried first, so the
+    picture can be renamed without touching this; ``storeicon.png`` is what is
+    shipped today, and a plain ``icon.png`` answers for either.
+    """
     folder = None
     try:
         folder = api.paths.assets
@@ -261,38 +458,75 @@ def tab_icon() -> str:
         folder = None
     if folder is None:
         return TAB_ICON
-    try:
-        candidate = Path(str(folder)) / TAB_ICON_FILE
-        if candidate.is_file():
-            return str(candidate)
-    except (OSError, AddonError):
-        return TAB_ICON
-    return TAB_ICON
+    return find_icon(folder, OWN_ID, TAB_ICON_FILE) or TAB_ICON
 
 
 def tab_spec() -> dict:
-    """The whole tab: one header line, the catalog and its log, its buttons.
+    """The whole tab as an app store has it: a list of what is on offer and, beside
+    it, the one addon currently picked, with the job's log under both.
 
     The status line sits in the header between the title and the repository chip,
-    so nothing of its own steals height from the table. It takes the width the
-    two leave over and wraps inside that, so a long report stays readable and the
-    chip stays put. The table and the log share a horizontal splitter, so the
-    line between them drags to give either more room; the table starts with the
-    larger share.
+    so nothing of its own steals height from the list; it takes the width the two
+    leave over and wraps inside that, so a long report stays readable and the chip
+    stays put. Under the header a filter line narrows the list as it is typed.
+
+    Two splitters do the rest, and every part of the tab can therefore be given
+    room by dragging: the outer one is the panes over the log, the inner one is
+    the list over its detail pane. The detail pane starts with the larger share,
+    since an addon's description is the thing a person came here to read.
     """
     return {"kind": "column", "children": [
         {"kind": "row", "children": [
             {"kind": "label", "text": "Berry addon store", "style": BANNER_STYLE},
             {"kind": "label", "id": "status", "text": "Ready.", "word_wrap": True,
-             "expand": True, "style": "color: #23d18b; padding: 2px 4px;"},
-            {"kind": "label", "id": "source", "text": "", "style": _STATUS_STYLE},
+             "expand": True, "style": _STATUS_TEXT},
+            {"kind": "label", "id": "source", "text": "",
+             "tooltip": "The repository, or the first of them, the catalog is "
+                        "read from", "style": _STATUS_STYLE},
         ]},
-        {"kind": "splitter", "sizes": [3, 2], "children": [
-            {"kind": "table", "id": "list", "label": "Available",
-             "columns": ["ID", "Version", "Name", "Author", "Installed"],
-             "stretch": [2, 3], "col_widths": [120, 60, 0, 0, 100],
-             "tooltip": "What the store folder lists; pick one and use the buttons "
-                        "below"},
+        {"kind": "row", "children": [
+            {"kind": "label", "text": "Find", "style": _FILTER_LABEL},
+            {"kind": "line", "id": "filter", "expand": True,
+             "placeholder": "Filter the list by name, author, id or what it needs",
+             "tooltip": "Nothing is looked for until you type; the catalog on "
+                        "GitHub is not touched",
+             "on": ["changed", "returned"]},
+            {"kind": "label", "id": "count", "text": "", "style": _STATUS_STYLE,
+             "tooltip": "How many of the catalog's addons are showing"},
+        ]},
+        {"kind": "splitter", "vertical": True, "sizes": [3, 1], "children": [
+            {"kind": "splitter", "sizes": [2, 3], "children": [
+                {"kind": "table", "id": "list", "columns": list(LIST_COLUMNS),
+                 "stretch": [0], "col_widths": [0, 70, 130], "font_size": 11,
+                 "on": ["selected", "context"],
+                 "tooltip": "Every addon the configured sources list; click one "
+                            "to read about it, then use the buttons below"},
+                {"kind": "column", "children": [
+                    {"kind": "row", "children": [
+                        {"kind": "image", "id": "dicon", "size": 64},
+                        {"kind": "column", "children": [
+                            {"kind": "label", "id": "dtitle",
+                             "text": "Pick an addon", "style": _DETAIL_TITLE,
+                             "word_wrap": True},
+                            {"kind": "label", "id": "dby", "text": "",
+                             "style": _DETAIL_SUB, "word_wrap": True},
+                            {"kind": "label", "id": "dstate", "text": "",
+                             "style": _DETAIL_STATE, "word_wrap": True},
+                        ]},
+                    ]},
+                    {"kind": "label", "text": "What it is", "style": _DETAIL_HEAD},
+                    {"kind": "multi", "id": "dabout", "readonly": True,
+                     "expand": True, "style": _ABOUT_STYLE,
+                     "placeholder": "Nothing picked yet - choose an addon on the "
+                                    "left to read what it does"},
+                    {"kind": "label", "text": "What the listing says",
+                     "style": _DETAIL_HEAD},
+                    {"kind": "table", "id": "dfacts", "columns": list(FACT_COLUMNS),
+                     "stretch": [1], "col_widths": [120, 0], "font_size": 10,
+                     "tooltip": "The catalog's own words about this addon, and "
+                                "where on GitHub it came from"},
+                ]},
+            ]},
             {"kind": "multi", "id": "log", "readonly": True,
              "placeholder": "Every step of the last install, as it happened",
              "tooltip": "The same lines go into the program's own log"},
@@ -305,8 +539,14 @@ def tab_spec() -> dict:
 
 
 def build_tab() -> None:
-    """The tab as a spec; nothing here holds a widget."""
-    api.tabs.add_tab(TAB, spec=tab_spec(), style=TAB_STYLE)
+    """The tab as a spec; nothing here holds a widget.
+
+    Pinned and icon-only on purpose: the store is furniture, like Settings, so it
+    holds at the right edge of the bar and is recognised by its mark instead of
+    taking a place in the row of tabs the user arranged.
+    """
+    api.tabs.add_tab(TAB, spec=tab_spec(), style=TAB_STYLE,
+                     pinned=True, icon_only=True)
     api.tabs.set_icon(TAB, tab_icon())
 
 
@@ -316,9 +556,7 @@ def say(text: str, bad: bool = False) -> None:
         return
     try:
         api.tabs.set_widget(TAB, "status", "text", str(text))
-        api.tabs.set_widget(TAB, "status", "style",
-                            "color: #ffb020; padding: 2px 4px;" if bad
-                            else "color: #23d18b; padding: 2px 4px;")
+        api.tabs.set_widget(TAB, "status", "style", _STATUS_BAD if bad else _STATUS_OK)
     except AddonError:
         pass
 
@@ -334,10 +572,18 @@ def note(text: str) -> None:
     api.log(text)
 
 
-def show_source(values: dict) -> None:
-    """The header chip: which owner/repo/ref/folder the catalog is read from."""
-    text = (f"{config_get(values, 'owner', '')}/{config_get(values, 'repo', '')}"
-            f" @ {config_get(values, 'ref', 'main')}")
+def show_sources(sources: list[dict]) -> None:
+    """The header chip: which repositories the catalog is read from, in order.
+
+    One source is named in full; several are named by the first and counted, so
+    the chip stays a chip and the status line keeps the width it needs.
+    """
+    if not sources:
+        text = "no source configured"
+    elif len(sources) == 1:
+        text = source_label(sources[0])
+    else:
+        text = f"{source_label(sources[0])}  +{len(sources) - 1}"
     if api is None:
         return
     try:
@@ -432,7 +678,7 @@ def app_folder(values: dict) -> str:
     leaves nothing above it to name.
     """
     folder = one_line(config_get(values, "store_path",
-                                 DEFAULTS["store_path"])).strip("/")
+                                 MAIN_SOURCE["store_path"])).strip("/")
     return folder.rsplit("/", 1)[0] if "/" in folder else ""
 
 
@@ -443,11 +689,11 @@ def raw_address(values: dict, filename: str, folder: str | None = None) -> str:
     it, which is how the two modules an addon's test and its program import are
     reached above the store.
     """
-    owner = quote(safe_segment(config_get(values, "owner", DEFAULTS["owner"])))
-    repo = quote(safe_segment(config_get(values, "repo", DEFAULTS["repo"])))
+    owner = quote(safe_segment(config_get(values, "owner", MAIN_SOURCE["owner"])))
+    repo = quote(safe_segment(config_get(values, "repo", MAIN_SOURCE["repo"])))
     ref = quote(one_line(config_get(values, "ref", "main")).strip("/"), safe="-./_")
     where = (one_line(folder) if folder is not None else
-             config_get(values, "store_path", DEFAULTS["store_path"]))
+             config_get(values, "store_path", MAIN_SOURCE["store_path"]))
     whole = "/".join(part for part in (safe_segment(where).strip("/"),
                                        safe_segment(filename)) if part)
     return f"/{owner}/{repo}/{ref}/{quote(whole)}"
@@ -466,7 +712,14 @@ def _refused(status: int, path: str) -> str:
 # --- reading the catalog ---
 
 def parse_catalog(body: Any) -> list[dict]:
-    """index.json as a tidy list of entries; a bare list is accepted too."""
+    """index.json as a tidy list of entries; a bare list is accepted too.
+
+    What an addon needs on the device comes over in two keys the generator writes
+    from the addon's own manifest: ``requires`` the transports it asks for, and
+    ``connection`` how it reaches the device at all. Both are read through the
+    same helpers the app uses, so a listing and a Settings row say the same thing
+    about the same addon.
+    """
     if isinstance(body, dict):
         rows = body.get("addons") or body.get("entries") or []
     elif isinstance(body, list):
@@ -495,6 +748,8 @@ def parse_catalog(body: Any) -> list[dict]:
             "icon": one_line(raw.get("icon") or ""),
             "test": one_line(raw.get("test") or ""),
             "status": one_line(raw.get("status") or ""),
+            "requires": requires_list(raw),
+            "connection": connection_kind(raw),
         })
     return out
 
@@ -656,6 +911,231 @@ def _tidy(id_value: str) -> None:
     _reset_staging()
 
 
+# --- the pictures an addon is shown with ---
+
+#: What a catalog's ``icon`` may name, and where a downloaded picture is kept. A
+#: picture is fetched once and read off disk afterwards, so a store of forty
+#: addons costs forty downloads the first time and nothing at all after it.
+_PICTURES = (".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico")
+
+#: How many ticks a picture waits between itself and the next one. Slow enough
+#: that a build starting in between gets the connection back in front of it.
+_ICON_GAP = 0.3
+
+
+def icons_dir() -> Path:
+    """``addons/_data/addon_store/icons``, made when asked for."""
+    folder = Path(api.paths.data) / "icons"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def cached_icon(id_value: str) -> str:
+    """The picture of one addon this machine already has, whatever name it came under.
+
+    The catalog's own name is what is looked for first, since that is the file it
+    points at; anything else already downloaded under this id's name is just as
+    good, so a store that renamed its picture is not left showing the default.
+    """
+    name = clean_id(id_value)
+    if not name:
+        return ""
+    folder = icons_dir()
+    target = None
+    for candidate in sorted(folder.glob(f"{name}.*")):
+        if candidate.suffix.lower() in _PICTURES and candidate.is_file():
+            target = candidate
+            break
+    return str(target) if target is not None else ""
+
+
+def fallback_icon() -> str:
+    """The picture an addon with none of its own is shown with.
+
+    ``assets/storedefaultaddon.png`` beside the program, looked for in the
+    program's own assets folder as well: a store compiled into a program of its
+    own carries only its own pictures, and the default is the app's.
+    """
+    tries: list[Any] = []
+    try:
+        tries.append(api.paths.assets)
+        tries.append(Path(api.paths.base) / "assets")
+    except (AddonError, AttributeError, TypeError):
+        pass
+    for folder in tries:
+        found = default_icon_path(folder)
+        if found:
+            return found
+    return ""
+
+
+def icon_of(entry: dict) -> str:
+    """What one catalog row is drawn with: its own picture, or the default."""
+    id_value = one_line(entry.get("id"))
+    return (icon_paths.get(id_value) or cached_icon(id_value)
+            or fallback_icon())
+
+
+def _fetch_quiet(values: dict, remote: str, target: Path) -> bool:
+    """One file straight to disk, without the log line a download usually makes.
+
+    A picture nobody asked for is not worth a page of the job log, and one that
+    will not arrive is simply a store that shows the default icon.
+    """
+    path = raw_address(values, remote)
+    try:
+        status, body = _http(values).get("raw.githubusercontent.com", path)
+    except (http.client.HTTPException, OSError):
+        return False
+    if status != 200 or not body:
+        return False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+    except OSError:
+        return False
+    return True
+
+
+def queue_icons() -> None:
+    """Every listed addon whose picture this machine lacks, in the order it shows.
+
+    Only addons the catalog names a picture for are asked about, so an addon
+    published without one costs nothing and is drawn with the default.
+    """
+    del icon_queue[:]
+    for entry in entries:
+        id_value = one_line(entry.get("id"))
+        if not id_value or not one_line(entry.get("icon")):
+            continue
+        if not cached_icon(id_value):
+            icon_paths.pop(id_value, None)
+            icon_queue.append(id_value)
+    if icon_queue:
+        api.schedule.after(_ICON_GAP, _pump_icons)
+
+
+def _pump_icons() -> None:
+    """Fetch one waiting picture, then come back for the next on a later tick.
+
+    One per tick, because these are the app's own downloads and a store with a
+    slow connection would otherwise sit filling a row of empty squares while it
+    caught up. A picture that will not come is left for the default.
+    """
+    if api is None or not icon_queue:
+        return
+    if working:                       # a build in hand goes first
+        api.schedule.after(1.0, _pump_icons)
+        return
+    id_value = str(icon_queue.pop(0))
+    entry = entry_for(id_value)
+    if entry is not None:
+        name = one_line(entry.get("icon"))
+        source = entry.get("src")
+        if name and isinstance(source, dict) and not cached_icon(id_value):
+            suffix = Path(name).suffix.lower() or ".png"
+            target = icons_dir() / f"{clean_id(id_value)}{suffix}"
+            values = source_values(source, clean_token(
+                config_get(source_config(), "token", "")))
+            if _fetch_quiet(values, f"assets/{id_value}/{name}", target):
+                icon_paths[id_value] = str(target)
+                show_entries()
+                if picked == id_value:
+                    show_detail(entry)
+    if icon_queue:
+        api.schedule.after(_ICON_GAP, _pump_icons)
+
+
+# --- which commit a published addon came out of ---
+
+#: GitHub's own address for questions about a repository rather than its files.
+#: The catalog is regenerated whenever the store folder changes and CI commits
+#: the result, so nothing baked into it could honestly name a commit - the store
+#: asks for the last one that touched the addon's own file, once per addon per
+#: load, and only when somebody opens it.
+_API_HOST = "api.github.com"
+
+
+def commit_address(values: dict, filename: str) -> str:
+    """The commits query for one file, held to the ref the source names."""
+    owner = quote(safe_segment(config_get(values, "owner", MAIN_SOURCE["owner"])))
+    repo = quote(safe_segment(config_get(values, "repo", MAIN_SOURCE["repo"])))
+    ref = quote(one_line(config_get(values, "ref")) or "main", safe="-./_")
+    where = "/".join(part for part in (
+        safe_segment(config_get(values, "store_path",
+                                MAIN_SOURCE["store_path"])).strip("/"),
+        safe_segment(filename)) if part)
+    return (f"/repos/{owner}/{repo}/commits?sha={ref}"
+            f"&path={quote(where, safe='/-._')}&per_page=1")
+
+
+def _commit_words(record: dict) -> dict:
+    """One commit as the few parts a listing shows: what, who, when."""
+    data = record if isinstance(record, dict) else {}
+    inner = data.get("commit") if isinstance(data.get("commit"), dict) else {}
+    lines = [line.strip() for line in str(inner.get("message") or "").splitlines()
+             if line.strip()]
+    author = data.get("author") if isinstance(data.get("author"), dict) else {}
+    writer = inner.get("author") if isinstance(inner.get("author"), dict) else {}
+    return {"sha": one_line(data.get("sha")),
+            "title": lines[0] if lines else "",
+            "body": "\n".join(lines[1:]),
+            "date": str(writer.get("date") or "")[:10],
+            "who": one_line(author.get("login") or writer.get("name"))}
+
+
+def _ask_commit(entry: dict) -> None:
+    """Queue the lookup of one addon's commit; the answer comes on a later tick.
+
+    Asking on the spot would make opening a row wait on GitHub for as long as the
+    connection cares to take, so it is put off a moment. An addon whose commit is
+    already in hand, or already being asked about, is never asked twice.
+    """
+    if api is None or entry.get("asking") or isinstance(entry.get("commit"), dict):
+        return
+    if not isinstance(entry.get("src"), dict):
+        return
+    entry["asking"] = True
+    try:
+        api.schedule.after(0.05, lambda: _read_commit(entry))
+    except (AddonError, AttributeError, TypeError):
+        entry["asking"] = False
+
+
+def _read_commit(entry: dict) -> None:
+    """Fill in the commit one addon's file last changed in; quiet when it cannot.
+
+    Rate limits, a private repository with no token and an unreachable network
+    all leave the row without a commit line rather than a wall of text, because
+    provenance is a nicety that the store works perfectly well without.
+    """
+    if api is None:
+        return
+    source = entry.get("src")
+    if not isinstance(source, dict):
+        return
+    entry["asking"] = True
+    values = source_values(source, clean_token(
+        config_get(source_config(), "token", "")))
+    path = commit_address(values, one_line(entry.get("filename")))
+    try:
+        status, body = _http(values).get(_API_HOST, path, accept="application/json")
+    except (http.client.HTTPException, OSError) as error:
+        note(f"{entry['id']}: its commit could not be read ({error})")
+        return
+    if status != 200:
+        return
+    try:
+        records = json.loads(body.decode("utf-8", errors="replace"))
+    except ValueError:
+        return
+    first = records[0] if isinstance(records, list) and records else None
+    if isinstance(first, dict):
+        entry["commit"] = _commit_words(first)
+        if picked == entry.get("id"):
+            show_detail(entry)
+
+
 # --- the table ---
 
 def check_updates() -> dict[str, dict]:
@@ -671,46 +1151,119 @@ def check_updates() -> dict[str, dict]:
     return found
 
 
+#: What the generator leaves in the catalog to point at a row nobody has taken.
+_MARKS = {"new": "  \u25cf new", "updated": "  \u21bb updated"}
+
+#: The filter line as it stands, and the rows it leaves showing.
+filter_text = ""
+
+
+def state_of(entry: dict) -> tuple[str, str, str]:
+    """How one addon stands here: the short words for its row, the long words for
+    the pane beside it, and the colour both are drawn in.
+
+    The version counted as behind is the one written down beside the program when
+    it was installed, so a row can say what an update would replace rather than
+    only that something is due.
+    """
+    id_value = one_line(entry.get("id"))
+    pending = updates.get(id_value) or {}
+    done = installed(id_value)
+    have = (one_line(pending.get("installed"))
+            or (installed_version(id_value) if done else ""))
+    if pending:
+        return ("update available",
+                f"Update available - version {have or 'unknown'} here, "
+                f"{one_line(pending.get('available')) or '?'} in the store",
+                "#ffb020")
+    if done:
+        return ("installed", f"Installed, version {have or 'unknown'}", "#23d18b")
+    status = one_line(entry.get("status"))
+    if status == "new":
+        return ("new", "New in the store, never installed here", "#ffb020")
+    if status == "updated":
+        return ("updated", "Updated in the store since it was last built", "#ffb020")
+    return ("not installed", "Not installed on this machine", "#9a9a9a")
+
+
+def matches(entry: dict, needle: str) -> bool:
+    """Whether one catalog row is what the filter line is asking for.
+
+    Every word a person might type at a store is searched - the name, the id, who
+    wrote it, what the listing says it does, how it reaches a device and which
+    repository published it - and none of it reaches GitHub to do it.
+    """
+    if not needle:
+        return True
+    for value in (entry.get("name"), entry.get("id"), entry.get("author"),
+                  entry.get("description"), entry.get("source"),
+                  connection_words(entry), " ".join(entry.get("requires") or [])):
+        if needle in one_line(value).lower():
+            return True
+    return False
+
+
 def show_entries() -> None:
-    """The catalog as rows: last column installed, up to date or behind."""
+    """The catalog as rows: each addon's own picture and name, its version, and
+    how it stands against what is installed here."""
+    global shown
     if api is None:
         return
+    needle = filter_text.strip().lower()
+    shown = [entry for entry in entries if matches(entry, needle)]
     rows = []
-    marks = {"new": "  \u25cf new", "updated": "  \u21bb updated"}
-    for entry in entries:
-        done = installed(entry["id"])
-        pending = bool(updates.get(entry["id"]))
-        mark = marks.get(entry.get("status", ""), "")
-        state = ("update available" if pending
-                 else "installed" if done else "not installed")
-        row = {"cells": [entry["id"], entry["version"], entry["name"] + mark,
-                         entry["author"], state]}
-        if pending:
-            row["color"] = "#ffb020"
-        elif done:
-            row["color"] = "#23d18b"
-        elif entry.get("status") in marks:
-            row["color"] = "#ffb020"
-        else:
-            row["color"] = "#9a9a9a"
+    for entry in shown:
+        state, _words, tint = state_of(entry)
+        name = one_line(entry.get("name")) or one_line(entry.get("id"))
+        row = {"cells": [name + _MARKS.get(one_line(entry.get("status")), ""),
+                         one_line(entry.get("version")), state],
+               "color": tint}
+        picture = icon_of(entry)
+        if picture:
+            row["icon"] = picture
         rows.append(row)
+    total = len(entries)
     try:
         api.tabs.set_widget(TAB, "list", "rows", rows)
+        api.tabs.set_widget(TAB, "count", "text",
+                            f"{len(shown)} of {total}" if needle
+                            else f"{total} listed")
     except AddonError:
         pass
 
 
-def selected_id() -> str:
-    """The id in the first column of the chosen row, or nothing."""
-    try:
-        chosen = api.tabs.widget_value(TAB, "list", "selected")
-    except AddonError:
-        return ""
-    if not chosen:
-        return ""
-    first = chosen[0] if isinstance(chosen, (list, tuple)) else chosen
-    parts = str(first).split("\t")
-    return clean_id(parts[0])
+def apply_filter(needle: Any = "") -> None:
+    """Repaint the list with only the rows the filter fits; the catalog is kept."""
+    global filter_text
+    filter_text = one_line(needle)
+    show_entries()
+
+
+def find_entry(text: str) -> dict | None:
+    """The row a person means, whether they named it by id or by the name the list shows.
+
+    The first column carries a name with any mark beside it, while every command
+    takes an id, so both are tried - the id first, then an exact caption, then a
+    caption the words fit - before a row is given up on.
+    """
+    wanted = one_line(text)
+    if not wanted:
+        return None
+    ident = clean_id(wanted)
+    for entry in entries:
+        if entry["id"] == ident:
+            return entry
+    lowered = wanted.lower()
+    for pool in (shown, entries):
+        for entry in pool:
+            if one_line(entry.get("name")).lower() == lowered:
+                return entry
+    for pool in (shown, entries):
+        for entry in pool:
+            name = one_line(entry.get("name")).lower()
+            if name and (name in lowered or lowered.startswith(name)):
+                return entry
+    return None
 
 
 def entry_for(id_value: str) -> dict | None:
@@ -720,29 +1273,384 @@ def entry_for(id_value: str) -> dict | None:
     return None
 
 
+def selected_id() -> str:
+    """The addon the buttons work on: the chosen row, or the one being described.
+
+    A repaint drops Qt's selection without dropping what the pane is showing, so
+    the pane answers second - a button then still means the addon the person is
+    looking at rather than nothing at all.
+    """
+    if api is None:
+        return clean_id(picked)
+    try:
+        chosen = api.tabs.widget_value(TAB, "list", "selected")
+    except AddonError:
+        chosen = None
+    if isinstance(chosen, (list, tuple)):
+        text = str(chosen[0]) if chosen else ""
+    else:
+        text = str(chosen or "")
+    entry = find_entry(text.split("\t")[0])
+    if entry is not None:
+        return entry["id"]
+    return clean_id(picked)
+
+
+# --- the detail pane: what one addon really is ---
+
+def _detail(id_value: str, prop: str, value: Any) -> None:
+    """One widget of the detail pane, with the tab's own failures kept to itself."""
+    if api is None:
+        return
+    try:
+        api.tabs.set_widget(TAB, id_value, prop, value)
+    except AddonError:
+        pass
+
+
+def _fact_rows(entry: dict) -> list[dict]:
+    """The listing's own words about one addon, as the pairs the pane shows.
+
+    What it needs on the device is said twice over on purpose: the transports
+    ``api.device`` will hand it, and in plain words whose connection it runs on -
+    the two things a person can only find out the hard way otherwise.
+    """
+    state, _words, _tint = state_of(entry)
+    commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
+    needs = ", ".join(entry.get("requires") or []) or "nothing on the device"
+    facts = [["id", one_line(entry.get("id"))],
+             ["Version", one_line(entry.get("version")) or "not stated"],
+             ["Author", one_line(entry.get("author")) or "not stated"],
+             ["Published by", one_line(entry.get("source")) or "not stated"],
+             ["Here", state],
+             ["Needs", needs],
+             ["Connection", connection_words(entry)],
+             ["File", one_line(entry.get("filename"))],
+             ["Its own assets", ", ".join(entry.get("assets") or []) or "none"],
+             ["Its own test", one_line(entry.get("test")) or "none published"]]
+    if commit.get("sha"):
+        title = one_line(commit.get("title"))
+        facts.insert(5, ["Commit", f"{str(commit['sha'])[:7]} {title}".strip()])
+        when = " ".join(part for part in (one_line(commit.get("date")),
+                                          one_line(commit.get("who"))) if part)
+        if when:
+            facts.insert(6, ["Committed", when])
+    return [{"cells": [label, value]} for label, value in facts]
+
+
+def show_detail(entry: dict | None) -> None:
+    """Fill in the pane beside the list with everything the listing says.
+
+    Opening an addon is the only time its commit is asked for, so the store makes
+    one request per addon somebody shows an interest in rather than one per row
+    on every refresh; the line fills itself in when the answer lands.
+    """
+    global picked
+    if api is None:
+        return
+    if not isinstance(entry, dict):
+        picked = ""
+        _detail("dicon", "image", "")
+        _detail("dtitle", "text", "Pick an addon")
+        _detail("dby", "text", "")
+        _detail("dstate", "text", "")
+        _detail("dabout", "value", "")
+        _detail("dfacts", "rows", [])
+        return
+    picked = one_line(entry.get("id"))
+    _state, words, tint = state_of(entry)
+    author = one_line(entry.get("author"))
+    source = one_line(entry.get("source"))
+    by = "   \u00b7   ".join(part for part in ((f"by {author}" if author else ""),
+                                               source) if part)
+    _detail("dicon", "image", icon_of(entry))
+    _detail("dtitle", "text", one_line(entry.get("name")) or picked)
+    _detail("dby", "text", by)
+    _detail("dstate", "text", words)
+    _detail("dstate", "style", f"color: {tint}; font-size: 10pt; font-weight: 600;"
+                               " padding: 2px 0px 0px 0px;")
+    _detail("dabout", "value", one_line(entry.get("description"))
+            or "The listing says nothing about this addon.")
+    _detail("dfacts", "rows", _fact_rows(entry))
+    _ask_commit(entry)
+
+
+def pick_row(payload: dict) -> None:
+    """A row was picked: describe the addon the list has under its selection.
+
+    A repaint arrives here as a selection of nothing, and that is not the person
+    changing their mind - so the pane keeps whatever it was already showing.
+    """
+    text = one_line((payload or {}).get("text"))
+    if not text and api is not None:
+        try:
+            chosen = api.tabs.widget_value(TAB, "list", "selected")
+        except AddonError:
+            return
+        text = str(chosen[0]) if isinstance(chosen, (list, tuple)) and chosen else ""
+    entry = find_entry(text)
+    if entry is not None:
+        show_detail(entry)
+
+
+def row_context(text: str) -> None:
+    """A right-click on a row: show what it is, then offer the buttons that fit it.
+
+    The two things that can only be done to an installed addon are left out of a
+    row that is not one, so the menu never offers to delete thin air.
+    """
+    if api is None:
+        return
+    entry = find_entry(text) or (entry_for(picked) if picked else None)
+    if entry is None:
+        return
+    show_detail(entry)
+    offered = [("Install it", "install"), ("Update it", "update"),
+               ("Delete it", "delete"), ("Refresh the catalog", "refresh")]
+    if not installed(entry["id"]):
+        offered = [pair for pair in offered if pair[1] not in ("update", "delete")]
+    line = api.ui.choose([words for words, _key in offered] + ["Nothing"])
+    if not line:
+        return
+    for words, key in offered:
+        if line == words:
+            HANDLERS[key]()
+            return
+
+
+def merge_catalogs(sources: list[dict], token: str = "") -> tuple[list[dict], list[str]]:
+    """Every source's catalog, in order, with the clashes said out loud.
+
+    An id two repositories both publish is taken from the first - the order of
+    the list is the priority - and the row says where the one kept came from, so
+    the download that follows is looked for in the same place. A source that will
+    not answer is reported and passed over, because the rest of them are still
+    worth reading.
+    """
+    found: list[dict] = []
+    failed: list[str] = []
+    seen: dict[str, str] = {}
+    for source in sources:
+        label = source_label(source)
+        try:
+            rows = load_catalog(source_values(source, token))
+        except AddonError as error:
+            failed.append(f"{label}: {error}")
+            note(f"catalog {label}: {error}")
+            continue
+        kept = 0
+        for row in rows:
+            entry = dict(row)
+            clash = seen.get(entry["id"])
+            if clash is not None:
+                note(f"{entry['id']} is published by {label} as well; the copy "
+                     f"from {clash} is the one that will be installed")
+                continue
+            entry["source"] = label
+            entry["src"] = source
+            seen[entry["id"]] = label
+            found.append(entry)
+            kept += 1
+        note(f"{label}: {kept} addon(s)")
+    return found, failed
+
+
 def refresh(_checked: bool = False) -> None:
-    """Read the catalog from GitHub, check what is behind it and repaint the table."""
+    """Read each source's catalog from GitHub, check what is behind it, repaint.
+
+    A commit already looked up is carried across the reload with it, so reading
+    the store again is not a reason to ask GitHub the same question twice, and the
+    pictures are queued again only for the addons this machine still lacks.
+    """
     global entries, updates
     if api is None or working:
         return
-    values = merge_config(DEFAULTS, api.config.stored())
-    show_source(values)
-    say("reading the store catalog...")
-    try:
-        entries = load_catalog(values)
-    except AddonError as error:
-        say(f"{error}", bad=True)
-        note(f"catalog: {error}")
+    values = source_config()
+    sources = read_sources(values)
+    show_sources(sources)
+    if not sources:
+        entries, updates = [], {}
+        show_entries()
+        show_detail(None)
+        say("no source is configured: press Sources and add a repository", bad=True)
         return
+    say(f"reading {len(sources)} catalog(s)...")
+    known = {one_line(entry.get("id")): entry["commit"] for entry in entries
+             if isinstance(entry.get("commit"), dict)}
+    entries, failed = merge_catalogs(sources, clean_token(config_get(values,
+                                                                     "token", "")))
+    for entry in entries:
+        saved = known.get(entry["id"])
+        if saved is not None:
+            entry["commit"] = saved
     updates = check_updates()
     show_entries()
-    word = "no addons are published here yet" if not entries \
-        else f"{len(entries)} addon(s) in the store"
+    queue_icons()
+    show_detail(entry_for(picked) if picked else None)
+    word = ("no addons are published here yet" if not entries
+            else f"{len(entries)} addon(s) in the store")
     if updates:
         word += f", {len(updates)} update(s) available"
         note(f"{len(updates)} installed addon(s) have a newer version in the store: "
              + ", ".join(sorted(updates)))
-    say(f"catalog loaded: {word}")
+    if failed and entries:
+        say(f"catalog loaded: {word}; {len(failed)} source(s) could not be read "
+            f"({failed[0]})", bad=True)
+    elif failed:
+        say("; ".join(failed), bad=True)
+    else:
+        say(f"catalog loaded: {word}")
+
+
+# --- the sources editor: what the tab's Sources button does ---
+
+_ADD = "Add a GitHub repository"
+_DONE = "Done"
+_MAIN = "Add this program's own source"
+
+#: What can be done to the source picked from the list, and the key each one
+#: writes when it is a field rather than a move.
+_SOURCE_ACTIONS = ("Change owner", "Change repository",
+                   "Change branch, tag or commit", "Change store folder",
+                   "Move first", "Remove")
+
+_SOURCE_FIELDS = {"Change owner": "owner",
+                  "Change repository": "repo",
+                  "Change branch, tag or commit": "ref",
+                  "Change store folder": "store_path"}
+
+_SOURCE_LABELS = {"owner": "GitHub owner - the account or organisation",
+                  "repo": "Repository name",
+                  "ref": "Branch, tag or commit",
+                  "store_path": "Store folder inside the repository"}
+
+
+def _source_menu(sources: list[dict]) -> tuple[list[str], list[tuple]]:
+    """The menu's lines and what each of them means, kept in step.
+
+    Every line is numbered or worded so it cannot be mistaken for one of the
+    actions, and the program's own repository is only offered again when it is
+    not already in the list.
+    """
+    items: list[str] = []
+    actions: list[tuple] = []
+    for index, source in enumerate(sources, 1):
+        items.append(f"{index}. {source_label(source)}")
+        actions.append(("source", index - 1))
+    items.append(_ADD)
+    actions.append(("add", None))
+    main = normalize_source(MAIN_SOURCE)
+    if not any(_source_key(source) == _source_key(main) for source in sources):
+        items.append(f"{_MAIN} ({source_label(main)})")
+        actions.append(("main", None))
+    items.append(_DONE)
+    actions.append(("done", None))
+    return items, actions
+
+
+def _ask_source(title: str) -> dict | None:
+    """Owner, repository, ref and store folder, one box at a time; nothing on cancel.
+
+    ``api.ui.dialog`` is modal and builds its spec without an events callback, so
+    it can host no live button of its own; a short run of single-line boxes asks
+    the same four questions and needs nothing extra of the app.
+    """
+    answers: dict[str, str] = {}
+    for key in SOURCE_KEYS:
+        text = api.ui.input(title, _SOURCE_LABELS[key],
+                            str(SOURCE_HINTS.get(key) or ""))
+        if text is None:                      # given up on
+            return None
+        answers[key] = text
+    made = normalize_source(answers)
+    if not made["owner"] or not made["repo"]:
+        api.ui.warning(title, "A source needs an owner and a repository.")
+        return None
+    return made
+
+
+def _ask_field(source: dict, key: str) -> dict | None:
+    """One part of a source changed, or the source as it was when the box was cancelled."""
+    label = _SOURCE_LABELS[key]
+    start = one_line(source.get(key)) or str(SOURCE_HINTS.get(key) or "")
+    text = api.ui.input(f"{source_label(source)}: {label}", label, start)
+    if text is None:
+        return None
+    updated = dict(source)
+    updated[key] = text
+    made = normalize_source(updated)
+    if not made["owner"] or not made["repo"]:
+        api.ui.warning("Change a store source",
+                       "A source needs an owner and a repository.")
+        return None
+    return made
+
+
+def edit_sources(_checked: bool = False) -> None:
+    """The Sources button: add a repository, change one, put it first or drop it.
+
+    Each change is written to the config as it is accepted, so closing the app
+    cannot lose it, and the catalog is re-read once, when the menu is done - a
+    repository added is a catalog fetched, and there is no sense in doing that
+    for every keystroke on the way.
+    """
+    global entries, updates
+    if api is None or working:
+        return
+    sources = current_sources()
+    changed = False
+    while True:
+        items, actions = _source_menu(sources)
+        picked = api.ui.choose(items)
+        if picked is None or picked == _DONE:
+            break
+        kind, which = actions[items.index(picked)]
+        if kind in ("add", "main"):
+            made = (normalize_source(MAIN_SOURCE) if kind == "main"
+                    else _ask_source("Add a store source"))
+            if made is None or any(_source_key(one) == _source_key(made)
+                                   for one in sources):
+                if made is not None:
+                    say(f"{source_label(made)} is already a source")
+                continue
+            sources.append(made)
+            changed = True
+            note(f"{source_label(made)} was added as a source")
+            continue
+        source = sources[which]
+        action = api.ui.choose(list(_SOURCE_ACTIONS))
+        if action is None:
+            continue
+        if action in _SOURCE_FIELDS:
+            made = _ask_field(source, _SOURCE_FIELDS[action])
+            if made is None or _source_key(made) == _source_key(source):
+                continue
+            sources[which] = made
+            changed = True
+            note(f"a source is now {source_label(made)}")
+        elif action == "Move first":
+            if which:
+                sources.insert(0, sources.pop(which))
+                changed = True
+                note(f"{source_label(source)} is read first, so its versions win")
+        elif action == "Remove":
+            if not api.ui.question(
+                    "Remove a store source",
+                    f"Stop reading addons from {source_label(source)}?\n\n"
+                    "Nothing already installed is touched, and the repository "
+                    "can be added back."):
+                continue
+            sources.pop(which)
+            changed = True
+            note(f"{source_label(source)} was removed as a source")
+    if not changed:
+        return
+    kept = write_sources(sources)
+    show_sources(kept)
+    entries, updates = [], {}
+    show_entries()
+    if not working:
+        refresh()
 
 
 # --- the job: install and delete, without holding the tab still ---
@@ -754,12 +1662,23 @@ def _dev() -> Any:
     return manager_addondev
 
 
-def _begin(verb: str) -> dict:
-    """Start a job: the buttons grey out and one dict holds its whole state."""
+def _begin(verb: str, entry: dict | None = None) -> dict:
+    """Start a job: the buttons grey out and one dict holds its whole state.
+
+    The address the job works from is the one that published the entry it was
+    asked about, so its assets, its test and the modules it imports are fetched
+    from the repository the catalog row came out of. With no entry to follow -
+    a job started from a bare id - the first configured source answers.
+    """
     global working, job
-    values = merge_config(DEFAULTS, api.config.stored())
+    values = source_config()
+    token = clean_token(config_get(values, "token", ""))
+    source = (entry or {}).get("src")
+    if not isinstance(source, dict):
+        source = (read_sources(values) or [dict(MAIN_SOURCE)])[0]
     working = True
-    job = {"verb": verb, "values": values, "stream": None, "on_ok": None,
+    job = {"verb": verb, "values": source_values(source, token),
+           "source": source_label(source), "stream": None, "on_ok": None,
            "fail": "", "lines": [], "harness": None, "widened": False,
            "details": {}}
     _buttons(False)
@@ -767,6 +1686,7 @@ def _begin(verb: str) -> dict:
         api.tabs.set_widget(TAB, "log", "value", "")
     except AddonError:
         pass
+    note(f"{job['source']}: this job reads the store from here")
     return job
 
 
@@ -1248,7 +2168,7 @@ def install_selected(_checked: bool = False) -> None:
         say(f"{id_value} is already installed; use Update if the store lists a "
             "newer version, or Delete to remove it", bad=True)
         return
-    job_local = _begin("install")
+    job_local = _begin("install", entry_for(id_value))
     job_local["id"] = id_value
     where = _ensure_python()
     if not where:
@@ -1297,7 +2217,7 @@ def update_selected(_checked: bool = False) -> None:
             "Addons is left as it is."):
         say("the update was declined")
         return
-    job_local = _begin("update")
+    job_local = _begin("update", entry)
     job_local["id"] = id_value
     job_local["from_version"] = have
     where = _ensure_python()
@@ -1387,6 +2307,7 @@ HANDLERS: dict = {
     "install": install_selected,
     "update": update_selected,
     "delete": delete_selected,
+    "sources": edit_sources,
 }
 
 
@@ -1394,11 +2315,11 @@ def init(plugin_api: Any) -> None:
     """Build the tab from the saved config and read the catalog once."""
     global api
     api = plugin_api
-    values = api.config.declare(
+    api.config.declare(
         FIELDS, DEFAULTS,
         title="Berry addon store - addons/_data/addon_store/config.json")
     build_tab()
-    show_source(values)
+    show_sources(current_sources())
     api.ui.menu_item("Berry addon store", focus_tab, menu="Tools")
     api.schedule.after(0.2, refresh)
 
@@ -1409,28 +2330,52 @@ def start() -> None:
 
 
 def shutdown() -> None:
-    global api, working, job
+    """Let go of everything this copy held: the connections, the job, the pane."""
+    global api, working, job, shown, picked, filter_text
     _drop_http()
     working = False
     job = None
+    shown = []
+    picked = ""
+    filter_text = ""
+    del icon_queue[:]
     api = None
 
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
-    """A button on the tab was clicked: run what its id means."""
-    if str(tab) != TAB or str(event) != "clicked":
+    """Everything the tab reports back, in one place.
+
+    ``clicked`` runs the button its id names; a line ``changed`` on the filter box
+    narrows the list as it is typed; and a row picked - or right-clicked - is what
+    fills in the pane beside the list. Nothing here waits on the network except the
+    one request a right-click's menu and a commit lookup each make for themselves.
+    """
+    if str(tab) != TAB:
         return
-    handler = HANDLERS.get(str(identifier))
-    if handler is not None:
-        handler()
+    ident = str(identifier)
+    name = str(event)
+    data = payload if isinstance(payload, dict) else {}
+    if name == "clicked":
+        handler = HANDLERS.get(ident)
+        if handler is not None:
+            handler()
+        return
+    if ident == "filter" and name in ("changed", "returned"):
+        apply_filter(data.get("text", ""))
+        return
+    if ident != "list":
+        return
+    if name == "selected":
+        pick_row(data)
+    elif name == "context":
+        row_context(one_line(data.get("text")))
 
 
 def on_config(payload: dict) -> None:
     """The user changed the config in Settings: point the header and reload."""
     if api is None or str(payload.get("addon") or "") != api.id:
         return
-    values = api.config.all()
-    show_source(values)
+    show_sources(current_sources())
     if not working:
         refresh()
 

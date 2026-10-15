@@ -182,7 +182,8 @@ class BrowserMixin:
     """Embedded browser tabs, mixed into the main window; its attributes come from ``manager_gui.BerryManager``."""
 
     def _build_web_like_tab(self, initial_url: str, title: str,
-                            position: int | None = None) -> tuple[QLineEdit, QWebEngineView | None, QWidget]:
+                            position: int | None = None,
+                            home: bool = True) -> tuple[QLineEdit, QWebEngineView | None, QWidget]:
         page = QWidget()
         layout = QVBoxLayout(page)
         controls = QHBoxLayout()
@@ -236,7 +237,14 @@ class BrowserMixin:
             load_url()
 
         go_button.clicked.connect(load_url)
-        home_button.clicked.connect(go_home)
+        if home:
+            home_button.clicked.connect(go_home)
+        else:
+            # A tab a page opened itself belongs to no profile, so the address
+            # behind the Home button would be the active host's - the router,
+            # not the site. Offered, it moves the tab somewhere the user never
+            # asked for; it is left off instead.
+            home_button.setVisible(False)
         url_input.returnPressed.connect(load_url)
 
         def apply_tab_icon(icon: QIcon) -> None:
@@ -438,7 +446,7 @@ class BrowserMixin:
         its own closable tab, let the site name it once the title arrives, and
         hand back the new page so the request actually lands there."""
         url_input, view, page = self._build_web_like_tab(
-            "", "New page", self._content_insert_index())
+            "", "New page", self._content_insert_index(), home=False)
         entry = {"page": page, "url_input": url_input, "view": view,
                  "tab": {"name": "New page"}, "popup": True}
         self._transient_tab_entries.append(entry)

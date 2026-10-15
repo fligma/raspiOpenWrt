@@ -3,31 +3,49 @@
     {
       "id": "cert_manager",
       "name": "Certificate manager",
-      "version": "1.0",
+      "version": "1.2",
       "author": "fligma",
       "description": "Shows the certificate on the device and reissues the .crt and .key over SSH, with the subject, paths and follow-up commands kept in addons/_data/cert_manager/config.json.",
       "filename": "cert_manager.py",
+      "requires": [
+        "ssh"
+      ],
+      "connection": "app",
       "test": "test_cert_manager.py"
     },
     {
       "id": "openwrt_logs",
       "name": "OpenWrt Log Viewer",
-      "version": "2.7",
+      "version": "2.9",
       "author": "fligma",
-      "description": "a single-device log viewer and a multi-device view,colour-coded connections,log by time. The search highlights matching lines,",
+      "description": "a single-device log viewer and a multi-device view, colour-coded connections, the log in time order. The search highlights or filters the matching lines.",
       "filename": "openwrt_logs.py",
-      "assets": [
-        "openwrtlogsicon.png"
+      "requires": [
+        "ssh"
       ],
+      "connection": "both",
+      "assets": [
+        "openwrt_logsicon.png"
+      ],
+      "icon": "openwrt_logsicon.png",
       "test": "test_openwrt_logs.py"
     },
     {
       "id": "openwrt_package_manager",
       "name": "OpenWrt Package Manager",
-      "version": "1.0",
+      "version": "1.2",
       "author": "fligma",
       "description": "Audits installed OpenWrt packages and manages software installation via apk or opkg.",
       "filename": "openwrt_package_manager.py",
+      "requires": [
+        "ssh",
+        "sftp"
+      ],
+      "connection": "app",
+      "assets": [
+        "openwrtpkgmgr.png"
+      ],
+      "icon": "openwrtpkgmgr.png",
       "test": "test_openwrt_package_manager.py"
     }
   ]

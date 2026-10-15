@@ -23,11 +23,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from addon_common import AddonError        # the Qt-free half of the contract
+from addon_common import AddonError, find_icon      # the Qt-free half of the contract
 
 ADDON = {
     "name": "Berry file manager",
-    "version": "1.2",
+    "version": "1.3",
     "author": "fligma",
     "description": "A device-and-local file manager with a notepad-style editor: "
                    "browse both sides in one tab, edit files with syntax "
@@ -36,6 +36,8 @@ ADDON = {
                    "paste - most of it from a right-click menu, all configured in "
                    "addons/_data/berry/config.json.",
     "requires": ["ssh", "sftp"],
+    # Every device call rides the profile's own session; this opens none.
+    "connection": "app",
     "api": 1,
 }
 
@@ -185,12 +187,18 @@ EDITOR_ICON = (
     '</svg>'
 )
 
-# Picture the tab wears if the assets folder has one.
+# Picture the tab wears if the assets folder has one. The standard name for an
+# addon called ``berry`` is ``berryicon.png``, so it needs no declaring.
 TAB_ICON_FILE = "berryicon.png"
 
 
 def tab_icon() -> str:
-    """The shipped picture if the assets folder has one, else the drawn mark."""
+    """The shipped picture if the assets folder has one, else the drawn mark.
+
+    ``find_icon`` is how every addon's picture is looked up: the standard
+    ``<id>icon.png`` first, then the names this one has shipped under, so a
+    picture dropped in the assets folder is picked up without a code change.
+    """
     folder = None
     try:
         folder = api.paths.assets
@@ -198,13 +206,7 @@ def tab_icon() -> str:
         folder = None
     if folder is None:
         return TAB_ICON
-    try:
-        candidate = Path(str(folder)) / TAB_ICON_FILE
-        if candidate.is_file():
-            return str(candidate)
-    except (OSError, AddonError):
-        return TAB_ICON
-    return TAB_ICON
+    return find_icon(folder, "berry", TAB_ICON_FILE) or TAB_ICON
 
 
 SHQ = shlex.quote

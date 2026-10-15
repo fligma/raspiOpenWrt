@@ -169,6 +169,24 @@ def tab_caption(bar: QTabBar, index: int) -> str:
     return bar.tabText(index)
 
 
+def label_tab(bar: QTabBar, index: int, label: str, icon_only: bool = False,
+              tooltip: str = "") -> None:
+    """Name one tab, in the two places a name lives.
+
+    A tab's full name always goes into its data, because that is what order
+    lookups, the start-tab picker and the tooltip read; the caption in the tab
+    itself is what the bar draws, and an icon-only tab simply leaves it blank.
+    Only a pinned tab keeps a blank caption for good: the squeeze pass re-derives
+    a movable tab's caption from its data whenever the bar re-measures.
+    """
+    if not 0 <= index < bar.count():
+        return
+    text = str(label or "")
+    bar.setTabData(index, text)
+    bar.setTabText(index, "" if icon_only else text)
+    bar.setTabToolTip(index, str(tooltip or text))
+
+
 #: Air between a tab's icon and its caption, and the give that keeps an
 #: elided caption off the capsule's edge - both before zoom.
 _TAB_LABEL_GAP = 6
@@ -226,24 +244,30 @@ def _draw_centered_tab_label(opt: QStyleOptionTab, painter: QPainter, bar: QTabB
 
 
 class RightPinnedTabBar(QTabBar):
-    """A tab bar that keeps the last tab pinned to the far right edge.
+    """A tab bar that keeps a run of tabs pinned to the far right edge.
 
     An empty, disabled *gap* tab is widened to soak up all the spare room, so
-    the tab that sits just after it - the Settings tab - is pushed against the
-    right edge and reads as detached from the reorderable tabs on the left.
-    ``set_gap_index`` tells the bar which tab is the spacer; its width is
-    recomputed from the bar's own width every time a tab moves or the window
-    is resized, so the pinned tab always ends up flush right.
+    the tabs that sit just after it - Settings and the system tabs beside it -
+    are pushed against the right edge and read as detached from the reorderable
+    tabs on the left. ``set_gap_index`` tells the bar which tab is the spacer and
+    how many tabs follow it as a pinned block; their widths are recomputed from
+    the bar's own width every time a tab moves or the window is resized, so the
+    pinned run always ends up flush right and never takes part in the squeezing
+    or the saved order.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.gap_index = -1
+        # How many tabs sit right of the gap and stay put: Settings alone until
+        # the window says otherwise.
+        self.pinned_count = 1
         self._refitting = False
 
-    def set_gap_index(self, index: int) -> None:
+    def set_gap_index(self, index: int, pinned: int = 1) -> None:
         old = self.gap_index
         self.gap_index = index
+        self.pinned_count = max(1, int(pinned))
         # Whatever the old index points at now, it is not the gap any more -
         # and only the gap may sit disabled on this bar. Hand the tab that
         # inherited the position (a reorder can leave one sitting exactly
@@ -252,30 +276,49 @@ class RightPinnedTabBar(QTabBar):
             self.setTabEnabled(old, True)
         self.refit()
 
+    def pinned_indices(self) -> list[int]:
+        """The tabs held at the right edge, left to right; empty until the block is pinned.
+
+        Only the last ``pinned_count`` tabs count, so a tab the owner has not
+        moved into the block yet is treated as movable rather than silently
+        pinned.
+        """
+        if not (0 <= self.gap_index < self.count()):
+            return []
+        return list(range(self.count() - self.pinned_count, self.count()))
+
+    def is_pinned(self, index: int) -> bool:
+        """Whether this tab belongs to the pinned run (or is its gap)."""
+        return index == self.gap_index or index in self.pinned_indices()
+
+    def _movable_indices(self) -> list[int]:
+        """Every tab the user may drag, which is everything but the gap and the pinned run."""
+        pinned = set(self.pinned_indices())
+        return [i for i in range(self.count())
+                if i != self.gap_index and i not in pinned]
+
     def tabSizeHint(self, index: int) -> QSize:
-        """Equalise the movable tabs to the widest, stretch the gap to soak spare room, and leave Settings at its own width."""
+        """Equalise the movable tabs to the widest, stretch the gap to soak spare room, and leave the pinned run at its own width."""
         natural = QTabBar.tabSizeHint(self, index)
         if not (0 <= self.gap_index < self.count()):
             return natural              # nothing pinned yet: leave tabs natural
         count = self.count()
-        settings_index = self.gap_index + 1
         if index == self.gap_index:
             used = sum(self.tabSizeHint(i).width() for i in range(count)
                        if i != index)
             return QSize(max(0, self.width() - used), natural.height())
-        if index == settings_index:
+        if index in self.pinned_indices():
             return natural
-        movable = [i for i in range(count)
-                   if i != self.gap_index and i != settings_index]
+        movable = self._movable_indices()
+        pinned = self.pinned_indices()
         if movable:
             widest = max(QTabBar.tabSizeHint(self, i).width() for i in movable)
-            # Never let the movable tabs eat the room reserved for Settings:
-            # the squeeze aims captions at an equal share, and this caps the
-            # drawn width at that share even if the aim comes out a little
+            # Never let the movable tabs eat the room reserved for the pinned
+            # run: the squeeze aims captions at an equal share, and this caps
+            # the drawn width at that share even if the aim comes out a little
             # wide. The label paints centred into whatever rect results.
-            share = max(1, (self.width() - 2
-                            - QTabBar.tabSizeHint(self, settings_index).width())
-                        // len(movable))
+            reserved = sum(QTabBar.tabSizeHint(self, i).width() for i in pinned)
+            share = max(1, (self.width() - 2 - reserved) // len(movable))
             return QSize(min(widest, share), natural.height())
         return natural
 
@@ -311,27 +354,26 @@ class RightPinnedTabBar(QTabBar):
     def _refit(self) -> None:
         if not (0 <= self.gap_index < self.count()):
             return                      # nothing pinned yet: measure later
-        if self.gap_index != self.count() - 2:
-            # The pinned pair is out of date - a tab went in or came out and
+        if self.gap_index != self.count() - self.pinned_count - 1:
+            # The pinned block is out of date - a tab went in or came out and
             # the owner has not re-pinned yet. Squeezing on the stale index
-            # could treat the real Settings tab as a movable one, and
-            # Settings must never be touched: leave the texts alone.
+            # could treat a real pinned tab as a movable one, and the pinned
+            # run must never be touched: leave the texts alone.
             return
-        settings_index = self.gap_index + 1
-        movable = [i for i in range(self.count())
-                   if i != self.gap_index and i != settings_index]
+        movable = self._movable_indices()
         if not movable:
             return
         # Only the gap ever sits disabled here; if a stale blink greyed a
         # real tab out earlier (see _relayout), this is where it heals.
-        if not self.isTabEnabled(settings_index):
-            self.setTabEnabled(settings_index, True)
-        for i in movable:
-            if not self.isTabEnabled(i):
+        for i in range(self.count()):
+            if i != self.gap_index and not self.isTabEnabled(i):
                 self.setTabEnabled(i, True)
-        # Every tab wears something, even when its name comes off later.
-        if self.tabIcon(settings_index).isNull():
-            self.setTabIcon(settings_index, default_tab_icon())
+        # The pinned run wears no caption but always wears its mark, so it is
+        # never left as an empty capsule; the movable tabs keep a picture too,
+        # even when their name comes off later.
+        for i in self.pinned_indices():
+            if self.tabIcon(i).isNull():
+                self.setTabIcon(i, default_tab_icon())
         for i in movable:
             if self.tabIcon(i).isNull():
                 self.setTabIcon(i, default_tab_icon())
@@ -340,7 +382,8 @@ class RightPinnedTabBar(QTabBar):
             caption = tab_caption(self, i)
             if self.tabText(i) != caption:
                 self.setTabText(i, caption)
-        reserve = QTabBar.tabSizeHint(self, settings_index).width()
+        reserve = sum(QTabBar.tabSizeHint(self, i).width()
+                      for i in self.pinned_indices())
         room = max(0, self.width() - 2 - reserve)
         if self.width() < zoom_size(50):
             return   # the bar has no real width yet (window still hidden
@@ -380,7 +423,8 @@ class RightPinnedTabBar(QTabBar):
 
     def _relayout(self) -> None:
         """Force the bar to re-run tabSizeHint by blinking the gap tab's enabled state - only when the index provably is the gap."""
-        if 0 <= self.gap_index < self.count() and self.gap_index == self.count() - 2:
+        if 0 <= self.gap_index < self.count() \
+                and self.gap_index == self.count() - self.pinned_count - 1:
             self.setTabEnabled(self.gap_index, True)
             self.setTabEnabled(self.gap_index, False)
 
@@ -516,6 +560,7 @@ class TabCloseButton(QToolButton):
     entirely, and needs no font to carry a glyph either.
     """
 
+    NAME = "tabCloseButton"  # what tells the transport-dot pass to spare it
     SIDE = 18          # the box's edge at 100% zoom
     INK = "#9a9a9a"    # the bar's own caption grey
     HOT = "#ff6b6b"    # and the warning red it takes up under the pointer
@@ -523,8 +568,9 @@ class TabCloseButton(QToolButton):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         # The name is what tells the transport-dot pass to leave this button in
-        # place: it strips every other widget sitting in a tab's right slot.
-        self.setObjectName("tabCloseButton")
+        # place: it strips every other widget sitting in a tab's right slot, and
+        # asks for this one by the name below rather than by a copy of it.
+        self.setObjectName(self.NAME)
         self.setAccessibleName("Close tab")
         self.setAutoRaise(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)

@@ -2,11 +2,12 @@
 """A test for the openwrt_package_manager addon (for the addon store).
 
 It runs the addon with the recording stub from :mod:`addon_client`, checking:
-* the manifest services and api version[cite: 5];
-* config declaration for switching between apk and opkg backends[cite: 5];
-* tab creation and sub-page / widget structures[cite: 5];
-* fetching installed packages using apk (default) and opkg[cite: 5];
-* updating feeds, searching online, and handling widget interactions[cite: 5].
+* the manifest services and api version;
+* config declaration for switching between apk and opkg backends;
+* tab creation and sub-page / widget structures;
+* fetching installed packages using apk (default) and opkg;
+* updating feeds, searching online, and handling widget interactions;
+* the search term and package names being quoted before they reach the shell.
 
 Run it from the Test panel, or on the command line::
 
@@ -16,6 +17,7 @@ Run it from the Test panel, or on the command line::
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -27,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 import addon_client                                          # noqa: E402
 
-#: The addon to test: the store install source or local tree[cite: 6].
+#: The addon to test: the store install source or local tree.
 _HANDED = os.environ.get("RASCONF_ADDON_SOURCE")
 SOURCE = Path(_HANDED) if _HANDED else ROOT / "addon.store" / "openwrt_package_manager.py"
 if not _HANDED and not SOURCE.is_file():
@@ -92,15 +94,15 @@ class Api(addon_client.StubAPI):
 def test_manifest_and_config(addon: Any, api: Api) -> None:
     print("\n1. manifest and config defaults")
     check(addon.ADDON.get("requires") == ["ssh", "sftp"],
-          f"requires ssh and sftp services: {addon.ADDON.get('requires')!r}[cite: 5]")
-    check(str(addon.ADDON.get("api")) == "1", "addon api version is 1[cite: 5]")
+          f"requires ssh and sftp services: {addon.ADDON.get('requires')!r}")
+    check(str(addon.ADDON.get("api")) == "1", "addon api version is 1")
     addon.init(api)
-    check(api.called("config.declare"), "addon must declare its config form[cite: 5]")
+    check(api.called("config.declare"), "addon must declare its config form")
     fields = api.declared.get("fields", [])
     check(len(fields) == 1 and fields[0].get("key") == "package_manager",
-          f"package_manager choice field declared correctly: {fields}[cite: 5]")
+          f"package_manager choice field declared correctly: {fields}")
     check(api.declared.get("defaults", {}).get("package_manager") == "apk",
-          "default package manager backend must be set to apk[cite: 5]")
+          "default package manager backend must be set to apk")
 
 
 def test_package_fetching(addon: Any, api: Api) -> None:
@@ -108,17 +110,17 @@ def test_package_fetching(addon: Any, api: Api) -> None:
     fresh_addon(api)
     addon.fetch_installed()
     check(api.asked("device.run_async", "command") == "apk info -v",
-          f"default fetch command uses apk info -v: {api.asked('device.run_async', 'command')!r}[cite: 5]")
+          f"default fetch command uses apk info -v: {api.asked('device.run_async', 'command')!r}")
     rows = api.last_set("inst_table", "rows")
-    check(rows and len(rows) == 3, f"parsed 3 packages successfully under apk: {rows}[cite: 5]")
+    check(rows and len(rows) == 3, f"parsed 3 packages successfully under apk: {rows}")
 
     # Switch backend to opkg via config
     api.config_values["package_manager"] = "opkg"
     addon.fetch_installed()
     check(api.asked("device.run_async", "command") == "opkg list-installed",
-          f"switched backend runs opkg list-installed: {api.asked('device.run_async', 'command')!r}[cite: 5]")
+          f"switched backend runs opkg list-installed: {api.asked('device.run_async', 'command')!r}")
     rows = api.last_set("inst_table", "rows")
-    check(rows and len(rows) == 2, f"parsed 2 packages successfully under opkg: {rows}[cite: 5]")
+    check(rows and len(rows) == 2, f"parsed 2 packages successfully under opkg: {rows}")
     api.config_values.pop("package_manager", None)
 
 
@@ -127,13 +129,13 @@ def test_search_and_feeds(addon: Any, api: Api) -> None:
     fresh_addon(api)
     addon.update_feeds()
     check(api.asked("device.run_async", "command") == "apk update",
-          f"feed update executes apk update by default: {api.asked('device.run_async', 'command')!r}[cite: 5]")
+          f"feed update executes apk update by default: {api.asked('device.run_async', 'command')!r}")
 
     addon.search_online("htop")
     check(api.asked("device.run_async", "command") == "apk search htop",
-          f"online search executes apk search: {api.asked('device.run_async', 'command')!r}[cite: 5]")
+          f"online search executes apk search: {api.asked('device.run_async', 'command')!r}")
     browse_rows = api.last_set("browse_table", "rows")
-    check(browse_rows and len(browse_rows) == 2, f"browse results table populated: {browse_rows}[cite: 5]")
+    check(browse_rows and len(browse_rows) == 2, f"browse results table populated: {browse_rows}")
 
 
 def test_widget_actions(addon: Any, api: Api) -> None:
@@ -145,13 +147,51 @@ def test_widget_actions(addon: Any, api: Api) -> None:
     api.question_answer = True
     addon.on_widget("Package Manager", "btn_remove", "clicked", {})
     check(api.asked("device.run_async", "command") == "apk del curl",
-          f"remove button triggers apk del: {api.asked('device.run_async', 'command')!r}[cite: 5]")
+          f"remove button triggers apk del: {api.asked('device.run_async', 'command')!r}")
 
     # Test package installation event by mocking form selection value
     api.form["browse_table"] = ["htop - 3.3.0"]
     addon.on_widget("Package Manager", "btn_install", "clicked", {})
     check(api.asked("device.run_async", "command") == "apk add htop",
-          f"install button triggers apk add: {api.asked('device.run_async', 'command')!r}[cite: 5]")
+          f"install button triggers apk add: {api.asked('device.run_async', 'command')!r}")
+
+
+def test_quoting(addon: Any, api: Api) -> None:
+    """What a user types, and what a table shows, must not reach the device
+    shell as shell syntax. The test for this is what the shell would cut the
+    command into: shlex.split answers that, so a name that ought to stay one
+    word and a name that would break into two commands cannot be confused.
+    A plain name quotes to itself, which is why the ordinary command checks
+    above are still written plainly and hold the other half."""
+    print("\n5. shell punctuation in a name cannot become a second command")
+    fresh_addon(api)
+
+    def words() -> list[str]:
+        return shlex.split(api.asked("device.run_async", "command"))
+
+    addon.search_online("htop; reboot")
+    check(words() == ["apk", "search", "htop; reboot"],
+          f"a search term's ';' stays inside its own word: "
+          f"{api.asked('device.run_async', 'command')!r}")
+
+    api.config_values["package_manager"] = "opkg"
+    addon.search_online("x'$(id)")
+    check(words() == ["opkg", "list", "x'$(id)*"],
+          f"a quote in a search term cannot close itself out of its word: "
+          f"{api.asked('device.run_async', 'command')!r}")
+    api.config_values.pop("package_manager", None)
+
+    api.form["inst_table"] = ["curl; rm -rf /"]
+    addon.on_widget("Package Manager", "btn_remove", "clicked", {})
+    check(words() == ["apk", "del", "curl; rm -rf /"],
+          f"a name read back from the table is quoted too: "
+          f"{api.asked('device.run_async', 'command')!r}")
+
+    api.form["browse_table"] = ["htop; touch /tmp/pwned - 3.3.0"]
+    addon.on_widget("Package Manager", "btn_install", "clicked", {})
+    check(len(words()) == 3,
+          f"install is handed one package word and no more: "
+          f"{api.asked('device.run_async', 'command')!r}")
 
 
 def fresh_addon(api: Api) -> None:
@@ -169,24 +209,25 @@ def main() -> int:
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
                                errors="replace")
     if not SOURCE.is_file():
-        print(f"there is no addon at {SOURCE}[cite: 5, 6]")
+        print(f"there is no addon at {SOURCE}")
         return 2
     addon = addon_client.load_addon(SOURCE)
     api_module = addon
 
-    print(f"openwrt_package_manager: testing addon at {SOURCE.name}[cite: 5, 6]")
+    print(f"openwrt_package_manager: testing addon at {SOURCE.name}")
     api = Api(addon_id="openwrt_package_manager")
     test_manifest_and_config(addon, api)
     test_package_fetching(addon, api)
     test_search_and_feeds(addon, api)
     test_widget_actions(addon, api)
+    test_quoting(addon, api)
 
     if FAILURES:
         print()
         for text in FAILURES:
             print(f"FAILED: {text}")
         return 1
-    print("\nall package manager checks passed[cite: 5]")
+    print("\nall package manager checks passed")
     return 0
 
 

@@ -47,7 +47,7 @@ def find_asset(filename: str) -> Path | None:
 #: The program's own version, the one the About dialog shows and the update
 #: addon compares against the tags published on GitHub (``berry`` + this).
 #: One line to change per release, everything else reads it from here.
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 UPDATE_TAG_PREFIX = "berry"
 
 # --- file names and fixed identifiers ---
@@ -159,6 +159,11 @@ DEFAULT_APP_CONFIG = {
     # switch opens it at startup. See manager_gui.
     "auto_connect": False,
     "use_alt_icon": False,
+    # Notices worth seeing without looking at the window: an addon's
+    # api.ui.popup, and this program's own news such as "an update is
+    # available", come up as a tray toast over the status line. Off,
+    # nothing leaves the window. See manager_gui.notify_popup.
+    "system_notifications": True,
     # Per-transport gates, each with its own switch in Settings >
     # Connection. Off, the transport's controls go away and
     # api.device refuses that transport to every addon (see the

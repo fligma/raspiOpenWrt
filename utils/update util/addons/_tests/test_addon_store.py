@@ -13,11 +13,17 @@ Three things get looked at:
 * the pure helpers: catalog parsing, id sanitising, and the raw path that the
   store folder's space has to survive;
 * the tab on a stub api: that init declares and adds it, that Refresh fills the
-  table, and that Install/Delete say the right thing when nothing sensible is
-  selected - and, with Qt standing up, that the status line fits into the header
-  and the table and the log really share one horizontal splitter;
+  list, and that Install/Delete say the right thing when nothing sensible is
+  selected - and, with Qt standing up, that the status line fits into the header,
+  that the list and its detail pane share one horizontal splitter and the log
+  sits under them both; and what the pane, the filter, the pictures and the
+  commit lookup do when a row is picked;
 * what counts as installed, against a temporary addons folder, and how a compiled
   addon finds its own bundled assets;
+* the list of repositories the catalog is read from: the order that list is a
+  priority in, one id published by two sources, a source that will not answer,
+  the config from before the list existed, and the Sources button adding, moving,
+  changing and removing a source through its menus;
 * how the store works out that the catalog is ahead of what is installed: the
   version kept beside an install, the way two dotted versions are compared, and
   what Update refuses, asks and then does when it goes ahead;
@@ -72,8 +78,9 @@ _QT_APP: Any = None
 CATALOG = {
     "addons": [
         {"id": "hello_store", "name": "Hello from the store", "version": "1.0",
-         "author": "fligma", "filename": "hello_store.py",
-         "assets": ["helloicon.png"], "icon": "hello_store.ico",
+         "author": "fligma", "description": "Says hello, over SFTP.",
+         "filename": "hello_store.py", "requires": ["sftp"], "connection": "own",
+         "assets": ["helloicon.png"], "icon": "hello_storeicon.png",
          "test": "test_hello_store.py", "status": "new"},
         {"id": "odd-id", "name": "Odd"},                     # no filename: falls back
     ]
@@ -103,12 +110,15 @@ def test_the_helpers(store: Any) -> None:
     check(entries[1]["id"] == "odd_id" and entries[1]["filename"] == "odd_id.py",
           f"a dashed id with no filename was not sanitised and completed: {entries[1]}")
     check(entries[0]["assets"] == ["helloicon.png"]
-          and entries[0]["icon"] == "hello_store.ico"
+          and entries[0]["icon"] == "hello_storeicon.png"
           and entries[0]["test"] == "test_hello_store.py"
           and entries[0]["status"] == "new",
           f"assets, icon, test and status did not come through the catalog: {entries[0]}")
+    check(entries[0]["requires"] == ["sftp"] and entries[0]["connection"] == "own",
+          f"what the addon needs on the device did not come through: {entries[0]}")
     check(entries[1]["assets"] == [] and entries[1]["icon"] == ""
-          and entries[1]["test"] == "" and entries[1]["status"] == "",
+          and entries[1]["test"] == "" and entries[1]["status"] == ""
+          and entries[1]["requires"] == [] and entries[1]["connection"] == "",
           f"an entry with nothing to carry gained something: {entries[1]}")
 
     check(store.parse_catalog([{"id": "only", "name": "Only"}])[0]["id"] == "only",
@@ -118,17 +128,19 @@ def test_the_helpers(store: Any) -> None:
     check(not store.parse_catalog("not a list"),
           "a string was read as a catalog")
 
-    check(store.raw_address(dict(store.DEFAULTS), "hello_store.py")
+    check(store.raw_address(store.source_values(store.MAIN_SOURCE),
+                            "hello_store.py")
           == "/fligma/raspiOpenWrt/main/utils/update%20util/addon.store/hello_store.py",
           f"the store folder's space did not survive the address: "
-          f"{store.raw_address(dict(store.DEFAULTS), 'hello_store.py')!r}")
+          f"{store.raw_address(store.source_values(store.MAIN_SOURCE), 'hello_store.py')!r}")
 
     quoted = store.raw_address({"owner": "a b", "repo": "c/d", "ref": "v 1",
                                 "store_path": "u/ld"}, "x.py")
     check(quoted.startswith("/a%20b/c/d/v%201/u/ld/x.py") and ".." not in quoted,
           f"a messy owner, ref or path was not encoded before use: {quoted!r}")
 
-    asset = store.raw_address(dict(store.DEFAULTS), "assets/hello_store/icon.png")
+    asset = store.raw_address(store.source_values(store.MAIN_SOURCE),
+                              "assets/hello_store/icon.png")
     check(asset == "/fligma/raspiOpenWrt/main/utils/update%20util/"
                     "addon.store/assets/hello_store/icon.png",
           f"an asset in the store folder did not get an address: {asset!r}")
@@ -148,11 +160,25 @@ def fresh(store: Any, config: dict | None = None, catalog: list | None = None) -
 
 def last_row_call(api: Any) -> Any:
     """The rows the addon last sent to its table, or nothing."""
+    return last_rows_for(api, "list")
+
+
+def last_rows_for(api: Any, widget: str) -> Any:
+    """The rows the addon last sent to one table, by its widget id."""
     for where, arguments, _named in reversed(api.calls):
         if where == "tabs.set_widget" and len(arguments) >= 4 \
-                and arguments[1] == "list" and arguments[2] == "rows":
+                and arguments[1] == widget and arguments[2] == "rows":
             return arguments[3]
     return None
+
+
+def last_text_for(api: Any, widget: str) -> str:
+    """The line the addon last put on one label, by its widget id."""
+    for where, arguments, _named in reversed(api.calls):
+        if where == "tabs.set_widget" and len(arguments) >= 4 \
+                and arguments[1] == widget and arguments[2] == "text":
+            return str(arguments[3])
+    return ""
 
 
 def last_status(api: Any) -> str:
@@ -176,14 +202,20 @@ def test_the_tab(store: Any) -> None:
     check(any(where == "tabs.use_app_icon" for where, _a, _n in api.calls) is False,
           "the tab still wears the program's icon instead of its own")
 
-    print("\n3. Refresh fills the table, installed or not")
+    print("\n3. Refresh fills the list, installed or not")
     store.entries = []
     store.on_widget(store.TAB, "refresh", "clicked", {})
     rows = last_row_call(api) or []
-    check(len(rows) == 2, f"two catalog rows did not reach the table: {len(rows)}")
-    ids = [row["cells"][0] for row in rows]
-    check(ids == ["hello_store", "odd_id"], f"the table is not the catalog: {ids}")
+    check(len(rows) == 2, f"two catalog rows did not reach the list: {len(rows)}")
+    names = [row["cells"][0] for row in rows]
+    check(names == ["Hello from the store  \u25cf new", "Odd"],
+          f"the list is not the catalog: {names}")
+    check([store.find_entry(name)["id"] for name in names]
+          == ["hello_store", "odd_id"],
+          f"a row's own caption does not lead back to its addon: {names}")
     check(all("cells" in row for row in rows), "a table row holds no cells")
+    check(rows[1]["cells"][2] == "not installed",
+          f"a row nobody has taken yet was not described plainly: {rows[1]}")
     check(store.installed("hello_store") in (False, True),
           "installed() answered something unusable")
 
@@ -206,13 +238,13 @@ def test_the_tab(store: Any) -> None:
 # --- three: the header and the two panes really are put where they are said ---
 
 def test_the_layout(store: Any) -> None:
-    """Qt builds the header line and the catalog with its log in one splitter."""
-    print("\n3b. the status line, the table and the log are laid out as promised")
+    """Qt builds the header, the filter line, the list with its pane, and the log."""
+    print("\n3b. the status line, the list, its detail pane and the log are put as promised")
     global _QT_APP
     try:
         import addon_api
         from PyQt6.QtCore import Qt
-        from PyQt6.QtWidgets import (QApplication, QLabel, QPlainTextEdit,
+        from PyQt6.QtWidgets import (QApplication, QLabel, QLineEdit, QPlainTextEdit,
                                      QSplitter, QTreeWidget)
 
         _QT_APP = QApplication.instance() or QApplication([])
@@ -223,17 +255,23 @@ def test_the_layout(store: Any) -> None:
     table = registry.get("list")
     log = registry.get("log")
     check(isinstance(table, QTreeWidget) and isinstance(log, QPlainTextEdit),
-          f"the tab built no table and log: {table!r} / {log!r}")
+          f"the tab built no list and no log: {table!r} / {log!r}")
     if not isinstance(table, QTreeWidget) or not isinstance(log, QPlainTextEdit):
         return
     bar = table.parentWidget()
-    check(isinstance(bar, QSplitter),
-          f"the table does not sit in a splitter of its own: {bar!r}")
-    check(bar is not None and bar is log.parentWidget() and bar.count() == 2
-          and bar.orientation() == Qt.Orientation.Horizontal,
-          "the table and the log are not the two sides of one horizontal splitter")
+    check(isinstance(bar, QSplitter)
+          and bar.orientation() == Qt.Orientation.Horizontal and bar.count() == 2,
+          f"the list is not one side of a horizontal splitter: {bar!r}")
+    pane = bar.widget(1) if isinstance(bar, QSplitter) else None
+    check(pane is not None and not isinstance(pane, QSplitter)
+          and pane.findChild(QTreeWidget) is not None,
+          f"the detail pane beside the list is not the pair it was said to be: {pane!r}")
+    outer = bar.parentWidget() if bar is not None else None
+    check(isinstance(outer, QSplitter)
+          and outer.orientation() == Qt.Orientation.Vertical and outer.widget(1) is log,
+          f"the two panes do not sit above the log in a splitter of their own: {outer!r}")
     # The status has no row of its own any more: it shares the header line with
-    # the title and the repository chip, so all the height goes to the table.
+    # the title and the repository chip, so all the height goes to the panes.
     status = registry.get("status")
     source = registry.get("source")
     header = status.parentWidget() if status is not None else None
@@ -249,12 +287,202 @@ def test_the_layout(store: Any) -> None:
     check(status is not None and status.sizePolicy().horizontalPolicy()
           == status.sizePolicy().Policy.Expanding,
           "the status line does not stretch across the room the header leaves it")
+    # The filter line is a real box, and it reports as it is typed.
+    check(isinstance(registry.get("filter"), QLineEdit)
+          and isinstance(registry.get("count"), QLabel),
+          f"there is no filter box and no count: {registry.get('filter')!r}")
+    # The pane's own widgets, so the addon has something to fill in.
+    picture = registry.get("dicon")
+    check(isinstance(picture, QLabel) and getattr(picture, "_addon_picture_side", 0) >= 8,
+          f"the pane has no picture of its own to wear: {picture!r}")
+    about = registry.get("dabout")
+    check(isinstance(about, QPlainTextEdit) and about.isReadOnly(),
+          f"the pane's description is not a read-only box: {about!r}")
+    facts = registry.get("dfacts")
+    check(isinstance(facts, QTreeWidget) and facts.columnCount() == 2,
+          f"the pane's facts are not a label and an answer: {facts!r}")
+    for ident in ("dtitle", "dby", "dstate"):
+        check(isinstance(registry.get(ident), QLabel),
+              f"the pane is missing its own {ident}")
     labels = [table.headerItem().text(column) for column in range(table.columnCount())]
-    check(labels == ["ID", "Version", "Name", "Author", "Installed"],
+    check(labels == list(store.LIST_COLUMNS),
           f"the columns are not in the promised order: {labels}")
-    widths = [table.columnWidth(column) for column in range(5)]
-    check(widths[0] >= 120 and widths[1] >= 60 and widths[4] >= 100,
+    widths = [table.columnWidth(column) for column in range(3)]
+    check(widths[1] >= 70 and widths[2] >= 130,
           f"the fixed columns were not given room to fit their text: {widths}")
+
+
+# --- three a: the pane beside the list, the filter over it, the pictures ---
+
+def test_the_pane(store: Any) -> None:
+    """What picking a row shows, what the filter leaves, and where a picture comes from.
+
+    Nothing reaches GitHub here: the commit's address and its reading are checked as
+    pure text, a missing picture is only ever put on the queue, and the pane is
+    driven through the same ``on_widget`` the app itself would use.
+    """
+    print("\n3c. the detail pane, the filter, the pictures and the commit's address")
+    real_dir = store.addons_dir
+    real_entries, real_updates = store.entries, store.updates
+    real_picked, real_filter = store.picked, store.filter_text
+    with tempfile.TemporaryDirectory() as where:
+        folder = Path(where)
+        store.addons_dir = lambda: folder
+        api = fresh(store)
+        source = store.normalize_source(store.MAIN_SOURCE)
+        try:
+            store.entries = store.parse_catalog(CATALOG)
+            for entry in store.entries:        # as merge_catalogs leaves them
+                entry["src"] = dict(source)
+                entry["source"] = store.source_label(source)
+            store.updates = {}
+            store.show_entries()
+            check(last_text_for(api, "count") == "2 listed",
+                  f"the list did not count itself: {last_text_for(api, 'count')!r}")
+
+            print("\n3d. the filter narrows the list without touching GitHub")
+            store.on_widget(store.TAB, "filter", "changed", {"text": "odd"})
+            rows = last_row_call(api) or []
+            check(len(rows) == 1 and rows[0]["cells"][0] == "Odd",
+                  f"one word of a filter left the whole store showing: {rows}")
+            check(last_text_for(api, "count") == "1 of 2",
+                  f"the count did not follow the filter: {last_text_for(api, 'count')!r}")
+            store.on_widget(store.TAB, "filter", "changed", {"text": "its own"})
+            rows = last_row_call(api) or []
+            check(len(rows) == 1 and rows[0]["cells"][0].startswith("Hello"),
+                  f"the filter cannot search how an addon reaches a device: {rows}")
+            store.on_widget(store.TAB, "filter", "changed", {"text": "sftp"})
+            check(len(last_row_call(api) or []) == 1,
+                  "the filter does not search what an addon needs on the device")
+            store.on_widget(store.TAB, "filter", "changed", {"text": ""})
+            check(len(last_row_call(api) or []) == 2,
+                  "clearing the filter left it applied")
+
+            print("\n3e. picking a row fills in the pane beside it")
+            api.calls.clear()
+            store.on_widget(store.TAB, "list", "selected",
+                            {"text": "Hello from the store  \u25cf new"})
+            facts = {row["cells"][0]: row["cells"][1]
+                     for row in (last_rows_for(api, "dfacts") or [])}
+
+            def shown(ident: str, prop: str) -> str:
+                for name, arguments, _named in reversed(api.calls):
+                    if name == "tabs.set_widget" and len(arguments) >= 4 \
+                            and arguments[1] == ident and arguments[2] == prop:
+                        return str(arguments[3])
+                return ""
+
+            check(store.picked == "hello_store",
+                  f"the pane forgot which addon it is describing: {store.picked!r}")
+            check(facts.get("id") == "hello_store" and facts.get("Version") == "1.0",
+                  f"the pane does not even name its own addon: {facts}")
+            check(facts.get("Author") == "fligma"
+                  and facts.get("File") == "hello_store.py"
+                  and facts.get("Published by") == "fligma/raspiOpenWrt @ main",
+                  f"who wrote it, what file it is and where from were not said: {facts}")
+            check("sftp" in facts.get("Needs", "")
+                  and "of its own" in facts.get("Connection", ""),
+                  f"what the addon needs was not said in words a person can read: {facts}")
+            check(facts.get("Its own test") == "test_hello_store.py"
+                  and "helloicon.png" in facts.get("Its own assets", ""),
+                  f"the files an addon carries were not listed: {facts}")
+            check("Says hello" in shown("dabout", "value"),
+                  f"the description did not reach the pane: {shown('dabout', 'value')!r}")
+            check("new in the store" in last_text_for(api, "dstate").lower(),
+                  f"how the addon stands was not said: {last_text_for(api, 'dstate')!r}")
+
+            # and once it is installed behind, the pane says what an update replaces
+            (folder / "hello_store.exe").write_text("x", encoding="utf-8")
+            (folder / "hello_store.json").write_text('{"version": "0.9"}',
+                                                     encoding="utf-8")
+            store.updates = store.check_updates()
+            api.calls.clear()
+            store.show_detail(store.entries[0])
+            words = last_text_for(api, "dstate")
+            check("Update available" in words and "0.9" in words and "1.0" in words,
+                  f"the pane did not say what the update would replace: {words!r}")
+            check(store.selected_id() == "hello_store",
+                  f"the buttons are not working on the addon being shown: "
+                  f"{store.selected_id()!r}")
+            store.show_detail(None)
+            check(store.picked == "" and last_text_for(api, "dtitle") == "Pick an addon",
+                  "the pane was not put back empty when nothing is picked")
+
+            print("\n3f. a right-click offers only what that row could still do")
+            api.calls.clear()
+            api.answer("ui.choose", None)
+            store.on_widget(store.TAB, "list", "context", {"text": "Odd"})
+            menus = [arguments[0] for name, arguments, _n in api.calls
+                     if name == "ui.choose" and arguments]
+            check(menus and list(menus[-1]) == ["Install it", "Refresh the catalog",
+                                                "Nothing"],
+                  f"a row that is not installed was offered to be updated: {menus}")
+            api.answer("ui.choose", "Refresh the catalog")
+            store.on_widget(store.TAB, "list", "context", {"text": "Odd"})
+            check("catalog loaded" in last_status(api),
+                  f"the menu's Refresh did not run it: {last_status(api)!r}")
+
+            print("\n3g. an addon's picture, and which commit its file came out of")
+            icons = Path(api.paths.data) / "icons"
+            icons.mkdir(parents=True, exist_ok=True)
+            (icons / "hello_store.png").write_bytes(b"png")
+            check(store.cached_icon("hello_store") == str(icons / "hello_store.png"),
+                  f"the picture on disk was not found from its id: "
+                  f"{store.cached_icon('hello_store')!r}")
+            check(store.icon_of(store.entries[0]).endswith("hello_store.png"),
+                  "a row was not drawn with the picture it has")
+            check(not store.cached_icon("odd_id"),
+                  "an addon with no picture on disk reported one")
+            default = store.fallback_icon()
+            check(bool(default), "there is no default picture for an addon without one")
+            check(store.icon_of(store.entries[1]) == default,
+                  "an addon with no picture of its own was not shown with the default")
+            del store.icon_queue[:]
+            store.queue_icons()
+            check(not store.icon_queue,
+                  f"a picture already on disk was queued to be fetched again: "
+                  f"{store.icon_queue}")
+            (icons / "hello_store.png").unlink()
+            store.queue_icons()
+            check(store.icon_queue == ["hello_store"],
+                  f"an addon whose picture is missing was not queued for it: "
+                  f"{store.icon_queue}")
+            api.timers.cancel_all()        # nothing above should have reached the net
+
+            address = store.commit_address(store.source_values(store.MAIN_SOURCE),
+                                           "hello_store.py")
+            check(address.startswith("/repos/fligma/raspiOpenWrt/commits?sha=main&path=")
+                  and "utils/update%20util/addon.store/hello_store.py" in address
+                  and address.endswith("&per_page=1"),
+                  f"the commit query is not an address GitHub answers: {address!r}")
+            words = store._commit_words({
+                "sha": "abcdef1234567890",
+                "commit": {"message": "Title line\n\nBody line.",
+                           "author": {"date": "2026-10-13T09:00:00Z"}},
+                "author": {"login": "fligma"}})
+            check(words["title"] == "Title line" and words["body"] == "Body line."
+                  and words["who"] == "fligma" and words["date"] == "2026-10-13",
+                  f"a commit was not read down to what a listing shows: {words}")
+            store.entries[0]["commit"] = words
+            api.calls.clear()
+            store.show_detail(store.entries[0])
+            facts = {row["cells"][0]: row["cells"][1]
+                     for row in (last_rows_for(api, "dfacts") or [])}
+            check(facts.get("Commit", "").startswith("abcdef1")
+                  and "Title line" in facts.get("Commit", ""),
+                  f"the pane does not say which commit the addon came out of: {facts}")
+            store.entries[0].pop("asking", None)
+            api.calls.clear()
+            store.show_detail(store.entries[0])
+            check(not [call for call in api.calls if call[0] == "schedule.after"],
+                  "an addon whose commit is already known was asked for it again")
+        finally:
+            api.timers.cancel_all()
+            store.addons_dir = real_dir
+            store.entries, store.updates = real_entries, real_updates
+            store.picked, store.filter_text = real_picked, real_filter
+            del store.icon_queue[:]
+            store.shutdown()
 
 
 # --- three: what counts as installed, against a temporary addons folder ---
@@ -347,12 +575,12 @@ def test_the_updates(store: Any) -> None:
             api.calls.clear()
             store.show_entries()
             rows = last_row_call(api) or []
-            byid = {row["cells"][0]: row for row in rows}
-            check(byid["hello_store"]["cells"][4] == "update available",
+            byid = {store.find_entry(row["cells"][0])["id"]: row for row in rows}
+            check(byid["hello_store"]["cells"][2] == "update available",
                   f"the behind addon was not marked for update: {byid['hello_store']}")
             check(byid["hello_store"].get("color") == "#ffb020",
                   "the update row did not wear the amber mark")
-            check(byid["odd_id"]["cells"][4] == "not installed",
+            check(byid["odd_id"]["cells"][2] == "not installed",
                   f"a thing not installed was described as an update: "
                   f"{byid['odd_id']}")
 
@@ -394,8 +622,8 @@ def test_the_updates(store: Any) -> None:
             api.answer("ui.question", True)
             began: list = []
 
-            def fake_begin(verb):
-                began.append(verb)
+            def fake_begin(verb, entry=None):
+                began.append((verb, (entry or {}).get("id")))
                 store.job = {"verb": verb}
                 return store.job
             store._begin = fake_begin
@@ -410,7 +638,7 @@ def test_the_updates(store: Any) -> None:
             store._compile = lambda ident: compiled.append(ident)
             api.calls.clear()
             store.update_selected()
-            check(began == ["update"],
+            check(began == [("update", "hello_store")],
                   f"a going update did not begin as an update job: {began}")
             check(compiled == ["hello_store"],
                   f"the accepted update did not reach the compile: {compiled}")
@@ -425,6 +653,276 @@ def test_the_updates(store: Any) -> None:
         store.job = None
         store.working = False
         store.shutdown()
+
+
+# --- three c: several repositories, read in order and edited on the tab ---
+
+class _Menus:
+    """``api.ui`` for a run through the Sources menu: the answers, in order.
+
+    The editor is a sequence of menus and single-line boxes, so a list drives it:
+    a string is what was picked or typed, ``True``/``False`` a question's answer,
+    and running out of answers is the user closing the menu without saying more.
+    """
+
+    def __init__(self, answers: list) -> None:
+        self.answers = list(answers)
+        self.asked: list = []
+        self.warned: list = []
+
+    def _next(self) -> Any:
+        return self.answers.pop(0) if self.answers else None
+
+    def choose(self, items):
+        self.asked.append(("choose", list(items)))
+        return self._next()
+
+    def input(self, title, label, default="", secret=False):
+        self.asked.append(("input", str(label), str(default)))
+        return self._next()
+
+    def question(self, title, text, default=False):
+        self.asked.append(("question", str(title)))
+        answer = self._next()
+        return bool(answer) if answer is not None else False
+
+    def warning(self, title, text):
+        self.warned.append((str(title), str(text)))
+
+
+def last_chip(api: Any) -> str:
+    """The source line the tab last showed in its header."""
+    for where, arguments, _named in reversed(api.calls):
+        if where == "tabs.set_widget" and len(arguments) >= 4 \
+                and arguments[1] == "source" and arguments[2] == "text":
+            return str(arguments[3])
+    return ""
+
+
+def chips_shown(api: Any) -> list:
+    """Every source line the tab has shown, in the order it showed them.
+
+    A stub api never keeps what it was asked to write, so a reload after an edit
+    reads the sources the api was made with rather than the edited ones; the line
+    the editor put up is still the one that was asked for.
+    """
+    return [str(arguments[3]) for where, arguments, _named in api.calls
+            if where == "tabs.set_widget" and len(arguments) >= 4
+            and arguments[1] == "source" and arguments[2] == "text"]
+
+
+def sources_written(api: Any) -> Any:
+    """The ``values`` the store last asked the config to be written with."""
+    for where, arguments, named in reversed(api.calls):
+        if where == "config.update":
+            if named:
+                return named.get("values")
+            return arguments[0] if arguments else None
+    return None
+
+
+def keys_popped(api: Any) -> list:
+    return sorted(arguments[0] for where, arguments, _named in api.calls
+                  if where == "config.pop" and arguments)
+
+
+def test_the_sources(store: Any) -> None:
+    """What the config says about where addons come from, and what the tab does about it.
+
+    Nothing here reaches GitHub: the catalog is answered per source, so the order
+    of the list, the clash between two repositories publishing one id, a source
+    that will not answer and the header chip are all read off what the store put
+    together. The Sources button is driven through its menus by a scripted run of
+    answers, and the config it writes is read back out of the recorded calls.
+    """
+    print("\n5e. the sources: which repositories the store reads, in what order")
+
+    main = store.read_sources({"sources": [dict(store.MAIN_SOURCE)], "token": ""})
+    check(len(main) == 1 and main[0]["owner"] == "fligma"
+          and main[0]["store_path"] == "utils/update util/addon.store",
+          f"the shipped default is not this program's own repository: {main}")
+    legacy = store.read_sources({"owner": "someone", "repo": "other", "ref": "v1",
+                                 "store_path": "util/store"})
+    check([store.source_label(source) for source in legacy] == ["someone/other @ v1"],
+          f"a single-source config was not migrated: {legacy}")
+    check(store.read_sources({}) == main,
+          f"a config naming nothing did not fall back to the main source: "
+          f"{store.read_sources({})}")
+    check(not store.read_sources({"sources": []}),
+          "every source having been removed still left one behind")
+    twice = store.read_sources({"sources": [dict(store.MAIN_SOURCE),
+                                              dict(store.MAIN_SOURCE),
+                                              {"owner": "a", "repo": "b"}]})
+    check([store.source_label(source) for source in twice]
+          == ["fligma/raspiOpenWrt @ main", "a/b @ main"],
+          f"a source named twice was kept twice, or the wrong one dropped: {twice}")
+    check(store.read_sources({"sources": [{"owner": "a"}, {"repo": "b"},
+                                            {"owner": " c ", "repo": " d "}]})
+          == [store.normalize_source({"owner": "c", "repo": "d"})],
+          "a half-typed source was kept, or a whole one not cleaned")
+    check(store.source_values(store.normalize_source({"owner": "a", "repo": "b"}),
+                              " gh ")
+          == {"owner": "a", "repo": "b", "ref": "main",
+              "store_path": "utils/update util/addon.store", "token": "gh"},
+          "a source did not come out as the flat address the fetches read")
+
+    # one source, on the tab: the chip names it and the rows say where they came from
+    api = fresh(store)
+    check(last_chip(api) == "fligma/raspiOpenWrt @ main",
+          f"the header does not name the source: {last_chip(api)!r}")
+    store.entries = []
+    store.on_widget(store.TAB, "refresh", "clicked", {})
+    api.calls.clear()
+    store.on_widget(store.TAB, "list", "selected", {"text": "hello_store"})
+    facts = {row["cells"][0]: row["cells"][1]
+             for row in (last_rows_for(api, "dfacts") or [])}
+    check(facts.get("Published by") == "fligma/raspiOpenWrt @ main",
+          f"the pane did not say which source published the addon: {facts}")
+
+    # nothing configured at all is said, rather than reading the main source anyway
+    empty = fresh(store, config={"sources": []})
+    store.entries = store.parse_catalog(CATALOG)
+    store.refresh()
+    check("no source is configured" in last_status(empty),
+          f"an empty list of sources still read a catalog: {last_status(empty)!r}")
+    check(not store.entries, f"the table kept rows out of a source-less store: "
+                             f"{store.entries}")
+
+    # the list put together: order is priority, and a dead source costs only itself
+    other = store.normalize_source({"owner": "someone", "repo": "other",
+                                    "ref": "v1", "store_path": "store"})
+    both = fresh(store, config={"sources": [dict(store.MAIN_SOURCE), other]})
+    real_load = store.load_catalog
+    check(last_chip(both) == "fligma/raspiOpenWrt @ main  +1",
+          f"several sources were not counted in the header: {last_chip(both)!r}")
+
+    def catalogue(values: dict) -> list:
+        if values["owner"] == "fligma":
+            return store.parse_catalog(CATALOG)
+        return store.parse_catalog({"addons": [
+            {"id": "hello_store", "name": "Other's copy", "version": "9.9"},
+            {"id": "only_other", "name": "Only there", "version": "1.0"}]})
+    try:
+        store.load_catalog = catalogue
+        found, failed = store.merge_catalogs([main[0], other])
+        ids = [entry["id"] for entry in found]
+        check(ids == ["hello_store", "odd_id", "only_other"],
+              f"the catalogs did not come together in the order asked for: {ids}")
+        check(found[0]["name"] == "Hello from the store"
+              and found[0]["source"] == "fligma/raspiOpenWrt @ main",
+              f"an id in two sources was not taken from the first: {found[0]}")
+        check(found[2]["source"] == "someone/other @ v1"
+              and found[2]["src"] == other,
+              f"a row from the second source did not carry it: {found[2]}")
+        check(not failed, f"two living sources reported a failure: {failed}")
+
+        def refuses(values: dict) -> list:
+            if values["owner"] != "fligma":
+                raise store.AddonError("the catalog could not be reached")
+            return store.parse_catalog(CATALOG)
+        store.load_catalog = refuses
+        found, failed = store.merge_catalogs([main[0], other])
+        check(len(found) == 2 and len(failed) == 1
+              and failed[0].startswith("someone/other @ v1:"),
+              f"a source that would not answer took the rest of them with it: "
+              f"{found} {failed}")
+        both.calls.clear()
+        store.refresh()
+        check("could not be read" in last_status(both),
+              f"a source that failed was not reported on the tab: "
+              f"{last_status(both)!r}")
+        check(len(store.entries) == 2,
+              f"a source that failed emptied the table: {store.entries}")
+    finally:
+        store.load_catalog = real_load
+
+    # a job follows the source that published the addon it is building
+    store.entries = store.parse_catalog(CATALOG)
+    store.entries[0]["src"] = other
+    store.entries[0]["source"] = store.source_label(other)
+    try:
+        began = store._begin("install", store.entries[0])
+        check(began["values"]["owner"] == "someone"
+              and began["values"]["store_path"] == "store"
+              and began["source"] == "someone/other @ v1",
+              f"the job did not follow the source that published the addon: "
+              f"{began['values']}")
+        store.working = False
+        began = store._begin("install")
+        check(began["values"]["owner"] == "fligma",
+              f"a job with no entry did not take the first source: {began['values']}")
+    finally:
+        store.job, store.working = None, False
+
+    # the Sources button: one field changed, and the old flat keys cleared out
+    # (the runs below all drive ``both``, the api holding the two sources, since
+    # that is the one the addon is talking to: a stub never stores what was
+    # written, so every run starts from those two and writes the edited list)
+    both.calls.clear()
+    both.ui = _Menus(["2. someone/other @ v1", "Change repository", "somerepo",
+                      store._DONE])
+    store.edit_sources()
+    wrote = sources_written(both)
+    check(wrote and [store.source_label(s) for s in wrote["sources"]]
+          == ["fligma/raspiOpenWrt @ main", "someone/somerepo @ v1"],
+          f"the edited source list is not what the menu was told: {wrote}")
+    check(keys_popped(both) == sorted(store.SOURCE_KEYS),
+          f"the keys a single-source config used were not cleared: {keys_popped(both)}")
+    check(last_chip(both) == "fligma/raspiOpenWrt @ main  +1",
+          f"the header was not pointed at the changed sources: {last_chip(both)!r}")
+
+    # add one, refuse a duplicate, move one first, remove one - and close with nothing said
+    both.calls.clear()
+    both.ui = _Menus([store._ADD, "another", "repo2", "dev", "store/here",
+                      store._DONE])
+    store.edit_sources()
+    wrote = sources_written(both)
+    check(wrote and [store.source_label(s) for s in wrote["sources"]][-1]
+          == "another/repo2 @ dev",
+          f"a source added from the menu is not in the config: {wrote}")
+    check(len(wrote["sources"]) == 3,
+          f"adding a source lost one that was already there: {wrote}")
+
+    both.calls.clear()
+    both.ui = _Menus([store._ADD, "fligma", "raspiOpenWrt", "main",
+                      "utils/update util/addon.store", store._DONE])
+    store.edit_sources()
+    check("already a source" in last_status(both),
+          f"a source added twice was not turned away: {last_status(both)!r}")
+    check(sources_written(both) is None,
+          "the config was written for a source that was refused")
+
+    both.calls.clear()
+    both.ui = _Menus(["2. someone/other @ v1", "Move first",
+                      "1. someone/other @ v1", "Remove", False,
+                      "2. fligma/raspiOpenWrt @ main", "Remove", True, store._DONE])
+    store.edit_sources()
+    wrote = sources_written(both)
+    check(wrote and [store.source_label(s) for s in wrote["sources"]]
+          == ["someone/other @ v1"],
+          f"a move and two removals did not come out as told: {wrote}")
+    check("someone/other @ v1" in chips_shown(both),
+          f"the header never showed the sources as they were left: "
+          f"{chips_shown(both)}")
+
+    both.calls.clear()
+    both.ui = _Menus([])                    # closed the menu without a word
+    store.edit_sources()
+    check(sources_written(both) is None,
+          "closing the Sources menu wrote the config anyway")
+    check(not [asked for asked in both.ui.asked if asked[0] == "input"],
+          "a menu closed at once went on asking for a repository")
+
+    # a typed-in source with no owner or repo is refused where it was asked for
+    both.calls.clear()
+    menus = _Menus([store._ADD, "", "", "", "store", store._DONE])
+    both.ui = menus
+    store.edit_sources()
+    check(bool(menus.warned),
+          "a source with nothing in it was accepted without a word")
+    check(sources_written(both) is None,
+          "a refused source still reached the config")
+    store.shutdown()
 
 
 # --- four: a compiled addon finds its own bundled assets ---
@@ -703,7 +1201,8 @@ def test_the_harness(store: Any) -> None:
     try:
         with tempfile.TemporaryDirectory() as box:
             os.environ["RASCONF_ADDON_DATA"] = str(Path(box) / "data")
-            store.job = {"values": dict(store.DEFAULTS)}
+            main = store.source_values(store.MAIN_SOURCE)
+            store.job = {"values": dict(main)}
 
             def write(values: dict, remote: str, target: Path,
                       folder: str | None = None) -> str:
@@ -713,30 +1212,30 @@ def test_the_harness(store: Any) -> None:
                 return ""
             store._fetch_file = write
 
-            check(store.app_folder(dict(store.DEFAULTS)) == "utils/update util",
+            check(store.app_folder(dict(main)) == "utils/update util",
                   f"the app's folder was not read off the store path: "
-                  f"{store.app_folder(dict(store.DEFAULTS))!r}")
+                  f"{store.app_folder(dict(main))!r}")
             check(store.app_folder({"store_path": "addons"}) == "",
                   "a store folder at the repository root made a folder out of nothing")
-            check(store.raw_address(dict(store.DEFAULTS), "addon_client.py",
-                                    store.app_folder(dict(store.DEFAULTS)))
+            check(store.raw_address(dict(main), "addon_client.py",
+                                    store.app_folder(dict(main)))
                   == "/fligma/raspiOpenWrt/main/utils/update%20util/addon_client.py",
                   f"the app's own folder did not survive the address: "
-                  f"{store.raw_address(dict(store.DEFAULTS), 'addon_client.py', 'utils/update util')!r}")
+                  f"{store.raw_address(dict(main), 'addon_client.py', 'utils/update util')!r}")
 
             # a checkout answers with its own folder and downloads nothing
             store._dev = lambda: _FakeDev()
-            check(store.harness_folder(dict(store.DEFAULTS)) == ROOT,
+            check(store.harness_folder(dict(main)) == ROOT,
                   "a checkout's own folder was not taken for the modules an addon "
                   "imports")
             check(not fetched, f"a checkout still fetched: {fetched}")
 
             # a program with nothing on disk asks for both, from the app's folder
             store._dev = lambda: _FrozenDev()
-            found = store.harness_folder(dict(store.DEFAULTS))
+            found = store.harness_folder(dict(main))
             check([name for name, _folder in fetched] == list(store.HARNESS_FILES),
                   f"both modules were not fetched: {fetched}")
-            check({folder for _name, folder in fetched} == {store.app_folder(store.DEFAULTS)},
+            check({folder for _name, folder in fetched} == {store.app_folder(main)},
                   f"the modules were looked for in the store folder, not the app's: "
                   f"{fetched}")
             check(found == store.staging() / "harness",
@@ -746,7 +1245,7 @@ def test_the_harness(store: Any) -> None:
             fetched.clear()
             store._fetch_file = lambda values, remote, target, folder=None: (
                 "GitHub answered 404" if remote == store.HARNESS_FILES[1] else "")
-            check(store.harness_folder(dict(store.DEFAULTS)) is None,
+            check(store.harness_folder(dict(main)) is None,
                   "a harness that could not be fetched was still handed to a build")
 
             # a fetched pair is what a build needs, not what a test wants: a run
@@ -776,7 +1275,7 @@ def test_the_harness(store: Any) -> None:
             store._build = lambda id_value, source: built.append(str(source))
             store._finish = lambda text, bad=False: stopped.append((str(text), bad))
             fetched.clear()
-            store.job = {"values": dict(store.DEFAULTS), "harness": narrow,
+            store.job = {"values": dict(main), "harness": narrow,
                          "lines": [], "widened": False}
             store._maybe_test("widget", src, test)
             check(len(runs) == 2, f"the test was not run a second time: {runs}")
@@ -805,7 +1304,7 @@ def test_the_harness(store: Any) -> None:
                 if callable(on_bad):
                     on_bad()
             store._stream = again_bad
-            store.job = {"values": dict(store.DEFAULTS), "harness": narrow,
+            store.job = {"values": dict(main), "harness": narrow,
                          "lines": [], "widened": False}
             store._maybe_test("widget", src, test)
             check(len(runs) == 1,
@@ -1380,8 +1879,10 @@ def main() -> int:
     test_the_helpers(store)
     test_the_tab(store)
     test_the_layout(store)
+    test_the_pane(store)
     test_installed(store)
     test_the_updates(store)
+    test_the_sources(store)
     test_bundled_assets(store)
     test_the_generator(store)
     test_the_gate(store)

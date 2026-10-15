@@ -26,16 +26,18 @@ import re
 # Qt-free half: runs compiled alone and in a windowless test.
 from typing import Any
 
-from addon_common import AddonError, config_get, merge_config
+from addon_common import AddonError, config_get, find_icon, merge_config
 
 ADDON = {
     "name": "Certificate manager",
-    "version": "1.0",
+    "version": "1.2",
     "author": "fligma",
     "description": "Shows the certificate on the device and reissues the .crt and "
                    ".key over SSH, with the subject, paths and follow-up commands "
                    "kept in addons/_data/cert_manager/config.json.",
     "requires": ["ssh"],
+    # Everything is read and written over the profile's own session.
+    "connection": "app",
     "api": 1,
 }
 
@@ -331,11 +333,26 @@ def tab_spec(values: dict) -> dict:
     return {"kind": "splitter", "children": [left, right]}
 
 
+def tab_icon() -> str:
+    """The shipped picture if the assets folder has one, else the drawn mark.
+
+    An addon's own picture is looked for by the standard rule - the id and then
+    ``icon.png``, so here ``cert_managericon.png`` - which is why there is no
+    file name to keep in step here: dropping the picture in is enough.
+    """
+    folder = None
+    try:
+        folder = api.paths.assets
+    except (AddonError, AttributeError, TypeError):    # no api on a bare import
+        folder = None
+    return find_icon(folder, "cert_manager") or TAB_ICON
+
+
 def build_tab() -> None:
     """The tab as a spec; buttons report through ``on_widget``, so compiled and source match."""
     values = with_clean_subject(api.config.all())
     api.tabs.add_tab(TAB, spec=tab_spec(values), style=TAB_STYLE)
-    api.tabs.set_icon(TAB, TAB_ICON)
+    api.tabs.set_icon(TAB, tab_icon())
 
 
 def values_of() -> dict:
