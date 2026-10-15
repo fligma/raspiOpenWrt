@@ -215,6 +215,17 @@ jobs:
         # offscreen, so no device and no window are involved. A failing test fails
         # the build. The tests themselves never reach the executable - the staging
         # step below skips _folders.
+        # Say what machine these answers came off, and with what: a test that
+        # passes on one system and not the other is nearly always Qt laying out
+        # or painting to that platform's font, so the version and the system are
+        # the first two lines to compare between the two logs.
+        python -c "import platform, sys; print(sys.platform, platform.release(), platform.machine(), sys.version.split()[0])"
+        python -c "from PyQt6.QtCore import QT_VERSION_STR, PYQT_VERSION_STR; print('Qt', QT_VERSION_STR, 'PyQt', PYQT_VERSION_STR)"
+        # ... and how much room its fonts take: the addon tests lay tabs out
+        # offscreen, so a machine with no font to draw has measured column
+        # widths and row heights of its own, and that is the one thing a text
+        # width here shows up before the checks that lean on it do.
+        python -c "import os; os.environ['QT_QPA_PLATFORM']='offscreen'; from PyQt6.QtWidgets import QApplication; from PyQt6.QtGui import QFont, QFontMetrics; app = QApplication([]); print('text width of Hello in Sans 11:', QFontMetrics(QFont('Sans', 11)).horizontalAdvance('Hello'))"
         $failed = $false
         foreach ($folder in @("addons/_tests", "addon.store/_tests")) {
           if (-not (Test-Path $folder -PathType Container)) { continue }

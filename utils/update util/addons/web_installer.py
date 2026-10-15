@@ -26,7 +26,7 @@ the repository and belongs to the device.
 
 The tab is built from a declarative spec and its buttons report back through
 ``on_widget``, so the same file works imported into the app and compiled into a
-program of its own by the Addon Dev tab.
+program of its own by the Addon Dev tab
 """
 
 from __future__ import annotations

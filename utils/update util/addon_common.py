@@ -13,8 +13,7 @@ is the same contract stripped down to plain Python, so it can also be used:
   :mod:`addon_api` - the names are re-exported there, so nothing that says
   ``from addon_api import AddonError`` has to change.
 
-Where things live
------------------
+Where things live:
 A helper looks for its folder in this order: an environment variable the app
 set for the addon process (``RASCONF_ADDON_CONFIG`` and friends, see
 ``manager_addons.ProcessBridge._environment``), then ``manager_const`` when it

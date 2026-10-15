@@ -69,7 +69,15 @@ from the source alone - is handed this run's own token, because sixty anonymous
 GitHub requests an hour are shared by everything a runner does, the catalog job
 of the same push among them; when GitHub still refuses, or no token is there, that
 half says so in the log and is skipped rather than failing the build, and the
-local-folder route - which needs no internet - is still run. The step after that
+local-folder route - which needs no internet - is still run. Each of those tests
+measures a tab by what it promised, not by how many pixels one machine made of
+it: a column is checked against the width the addon pinned in its own spec, a
+coloured row against the plain row beside it, an addon's mark against the pixels
+it actually drew - because the same Qt lays out with another font, another row
+height and another rasteriser elsewhere, and a build should not stop over that.
+So the step says what it is answering from before it runs anything: the system
+and Python, the Qt and PyQt in it, and how wide one word is in a default font.
+The step after that
 stages the addons
 out of `addons` into `_addon_bundle`, which is what gets packed inside the
 executable: top-level `.py` addons, compiled addons (a loose `.exe` or `.bin`

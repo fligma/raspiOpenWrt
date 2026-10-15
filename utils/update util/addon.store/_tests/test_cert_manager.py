@@ -450,14 +450,27 @@ def test_the_mark(app: Any) -> None:
         check(max(size.width() for size in sizes) >= 32,
               f"the mark was not rendered at a usable size: {sizes}")
         image = icon.pixmap(sizes[-1]).toImage()
-        gold = sum(1 for x in range(image.width()) for y in range(image.height())
-                   if image.pixelColor(x, y).red() > 180
-                   and image.pixelColor(x, y).green() > 100
-                   and image.pixelColor(x, y).blue() < 90)
-        check(gold > image.width() * image.height() * 0.05,
-              f"hardly anything was drawn: {gold} gold pixel(s) of "
-              f"{image.width() * image.height()}")
-        look(f"{sizes[-1].width()}px mark, {gold} gold pixel(s) in it")
+        # How much of a drawing lands on which pixel is the rasteriser's, and
+        # that differs between machines; how much of what was drawn is the
+        # trophy's own gold is the addon's. So the gold is counted against the
+        # pixels the mark actually covers, not against the square around it.
+        drawn = gold = 0
+        for x in range(image.width()):
+            for y in range(image.height()):
+                colour = image.pixelColor(x, y)
+                if colour.alpha() < 40:
+                    continue                 # nothing was drawn in this pixel
+                drawn += 1
+                if (colour.red() > 180 and colour.green() > 100
+                        and colour.blue() < 90):
+                    gold += 1
+        total = image.width() * image.height()
+        check(drawn > total * 0.1, f"the mark drew almost nothing: {drawn} of "
+                                   f"{total} pixel(s) covered")
+        check(gold > drawn * 0.4,
+              f"hardly any of what was drawn is the trophy: {gold} gold pixel(s) "
+              f"of {drawn} drawn")
+        look(f"{sizes[-1].width()}px mark, {gold} of {drawn} drawn pixel(s) gold")
 
     for nothing in ("", "   ", None, "not-a-file.png", "<svg><broken",
                     str(Path(__file__))):

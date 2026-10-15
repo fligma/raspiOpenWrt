@@ -583,15 +583,41 @@ def test_rows_paint(app: Any) -> None:
         painted.render(painter)
         painter.end()
         rect = painted.visualItemRect(painted.topLevelItem(0))
-        lit = 0
-        for y in range(max(0, rect.top()), min(96, rect.bottom() + 1)):
-            for x in range(max(0, rect.left()), min(240, rect.right() + 1)):
-                c = img.pixelColor(x, y)
-                if c.blue() > 60 and c.blue() > c.green() + 20 and c.red() > 40:
-                    lit += 1                    # the sky wash over the dark base
-        check(lit > 150,
+
+        def band_colour(row: int) -> tuple[int, int, int]:
+            """The average colour of one row's band, as it was really painted."""
+            band = painted.visualItemRect(painted.topLevelItem(row))
+            left, top = max(0, band.left()), max(0, band.top())
+            right = min(240, band.right() + 1)
+            bottom = min(96, band.bottom() + 1)
+            tally = [0, 0, 0]
+            seen = 0
+            for y in range(top, bottom):
+                for x in range(left, right):
+                    colour = img.pixelColor(x, y)
+                    tally[0] += colour.red()
+                    tally[1] += colour.green()
+                    tally[2] += colour.blue()
+                    seen += 1
+            return tuple(value // seen for value in tally) if seen else (0, 0, 0)
+
+        # How tall a row is, what sits in it and which font draws it is the
+        # platform's doing, so counting pixels of one shade would be this
+        # machine's metrics by another name - and the app's own background is
+        # bluish enough to pass such a count with no wash on at all. What the
+        # delegate can only get one way is whether the row the addon coloured
+        # looks different from the row nobody coloured, so that distance is what
+        # is measured here: the washed row is the sky wash, the plain one the
+        # sheet's base, and a delegate that swallowed the brush would leave them
+        # the same pixels.
+        washed, plain = band_colour(0), band_colour(1)
+        apart = sum(abs(one - other) for one, other in zip(washed, plain))
+        check(rect.height() > 0 and apart >= 20,
               f"the row colours must survive the app stylesheet (delegate); "
-              f"only {lit} wash-coloured pixels showed")
+              f"the washed row averaged {washed} and the plain one {plain}, "
+              f"{apart} apart, on {sys.platform}")
+        look(f"row band {rect.width()}x{rect.height()} px, washed {washed} "
+             f"against plain {plain}")
         painted.deleteLater()
     finally:
         app.setStyleSheet(sheet)

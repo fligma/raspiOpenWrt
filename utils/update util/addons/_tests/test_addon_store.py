@@ -189,6 +189,28 @@ def last_status(api: Any) -> str:
     return ""
 
 
+def spec_of(spec: Any, ident: str) -> Any:
+    """The one leaf of a tab spec that carries this widget id, or nothing.
+
+    A tab says how much room its own columns need in the spec it hands the app,
+    which is text and can be read on any machine; what the built widget reports
+    back is that number as the platform's style chose to wear it.
+    """
+    if isinstance(spec, dict):
+        if spec.get("id") == ident:
+            return spec
+        for value in spec.values():
+            found = spec_of(value, ident)
+            if found is not None:
+                return found
+    elif isinstance(spec, (list, tuple)):
+        for value in spec:
+            found = spec_of(value, ident)
+            if found is not None:
+                return found
+    return None
+
+
 def test_the_tab(store: Any) -> None:
     print("\n2. init builds the tab and reads the catalog")
     api = fresh(store)
@@ -307,9 +329,20 @@ def test_the_layout(store: Any) -> None:
     labels = [table.headerItem().text(column) for column in range(table.columnCount())]
     check(labels == list(store.LIST_COLUMNS),
           f"the columns are not in the promised order: {labels}")
-    widths = [table.columnWidth(column) for column in range(3)]
-    check(widths[1] >= 70 and widths[2] >= 130,
-          f"the fixed columns were not given room to fit their text: {widths}")
+    # How wide a column is drawn is the platform's business - its font, its
+    # style, its dots per inch - so the promise is read from the spec and the
+    # widget is only asked not to render a pinned column narrower than it was
+    # told: a style grows a section, it does not ignore one that was pinned.
+    asked = (spec_of(store.tab_spec(), "list") or {}).get("col_widths") or []
+    check(len(asked) == 3 and asked[1] > 0 and asked[2] > asked[1],
+          f"the list pins no room for a version and more for how it stands: "
+          f"{asked}")
+    widths = [table.columnWidth(column) for column in range(table.columnCount())]
+    check(all(width >= asked[column]
+              for column, width in enumerate(widths) if column < len(asked)),
+          f"a column was drawn narrower than the tab pinned for it: {asked} / "
+          f"{widths}")
+    look(f"{sys.platform} laid the list out at {widths}")
 
 
 # --- three a: the pane beside the list, the filter over it, the pictures ---
