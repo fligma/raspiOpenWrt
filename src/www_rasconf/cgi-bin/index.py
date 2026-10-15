@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rasconf dashboard CGI entry point.
+"""Berry dashboard CGI entry point.
 
 Handles PIN authentication, routes API/action requests, and serves the login and
 dashboard pages. Data gathering and page templates live in sibling modules that

@@ -31,6 +31,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -81,12 +82,15 @@ from addon_common import (addon_data_dir, addon_manifest_path, addon_origin,
                           terminate_process_tree, write_build_mark)
 from manager_const import (
     ADDON_DATA_DIR,
+    ADDON_EXECUTABLE_SUFFIX,
+    ADDON_ID_TRANSLATIONS,
     ADDONS_DIR,
     ASSETS_DIR,
     BASE_DIR,
     BUILTIN_ADDONS_DIR,
     HAS_BUILTIN_ADDONS,
     LOG_FILE,
+    RETIRED_SHIPPED_ADDON_IDS,
     SHIPPED_ADDON_IDS,
     THEMES_DIR,
 )
@@ -192,6 +196,98 @@ _ID_CLEAN = re.compile(r"[^A-Za-z0-9_.-]+")
 
 def safe_identifier(text: str) -> str:
     return _ID_CLEAN.sub("_", str(text).strip()) or "addon"
+
+
+# --- the leftovers of an addon this version no longer ships ---
+
+def retired_addon_files(folder: Path, addon_id: str) -> list[Path]:
+    """Every file one retired id may have left in the addons folder.
+
+    The names are exactly the ones an install or a build writes: the source a
+    checkout ships, the program the store compiles (with the extensionless name a
+    Unix build uses), the older ``.bin`` shape, the manifest sidecar a process
+    addon needs to be found at all, and the folder an addon of its own can be
+    laid out in. Anything else in that folder is somebody else's addon and is not
+    named here.
+    """
+    folder = Path(folder)
+    wanted = [f"{addon_id}.py", f"{addon_id}{ADDON_EXECUTABLE_SUFFIX}",
+              f"{addon_id}.bin", f"{addon_id}.json", addon_id]
+    seen: set[str] = set()
+    out: list[Path] = []
+    for name in wanted:
+        if not name or name in seen:
+            continue            # an extensionless build names the folder too
+        seen.add(name)
+        path = folder / name
+        if path.exists():
+            out.append(path)
+    return out
+
+
+def _take_out(path: Path) -> bool:
+    """Delete one file or folder; whether anything actually went."""
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink()
+    except OSError:
+        return False
+    return not path.exists()
+
+
+def prune_retired_addons(log: Callable[[str], None] | None = None,
+                         addons: Path | None = None,
+                         data: Path | None = None) -> list[str]:
+    """Clear what an addon the source no longer ships left behind, keeping its settings.
+
+    An upgrade that drops a bundled addon has to finish the job on the machine it
+    runs on: the program itself goes with the new build, but a copy in ``addons``
+    from an older install, the manifest beside it and the answers it saved in
+    ``addons/_data/<id>`` all stay, and an unknown id sitting in that folder is
+    dead weight that Settings would go on listing.
+
+    A retired name with a successor - the store taking over what used to ship -
+    is not simply thrown away: its settings folder is moved under the new id when
+    nothing is there yet, so an install that worked keeps its configuration. Once
+    the successor has a folder of its own the old one is only confusion, and it
+    goes. Every action is said through ``log`` and returned as a line, so a test
+    can read the answer instead of a window.
+    """
+    folder = Path(addons) if addons is not None else ADDONS_DIR
+    keeps = Path(data) if data is not None else ADDON_DATA_DIR
+    said: list[str] = []
+    for addon_id in RETIRED_SHIPPED_ADDON_IDS:
+        for path in retired_addon_files(folder, addon_id):
+            if _take_out(path):
+                said.append(f"cleared the retired addon file {path.name}")
+            else:
+                said.append(f"{path.name} could not be removed")
+        gone = keeps / safe_identifier(addon_id)
+        if not gone.is_dir():
+            continue
+        heir = ADDON_ID_TRANSLATIONS.get(addon_id, "")
+        into = keeps / safe_identifier(heir) if heir else None
+        if into is not None and not into.exists():
+            try:
+                gone.rename(into)
+                said.append(f"moved {addon_id}'s settings to {heir}")
+                continue
+            except OSError:
+                # Nothing was copied and nothing was deleted: the settings are
+                # still where they were, which is the safe answer to keep.
+                said.append(f"{addon_id}'s settings could not be moved to "
+                            f"{heir}, so they stay where they are")
+                continue
+        if _take_out(gone):
+            said.append(f"removed {addon_id}'s old settings folder")
+        else:
+            said.append(f"{addon_id}'s settings folder could not be removed")
+    for line in said:
+        if callable(log):
+            log(line)
+    return said
 
 
 class Addon:
@@ -957,6 +1053,7 @@ class AddonManager:
     def reload(self) -> None:
         """Rescan the folder, then start whatever the profile has enabled."""
         keep = {addon.id: addon for addon in self.addons}
+        active = self._active_tab()
         for addon in list(self.addons):
             self.unload(addon)
         discovered = self.scan()
@@ -990,6 +1087,42 @@ class AddonManager:
             self.load(addon)
         self.refresh_rows()
         self._restore_window_tabs()
+        self._reactivate_tab(active)
+
+    def _active_tab(self) -> str:
+        """The caption of the tab on show now, or "" when none is."""
+        widget = getattr(self.win, "tabs", None)
+        if widget is None:
+            return ""
+        index = widget.currentIndex()
+        if index < 0:
+            return ""
+        reader = getattr(widget, "tabBar", None)
+        bar = reader() if callable(reader) else None
+        if bar is None:
+            return str(widget.tabText(index) or "")
+        return str(tab_caption(bar, index) or "")
+
+    def _reactivate_tab(self, caption: str) -> None:
+        """Stand on the tab named ``caption`` again, when it is still there.
+
+        A rescan takes every addon's tab down and puts them all back, and the bar
+        can settle on any of them; a person who was looking at the store when an
+        install reloaded the addons should still be looking at it afterwards.
+        A caption that no longer has a tab (an addon that did not come back) is
+        left alone rather than jumped to some other tab.
+        """
+        if not caption:
+            return
+        widget = getattr(self.win, "tabs", None)
+        if widget is None:
+            return
+        try:
+            at = self._tab_titles().index(caption)
+        except ValueError:
+            return
+        if widget.currentIndex() != at:
+            widget.setCurrentIndex(at)
 
     def reconcile(self) -> None:
         """Apply the enable/disable flags after a profile switch or import."""

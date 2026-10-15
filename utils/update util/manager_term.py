@@ -24,13 +24,16 @@ from PyQt6.QtGui import (QColor, QFocusEvent, QFont, QFontMetrics, QKeyEvent,
                          QWheelEvent)
 from PyQt6.QtWidgets import QApplication, QScrollBar, QSizePolicy, QWidget
 
-# Colours: 16 named, then the 6x6x6 cube and grey ramp; defaults match the app.
-DEFAULT_FG = "#e0e0e0"
-DEFAULT_BG = "#1e1e1e"
+# Colours: a dark ground with a balanced 16-colour set (the Tango scheme), so
+# every ANSI colour - the blue and the dim greys above all - reads on the dark
+# background; then the standard 6x6x6 cube and grey ramp for 256-colour output.
+# The terminal keeps its own look and does not follow the app theme.
+DEFAULT_FG = "#e6e6e6"
+DEFAULT_BG = "#14161a"
 SELECTION_COLOR = QColor(70, 130, 200, 100)
-PALETTE16 = ["#000000", "#cd0000", "#00cd00", "#cdcd00", "#0000ee", "#cd00cd",
-             "#00cdcd", "#e5e5e5", "#7f7f7f", "#ff0000", "#00ff00", "#ffff00",
-             "#5c5cff", "#ff00ff", "#00ffff", "#ffffff"]
+PALETTE16 = ["#2e3436", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b",
+             "#06989a", "#d3d7cf", "#555753", "#ef2929", "#8ae234", "#fce94f",
+             "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"]
 
 HISTORY_MAX = 2000          # rows kept above the screen when nothing is full-screen
 
@@ -64,6 +67,17 @@ def _cell_color(value: int, default: QColor) -> QColor:
         return PALETTE[value]
     packed = value - 256
     return QColor((packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF)
+
+
+def _blend(color: QColor, toward: QColor, weight: float) -> QColor:
+    """``color`` mixed ``weight`` of the way toward ``toward`` (0 keeps it, 1
+    is fully ``toward``). Used to dim text toward the background rather than
+    darken it to black, so a dim line is soft but still readable."""
+    out = QColor(color)
+    out.setRedF(color.redF() * (1 - weight) + toward.redF() * weight)
+    out.setGreenF(color.greenF() * (1 - weight) + toward.greenF() * weight)
+    out.setBlueF(color.blueF() * (1 - weight) + toward.blueF() * weight)
+    return out
 
 
 def _blank_cell(fg: int = -1, bg: int = -1, flags: int = 0) -> tuple:
@@ -124,6 +138,8 @@ class TerminalScreen(QWidget):
         self._bar = QScrollBar(Qt.Orientation.Vertical, self)
         self._bar.setVisible(False)
         self._bar.valueChanged.connect(self._scroll_to)
+        self._bar_shown = False           # whether the bar is in the grid's way
+        self._refitting = False           # guards the resize triggered by a bar toggle
 
         self._blink_on = True
         self._blink = QTimer(self)
@@ -161,12 +177,21 @@ class TerminalScreen(QWidget):
         super().resizeEvent(event)
 
     def _refit(self) -> None:
-        cols = max(2, self.width() // self._cw)
+        # Reserve the scrollbar's width while it is in the way so a column is
+        # never painted underneath it: the bar is an overlay child, so width()
+        # still spans the whole widget and the grid has to give up that room.
+        cols = max(2, (self.width() - self._bar_width()) // self._cw)
         rows = max(2, self.height() // self._ch)
         if (cols, rows) == (self.cols, self.rows):
             return
         self._resize_grid(cols, rows)
         self.resized.emit(self.cols, self.rows)
+
+    def _bar_width(self) -> int:
+        """The room the vertical scrollbar takes when it is over the grid."""
+        if self.alternate or not self.history:
+            return 0
+        return self._bar.sizeHint().width()
 
     def _resize_grid(self, cols: int, rows: int) -> None:
         """Carry the grid across a shape change, keeping what still fits."""
@@ -189,6 +214,10 @@ class TerminalScreen(QWidget):
         """One chunk of device output. The view follows it if it was at bottom."""
         for ch in text:
             self._step(ch)
+        # Any output brings the cursor back for a full beat, the way a real
+        # terminal does: a program that keeps the screen busy - nano redrawing
+        # on every keystroke - is never left with a cursor caught mid-blink.
+        self._blink_on = True
         if self._back:
             self._back = 0
             self._bar.setValue(0)
@@ -439,6 +468,7 @@ class TerminalScreen(QWidget):
                 self.saved_cursor = (self.cr, self.cc, *self.pen)
             self._main_state = (saved, keep_modes)
             self.alternate = True
+            self._blink_on = True
         elif on is False and self.alternate and self._main_state is not None:
             (saved, keep_modes) = self._main_state
             (self.lines, self.cr, self.cc, self.top_margin, self.bottom_margin,
@@ -446,7 +476,7 @@ class TerminalScreen(QWidget):
             (self.app_cursor, self.autowrap, self.bracketed_paste) = keep_modes
             self._main_state = None
             self.alternate = False
-        self._bar.setVisible(not self.alternate and bool(self.history))
+        self._update_bar()
         self.update()
 
     # --- screen surgery ---
@@ -671,6 +701,17 @@ class TerminalScreen(QWidget):
         if self._back > room:
             self._back = room
         self._bar.setValue(self._back)
+        shown = room > 0
+        if shown != self._bar_shown and not self._refitting:
+            # The bar has just come over the grid (or left it): re-lay the grid
+            # once so no column hides under it, or sits wasted beside it. The
+            # flag keeps this off the _refit -> _resize_grid -> _update_bar loop.
+            self._bar_shown = shown
+            self._refitting = True
+            try:
+                self._refit()
+            finally:
+                self._refitting = False
 
     def _scroll_to(self, value: int) -> None:
         self._back = value
@@ -703,6 +744,7 @@ class TerminalScreen(QWidget):
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.fillRect(self.rect(), QColor(DEFAULT_BG))
         rows = self._visible_rows()
         view_top = self._view_top_index()
@@ -727,7 +769,7 @@ class TerminalScreen(QWidget):
                     if flags & BOLD and 0 <= fg < 8:
                         text_color = PALETTE[fg + 8]      # bold 0..7 picks the bright colour
                     if flags & DIM:
-                        text_color = text_color.darker(150)
+                        text_color = _blend(text_color, bg_color, 0.4)
                 if bg_color != QColor(DEFAULT_BG):
                     painter.fillRect(QRect(col * self._cw, y, (run - col + 1) * self._cw, self._ch), bg_color)
                 text = "".join(row[c][0] for c in range(col, run + 1)).rstrip()
@@ -739,7 +781,7 @@ class TerminalScreen(QWidget):
                         font = self._font_for(flags, fonts)
                     painter.setFont(font)
                     painter.setPen(text_color)
-                    painter.drawText(QRect(col * self._cw, y, (run - col + 1) * self._cw, self._ch),
+                    painter.drawText(QRect(col * self._cw + 1, y, (run - col + 1) * self._cw, self._ch),
                                      Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
                                      text)
                 col = run + 1
@@ -794,7 +836,13 @@ class TerminalScreen(QWidget):
             painter.drawText(rect.adjusted(1, 0, 0, 0),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, cell[0])
         else:
-            painter.setPen(QColor(DEFAULT_FG))
+            # unfocused: a hollow box, drawn against the cell's own colour so it
+            # stays visible on any background, light or dark
+            cell = self.lines[self.cr][self.cc]
+            base = _cell_color(cell[2], QColor(DEFAULT_BG))
+            edge = QColor(DEFAULT_FG) if base.lightnessF() < 0.5 \
+                else QColor(30, 30, 30)
+            painter.setPen(edge)
             painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
     # --- selection ---
@@ -875,7 +923,7 @@ class TerminalScreen(QWidget):
         super().focusOutEvent(event)
 
     def _toggle_blink(self) -> None:
-        if self.cursor_visible and not self.alternate:
+        if self.cursor_visible:
             self._blink_on = not self._blink_on
             self.update()
 

@@ -32,9 +32,14 @@ downloads, under ``addons/_data/addon_store/build``, and both the downloads and
 the build are thrown away as soon as the program is in ``addons/``: only the
 installed file and the addon's own settings are left behind.
 
-A freshly installed addon is written into the active profile's settings as
-switched off, so nothing of it runs until it is turned on in Settings > Addons,
-where its row appears as soon as the app has rescanned the folder.
+Before a program is replaced, the addon it is being written for is stopped and
+switched off: its running process is killed, so the file is not held open, and
+its row is marked off while the new one goes in. A freshly installed addon is
+left that way - written into the active profile's settings as switched off, so
+nothing of it runs until it is turned on - and an update puts its switch back
+where it stood before the job, so an addon that was on comes back on when the
+app has rescanned the folder. Every switch is answered in a live notice over
+the app's corner: a progress bar with the percentage of the batch done.
 
 A program only says what it is once it runs, and the app needs some of that
 before then, so what the addon's source declared is written down as it is
@@ -69,8 +74,15 @@ catalog names now, and where the repository is ahead the row says *update
 available*. Update then runs the same download, test and build as a fresh install
 and puts the result where the old program was, replacing it - what the addon
 saved for itself under ``addons/_data/<id>`` is never part of an install and is
-left exactly as it is, and the switch in Settings > Addons is not touched, so an
-addon that was on stays on.
+left exactly as it is - and the addon's on/off switch is returned to the state
+the person had it in before the job started, so an addon that was on stays on.
+
+Install and Update work on whatever rows are selected, so ctrl-clicking several
+addons runs them as one batch behind a single progress notice, one job after
+another until the queue is empty. An installed addon's row wears a check box
+that switches it on or off where it stands, and the rescan an install ends with
+keeps the tab it was started from showing, so a job never moves the person away
+from the store.
 
 Deleting one takes that compiled program (or folder) back out of ``addons/`` and
 rescans. By default it takes the addon's own ``_data`` settings with it, since
@@ -124,7 +136,7 @@ from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_manifest_p
 
 ADDON = {
     "name": "Berry addon store",
-    "version": "1.4",
+    "version": "1.5",
     "author": "fligma",
     "description": "Lists the addons published in the repository's addon.store "
                    "folder, downloads a chosen one into a staging folder and "
@@ -521,9 +533,11 @@ def tab_spec() -> dict:
             {"kind": "splitter", "sizes": [2, 3], "children": [
                 {"kind": "table", "id": "list", "columns": list(LIST_COLUMNS),
                  "stretch": [0], "col_widths": [0, 70, 130], "font_size": 11,
-                 "on": ["selected", "context"],
+                 "checkbox": 0, "multi": True,
+                 "on": ["selected", "context", "toggled"],
                  "tooltip": "Every addon the configured sources list; click one "
-                            "to read about it, then use the buttons below"},
+                            "to read about it, ctrl-click several to work on them "
+                            "as a batch, and tick an installed one to switch it on"},
                 {"kind": "column", "children": [
                     {"kind": "row", "children": [
                         {"kind": "image", "id": "dicon", "size": 64},
@@ -1347,6 +1361,8 @@ def show_entries() -> None:
         row = {"cells": [name + _MARKS.get(one_line(entry.get("status")), ""),
                          one_line(entry.get("version")), state],
                "color": tint}
+        if installed(entry["id"]):
+            row["check"] = bool(enabled_of(entry["id"]))
         picture = icon_of(entry)
         if picture:
             row["icon"] = picture
@@ -1423,6 +1439,89 @@ def selected_id() -> str:
     if entry is not None:
         return entry["id"]
     return clean_id(picked)
+
+
+def selected_ids() -> list[str]:
+    """Every row a person has picked, in list order; the described one when none.
+
+    A batch is taken from the whole selection, so ctrl-clicking several rows
+    hands Install and Update all of them at once. A repaint that drops Qt's
+    selection without dropping the pane still answers with the addon showing.
+    """
+    if api is None:
+        return [clean_id(picked)] if picked else []
+    try:
+        chosen = api.tabs.widget_value(TAB, "list", "selected")
+    except AddonError:
+        chosen = None
+    if isinstance(chosen, (list, tuple)):
+        texts = [str(item) for item in chosen]
+    elif chosen:
+        texts = [str(chosen)]
+    else:
+        texts = []
+    ids = []
+    for text in texts:
+        entry = find_entry(text.split("\t")[0])
+        if entry is not None and entry["id"] not in ids:
+            ids.append(entry["id"])
+    if not ids and picked:
+        ids = [clean_id(picked)]
+    return ids
+
+
+def enabled_of(id_value: str) -> bool | None:
+    """Whether an installed addon's switch is on, as the app's record has it.
+
+    The store's list carries that switch as a check box, so the rows are drawn
+    from the same answer the toggle writes; nothing here reads settings files.
+    """
+    if api is None:
+        return None
+    try:
+        state = api.session.addon_state(addon_id=id_value)
+    except Exception:
+        return None
+    if not isinstance(state, dict) or not state.get("installed"):
+        return None
+    return bool(state.get("enabled"))
+
+
+def toggle_installed(payload: dict) -> None:
+    """A row's check box was moved: switch that installed addon on or off here.
+
+    The list's box is Settings > Addons's switch, not a copy of it: the same
+    record is written and the same load or stop follows, so ticking the box
+    starts the addon and unticking it stops it. The store then takes the tab
+    back for itself, because an addon waking up may claim one, and a tick that
+    came in during a job is put right by the next repaint - the job owns the
+    switches until it ends.
+    """
+    if api is None or working:
+        return
+    data = payload if isinstance(payload, dict) else {}
+    entry = find_entry(one_line(data.get("text")).split("\t")[0])
+    if entry is None:
+        return
+    if not installed(entry["id"]):
+        show_entries()          # only an installed addon has a switch to move
+        return
+    want = bool(data.get("checked"))
+    try:
+        api.session.set_addon_running(addon_id=entry["id"], running=want)
+    except Exception as error:
+        say(f"{entry['id']} could not be switched "
+            f"{'on' if want else 'off'}: {error}", bad=True)
+        show_entries()
+        return
+    words = f"switched {entry['id']} {'on' if want else 'off'}"
+    say(words)
+    note(words)
+    try:
+        api.tabs.activate(TAB)  # loading an addon must not steal the store tab
+    except Exception:
+        pass
+    show_entries()
 
 
 # --- the detail pane: what one addon really is ---
@@ -1792,42 +1891,196 @@ def _dev() -> Any:
     return manager_addondev
 
 
-def _begin(verb: str, entry: dict | None = None) -> dict:
-    """Start a job: the buttons grey out and one dict holds its whole state.
+def _point_job_at(entry: dict | None) -> None:
+    """Aim the job's downloads at the source that published this entry.
 
-    The address the job works from is the one that published the entry it was
-    asked about, so its assets, its test and the modules it imports are fetched
-    from the repository the catalog row came out of. With no entry to follow -
-    a job started from a bare id - the first configured source answers.
+    Each catalog row remembers which repository served it, so a batch drawn
+    from several sources fetches every addon - its program, its assets, its
+    test - from the place that actually lists it. With no source on the row,
+    the first configured one answers.
     """
-    global working, job
     values = source_config()
     token = clean_token(config_get(values, "token", ""))
     source = (entry or {}).get("src")
     if not isinstance(source, dict):
         source = (read_sources(values) or [dict(MAIN_SOURCE)])[0]
+    job["values"] = source_values(source, token)
+    job["source"] = source_label(source)
+
+
+def _begin(verb: str, entry: dict | None = None) -> dict:
+    """Start a job: the buttons grey out and one dict holds its whole state.
+
+    The job may cover one addon or a batch: the queue holds what is still to
+    come, ``total`` counts the whole of what was picked and ``done`` how many
+    have landed, and ``restore`` remembers each stopped addon's switch so an
+    update can put it back.
+    """
+    global working, job
     working = True
-    job = {"verb": verb, "values": source_values(source, token),
-           "source": source_label(source), "stream": None, "on_ok": None,
-           "fail": "", "lines": [], "harness": None, "widened": False,
-           "details": {}}
+    job = {"verb": verb, "values": {}, "source": "", "stream": None,
+           "on_ok": None, "fail": "", "lines": [], "harness": None,
+           "widened": False, "details": {}, "id": "", "queue": [],
+           "total": 1, "done": 0, "restore": {}, "did": []}
+    _point_job_at(entry)
     _buttons(False)
     try:
         api.tabs.set_widget(TAB, "log", "value", "")
     except AddonError:
         pass
     note(f"{job['source']}: this job reads the store from here")
+    _progress(f"{verb} starting...", 0.0)
+    return job
+
+
+def _begin_job(verb: str, items: list[dict]) -> dict:
+    """Start a job over a batch: the first entry works at once, the rest queue.
+
+    One job covers the whole of what was picked. Its queue is worked through
+    addon by addon, and the live notice counts its percentage over all of
+    them, so ten installs read as one job at one pace.
+    """
+    global job
+    job = _begin(verb, items[0])
+    job["queue"] = list(items)
+    job["total"] = len(items)
     return job
 
 
 def _finish(text: str, bad: bool = False) -> None:
-    """End the job in hand: the buttons come back and one line is left up."""
+    """End the job in hand: the buttons come back and one line is left up.
+
+    A batch that stops part-way says how far it got, so the last line holds
+    the whole truth of the job. The live notice ends either way: filled to
+    hundred percent, to be held a moment and fade, when all is well; closed
+    straight away when the job ended bad.
+    """
     global working, job
+    if job is not None:
+        total = int(job.get("total") or 1)
+        done = int(job.get("done") or 0)
+        if bad and total > 1:
+            text = f"the batch stopped after {done} of {total}: {text}"
     job = None
     working = False
     _buttons(True)
+    if api is not None:
+        try:
+            if bad:
+                api.ui.progress_notice_close()
+            else:
+                api.ui.progress_notice("Berry addon store", str(text), 100, 100)
+        except Exception:
+            pass
     say(text, bad=bad)
     note(text)
+
+
+def _progress(text: str, frac: float) -> None:
+    """One step of the job: the status line, and the live notice's percentage.
+
+    The percentage covers the whole batch: a finished addon counts as one full
+    share and the one in hand contributes its part of a share, so the bar of
+    ten installs creeps by tenths of a tenth and never runs back. Only the
+    ending itself reaches hundred percent, because the notice holds and fades
+    the moment it is filled.
+    """
+    if api is None or job is None:
+        return
+    total = max(1, int(job.get("total") or 1))
+    done = int(job.get("done") or 0)
+    part = max(0.0, min(1.0, float(frac)))
+    percent = min(99, int(round(100.0 * (done + part) / total)))
+    line = f"{done + 1} of {total}: {text}" if total > 1 else str(text)
+    try:
+        api.ui.progress_notice("Berry addon store", line, percent, 100)
+    except Exception:
+        pass
+    say(line)
+
+
+def _prep_one(id_value: str) -> None:
+    """Stop the addon and switch it off before its file is replaced.
+
+    A running program holds its own file open on Windows, and an old build
+    left running beside a fresh one is the worst of both; so the process
+    goes first. What the switch said beforehand is remembered, so an update
+    can put it back where it stood once the new program lands. A fresh
+    install has nothing to stop, and says so by saying nothing.
+    """
+    if api is None or job is None:
+        return
+    try:
+        state = api.session.addon_state(addon_id=id_value)
+    except Exception as error:
+        note(f"{id_value}'s running state could not be read: {error}")
+        return
+    if not isinstance(state, dict) or not state.get("installed"):
+        return
+    job["restore"][id_value] = bool(state.get("enabled"))
+    if not state.get("enabled") and not state.get("running"):
+        return
+    try:
+        api.session.set_addon_running(addon_id=id_value, running=False)
+    except Exception as error:
+        note(f"{id_value} could not be stopped and switched off first: {error}")
+        return
+    _progress(f"stopped and switched off {id_value} to work on it", 0.03)
+
+
+def _restore_enabled(id_value: str) -> None:
+    """Put an updated addon's switch back where it was before the job touched it.
+
+    Only the record is written: the rescan that ends the job starts the
+    program again when the switch is on, so an addon that was on comes back
+    on and one that was off is left off - nothing is loaded from under the
+    rescan.
+    """
+    if api is None or job is None:
+        return
+    prior = (job.get("restore") or {}).get(id_value)
+    if prior is None:
+        return
+    try:
+        api.session.set_addon_enabled(addon_id=id_value, enabled=bool(prior))
+    except Exception as error:
+        note(f"{id_value}'s switch could not be put back: {error}")
+        return
+    note(f"{id_value} is switched {'on' if prior else 'off'} again, as it was "
+         "before the update")
+
+
+def _start_next() -> None:
+    """Take the next addon off the batch queue and set it building.
+
+    Each entry is aimed at its own publishing source, stopped and switched
+    off as it comes, and the interpreter and PyInstaller are checked again
+    per addon rather than assumed from the last - the first of a batch may
+    have brought pip along since the job started.
+    """
+    global job
+    if job is None or not job.get("queue"):
+        return
+    entry = job["queue"].pop(0)
+    id_value = one_line(entry.get("id"))
+    job["id"] = id_value
+    job["widened"] = False
+    job["harness"] = None
+    job["lines"] = []
+    _point_job_at(entry)
+    if job.get("verb") == "update":
+        job["from_version"] = installed_version(id_value)
+    if int(job.get("total") or 1) > 1:
+        _progress(f"working on {one_line(entry.get('name')) or id_value}", 0.0)
+    _prep_one(id_value)
+    where = _ensure_python()
+    if not where:
+        return
+    ready, _hint = _dev().pyinstaller_ready()
+    if not ready:
+        _pip_install(where)
+        return
+    _compile(id_value)
 
 
 def _stream(command: list[str], cwd: Path | None, on_ok: Any,
@@ -1939,7 +2192,7 @@ def _compile(id_value: str) -> None:
         return
     _reset_staging()
     source = staging() / f"{id_value}.py"
-    say(f"downloading {entry['filename']}...")
+    _progress(f"downloading {entry['filename']}...", 0.15)
     why = _fetch_file(values, entry["filename"], source)
     if why:
         _finish(why, bad=True)
@@ -1952,7 +2205,8 @@ def _compile(id_value: str) -> None:
     assets = staging() / "assets"
     left = []
     for index, name in enumerate(names, 1):
-        say(f"downloading asset {name} ({index} of {len(names)})...")
+        _progress(f"downloading asset {name} ({index} of {len(names)})...",
+                  0.15 + 0.20 * index / max(1, len(names)))
         why = _fetch_file(values, f"assets/{id_value}/{name}", assets / name)
         if why:
             note(f"{name} could not be fetched: {why}")
@@ -1963,7 +2217,7 @@ def _compile(id_value: str) -> None:
     test_path = None
     test_name = entry.get("test") or ""
     if test_name:
-        say(f"downloading {test_name} to check the addon first...")
+        _progress(f"downloading {test_name} to check the addon first...", 0.38)
         why = _fetch_file(values, f"_tests/{test_name}", staging() / test_name)
         if why:
             _finish(f"the addon's test could not be fetched: {why}", bad=True)
@@ -1986,12 +2240,12 @@ def _maybe_test(id_value: str, source: Path, test_path: Path | None) -> None:
     if job is None:
         return
     if test_path is None or not test_path.is_file():
-        say("no test is published for this addon; compiling as it is")
+        _progress("no test is published for this addon; compiling as it is", 0.45)
         _build(id_value, source)
         return
     harness = job.get("harness")
     if harness is None:
-        say("the addon's test cannot be run here; compiling as it is")
+        _progress("the addon's test cannot be run here; compiling as it is", 0.45)
         _build(id_value, source)
         return
     dev = _dev()
@@ -2004,7 +2258,7 @@ def _maybe_test(id_value: str, source: Path, test_path: Path | None) -> None:
     env["PYTHONPATH"] = str(harness) + (os.pathsep + had if had else "")
     env["RASCONF_ADDON_SOURCE"] = str(source)      # the copy just downloaded
     env["QT_QPA_PLATFORM"] = "offscreen"           # a test may build real widgets
-    say(f"running {test_path.name} before compiling...")
+    _progress(f"running {test_path.name} before compiling...", 0.55)
     _stream([str(where), str(test_path)], Path(harness),
             lambda: _build(id_value, source), env=env,
             fail="the addon's own test did not pass, so it was not compiled",
@@ -2041,7 +2295,7 @@ def _test_said_nothing(id_value: str, source: Path,
             return
     note(f"the test could not start: this Python has no {missing}, so nothing "
          "was proved about the addon either way")
-    say("the addon's test cannot be run here; compiling as it is")
+    _progress("the addon's test cannot be run here; compiling as it is", 0.45)
     _build(id_value, source)
 
 
@@ -2112,7 +2366,7 @@ def _build(id_value: str, source: Path) -> None:
         options["icon"] = str(icon) if (icon is not None and icon.is_file()) else True
     command = dev.build_command(launcher, id_value, options, source, root=root,
                                 paths=[Path(harness)])
-    say(f"compiling {id_value} with PyInstaller...")
+    _progress(f"compiling {id_value} with PyInstaller...", 0.70)
     note("$ " + " ".join(command))
     _stream(command, work, lambda: _install_step(id_value))
 
@@ -2233,16 +2487,22 @@ def _clear_old_flat(id_value: str) -> None:
 
 
 def _install_step(id_value: str) -> None:
-    """Move the fresh program into ``addons/<id>/``, say what it is, leave it off.
+    """Move the fresh program into ``addons/<id>/``, then on to the next or end.
+
+    A fresh install is left switched off; an update puts the switch back where
+    it stood before the job stopped the addon. With more of a batch queued the
+    next addon starts straight off this one; only the last addon's finish ends
+    the job and asks for the rescan.
 
     The rescan that lets the app see the new file re-loads this addon as well,
     which takes the module this code runs in out of the app: the api is gone the
     moment ``_reload()`` starts. So everything that still needs it - clearing the
-    build away, marking the addon off, the table and the status line - is done
-    first, and the rescan is the last thing here.
+    build away, the switch, the table and the status line - is done first, and
+    the rescan is the last thing here.
     """
     if job is None:
         return
+    _progress(f"installing {id_value}...", 0.92)
     dev = _dev()
     staged = dev.staged_name(id_value, False, root=work_dir())
     if not staged.is_file():
@@ -2263,10 +2523,24 @@ def _install_step(id_value: str) -> None:
         note(f"{id_value}'s own settings under addons/_data/{id_value}/ were left "
              "as they are")
         updates.pop(id_value, None)     # it now matches the catalog, so it is current
+        _restore_enabled(id_value)
     else:
         _stay_off(id_value)
+    job.setdefault("did", []).append(id_value)
+    job["done"] = int(job.get("done") or 0) + 1
     show_entries()
-    if updating:
+    if job.get("queue"):
+        _start_next()
+        return
+    did = job.get("did") or [id_value]
+    if len(did) > 1:
+        if updating:
+            _finish(f"updated {len(did)} addons - " + ", ".join(did) +
+                    "; each switch is back where it was")
+        else:
+            _finish(f"installed {len(did)} addons - " + ", ".join(did) +
+                    ", switched off until you turn them on in Settings > Addons")
+    elif updating:
         had = one_line(job.get("from_version"))
         now = one_line((job.get("details") or {}).get("manifest", {})
                        .get("version")) \
@@ -2289,7 +2563,7 @@ def _pip_install(where: str, user: bool = False) -> None:
     if job is None:
         return
     who = " for this user" if user else ""
-    say(f"getting PyInstaller ready (pip install{who})...")
+    _progress(f"getting PyInstaller ready (pip install{who})...", 0.05)
     command = [where, "-m", "pip", "install", "--disable-pip-version-check"]
     if user:
         command.append("--user")
@@ -2321,79 +2595,109 @@ def _after_pip(where: str) -> None:
 
 
 def install_selected(_checked: bool = False) -> None:
-    """Download and compile the chosen addon, installing PyInstaller first if needed."""
+    """Download and compile the chosen addons, installing PyInstaller first if needed.
+
+    One row or several: ctrl-click takes the whole selection as a batch, the
+    job works through it addon by addon, and every install ends switched off.
+    Anything in the selection that is already installed is left out of it with
+    a line in the log, since installing over a live addon is Update's work.
+    """
     if api is None or working:
         return
-    id_value = selected_id()
-    if not id_value:
+    ids = selected_ids()
+    if not ids:
         say("pick an addon in the list first", bad=True)
         return
-    if entry_for(id_value) is None:
+    pool = [entry for entry in (entry_for(ident) for ident in ids)
+            if isinstance(entry, dict)]
+    if not pool:
         say("the list is empty - press Refresh first", bad=True)
         return
-    if installed(id_value):
-        say(f"{id_value} is already installed; use Update if the store lists a "
-            "newer version, or Delete to remove it", bad=True)
+    fresh = [entry for entry in pool if not installed(entry["id"])]
+    if not fresh:
+        say("every addon picked is already installed; use Update if the store "
+            "lists a newer version, or Delete to remove it", bad=True)
         return
-    job_local = _begin("install", entry_for(id_value))
-    job_local["id"] = id_value
-    where = _ensure_python()
-    if not where:
-        return
-    ready, _hint = _dev().pyinstaller_ready()
-    if not ready:
-        _pip_install(where)
-        return
-    _compile(id_value)
+    if len(fresh) > 1:
+        names = "\n".join(f"- {one_line(entry.get('name')) or entry['id']}"
+                          for entry in fresh)
+        if not api.ui.question(
+                "Install addons",
+                f"Install {len(fresh)} addons from the store?\n\n{names}\n\n"
+                "Each is compiled here and left switched off until you turn "
+                "it on in Settings > Addons."):
+            say("the install was declined")
+            return
+    _begin_job("install", fresh)
+    for entry in pool:
+        if entry not in fresh:
+            note(f"{entry['id']} is already installed; it was left out of the "
+                 "batch")
+    _start_next()
 
 
 def update_selected(_checked: bool = False) -> None:
-    """Rebuild the chosen addon from the catalog's version, keeping its settings.
+    """Rebuild every chosen addon that is behind, keeping its settings.
 
     An update is an install over the top of what is already there: the same
     download, test and compile as a fresh install, and the program already in
     ``addons`` is replaced as the new one is copied in. What the addon saved for
     itself under ``addons/_data/<id>`` is never part of what an install clears,
-    so its config keeps the answers already given to it, and the switch in
-    Settings > Addons is not written to, so an addon that was on stays on.
+    so its config keeps the answers already given to it. Each addon is stopped
+    and switched off while its program is rebuilt, and its switch in Settings >
+    Addons is put back exactly where it was once the new one lands.
     """
     if api is None or working:
         return
-    id_value = selected_id()
-    if not id_value:
+    ids = selected_ids()
+    if not ids:
         say("pick an installed addon in the list first", bad=True)
         return
-    entry = entry_for(id_value)
-    if entry is None:
-        say("the list is empty - press Refresh first", bad=True)
+    behind = []
+    for ident in ids:
+        entry = entry_for(ident)
+        if entry is None or not installed(ident):
+            continue
+        if version_newer(one_line(entry.get("version")), installed_version(ident)):
+            behind.append(entry)
+    if not behind:
+        present = [ident for ident in ids if installed(ident)]
+        if present:
+            say((", ".join(present) + (" is" if len(present) == 1 else " are") +
+                 " already up to date"))
+        elif len(ids) == 1:
+            say(f"{ids[0]} is not installed yet; use Install to add it", bad=True)
+        else:
+            say("none of the picked addons is installed yet; use Install to "
+                "add them", bad=True)
         return
-    if not installed(id_value):
-        say(f"{id_value} is not installed yet; use Install to add it", bad=True)
-        return
-    have = installed_version(id_value)
-    wanted = one_line(entry.get("version"))
-    if not version_newer(wanted, have):
-        say(f"{id_value} is already up to date (version {have or 'unknown'})")
-        return
-    if not api.ui.question(
-            "Update addon",
-            f"Update {one_line(entry.get('name')) or id_value} from "
-            f"{have or 'an unknown version'} to {wanted}?\n\nIts settings in "
-            f"addons/_data/{id_value}/ are kept, and the switch in Settings > "
-            "Addons is left as it is."):
-        say("the update was declined")
-        return
-    job_local = _begin("update", entry)
-    job_local["id"] = id_value
-    job_local["from_version"] = have
-    where = _ensure_python()
-    if not where:
-        return
-    ready, _hint = _dev().pyinstaller_ready()
-    if not ready:
-        _pip_install(where)
-        return
-    _compile(id_value)
+    if len(behind) == 1:
+        entry = behind[0]
+        id_value = entry["id"]
+        have = installed_version(id_value) or "an unknown version"
+        if not api.ui.question(
+                "Update addon",
+                f"Update {one_line(entry.get('name')) or id_value} from "
+                f"{have} to {one_line(entry.get('version'))}?\n\nIts settings "
+                f"in addons/_data/{id_value}/ are kept. It is switched off "
+                "while its program is rebuilt, and switched back the way it "
+                "was after."):
+            say("the update was declined")
+            return
+    else:
+        lines = "\n".join(
+            f"- {one_line(entry.get('name')) or entry['id']} "
+            f"({installed_version(entry['id']) or '?'} -> "
+            f"{one_line(entry.get('version'))})" for entry in behind)
+        if not api.ui.question(
+                "Update addons",
+                f"Update {len(behind)} addons?\n\n{lines}\n\nEach keeps its "
+                "settings, is switched off while its program is rebuilt, and "
+                "is switched back the way it was after."):
+            say("the update was declined")
+            return
+    _begin_job("update", behind)
+    _start_next()
 
 
 def _delete_paths(id_value: str) -> list[Path]:
@@ -2545,9 +2849,10 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     ``clicked`` runs the button its id names; a line ``changed`` on the filter box
     narrows the list as it is typed; the check box beside the source says what
     Delete is to do with an addon's settings for this session; and a row picked -
-    or right-clicked - is what fills in the pane beside the list. Nothing here
-    waits on the network except the one request a right-click's menu and a commit
-    lookup each make for themselves.
+    or right-clicked - is what fills in the pane beside the list. A row's check
+    box is the installed addon's own switch, moved without leaving the tab.
+    Nothing here waits on the network except the one request a right-click's
+    menu and a commit lookup each make for themselves.
     """
     if str(tab) != TAB:
         return
@@ -2569,6 +2874,8 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         return
     if name == "selected":
         pick_row(data)
+    elif name == "toggled":
+        toggle_installed(data)
     elif name == "context":
         row_context(one_line(data.get("text")))
 

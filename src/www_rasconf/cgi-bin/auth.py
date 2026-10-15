@@ -1,4 +1,4 @@
-"""Session/PIN authentication helpers for the Rasconf dashboard."""
+"""Session/PIN authentication helpers for the Berry dashboard."""
 
 import hashlib
 import os

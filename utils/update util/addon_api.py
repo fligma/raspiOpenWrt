@@ -438,6 +438,27 @@ class _RowStyleDelegate(QStyledItemDelegate):
                 painter.drawRect(rect)
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
         box = rect.adjusted(zoom_size(4), 0, -zoom_size(4), 0)
+        check = index.data(Qt.ItemDataRole.CheckStateRole)
+        if check is not None:
+            # The row wears a tick. This delegate paints the whole cell by
+            # hand, so Qt's own check indicator never shows unless it is drawn
+            # here too - a box at the cell's left, and the text after it.
+            from PyQt6.QtCore import QRect
+            from PyQt6.QtWidgets import QStyleOptionButton
+
+            side = max(zoom_size(14), rect.height() - zoom_size(6))
+            opt = QStyleOptionButton()
+            opt.state = (QStyle.StateFlag.State_Enabled
+                         | (QStyle.StateFlag.State_On
+                            if check == Qt.CheckState.Checked
+                            else QStyle.StateFlag.State_Off))
+            opt.rect = QRect(rect.left() + zoom_size(4),
+                             rect.center().y() - side // 2, side, side)
+            style = self.style()
+            if style is not None:
+                style.drawPrimitive(
+                    QStyle.PrimitiveElement.PE_IndicatorCheckBox, opt, painter)
+            box = box.adjusted(side + zoom_size(6), 0, 0, 0)
         mark = index.data(Qt.ItemDataRole.DecorationRole)
         if mark is not None:
             # A row wearing an icon of its own: the picture keeps its shape and
@@ -623,6 +644,18 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
         widget.clicked.connect(lambda _=False: emit("clicked"))
     if "toggled" in names and isinstance(widget, QCheckBox):
         widget.toggled.connect(lambda on: events(identifier, "toggled", {"checked": bool(on)}))
+    if "toggled" in names and isinstance(widget, QTreeWidget):
+        # A row's tick flipped by hand: the row's label and whole line come
+        # back, so an addon acts on the entry without a second round trip. A
+        # repaint sets ticks behind the silent flag and is never reported.
+        def _row_toggled(item, changed, _col=getattr(widget, "_addon_check_column", 0)):
+            if changed != _col or getattr(widget, "_addon_check_silent", False):
+                return
+            events(identifier, "toggled", {
+                "text": str(item.text(0) or ""),
+                "checked": item.checkState(_col) == Qt.CheckState.Checked,
+                "cells": _row_cells(item)})
+        widget.itemChanged.connect(_row_toggled)
     if "returned" in names and isinstance(widget, QLineEdit):
         widget.returnPressed.connect(lambda: emit("returned"))
     if "changed" in names:
@@ -1068,6 +1101,15 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
                 if column < len(widths):
                     table.setColumnWidth(column, zoom_size(int(widths[column])))
         table.setMouseTracking(True)          # so a row knows the mouse is over it
+        if spec.get("multi"):
+            # More than one row picked at once: ctrl- and shift-click work the
+            # list, so an addon can offer a batch over everything selected.
+            table.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        if spec.get("checkbox") is not None:
+            # The column that wears a tick per row; a row that carries a
+            # "check" becomes user-tickable here, and its changes come back as
+            # a "toggled" event. See _place_row and the row delegate.
+            table._addon_check_column = int(spec["checkbox"])
         table.setItemDelegate(_RowStyleDelegate(table))
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         return table
@@ -1242,10 +1284,19 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
         elif hasattr(widget, "setCurrentIndex"):
             widget.setCurrentIndex(int(value or 0))
     elif prop == "rows":
-        if hasattr(widget, "clear"):
-            widget.clear()
-        for row in value or []:
-            _place_row(widget, row, None)
+        silent = getattr(widget, "_addon_check_column", None) is not None
+        if silent:
+            # Laying rows down sets each tick, which fires itemChanged; the
+            # table must not report those as the user flipping them.
+            widget._addon_check_silent = True
+        try:
+            if hasattr(widget, "clear"):
+                widget.clear()
+            for row in value or []:
+                _place_row(widget, row, None)
+        finally:
+            if silent:
+                widget._addon_check_silent = False
     elif prop == "clear":
         if hasattr(widget, "clear"):
             widget.clear()
@@ -1341,6 +1392,13 @@ def _place_row(widget: QWidget, row: Any, parent: QTreeWidgetItem | None) -> Non
     the table's delegate rather than the app sheet.
     """
     item, kids, open_it = _make_row(row)
+    column = getattr(widget, "_addon_check_column", None)
+    if column is not None and isinstance(row, dict) and "check" in row:
+        # Only a row that says so wears a tick: an addon's list puts a switch
+        # beside the entries it can act on and leaves the rest plain.
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(column, Qt.CheckState.Checked if row.get("check")
+                           else Qt.CheckState.Unchecked)
     if parent is None:
         widget.addTopLevelItem(item)
     else:
@@ -1777,6 +1835,41 @@ class SessionAPI:
         manager.save_records()
         return jsonable({"enabled": bool(record["enabled"]),
                          "settings": dict(record.get("settings") or {})})
+
+    def addon_state(self, addon_id: str) -> dict:
+        """Where one addon stands in this profile now.
+
+        Three answers, none of which an addon can read for itself once it is
+        written out to disk: whether the program is in the folder at all
+        (``installed``), whether the profile has its switch up (``enabled``),
+        and whether it is loaded and running this moment (``running``). The
+        store reads this before it replaces a program, so it can put the switch
+        back where it found it afterwards.
+        """
+        manager = self._api._manager
+        ident = str(addon_id)
+        addon = manager.find(ident)
+        record = manager.record_for(ident)
+        return jsonable({
+            "installed": addon is not None,
+            "enabled": bool(record.get("enabled", False)),
+            "running": bool(addon is not None and addon.loaded),
+        })
+
+    def set_addon_running(self, addon_id: str, running: bool) -> dict:
+        """Switch one addon on or off, and start or stop it to match.
+
+        Where :meth:`set_addon_enabled` only writes the record for a rescan to
+        pick up later, this acts at once: turning on loads the addon now, and
+        turning off takes a running one down - stopping its process, so the
+        files it was built from can be replaced - before writing its switch
+        off. The store uses it to kill and disable an addon it is about to
+        install over, and to bring an installed addon to life from a toggle in
+        its own list. The new :meth:`addon_state` comes back.
+        """
+        manager = self._api._manager
+        manager.set_enabled(str(addon_id), bool(running))
+        return self.addon_state(str(addon_id))
 
 
 class Connection:
@@ -2535,6 +2628,39 @@ class UIAPI:
         """A message in the status line that goes away by itself after ``ms``."""
         self._win.statusBar().showMessage(str(text), max(500, int(ms)))
 
+    def progress_notice(self, title: str, text: str = "", value: int = 0,
+                        maximum: int = 100) -> None:
+        """A live card over the window's corner, showing a running job's percent.
+
+        Where ``popup`` says one thing and leaves and ``notify`` writes a line
+        that fades, this is a card that stays while a job runs and moves a bar
+        as it goes, so a person who has pushed the window behind anything else
+        can still watch an install reach its end. The card is this addon's own -
+        keyed by its id, so repeated calls bring the same bar up with a new
+        figure instead of stacking - and it is named for the addon speaking.
+        ``value`` runs from 0 to ``maximum``; a card filled to ``maximum`` holds
+        a few seconds and closes itself, and :meth:`progress_notice_close` takes
+        it away sooner.
+        """
+        show = getattr(self._win, "progress_notice", None)
+        if not callable(show):
+            return
+        try:
+            show(str(self._api.id or "addon"), self._titled(title),
+                 str(text or ""), int(value), max(1, int(maximum)))
+        except Exception:                        # a card never breaks a job
+            pass
+
+    def progress_notice_close(self) -> None:
+        """Take this addon's progress card away now, if it is showing one."""
+        hide = getattr(self._win, "progress_notice_close", None)
+        if not callable(hide):
+            return
+        try:
+            hide(str(self._api.id or "addon"))
+        except Exception:
+            pass
+
     def window(self) -> QWidget:
         """The main window. Use sparingly - it is the app itself."""
         return self._win
@@ -2940,11 +3066,35 @@ class TabsAPI:
             raise AddonError(f"{name!r} has no widget with id {identifier!r}")
         return jsonable(read_widget_value(widget, what))
 
-    def set_html(self, name: str, html: str) -> None:
-        """Render markup in a web tab without a server - a fully custom page."""
-        view = self.view(name)
-        if view is None:
-            raise AddonError(f"{name!r} is not an embedded page")
+    def _resolve_view(self, name: str, identifier: str | None = None) -> Any:
+        """The embedded page behind a tab, or one nested in its spec by id.
+
+        A web tab's own view is stored whole, so a name finds it; an embedded
+        ``web``/``webview`` widget inside a custom tab lives in that tab's
+        registry and is reached by its spec id. Anything else is refused the
+        way the old per-method checks did.
+        """
+        entry = self._store.get(str(name))
+        if entry is None:
+            raise AddonError(f"no addon tab called {name!r}")
+        if identifier is None:
+            view = entry.get("view")
+            if not _is_web_view(view):
+                raise AddonError(f"{name!r} is not an embedded page")
+            return view
+        view = entry.get("registry", {}).get(str(identifier))
+        if not _is_web_view(view):
+            raise AddonError(f"{name!r} id {identifier!r} is not an embedded page")
+        return view
+
+    def set_html(self, name: str, html: str,
+                 identifier: str | None = None) -> None:
+        """Render markup in an embedded page without a server - a fully custom page.
+
+        ``identifier`` names a ``web`` widget inside a custom tab; left out, the
+        tab's own page is used.
+        """
+        view = self._resolve_view(name, identifier)
         page = str(html)
         if "<html" not in page.lower():
             page = (
@@ -2955,11 +3105,14 @@ class TabsAPI:
             )
         self._api._manager.bus.post(lambda: view.setHtml(page))
 
-    def inject_css(self, name: str, css: str) -> None:
-        """Style a page the device serves - the addon's own look on top."""
-        view = self.view(name)
-        if view is None:
-            raise AddonError(f"{name!r} is not an embedded page")
+    def inject_css(self, name: str, css: str,
+                   identifier: str | None = None) -> None:
+        """Style a page the device serves - the addon's own look on top.
+
+        Works on a web tab and on a ``web`` widget embedded in a custom tab
+        (named by ``identifier`).
+        """
+        view = self._resolve_view(name, identifier)
         script = (
             "var s=document.getElementById('addon-style');"
             "if(!s){s=document.createElement('style');s.id='addon-style';"
@@ -2969,15 +3122,81 @@ class TabsAPI:
         self._api._manager.bus.post(lambda: view.page().runJavaScript(script))
 
     def inject_js(self, name: str, code: Any,
-                  callback: Callable[[Any], None] | None = None) -> None:
+                  callback: Callable[[Any], None] | None = None,
+                  identifier: str | None = None) -> None:
         """Run JavaScript in an embedded page; ``callback`` takes whatever the
-        script returns, on the GUI thread."""
-        view = self.view(name)
-        if view is None:
-            raise AddonError(f"{name!r} is not an embedded page")
+        script returns, on the GUI thread. A ``web`` widget inside a custom tab
+        is reached by its ``identifier``.
+        """
+        view = self._resolve_view(name, identifier)
         self._api._manager.bus.post(
             lambda: view.page().runJavaScript(str(code), callback) if callback
             else view.page().runJavaScript(str(code)))
+
+    def set_cookie(self, name: str, cookie: Any, url: str = "",
+                   identifier: str | None = None) -> None:
+        """Give an embedded page a cookie - a session token, a saved login.
+
+        ``cookie`` is a ``name=value`` line (its ``; Domain=..; Path=..;``
+        attributes are read too) or a dict of ``name, value, domain, path,
+        secure, expires`` (``expires`` as seconds since the epoch). ``url`` is
+        the page the cookie is meant for, so it is scoped to the right host when
+        no domain is given. The embedded pages share one browser profile, so a
+        cookie set here is seen by every web tab; set it before you navigate.
+        """
+        view = self._resolve_view(name, identifier)
+        from PyQt6.QtCore import QDateTime, QUrl
+        from PyQt6.QtNetwork import QNetworkCookie
+
+        if isinstance(cookie, dict):
+            qc = QNetworkCookie(str(cookie.get("name", "")).encode("utf-8"),
+                                str(cookie.get("value", "")).encode("utf-8"))
+            if cookie.get("domain"):
+                qc.setDomain(str(cookie["domain"]))
+            if cookie.get("path"):
+                qc.setPath(str(cookie["path"]))
+            qc.setSecure(bool(cookie.get("secure")))
+            expires = cookie.get("expires")
+            if expires:
+                try:
+                    qc.setExpiryDate(QDateTime.fromSecsSinceEpoch(int(expires)))
+                except (TypeError, ValueError):
+                    pass
+        else:
+            qc = QNetworkCookie.fromRawHeader(str(cookie).strip().encode("utf-8"))
+        if qc is None or not qc.name():
+            raise AddonError("that cookie could not be read - use 'name=value' "
+                             "or a dict with name and value")
+        store = view.page().profile().cookieStore()
+        target = QUrl(str(url)) if url else QUrl()
+        self._api._manager.bus.post(lambda: store.setCookie(qc, target))
+
+    def clear_cookies(self, name: str, identifier: str | None = None) -> None:
+        """Drop the cookies the embedded pages carry.
+
+        The browser profile is shared, so this empties the store for every web
+        tab, not just the one named; a tab is named only to reach that store.
+        """
+        view = self._resolve_view(name, identifier)
+        store = view.page().profile().cookieStore()
+        self._api._manager.bus.post(lambda: store.clearCookies())
+
+    def read_cookies(self, name: str, identifier: str | None = None,
+                     callback: Callable[[Any], None] | None = None) -> None:
+        """Ask an embedded page what cookies its document can see (``document.cookie``).
+
+        ``callback`` gets the ``k=v; k=v`` text on the GUI thread. Cookies set
+        through :meth:`set_cookie` that are marked HttpOnly are not visible to
+        the page, so they are not reported here.
+        """
+        view = self._resolve_view(name, identifier)
+
+        def wrapped(value: Any) -> None:
+            if callable(callback):
+                callback(str(value or ""))
+
+        self._api._manager.bus.post(
+            lambda: view.page().runJavaScript("document.cookie", wrapped))
 
     def set_style(self, name: str, css: str) -> None:
         """A Qt stylesheet on a custom tab (for web tabs this themes the frame)."""

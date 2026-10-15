@@ -1,28 +1,35 @@
 #!/usr/bin/env python3
-"""Rasconf web installer: put the web dashboard onto the device from GitHub.
+"""Berry web dashboard: put the Berry web UI on the device and get uhttpd serving it.
 
-Adds a ``Web installer`` tab. The dashboard the device serves - the tree under
-``src/www_rasconf`` in this project's repository - is fetched from GitHub and
-written into the remote folder of the *current profile* over SFTP, so a device
-can be given the web interface, or brought up to date, without a checkout of
-the repository anywhere near the machine running the program.
+This is the addon a person installs from the store when the router has no web
+interface yet, or has one that has fallen behind. It does four things:
 
-The job runs one file at a time. Nothing here holds the interface still: each
-step is asked to happen on the next tick, so the progress bar and the plan table
-move while twenty-odd files come down and go up.
+* **looks** - one command over SSH asks the connected host whether the folder is
+  there, whether uhttpd points at it, whether ``python3`` is installed and
+  whether the page answers. What it finds decides where the tab opens: a live
+  dashboard lands on the status page, anything else lands on the installer;
+* **installs** - the tree under ``src/www_rasconf`` in this project's repository
+  comes down from GitHub (or is read off this machine) and is written into the
+  served folder over SFTP, with a backup first, the exec bit on the CGI entry and
+  a check that the page answers afterwards;
+* **sets the web server up** - the uhttpd options are written with ``uci``, so
+  the section that serves the folder is created or repaired rather than hand
+  edited, and the file ``/etc/config/uhttpd`` can be read as it stands;
+* **moves the folder** - ``/www_rasconf`` to ``/www_berry``, or anywhere else, in
+  one action that renames the folder, points uhttpd at the new name, commits and
+  restarts.
 
-Nothing is hardcoded that a user might want to change: the repository, the
-branch or tag, the folder inside it, the patterns that are never sent, the
-command that restarts the web server, whether to back the old copy up first and
-what to leave alone when tidying are kept in
-``addons/_data/web_installer/config.json``. That file is shown as a form under this
-addon's name in Settings > Addons, and it is plain JSON, so it can be edited
-anywhere.
+The look of the page follows the program: ``css/theme.css`` is generated from the
+theme the app is wearing and uploaded with the rest, so the dashboard is the same
+colours as the window that installed it.
 
-The files go where the profile's own deploy puts them: the remote root is the
-one in the connection panel, and every path is below it. ``hash.file`` - the PIN
-the dashboard checks - is never uploaded and never deleted, because it is not in
-the repository and belongs to the device.
+Nothing that a user might want to change is hardcoded. The repository, the ref,
+the folder inside it, the patterns that are never sent, the served folder's name,
+the uhttpd section, the port and the restart command all live in
+``addons/_data/berry_web/config.json``, shown as a form under this addon's name in
+Settings > Addons. That file is the one the retired **Rasconf web installer** kept
+its own settings in - the keys are deliberately named the same, so an install that
+existed before carries its settings straight across.
 
 The tab is built from a declarative spec and its buttons report back through
 ``on_widget``, so the same file works imported into the app and compiled into a
@@ -48,28 +55,36 @@ from urllib.parse import quote
 from addon_common import AddonError, config_get, find_addon_picture, merge_config
 
 ADDON = {
-    "name": "Rasconf web installer",
-    "version": "1.2",
+    "name": "Berry web dashboard",
+    "version": "1.0",
     "author": "fligma",
-    "description": "Downloads src/www_rasconf from GitHub and writes it into the "
-                   "profile's remote folder over SFTP, with a backup, the exec "
-                   "bit on the CGI entry, a web server restart and a check that "
-                   "the page answers afterwards.",
+    "description": "Looks for the Berry dashboard on the connected host and, when "
+                   "it is not there, installs src/www_rasconf from GitHub over "
+                   "SFTP: a backup, the files, the theme this program is wearing, "
+                   "the uhttpd section written with uci, the exec bit on the CGI "
+                   "entry, a restart and a check that the page answers. Also "
+                   "views and edits those options and can move the served folder "
+                   "from /www_rasconf to /www_berry.",
     "requires": ["ssh", "sftp"],
-    # The files go up over the profile's own SFTP session; none is opened here.
-    "connection": "app",
+    # The files go up over the profile's own session. "both" so a person can
+    # switch this addon onto a connection of its own, which is also what lets a
+    # long transfer hold one session open instead of one per file.
+    "connection": "both",
     "api": 1,
 }
 
-TAB = "Web installer"
-PAGE = "Rasconf dashboard"
+TAB = "Berry web"
+PAGE = "Berry dashboard"
 
 api = None                  # filled in by init()
 working = False             # one job at a time
 job: dict | None = None     # the job in progress, or nothing
+last_check: dict = {}       # what the device last said about itself
 
 # --- what can be configured, and what it starts out as ---
 
+#: The keys the retired installer used are kept as they were, so a translated
+#: settings dict means something here without a single value being rewritten.
 DEFAULTS = {
     "source": "GitHub",
     "owner": "fligma",
@@ -84,13 +99,19 @@ DEFAULTS = {
     "skip_unchanged": True,
     "remove_extra": False,
     "backup_first": True,
-    "backup_dir": "/tmp/rasconf_web_backups",
+    "backup_dir": "/tmp/berry_web_backups",
     "make_executable": True,
     "cgi_entry": "cgi-bin/index.py",
     "restart_command": ["/etc/init.d/uhttpd restart"],
     "verify": True,
     "web_port": 8989,
     "web_path": "/cgi-bin/index.py",
+    # Three keys this addon adds: the served folder by name rather than by the
+    # profile's root plus a subfolder, the uhttpd section that serves it, and
+    # whether the page is repainted in this program's colours.
+    "web_home": "/www_berry",
+    "uci_section": "berry",
+    "theme_sync": True,
 }
 
 FIELDS = [
@@ -102,7 +123,7 @@ FIELDS = [
      "hint": "The account or organisation the repository belongs to"},
     {"key": "repo", "label": "Repository", "kind": "text"},
     {"key": "ref", "label": "Branch, tag or commit", "kind": "text",
-     "hint": "main, a tag like v1.4, or a full commit sha"},
+     "hint": "main, a tag like v1.6, or a full commit sha"},
     {"key": "repo_path", "label": "Folder inside the repository", "kind": "text",
      "hint": "Its contents are what gets installed"},
     {"key": "token", "label": "GitHub token", "kind": "text",
@@ -114,9 +135,10 @@ FIELDS = [
              "source folder of the current profile",
      "placeholder": "the profile's source folder"},
 
-    {"key": "subdir", "label": "Subfolder of the remote directory", "kind": "text",
-     "hint": "Blank installs straight into the profile's remote root, which is "
-             "where the web server looks by default",
+    {"key": "subdir", "label": "Subfolder inside the served folder",
+     "kind": "text",
+     "hint": "Blank installs straight into the served folder named on the uhttpd "
+             "page, which is where the web server looks",
      "placeholder": "straight into it"},
     {"key": "skip", "label": "Never send these", "kind": "list",
      "hint": "Comma separated names or * patterns, matched against the path "
@@ -128,55 +150,87 @@ FIELDS = [
      "kind": "bool", "hint": "Makes a repeat install fast. Untick to write every "
                              "file again whatever the device has"},
     {"key": "remove_extra", "label": "Tidy away files that are not in the download",
-     "kind": "bool", "hint": "Only ever removes what is under the remote root and "
-                             "is not kept by the list above"},
+     "kind": "bool", "hint": "Only ever removes what is under the served folder "
+                             "and is not kept by the list above"},
 
     {"key": "backup_first", "label": "Back the folder up first", "kind": "bool"},
     {"key": "backup_dir", "label": "Where the backup goes", "kind": "text",
      "hint": "On the device. One tarball per install, named with the time"},
+
+    {"key": "uci_section", "label": "uhttpd section", "kind": "text",
+     "hint": "The section of /etc/config/uhttpd that serves this folder. uci "
+             "creates it when it is not there",
+     "placeholder": "berry"},
+    {"key": "web_home", "label": "Folder the web server serves", "kind": "text",
+     "hint": "An absolute path on the device. /www_berry is what this dashboard "
+             "is set up for; /www_rasconf is where an older install left it",
+     "placeholder": "/www_berry"},
+    {"key": "web_port", "label": "Port the dashboard listens on", "kind": "number",
+     "minimum": 1, "maximum": 65535,
+     "hint": "Written into the section's listen_http as 0.0.0.0:<port>"},
+    {"key": "web_path", "label": "Path of the dashboard on that port", "kind": "text",
+     "hint": "What the browser and the checks ask the device for"},
+    {"key": "cgi_entry", "label": "Entry file to make executable", "kind": "text",
+     "hint": "Relative to the served folder"},
     {"key": "make_executable", "label": "Make the CGI entry executable", "kind": "bool",
      "hint": "uhttpd runs the entry file itself, so it needs the exec bit"},
-    {"key": "cgi_entry", "label": "Entry file to make executable", "kind": "text"},
+    {"key": "theme_sync", "label": "Paint the page in this program's colours",
+     "kind": "bool",
+     "hint": "Writes css/theme.css from the theme the app is wearing"},
     {"key": "restart_command", "label": "Commands to restart the web server",
      "kind": "multiline",
      "hint": "One per line, run on the device once the files are written"},
     {"key": "verify", "label": "Check the page answers afterwards", "kind": "bool"},
-    {"key": "web_port", "label": "Port the dashboard listens on", "kind": "number",
-     "minimum": 1, "maximum": 65535},
-    {"key": "web_path", "label": "Path of the dashboard on that port", "kind": "text"},
 ]
 
-GROUPS = [
+#: The install form, on the installer page.
+GROUPS_INSTALL = [
     ("Where the files come from", ["source", "owner", "repo", "ref", "repo_path",
                                    "token", "local_dir"]),
-    ("Where they go on the device", ["subdir", "skip", "keep", "skip_unchanged",
-                                     "remove_extra"]),
-    ("Before and after", ["backup_first", "backup_dir", "make_executable",
-                          "cgi_entry", "restart_command", "verify", "web_port",
-                          "web_path"]),
+    ("How they are written", ["subdir", "skip", "keep", "skip_unchanged",
+                               "remove_extra"]),
+    ("Before the files go over", ["backup_first", "backup_dir"]),
+]
+
+#: The uhttpd form, on the uhttpd page: what the web server serves and how it is
+#: brought back up afterwards.
+GROUPS_UCI = [
+    ("What the web server serves", ["uci_section", "web_home", "web_port",
+                                    "web_path"]),
+    ("The page's own file", ["cgi_entry", "make_executable", "theme_sync"]),
+    ("After a change", ["restart_command", "verify"]),
 ]
 
 FIELDS_BY_KEY = {str(field["key"]): field for field in FIELDS}
 KIND_TO_WIDGET = {"text": "line", "number": "spin", "bool": "check",
                   "choice": "combo", "list": "line", "multiline": "multi"}
 
-BUTTONS = (("fetch", "Fetch files"), ("install", "Install"), ("open", "Open dashboard"),
+#: Buttons that stand down while a job runs; ``stop`` is the other way round.
+BUTTONS = (("recheck", "Re-check"), ("open", "Open dashboard"),
+           ("fetch", "Fetch files"), ("install", "Install"),
            ("restart", "Restart web server"), ("check", "Check page"),
+           ("read_uci", "Read"), ("apply_uci", "Apply"), ("move_home", "Move folder"),
+           ("refresh_raw", "Refresh"), ("copy_raw", "Copy to editor"),
            ("push", "Save to config"), ("pull", "Reload from config"))
 
-#: Step flow across the top: six chips for ten stages.
+#: Step flow across the top: seven chips for twelve stages.
 STEPS = (("files", "Files"), ("compare", "Compare"), ("backup", "Backup"),
-         ("write", "Write"), ("restart", "Restart"), ("check", "Check"))
+         ("write", "Write"), ("serve", "Serve"), ("restart", "Restart"),
+         ("check", "Check"))
 
 STAGE_TO_STEP = {"tree": "files", "fetch": "files", "remote": "compare",
                  "ready": "compare", "confirm": "compare", "backup": "backup",
-                 "write": "write", "prune": "write", "after": "restart",
-                 "verify": "check"}
+                 "write": "write", "prune": "write", "theme": "serve",
+                 "uci": "serve", "after": "restart", "verify": "check"}
+
+#: The notebook's own pages, by position: where the tab lands after a check.
+STATUS_PAGE, INSTALL_PAGE, UHTTPD_PAGE = 0, 1, 2
 
 STOP = "stop"
 HANDLERS: dict = {}
 
-#: Fallback file list when GitHub gives none.
+#: Fallback file list when GitHub gives none: the dashboard as this addon was
+#: written, so a refused request still installs something that works.
 FALLBACK_TREE = [
     "assets/250px-BrownSpiderMonkey_(edit2).jpg",
     "assets/android-chrome-192x192.png",
@@ -194,6 +248,7 @@ FALLBACK_TREE = [
     "cgi-bin/sysinfo.py",
     "css/index.css",
     "css/main.css",
+    "css/theme.css",
     "js/api.js",
     "js/format.js",
     "js/index.js",
@@ -232,7 +287,9 @@ _STEP_STYLES = {
     "pending": "color: #6f6f6f; padding: 2px 4px;",
     "off":     "color: #454545; padding: 2px 4px;",
 }
-_STEP_GLYPHS = {"done": "\u2713 ", "active": "\u25cf ", "pending": "\u25cb ", "off": "\u00b7 "}
+_STEP_GLYPHS = {"done": "\u2713 ", "active": "\u25cf ", "pending": "\u25cb ",
+                "off": "\u00b7 "}
+
 
 def _chip_style(foreground: str, background: str, edge: str) -> str:
     return (f"color: {foreground}; background-color: {background};"
@@ -256,6 +313,41 @@ ACTION_COLORS = {"queued": "#5fb3ff", "new": "#5fb3ff", "written": "#23d18b",
 #: Shell chars that must never reach a command line.
 _UNSAFE = re.compile(r"[\"'`$;|&<>\\\n\r\t]")
 _RELATIVE = re.compile(r"^[A-Za-z0-9._/-]+$")
+#: A device folder of its own: an absolute path, nothing that a shell or a
+#: ``uci`` value could read as anything else.
+_ABSOLUTE = re.compile(r"^/[A-Za-z0-9._/-]*$")
+#: A uci section name is a bare word.
+_SECTION = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+#: What a page calls itself, read off its own ``<title>``.
+_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+#: Markers that say the page which answered really is this dashboard. The
+#: dashboard writes its own name into the title of both its pages and into the
+#: id of the block its script reads its settings from, so one of those is proof.
+#: A bare ``<html>`` is not: the router's own page answers on the same port and
+#: is every bit as much html as this one is.
+BERRY_MARKS = ("berry", "berry-config", "pin required")
+
+#: The app's theme tokens, and the variables the dashboard's own stylesheet
+#: already declares for them. Overriding those twelve lines is all it takes to
+#: repaint the page, so nothing here has to know how the page is laid out.
+THEME_VARS = (
+    ("base", "--color-background"),
+    ("surface", "--color-surface"),
+    ("soft", "--color-surface-raised"),
+    ("header", "--color-surface-tab"),
+    ("border", "--color-line"),
+    ("sunken", "--color-field"),
+    ("accent", "--color-accent"),
+    ("accent_deep", "--color-accent-hover"),
+    ("text", "--color-text"),
+    ("muted", "--color-muted"),
+    ("note", "--color-muted-strong"),
+    ("ok", "--color-success"),
+    ("close_hot", "--color-error"),
+)
+
+_HEX = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 
 # --- small helpers ---
@@ -271,6 +363,32 @@ def safe_path(value: Any, fallback: str = "") -> str:
     text = one_line(value).replace("..", "")
     text = _UNSAFE.sub("", text).strip("/ ")
     return text if text and _RELATIVE.match(text) else fallback
+
+
+def home_path(value: Any, fallback: str = "") -> str:
+    """A served folder as a clean absolute device path, or the fallback.
+
+    ``/www_berry`` and ``www_berry`` both mean the one thing here; anything
+    holding a quote, a dollar sign, a space or a ``..`` means nothing at all.
+    The word is refused rather than tidied up, because this is a path that goes
+    into ``uci set`` and into ``mv``, and a folder quietly rewritten from
+    ``/www my dir`` to ``/wwwmydir`` would move a dashboard nobody asked for.
+    """
+    text = one_line(value)
+    if ".." in text or _UNSAFE.search(text):
+        return fallback
+    if text and not text.startswith("/"):
+        text = "/" + text
+    text = text.rstrip("/") or ""
+    if not text or not _ABSOLUTE.match(text):
+        return fallback
+    return text
+
+
+def uci_name(value: Any, fallback: str = "berry") -> str:
+    """A uci section name, or the fallback when it is not a bare word."""
+    text = one_line(value).strip()
+    return text if _SECTION.match(text) else fallback
 
 
 def clean_list(value: Any) -> list[str]:
@@ -289,6 +407,11 @@ def clean_list(value: Any) -> list[str]:
 def quoted(text: str) -> str:
     """A device path or name as one safe shell word."""
     return '"' + str(text).replace('"', "") + '"'
+
+
+def squoted(text: str) -> str:
+    """A value inside uci's own single quotes; nothing in it can close them."""
+    return "'" + str(text).replace("'", "") + "'"
 
 
 def human(size: int) -> str:
@@ -321,6 +444,170 @@ def matches(path: str, patterns: list[str]) -> bool:
     return False
 
 
+def port_of(value: Any, fallback: int = 8989) -> int:
+    """A port number the device will answer on, clamped to what a port is."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = fallback
+    return min(max(number or fallback, 1), 65535)
+
+
+# --- the four pure answers a test can ask for, without a device ---
+
+def theme_css(colors: dict) -> str:
+    """``css/theme.css``: this program's colours, in the page's own variables.
+
+    The dashboard's stylesheet reads its colours from twelve custom properties
+    declared once in ``css/main.css``. Overriding those is the whole job, which
+    is why this file carries no layout of its own and can be dropped onto any
+    version of the page.
+    """
+    colors = colors if isinstance(colors, dict) else {}
+    lines = ["/* Written by the Berry web dashboard addon: the colours of the",
+             "   Berry Manager theme that installed this page. Edit the theme,",
+             "   not this file - an install writes it again. */", ":root {"]
+    said = False
+    for token, variable in THEME_VARS:
+        value = str(colors.get(token) or "").strip()
+        if not _HEX.match(value):
+            continue                        # a colour this page cannot use
+        lines.append(f"    {variable}: {value.lower()};")
+        said = True
+    lines.append("}")
+    if not said:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def uci_script(section: str, home: str, port: Any) -> str:
+    """The ``uci`` commands that make uhttpd serve one folder on one port.
+
+    The section is created only when it is missing, so an existing router's own
+    settings are not replaced wholesale; every option this dashboard needs is
+    then set to what the form says. ``add_list`` is asked quietly, because uhttpd
+    keeps a listen address that is already there and a duplicate would stop the
+    server starting.
+    """
+    name = uci_name(section)
+    folder = home_path(home, DEFAULTS["web_home"])
+    number = port_of(port)
+    return "\n".join([
+        'uci -q get uhttpd.{name} >/dev/null || uci set uhttpd.{name}=uhttpd',
+        'uci set uhttpd.{name}.home={home}',
+        'uci -q add_list uhttpd.{name}.listen_http={listen}',
+        'uci set uhttpd.{name}.cgi_prefix={prefix}',
+        'uci commit uhttpd',
+        'echo done',
+    ]).format(name=name, home=squoted(folder), listen=squoted(f"0.0.0.0:{number}"),
+             prefix=squoted("/cgi-bin"))
+
+
+def apply_uci_lines(section: str, restart: list[str]) -> list[str]:
+    """The line that reads a section back, and the ones that bring it up again."""
+    name = uci_name(section)
+    lines = [f'echo "== uhttpd.{name} after =="',
+             f'uci -q show uhttpd.{name} || echo "(there is no such section)"']
+    for one in restart or []:
+        text = one_line(one)
+        if text:
+            lines.append(f'{text} || {{ echo "note: {text} did not succeed"; }}')
+    return lines
+
+
+def page_title(body: Any) -> str:
+    """What a page calls itself, from its ``<title>``; nothing when it has none."""
+    found = _TITLE.search(str(body or ""))
+    return one_line(found.group(1)) if found else ""
+
+
+def parse_check(result: Any) -> dict:
+    """Sort one answer from the device into what the status page needs.
+
+    The check script says each thing on a line of its own, with a word in front,
+    so this never has to guess which line of a listing was meant as a folder. What
+    it returns decides where the tab opens: a served folder and a page that answers
+    with this dashboard is a live install.
+    """
+    out = str(result.get("out") if isinstance(result, dict) else (result or ""))
+    info = {"folder": False, "files": 0, "home": "", "python": "",
+            "answered": False, "url": "", "is_berry": False,
+            "code": int(result.get("code") or 0) if isinstance(result, dict) else 0,
+            "body": ""}
+    body: list[str] = []
+    for line in out.splitlines():
+        text = line.strip()
+        if text.startswith("FOLDER "):
+            info["folder"] = text[7:].lower() == "yes"
+        elif text.startswith("FILES "):
+            try:
+                info["files"] = int(text[6:].split()[0])
+            except (IndexError, ValueError):
+                info["files"] = 0
+        elif text.startswith("HOME "):
+            info["home"] = text[5:].strip().strip("'\"")
+        elif text.startswith("PY "):
+            word = text[3:].strip()
+            info["python"] = "" if word in ("-", "none") else word
+        elif text.startswith("ANSWERED "):
+            info["answered"] = True
+            info["url"] = text[9:].strip()
+        elif text.startswith("NOANSWER"):
+            info["answered"] = False
+        elif text.startswith("B "):
+            body.append(text[2:])
+    info["body"] = "\n".join(body)
+    low = info["body"].lower()
+    info["is_berry"] = info["answered"] and any(mark in low for mark in BERRY_MARKS)
+    return info
+
+
+def summary_rows(check: dict) -> list[dict]:
+    """The status table: four lines the device gave, in the words a person reads."""
+    check = check or {}
+    home = str(check.get("home") or "(nothing set)")
+    folder = ("yes" if check.get("folder") else "no")
+    if check.get("folder"):
+        folder += f"  \u00b7  {check.get('files', 0)} file(s)"
+    rows = [
+        {"cells": ["Folder served", home]},
+        {"cells": ["Folder is there", folder]},
+        {"cells": ["python3", str(check.get("python") or "not on the path")]},
+        {"cells": ["Page", str(check.get("url") or "no answer")]
+         , "color": "#23d18b" if check.get("answered") else "#ffb020"},
+    ]
+    if check.get("answered"):
+        rows.append({"cells": ["Answers as this dashboard",
+                              "yes" if check.get("is_berry") else "not obviously"],
+                     "color": "#23d18b" if check.get("is_berry") else "#ffb020"})
+    return rows
+
+
+def bridge_settings(stored: dict, root: str = "") -> dict:
+    """The installer's own settings, read as this addon's.
+
+    The retired addon had no served folder of its own: it wrote under the
+    profile's remote root, into an optional subfolder. A person who had it
+    working must not find the dashboard pointing somewhere else after the
+    upgrade, so the one changed concept is carried across once - the root and
+    the subfolder become the folder - and the subfolder key is emptied so the
+    two are never added together twice.
+
+    Only a file that is really there is bridged: a fresh install has no stored
+    settings at all and should simply take the default folder.
+    """
+    values = dict(stored or {})
+    if not values or "web_home" in values:
+        return values
+    home = home_path(root, DEFAULTS["web_home"])
+    sub = safe_path(values.get("subdir", ""))
+    if sub:
+        home = posixpath.join(home, sub)
+        values["subdir"] = ""
+    values["web_home"] = home
+    return values
+
+
 # --- reading the form ---
 
 def values_of() -> dict:
@@ -331,7 +618,7 @@ def values_of() -> dict:
         try:
             raw = api.tabs.widget_value(TAB, key,
                                          "checked" if kind == "bool" else "value")
-        except AddonError:
+        except (AddonError, AttributeError, TypeError):
             raw = None
         if raw is None:
             out[key] = config_get(DEFAULTS, key)
@@ -341,19 +628,32 @@ def values_of() -> dict:
             out[key] = [one_line(line) for line in str(raw or "").splitlines()
                         if one_line(line)]
         elif kind == "number":
-            try:
-                out[key] = int(raw)
-            except (TypeError, ValueError):
-                out[key] = int(field.get("minimum", 0))
+            out[key] = port_of(raw, int(field.get("minimum", 0)) or 8989) \
+                if key == "web_port" else _plain_int(raw, field)
         else:
             out[key] = raw
     return out
 
 
+def _plain_int(raw: Any, field: dict) -> int:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(field.get("minimum", 0))
+
+
 def merge_current() -> dict:
     """The saved config with whatever is in the form on top of it."""
-    merged = merge_config(DEFAULTS, api.config.stored())
+    merged = merge_config(DEFAULTS, _stored_config())
     return merge_config(merged, values_of())
+
+
+def _stored_config() -> dict:
+    """What the file holds, or nothing when there is no file or no app."""
+    try:
+        return dict(api.config.stored() or {})
+    except (AddonError, AttributeError, TypeError):
+        return {}
 
 
 # --- the tab ---
@@ -396,6 +696,14 @@ def control_spec(key: str, values: dict) -> dict:
     return spec
 
 
+def form_spec(groups: list, values: dict) -> dict:
+    """One scroll of group boxes: the install form, or the uhttpd form."""
+    return {"kind": "scroll", "children": [{"kind": "column", "children": [
+        {"kind": "group", "text": title, "layout": "form",
+         "children": [control_spec(key, values) for key in keys]}
+        for title, keys in groups]}]}
+
+
 def step_chip(key: str, caption: str) -> dict:
     """One step of the flow, waiting for its turn."""
     return {"kind": "label", "id": "step_" + key,
@@ -405,11 +713,26 @@ def step_chip(key: str, caption: str) -> dict:
                        "is what it is doing now"}
 
 
+def buttons_spec(tips: tuple) -> dict:
+    """A row of buttons, each reporting its own id."""
+    return {"kind": "row", "children": [
+        {"kind": "button", "id": identifier, "text": text, "tooltip": tip,
+         "on": ["clicked"]} for identifier, text, tip in tips]}
+
+
 def view_page(page: int) -> None:
-    """Jump the tab's own notebook: 0 the plan, 1 the log, 2 the settings."""
+    """Jump the tab's notebook: 0 status, 1 the installer, 2 uhttpd."""
     try:
         api.tabs.set_widget(TAB, "views", "current", int(page))
-    except AddonError:
+    except (AddonError, AttributeError, TypeError):
+        pass
+
+
+def uci_page(page: int) -> None:
+    """Jump the uhttpd page's own notebook: 0 the form, 1 the raw file."""
+    try:
+        api.tabs.set_widget(TAB, "uci_views", "current", int(page))
+    except (AddonError, AttributeError, TypeError):
         pass
 
 
@@ -432,9 +755,10 @@ def paint_steps(stages: list[str], cutoff: int, active: str | None = None) -> No
         else:
             state = "pending"
         try:
-            api.tabs.set_widget(TAB, "step_" + key, "text", _STEP_GLYPHS[state] + caption)
+            api.tabs.set_widget(TAB, "step_" + key, "text",
+                                _STEP_GLYPHS[state] + caption)
             api.tabs.set_widget(TAB, "step_" + key, "style", _STEP_STYLES[state])
-        except AddonError:
+        except (AddonError, AttributeError, TypeError):
             pass
 
 
@@ -443,7 +767,7 @@ def _chip(identifier: str, text: str, tone: str) -> None:
     try:
         api.tabs.set_widget(TAB, identifier, "text", text)
         api.tabs.set_widget(TAB, identifier, "style", _CHIP_STYLES[tone])
-    except AddonError:
+    except (AddonError, AttributeError, TypeError):
         pass
 
 
@@ -481,40 +805,21 @@ def refresh_totals(items: list[dict] | None = None) -> None:
 
 
 def tab_spec(values: dict) -> dict:
-    """The whole tab: a header, the step flow, and one notebook of pages."""
-    groups = []
-    for title, keys in GROUPS:
-        groups.append({
-            "kind": "group", "text": title, "layout": "form",
-            "children": [control_spec(key, values) for key in keys],
-        })
+    """The whole tab: a header, the step flow, and one notebook of three pages."""
     steps: list[dict] = []
     for index, (key, caption) in enumerate(STEPS):
         if index:
             steps.append({"kind": "label", "text": "\u2192",
                           "style": "color: #454545; padding: 0 1px;"})
         steps.append(step_chip(key, caption))
-    tips = (
-        ("fetch", "Fetch files", "Get the tree from GitHub or from the local "
-                                 "folder and work out what the device needs"),
-        ("install", "Install", "Write those files into the remote folder over SFTP"),
-        ("open", "Open dashboard", "The page the device is serving, in its own tab"),
-        ("restart", "Restart web server", "Run the restart command on the device"),
-        ("check", "Check page", "Ask the device for the dashboard and report what "
-                              "came back"),
-        ("push", "Save to config", "Keep these values in "
-                                   "addons/_data/web_installer/config.json"),
-        ("pull", "Reload from config", "Put the saved values back into the form"),
-        ("stop", "Stop", "Give up on the job in hand. What has already gone "
-                         "across stays on the device"),
-    )
     return {"kind": "column", "children": [
         {"kind": "row", "children": [
-            {"kind": "label", "text": "Rasconf web installer", "style": BANNER_STYLE},
+            {"kind": "label", "text": "Berry web dashboard", "style": BANNER_STYLE},
             {"kind": "spacer"},
             {"kind": "label", "id": "target", "text": "",
              "style": "color: #9a9a9a; padding: 2px 6px;"},
-            {"kind": "label", "id": "state", "text": "", "style": _CHIP_STYLES["gray"]},
+            {"kind": "label", "id": "state", "text": "",
+             "style": _CHIP_STYLES["gray"]},
         ]},
         {"kind": "row", "children": steps},
         {"kind": "label", "id": "status", "text": "Ready.", "word_wrap": True,
@@ -530,6 +835,39 @@ def tab_spec(values: dict) -> dict:
             {"kind": "spacer"},
         ]},
         {"kind": "tabs", "id": "views", "children": [
+            _status_page(),
+            _installer_page(values),
+            _uci_page(values),
+        ]},
+    ]}
+
+
+def _status_page() -> dict:
+    """What the device last said, and the three ways of acting on it."""
+    return {"kind": "column", "label": "Status", "children": [
+        {"kind": "table", "id": "summary",
+         "columns": ["What the device says", "Answer"],
+         "stretch": 1, "col_widths": [170, 0],
+         "tooltip": "One look, asked of the connected host over SSH: the folder "
+                    "uhttpd serves, whether it is there, whether python3 is "
+                    "installed and whether the page answers"},
+        {"kind": "label", "id": "last_check", "text": "Nothing asked yet.",
+         "word_wrap": True, "style": "color: #9a9a9a; padding: 2px 4px;"},
+        buttons_spec((
+            ("recheck", "Re-check", "Ask the connected host again what it has"),
+            ("check", "Check page", "Ask the device for its own page and report "
+                                    "what came back"),
+            ("open", "Open dashboard", "The page the device is serving, in its own tab"),
+            ("to_installer", "Go to installer",
+             "The page that fetches the files and writes them over"),
+        )),
+    ]}
+
+
+def _installer_page(values: dict) -> dict:
+    """The plan, the log and the install form; the buttons that start a job."""
+    return {"kind": "column", "label": "Installer", "children": [
+        {"kind": "tabs", "id": "install_views", "children": [
             {"kind": "table", "id": "plan", "label": "Files",
              "columns": ["File", "Size", "On the device", "Action"],
              "stretch": 0, "col_widths": [0, 90, 120, 130],
@@ -538,19 +876,66 @@ def tab_spec(values: dict) -> dict:
             {"kind": "multi", "id": "log", "label": "Log", "readonly": True,
              "placeholder": "Every step of the last job, as it happened",
              "tooltip": "The same lines go into the program's own log"},
-            {"kind": "scroll", "label": "Settings",
-             "children": [{"kind": "column", "children": groups}]},
+            dict(form_spec(GROUPS_INSTALL, values), label="Install settings"),
         ]},
-        {"kind": "row", "children": [
-            {"kind": "button", "id": identifier, "text": text, "tooltip": tip,
-             "on": ["clicked"]} for identifier, text, tip in tips],
-        },
+        buttons_spec((
+            ("fetch", "Fetch files", "Get the tree from GitHub or from the local "
+                                     "folder and work out what the device needs"),
+            ("install", "Install", "Write those files into the served folder over "
+                                   "SFTP, set the web server up and restart it"),
+            ("push", "Save to config", "Keep these values in "
+                                       "addons/_data/berry_web/config.json"),
+            ("pull", "Reload from config", "Put the saved values back into the forms"),
+            (STOP, "Stop", "Give up on the job in hand. What has already gone "
+                           "across stays on the device"),
+            ("to_uci", "uhttpd settings", "The served folder, its port and the "
+                                          "section that owns it"),
+        )),
     ]}
 
 
-#: The tab's mark: a window with something arriving in it, since this addon
-#: fetches a build and puts it on the device. Held as an SVG document so the tab
-#: wears the same thing whether or not the assets folder holds a picture file.
+def _uci_page(values: dict) -> dict:
+    """The options that make uhttpd serve this folder, and the file itself."""
+    return {"kind": "column", "label": "uhttpd", "children": [
+        {"kind": "tabs", "id": "uci_views", "children": [
+            {"kind": "column", "label": "Options", "children": [
+                form_spec(GROUPS_UCI, values),
+                buttons_spec((
+                    ("read_uci", "Read", "Ask the device for its uhttpd section "
+                                         "and the whole file"),
+                    ("apply_uci", "Apply", "Write the options above with uci and "
+                                           "commit them"),
+                    ("restart", "Restart web server",
+                     "Run the restart command on the device"),
+                    ("move_home", "Move folder to this name",
+                     "Rename the folder the server is using to the name in the "
+                     "box above, point uhttpd at it, commit and restart"),
+                    ("to_status", "Back to status", "What the device says now"),
+                )),
+            ]},
+            {"kind": "column", "label": "Raw file", "children": [
+                {"kind": "multi", "id": "raw_uci", "readonly": True,
+                 "placeholder": "/etc/config/uhttpd, exactly as the device holds it",
+                 "tooltip": "Read only: this page shows the file, the options "
+                            "above are what change it"},
+                buttons_spec((
+                    ("refresh_raw", "Refresh", "Read the file off the device again"),
+                    ("copy_raw", "Copy to editor", "Put the text below in the "
+                                                   "editor box, where it can be "
+                                                   "changed and kept for reading"),
+                )),
+                {"kind": "multi", "id": "raw_edit",
+                 "placeholder": "A copy of the file, for reading over or for "
+                                "keeping a note in",
+                 "tooltip": "Nothing here is ever written back to the device"},
+            ]},
+        ]},
+    ]}
+
+
+#: The tab's mark: a berry on a page, since this addon is the page the device
+#: serves. Held as an SVG document so the tab wears the same thing whether or not
+#: the assets folder holds a picture file.
 TAB_ICON = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
     '<rect x="2.5" y="3.5" width="19" height="17" rx="2.6" fill="none"'
@@ -558,19 +943,18 @@ TAB_ICON = (
     '<path d="M2.5 7.6h19" stroke="#7fb3d5" stroke-width="1.2"/>'
     '<circle cx="5.2" cy="5.6" r="0.9" fill="#e0e0e0"/>'
     '<circle cx="8" cy="5.6" r="0.9" fill="#e0e0e0"/>'
-    '<path d="M12 10v5.4" stroke="#c51a4a" stroke-width="1.8"'
-    ' stroke-linecap="round"/>'
-    '<path d="M9.4 12.9 12 15.6l2.6-2.7" fill="none" stroke="#c51a4a"'
-    ' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
-    '<path d="M8.2 18h7.6" stroke="#23d18b" stroke-width="1.8"'
-    ' stroke-linecap="round"/>'
+    '<circle cx="10.4" cy="12.1" r="2.1" fill="#c51a4a"/>'
+    '<circle cx="13.9" cy="12.1" r="2.1" fill="#9c1239"/>'
+    '<circle cx="12.1" cy="15.4" r="2.1" fill="#e0356b"/>'
+    '<path d="M12.1 10.4c0-1.6.8-2.7 2.3-3.2" fill="none" stroke="#23d18b"'
+    ' stroke-width="1.5" stroke-linecap="round"/>'
     '</svg>'
 )
 
 #: The picture the tab wears when the assets folder holds one: this addon's id
-#: and then ``icon.png``, so ``web_installericon.png`` - the one name every
-#: addon's picture is looked up under, written here only to say where it goes.
-TAB_ICON_FILE = "web_installericon.png"
+#: and then ``icon.png``, so ``berry_webicon.png`` - the one name every addon's
+#: picture is looked up under, written here only to say where it goes.
+TAB_ICON_FILE = "berry_webicon.png"
 
 
 def tab_icon() -> str:
@@ -580,12 +964,12 @@ def tab_icon() -> str:
         paths = api.paths
     except (AddonError, AttributeError, TypeError):    # no api on a bare import
         paths = None
-    return find_addon_picture(paths, "web_installer") or TAB_ICON
+    return find_addon_picture(paths, "berry_web") or TAB_ICON
 
 
 def build_tab() -> None:
     """The tab as a spec, and its buttons as reports; nothing holds a widget."""
-    api.tabs.add_tab(TAB, spec=tab_spec(merge_config(DEFAULTS, api.config.stored())),
+    api.tabs.add_tab(TAB, spec=tab_spec(merge_config(DEFAULTS, _stored_config())),
                      style=TAB_STYLE)
     api.tabs.set_icon(TAB, tab_icon())
 
@@ -595,8 +979,8 @@ def show_form(values: dict) -> None:
         kind = str(field.get("kind") or "text")
         value = config_get(values, key, config_get(DEFAULTS, key))
         if kind in ("list", "multiline"):
-            items = clean_list(value) if kind == "list" else [one_line(line)
-                                                             for line in (value or []) if one_line(line)]
+            items = clean_list(value) if kind == "list" else [
+                one_line(line) for line in (value or []) if one_line(line)]
             text = ", ".join(items) if kind == "list" else "\n".join(items)
             api.tabs.set_widget(TAB, key, "value", text)
         else:
@@ -662,26 +1046,33 @@ def describe(values: dict) -> str:
             f"{config_get(values, 'repo_path', '')}")
 
 
+def _profile_root() -> str:
+    """The current profile's remote folder, as a device path."""
+    try:
+        status = api.session.status() or {}
+    except (AddonError, AttributeError, TypeError):
+        return DEFAULTS["web_home"]
+    return home_path(str(status.get("remote_root") or ""), DEFAULTS["web_home"])
+
+
 def show_target(values: dict) -> None:
-    """The header line: where these files come from and where they land."""
+    """The header line: where these files come from and which folder they land in."""
     status: dict = {}
     try:
         status = api.session.status() or {}
-    except AddonError:
+    except (AddonError, AttributeError, TypeError):
         pass
-    root = str(status.get("remote_root") or "the profile's remote folder")
-    sub = safe_path(config_get(values, "subdir", ""))
-    whole = posixpath.join(root.rstrip("/"), sub) if sub else root
+    whole = job_paths(values)["home"]
     try:
         api.tabs.set_widget(TAB, "target", "text", f"{describe(values)}  \u2192  {whole}")
-    except AddonError:
+    except (AddonError, AttributeError, TypeError):
         pass
     host = one_line(str(status.get("host") or ""))
     # Ask what *this addon* may reach, not just whether the app's session is
     # up: the SSH and SFTP switches on its own Settings row count too.
     try:
         ready = bool(api.device.is_connected("sftp"))
-    except AddonError:
+    except (AddonError, AttributeError, TypeError):
         ready = False
     up = bool(status.get("sftp_connected"))
     words = ("\u25cf " if ready else "\u25cb ") + (host or "no host yet")
@@ -692,7 +1083,37 @@ def show_target(values: dict) -> None:
         api.tabs.set_widget(TAB, "state", "text", words)
         api.tabs.set_widget(TAB, "state", "style",
                             _CHIP_STYLES["green" if ready else "gray"])
-    except AddonError:
+    except (AddonError, AttributeError, TypeError):
+        pass
+
+
+def show_check(check: dict) -> None:
+    """Paint what the device answered: the table, and the line under it."""
+    try:
+        api.tabs.set_widget(TAB, "summary", "rows", summary_rows(check))
+    except (AddonError, AttributeError, TypeError):
+        pass
+    if not check:
+        return
+    if check.get("is_berry"):
+        words = f"{check.get('url')} answers as the Berry dashboard"
+    elif check.get("answered"):
+        words = (f"{check.get('url')} answered, but not with what looks like "
+                 "the Berry dashboard")
+    else:
+        words = "nothing answered the page"
+    title = page_title(check.get("body"))
+    if title:
+        words += f'  \u00b7  it calls itself "{title}"'
+    if not check.get("python"):
+        words += "  \u00b7  python3 is not on the path, so the CGI cannot run"
+    try:
+        api.tabs.set_widget(TAB, "last_check", "text", words)
+        api.tabs.set_widget(TAB, "last_check", "style",
+                            "color: #23d18b; padding: 2px 4px;"
+                            if check.get("is_berry")
+                            else "color: #ffb020; padding: 2px 4px;")
+    except (AddonError, AttributeError, TypeError):
         pass
 
 
@@ -775,7 +1196,26 @@ def _refused(status: int, body: bytes, path: str) -> str:
     return f"GitHub answered {status} for {path}" + (f": {detail}" if detail else "")
 
 
-# --- reading the settings into the shapes the job needs ---
+_fetchers: dict[str, Fetcher] = {}
+
+
+def _http(values: dict) -> Fetcher:
+    """The shared fetcher, keyed by token so a changed one does not inherit connections."""
+    key = str(config_get(values, "token", "") or "")
+    fetcher = _fetchers.get(key)
+    if fetcher is None:
+        fetcher = Fetcher(token=key)
+        _fetchers[key] = fetcher
+    return fetcher
+
+
+def _drop_http() -> None:
+    for fetcher in _fetchers.values():
+        fetcher.close()
+    _fetchers.clear()
+
+
+# --- where the files come from, and which folder they land in ---
 
 def is_local(values: dict) -> bool:
     """Whether this install reads a folder on this machine instead of GitHub."""
@@ -789,59 +1229,66 @@ def local_folder(values: dict) -> str:
         return text
     try:
         status = api.session.status() or {}
-    except AddonError:
+    except (AddonError, AttributeError, TypeError):
         status = {}
     return str(status.get("source") or "")
 
 
 def job_paths(values: dict) -> dict:
-    """Every path and pattern this job works with, cleaned once here."""
+    """Every path, name and pattern this job works with, cleaned once here."""
+    home = home_path(config_get(values, "web_home", ""), "") or _profile_root()
     sub = safe_path(config_get(values, "subdir", ""))
+    if sub:
+        home = posixpath.join(home, sub)
     entry = safe_path(config_get(values, "cgi_entry", DEFAULTS["cgi_entry"]),
                       DEFAULTS["cgi_entry"])
-    try:
-        port = int(config_get(values, "web_port", DEFAULTS["web_port"]) or 8989)
-    except (TypeError, ValueError):
-        port = 8989
     return {
-        "subdir": sub,
-        "entry": posixpath.join(sub, entry) if sub else entry,
+        "home": home,
+        "entry": entry,
+        "section": uci_name(config_get(values, "uci_section", DEFAULTS["uci_section"])),
         "skip": clean_list(config_get(values, "skip", DEFAULTS["skip"])),
         "keep": clean_list(config_get(values, "keep", DEFAULTS["keep"])),
         "repo_path": one_line(config_get(values, "repo_path",
                                          DEFAULTS["repo_path"])).strip("/ "),
         "web_path": "/" + str(config_get(values, "web_path",
                                          DEFAULTS["web_path"])).lstrip("/ "),
-        "backup_dir": "/" + safe_path(config_get(values, "backup_dir",
-                                                 DEFAULTS["backup_dir"]),
-                                      "tmp/rasconf_web_backups"),
-        "port": min(max(port, 1), 65535),
+        "backup_dir": home_path(config_get(values, "backup_dir", ""), "")
+        or "/tmp/berry_web_backups",
+        "port": port_of(config_get(values, "web_port", DEFAULTS["web_port"])),
+        "theme_sync": bool(config_get(values, "theme_sync", True)),
+        "restart": [one_line(text) for text in
+                    (config_get(values, "restart_command", []) or []) if one_line(text)],
     }
 
 
+def target_path(home: str, relative: str) -> str:
+    """One device path below the served folder, or nothing; nothing escapes it."""
+    clean = safe_path(relative)
+    root = home.rstrip("/") or ""
+    if not clean or not root:
+        return ""
+    joined = posixpath.normpath(posixpath.join(root, clean))
+    return joined if joined.startswith(root + "/") else ""
+
+
 def page_urls(paths: dict) -> list[str]:
-    """The addresses the device can ask itself for its page at; loopback first."""
-    out = [f"https://127.0.0.1:{paths['port']}{paths['web_path']}"]
+    """The addresses the device can ask itself for its page at; loopback first.
+
+    Both schemes are probed: the section is set up to answer over plain HTTP, but
+    a router that has TLS switched on for uhttpd answers ``https`` and nothing else.
+    """
+    host = ""
     try:
         status = api.session.status() or {}
-    except AddonError:
-        status = {}
-    host = one_line(str(status.get("host") or ""))
-    if host and not any(host in text for text in out):
-        out.append(f"https://{host}:{paths['port']}{paths['web_path']}")
+        host = one_line(str(status.get("host") or ""))
+    except (AddonError, AttributeError, TypeError):
+        host = ""
+    out: list[str] = []
+    for scheme in ("http", "https"):
+        out.append(f"{scheme}://127.0.0.1:{paths['port']}{paths['web_path']}")
+        if host:
+            out.append(f"{scheme}://{host}:{paths['port']}{paths['web_path']}")
     return out
-
-
-def device_path(relative: str) -> str:
-    """One device path below the remote root, or nothing; nothing escapes it."""
-    clean = safe_path(relative)
-    if not clean:
-        return ""
-    root = _remote_root().rstrip("/") or "/"
-    joined = posixpath.normpath(posixpath.join(root, clean))
-    if joined == "/" or (root != "/" and not joined.startswith(root.rstrip("/") + "/")):
-        return ""
-    return joined
 
 
 def _ref(values: dict) -> str:
@@ -857,27 +1304,97 @@ def _ignored(relative: str) -> bool:
     return str(relative).endswith((".pyc", ".pyo", ".tmp", ".bak", ".swp", "~"))
 
 
+# --- asking the host what it has ---
+
+def _page_probe(urls: list[str]) -> list[str]:
+    """Shell that asks for the page at each address, stopping at the first answer.
+
+    The body is printed with ``B `` in front of each line, so a reader can tell
+    the lines of the page from the lines of the report above it.
+    """
+    return [
+        "for URL in %s; do" % " ".join(quoted(text) for text in urls),
+        '  BODY=$(command -v curl >/dev/null 2>&1 && curl -s -k -m 10 "$URL" 2>/dev/null)',
+        '  if [ -z "$BODY" ]; then'
+        ' BODY=$(wget -q --no-check-certificate -O - "$URL" 2>/dev/null); fi',
+        '  if [ -n "$BODY" ]; then echo "ANSWERED $URL";'
+        ' echo "$BODY" | head -n 6 | sed "s/^/B /"; exit 0; fi',
+        "done",
+        'echo "NOANSWER"',
+    ]
+
+
+def check_script(paths: dict) -> str:
+    """The one command that asks the device everything the status page shows."""
+    section = paths["section"]
+    return "\n".join([
+        f'HOME={quoted(paths["home"])}',
+        'echo "FOLDER $(if [ -d "$HOME" ]; then echo yes; else echo no; fi)"',
+        'echo "FILES $(find "$HOME" -type f 2>/dev/null | wc -l)"',
+        f'echo "HOME $(uci -q get uhttpd.{section}.home 2>/dev/null)"',
+        'echo "PY $(command -v python3 2>/dev/null)"',
+    ] + _page_probe(page_urls(paths)))
+
+
+def land_on(check: dict) -> None:
+    """Where the tab opens: a live dashboard is looked at, anything else fixed."""
+    view_page(STATUS_PAGE if check.get("is_berry") else INSTALL_PAGE)
+
+
+def check_device(_checked: bool = False) -> None:
+    """One look at the connected host, and the tab arranged around what it said."""
+    if api is None or working:
+        return
+    paths = job_paths(merge_current())
+
+    def told(result: dict) -> None:
+        check = parse_check(result)
+        last_check.clear()
+        last_check.update(check)
+        show_check(check)
+        land_on(check)
+        if check.get("is_berry"):
+            say(f"the Berry dashboard answers on {check.get('url')}")
+        elif not check.get("folder"):
+            say(f"{paths['home']} is not on the device - the installer page "
+                "writes it", bad=True)
+        elif not check.get("answered"):
+            say("the folder is there but nothing answers the page - the installer "
+                "can set the web server up", bad=True)
+        else:
+            say("something answers, but it is not this dashboard - an install will "
+                "put these files in its place", bad=True)
+        if not check.get("python"):
+            note("python3 is not on the device's path: install it before the CGI "
+                 "can run (opkg install python3)")
+
+    _quick(check_script(paths), told, "asking the host what it has", timeout=90)
+
+
 # --- the job: one unit of work per tick ---
 
 #: Bar share per stage; the file-by-file ones get most.
-STAGE_WEIGHTS = {"tree": 4, "fetch": 40, "remote": 8, "ready": 4, "confirm": 2,
-                 "backup": 12, "write": 40, "prune": 8, "after": 10, "verify": 8}
+STAGE_WEIGHTS = {"tree": 4, "fetch": 34, "remote": 8, "ready": 4, "confirm": 2,
+                 "backup": 10, "write": 34, "prune": 6, "theme": 6, "uci": 8,
+                 "after": 10, "verify": 8}
 
 #: What the bar says during a stage; short, it fits the bar.
-STAGE_WORDS = {"tree": "finding the files", "fetch": "downloading", "remote": "asking the device",
-               "ready": "nothing to write", "confirm": "waiting for you",
-               "backup": "backing up", "write": "writing files", "prune": "tidying away",
+STAGE_WORDS = {"tree": "finding the files", "fetch": "downloading",
+               "remote": "asking the device", "ready": "nothing to write",
+               "confirm": "waiting for you", "backup": "backing up",
+               "write": "writing files", "prune": "tidying away",
+               "theme": "painting the page", "uci": "setting the server up",
                "after": "restarting the web server", "verify": "checking the page"}
 
 
 def route(values: dict, action: str) -> list[str]:
-    """The stages this job walks; only an install writes, tidies and checks."""
+    """The stages this job walks; only an install writes, serves and checks."""
     stages = ["tree"]
     if not is_local(values):
         stages.append("fetch")
     stages.append("remote")
-    stages += (["confirm", "backup", "write", "prune", "after", "verify"]
-               if action == "install" else ["ready"])
+    stages += (["confirm", "backup", "write", "prune", "theme", "uci",
+                "after", "verify"] if action == "install" else ["ready"])
     return stages
 
 
@@ -914,13 +1431,14 @@ def start_job(stages: list[str], label: str, values: dict) -> None:
     api.tabs.set_widget(TAB, "log", "value", "")
     api.tabs.set_widget(TAB, "plan", "rows", [])
     reset_totals()
-    view_page(0)                       # the plan is what a new job starts on
+    # The plan is what a new job starts on, inside the installer page.
+    api.tabs.set_widget(TAB, "install_views", "current", 0)
     api.tabs.set_widget(TAB, "bar", "maximum", units)
     api.tabs.set_widget(TAB, "bar", "value", 0)
     if "fetch" in stages:
         _reset_staging()
     say(f"{label}...")
-    api.log(f"{label}: {describe(values)}")
+    api.log(f"{label}: {describe(values)} \u2192 {job['paths']['home']}")
     _enter(stages[0])
 
 
@@ -1024,7 +1542,7 @@ def _done() -> None:
             if removed:
                 parts.append(f"{removed} tidied away")
             text = ", ".join(parts)
-    units = int((job or {}).get("units") or 100)
+    units = int(job.get("units") or 100)
     # Finish every step while the job can still be read.
     paint_steps(list(job["stages"]), len(job["stages"]))
     _close_session()
@@ -1242,9 +1760,9 @@ def _reset_staging() -> None:
 # --- stage: what the device already has ---
 
 def _stage_remote() -> None:
-    """One command listing every file under the remote root, with its size."""
+    """One command listing every file under the served folder, with its size."""
     script = "\n".join([
-        f'ROOT={quoted(_remote_root())}',
+        f'ROOT={quoted(job["paths"]["home"])}',
         'if [ ! -d "$ROOT" ]; then echo "NOTHING: that folder is not there yet"; '
         'exit 0; fi',
         """find "$ROOT" -type f -exec stat -c '%s|%n' {} + 2>/dev/null""",
@@ -1256,7 +1774,7 @@ def on_remote(result: dict) -> None:
     """Fill the plan table in: what is there, and what this job means to do."""
     if job is None:
         return
-    root = _remote_root().rstrip("/") or "/"
+    root = job["paths"]["home"].rstrip("/") or "/"
     remote: dict[str, int] = {}
     for line in str(result.get("out") or "").splitlines():
         size, _, path = line.partition("|")
@@ -1285,7 +1803,7 @@ def on_remote(result: dict) -> None:
     job["extras"] = len(_extras(job["items"], job["paths"]))
     show_plan(job["items"])
     if not remote:
-        note("the remote folder is empty or missing - this is a fresh install")
+        note(f"{root} is empty or missing - this is a fresh install")
     note(f"{todo_count()} of {len(job['items'])} file(s) need writing")
     _next()
 
@@ -1318,7 +1836,7 @@ def _stage_confirm() -> None:
     values, paths = job["values"], job["paths"]
     todo = todo_count()
     extra = _extras(items, paths)
-    lines = [f"Write {todo} of {len(items)} file(s) into\n\n  {_remote_root()}\n"]
+    lines = [f"Write {todo} of {len(items)} file(s) into\n\n  {paths['home']}\n"]
     if extra and bool(config_get(values, "remove_extra", False)):
         lines.append(f"{len(extra)} file(s) that are not in the download will be "
                      "deleted, except those the config keeps.\n")
@@ -1328,7 +1846,9 @@ def _stage_confirm() -> None:
     lines.append("The folder is backed up on the device first.\n"
                  if bool(config_get(values, "backup_first", True))
                  else "No backup will be taken.\n")
-    if not api.ui.question("Install the web interface",
+    lines.append(f"uhttpd.{paths['section']} is set to serve it on port "
+                 f"{paths['port']}, and the web server is restarted.\n")
+    if not api.ui.question("Install the Berry dashboard",
                            "\n".join(lines) + "Continue?", default=True):
         stop("install cancelled")
         return
@@ -1350,9 +1870,9 @@ def _stage_backup() -> None:
     if not bool(config_get(values, "backup_first", True)):
         _next()
         return
-    root = _remote_root()
+    root = paths["home"]
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    name = f"{Path(root).name or 'remote'}-{stamp}.tgz"
+    name = f"{posixpath.basename(root) or 'dashboard'}-{stamp}.tgz"
     script = "\n".join([
         f'ROOT={quoted(root)}',
         f'INTO={quoted(paths["backup_dir"])}',
@@ -1388,7 +1908,6 @@ def _stage_write() -> None:
 
 def _unit_write() -> None:
     """One file up to the device per tick."""
-    paths = job["paths"]
     queue = job.get("queue") or []
     index = int(job.get("index", 0))
     if index >= len(queue):
@@ -1396,17 +1915,16 @@ def _unit_write() -> None:
         _next()
         return
     item = queue[index]
-    target = posixpath.join(paths["subdir"], item["path"]) if paths["subdir"] else item["path"]
     _progress(index, len(queue),
               f"{job['label']} - {index + 1} of {len(queue)}: {item['path']}")
     try:
-        _put(item.get("local") or "", target)
+        _put(item.get("local") or "", item["path"])
     except (AddonError, OSError) as error:
         _problem(f"{item['path']}: {error}")
     else:
         item["action"] = "written"
         job["written"] = int(job.get("written") or 0) + 1
-        note(f"wrote {target} ({human(item.get('size') or 0)})")
+        note(f"wrote {item['path']} ({human(item.get('size') or 0)})")
     job["index"] = index + 1
     show_plan(job["items"])
     _again()
@@ -1421,8 +1939,7 @@ def _stage_prune() -> None:
     removed: list[str] = []
     lines = ['echo "== tidying away =="']
     for relative in _extras(job["items"], paths):
-        target = posixpath.join(paths["subdir"], relative) if paths["subdir"] else relative
-        full = device_path(target)
+        full = target_path(paths["home"], relative)
         if not full:
             continue
         removed.append(relative)
@@ -1433,17 +1950,59 @@ def _stage_prune() -> None:
         note("nothing left over to tidy away")
         _next()
         return
-    lines.append(f'ROOT={quoted(_remote_root())}')
+    lines.append(f'ROOT={quoted(paths["home"])}')
     lines.append('find "$ROOT" -type d -empty -delete 2>/dev/null || true')
     _device("\n".join(lines), lambda _result: _next(), timeout=90,
             step="tidying away what is left over")
+
+
+# --- stage: the page's own colours, and the web server's settings ---
+
+def _stage_theme() -> None:
+    """Write ``css/theme.css`` from the theme this program is wearing."""
+    paths = job["paths"]
+    if not paths["theme_sync"]:
+        note("the colour sync is switched off, so the page keeps its own theme.css")
+        _next()
+        return
+    colors: dict = {}
+    try:
+        colors = dict(api.theme.colors() or {})
+    except (AddonError, AttributeError, TypeError) as error:
+        _problem("the theme could not be read, so the page keeps its own colours: "
+                 f"{error}")
+        _next()
+        return
+    css = theme_css(colors)
+    if not css:
+        note("this theme names no colour the page can use, so nothing was written")
+        _next()
+        return
+    try:
+        local = staging() / "css" / "theme.css"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text(css, encoding="utf-8")
+        _put(str(local), "css/theme.css")
+    except (AddonError, OSError) as error:
+        _problem(f"css/theme.css was not written: {error}")
+    else:
+        note("css/theme.css written from the colours this program is wearing")
+    _next()
+
+
+def _stage_uci() -> None:
+    """Create or repair the uhttpd section that serves this folder."""
+    paths = job["paths"]
+    _device(uci_script(paths["section"], paths["home"], paths["port"]),
+            lambda _result: _next(), timeout=90,
+            step=f"setting uhttpd.{paths['section']} up")
 
 
 def _stage_after() -> None:
     """The exec bit on the CGI entry, then whatever restarts the web server."""
     values, paths = job["values"], job["paths"]
     lines: list[str] = []
-    entry = device_path(paths["entry"])
+    entry = target_path(paths["home"], paths["entry"])
     if bool(config_get(values, "make_executable", True)) and entry:
         lines += [
             'echo "== the CGI entry =="',
@@ -1451,12 +2010,9 @@ def _stage_after() -> None:
             f'echo "{paths["entry"]} is executable"; '
             f'else echo "note: there is no {paths["entry"]} there to set"; fi',
         ]
-    commands = [one_line(text) for text in
-                (config_get(values, "restart_command", []) or [])]
-    commands = [text for text in commands if text]
-    if commands:
+    if paths["restart"]:
         lines.append('echo "== after =="')
-        for one in commands:
+        for one in paths["restart"]:
             lines.append(f'{one} || {{ echo "note: {one} did not succeed"; }}')
     else:
         lines.append("echo '(no restart command configured)'")
@@ -1465,35 +2021,13 @@ def _stage_after() -> None:
             step="setting it up and restarting the web server")
 
 
-def _page_probe(urls: list[str]) -> list[str]:
-    """Shell that asks for the page at each address, stopping at the first answer."""
-    return [
-        "for URL in %s; do" % " ".join(quoted(text) for text in urls),
-        '  BODY=$(command -v curl >/dev/null 2>&1 && curl -s -k -m 10 "$URL" 2>/dev/null)',
-        '  if [ -z "$BODY" ]; then'
-        ' BODY=$(wget -q --no-check-certificate -O - "$URL" 2>/dev/null); fi',
-        '  if [ -n "$BODY" ]; then echo "ANSWERED $URL";'
-        ' echo "$BODY" | head -n 5; exit 0; fi',
-        "done",
-        f'echo "NO ANSWER from {urls[0]}"',
-    ]
-
-
-def answered_at(text: str) -> str:
-    """Which address the device's own check got a page from, if any said so."""
-    for line in str(text or "").splitlines():
-        if line.startswith("ANSWERED "):
-            return line[len("ANSWERED "):].strip()
-    return ""
-
-
 def _stage_verify() -> None:
     """Ask the device for its own page: the one proof that it is really working."""
     values, paths = job["values"], job["paths"]
     if not bool(config_get(values, "verify", True)):
         _next()
         return
-    entry = device_path(paths["entry"])
+    entry = target_path(paths["home"], paths["entry"])
     script = "\n".join([
         f'ENTRY={quoted(entry)}',
         'if [ -n "$ENTRY" ] && [ ! -f "$ENTRY" ]; then'
@@ -1507,16 +2041,21 @@ def on_verified(result: dict) -> None:
     """Read the answer back: a login page means it worked, anything else does not."""
     if job is None:
         return
+    check = parse_check(result)
+    last_check.clear()
+    last_check.update(check)
+    show_check(check)
     body = str(result.get("out") or "").lower()
     written = int(job.get("written") or 0)
     port = job["paths"]["port"]
-    if "no answer" in body:
+    if "noanswer" in body:
         _problem("the dashboard did not answer. Check that uhttpd listens on that "
-                 "port and that the folder it serves is the one this installed into")
+                 "port, that python3 is installed and that the folder it serves is "
+                 "the one this installed into")
     elif "missing" in body:
         _problem("there is no CGI entry file where the settings say there should be")
-    elif any(marker in body for marker in ("<html", "doctype", "password", "login")):
-        note("the dashboard answers")
+    elif check.get("is_berry"):
+        note("the Berry dashboard answers")
         job["summary"] = lambda: (f"{written} file(s) written and the dashboard "
                                   f"answers on port {port}")
     else:
@@ -1527,21 +2066,13 @@ def on_verified(result: dict) -> None:
 
 # --- one SFTP session, when the app will hand one out ---
 
-def _remote_root() -> str:
-    """The profile's deploy folder: every path in this job sits below it."""
-    session = (job or {}).get("session")
-    root = str(getattr(session, "remote_root", "") or "")
-    if root:
-        return root
-    try:
-        status = api.session.status() or {}
-    except AddonError:
-        return "/www_rasconf"
-    return str(status.get("remote_root") or "/www_rasconf") or "/www_rasconf"
-
-
 def _open_session() -> bool:
-    """Hold one SSH session for the whole transfer, if this addon may."""
+    """Hold one SSH session for the whole transfer, if this addon may.
+
+    Only an addon that may connect on its own is handed one, which is why the
+    manifest says ``both``: on the app's session the files go over the app's
+    channel instead, one upload at a time, and the install is no slower for it.
+    """
     if job is None:
         return False
     if job.get("session") is not None:
@@ -1553,9 +2084,9 @@ def _open_session() -> bool:
     except Exception as error:              # a refusal here is normal, not a failure
         job["session"] = None
         job["context"] = None
-        api.log(f"each file goes up on a connection of its own: {error}")
+        api.log(f"each file goes over the app's session on its own: {error}")
         return False
-    note(f"one session held for the transfer to {_remote_root()}")
+    note(f"one session held for the transfer to {job['paths']['home']}")
     return True
 
 
@@ -1573,23 +2104,19 @@ def _close_session() -> None:
         api.log(f"the session did not close tidily: {error}")
 
 
-def _put(local: str, target: str) -> None:
-    """Send one staged or local file to the device, below the remote root."""
+def _put(local: str, relative: str) -> None:
+    """Send one staged or local file into the served folder."""
     if not local or not Path(str(local)).is_file():
-        raise AddonError(f"there is no local file to send for {target}")
+        raise AddonError(f"there is no local file to send for {relative}")
+    target = target_path(job["paths"]["home"], relative)
+    if not target:
+        raise AddonError(f"{relative} is not a path this addon will write")
     session = (job or {}).get("session")
     if session is not None:
-        full = device_full(target)
-        _remote_dirs(session.sftp, posixpath.dirname(full))
-        session.sftp.put(str(local), full)
+        _remote_dirs(session.sftp, posixpath.dirname(target))
+        session.sftp.put(str(local), target)
         return
-    api.device.upload(str(local), target)
-
-
-def device_full(target: str) -> str:
-    """Where a relative path lands, for the session that is being held open."""
-    root = _remote_root().rstrip("/") or "/"
-    return posixpath.normpath(posixpath.join(root, str(target).lstrip("/")))
+    api.device.upload(str(local), target, outside_root=True)
 
 
 def _remote_dirs(sftp: Any, directory: str) -> None:
@@ -1608,9 +2135,10 @@ def _remote_dirs(sftp: Any, directory: str) -> None:
             pass
 
 
-# --- two buttons that are a single command, not a job ---
+# --- buttons that are a single command, not a job ---
 
-def _quick(command: str, told: Callable[[dict], None], step: str, timeout: int = 90) -> None:
+def _quick(command: str, told: Callable[[dict], None], step: str,
+           timeout: int = 90) -> None:
     """One command with the buttons held down while the device thinks."""
     global working
     if working or api is None:
@@ -1644,9 +2172,7 @@ def restart_server(_checked: bool = False) -> None:
     """Run the restart command from the config, and nothing else."""
     if api is None or working:
         return
-    values = merge_current()
-    commands = [one_line(text) for text in
-                (config_get(values, "restart_command", []) or []) if one_line(text)]
+    commands = job_paths(merge_current())["restart"]
     if not commands:
         say("there is no restart command in the config", bad=True)
         return
@@ -1660,42 +2186,159 @@ def check_page(_checked: bool = False) -> None:
     """Ask the device for the dashboard and say what came back."""
     if api is None or working:
         return
-    values = merge_current()
-    paths = job_paths(values)
-    urls = page_urls(paths)
-    script = "\n".join(['echo "== the page =="'] + _page_probe(urls))
+    paths = job_paths(merge_current())
+    script = "\n".join(['echo "== the page =="'] + _page_probe(page_urls(paths)))
 
     def told(result: dict) -> None:
-        out = str(result.get("out") or "")
-        body = out.lower()
-        if "no answer" in body:
-            say(f"nothing answers on {' or '.join(urls)}", bad=True)
-        elif any(marker in body for marker in ("<html", "doctype", "password", "login")):
-            said = answered_at(out)
-            say(f"the dashboard answers on port {paths['port']}"
-                + (f" ({said})" if said else ""))
+        check = parse_check(result)
+        last_check.clear()
+        last_check.update(check)
+        show_check(check)
+        if not check.get("answered"):
+            say(f"nothing answers on port {paths['port']}", bad=True)
+        elif check.get("is_berry"):
+            say(f"the Berry dashboard answers on {check.get('url')}")
         else:
-            say(f"{answered_at(out) or urls[0]} answered, but not with the dashboard",
-                bad=True)
+            say(f"{check.get('url')} answered, but not with the dashboard", bad=True)
 
     _quick(script, told, "asking the device for its page", timeout=60)
+
+
+def read_uci(_checked: bool = False) -> None:
+    """The section as uci reads it, and the whole file, into the raw page.
+
+    The file is asked for with ``cat`` on the same SSH channel as everything else
+    here: reading it over SFTP instead would block the interface until the device
+    answered, and the file is only ever shown, never written from this page.
+    """
+    if api is None or working:
+        return
+    section = job_paths(merge_current())["section"]
+    script = "\n".join([
+        f'echo "== uci show uhttpd.{section} =="',
+        f'uci -q show uhttpd.{section} 2>/dev/null || echo "(there is no such section yet)"',
+        'echo "== /etc/config/uhttpd =="',
+        'cat /etc/config/uhttpd 2>/dev/null || echo "(the file is not there)"',
+    ])
+
+    def told(result: dict) -> None:
+        try:
+            api.tabs.set_widget(TAB, "raw_uci", "value",
+                                str(result.get("out") or "").strip())
+        except AddonError:
+            pass
+        uci_page(1)                       # show what was just read
+        say("the device's uhttpd settings are on the Raw file page")
+
+    _quick(script, told, "reading the web server's settings", timeout=60)
+
+
+def apply_uci(_checked: bool = False) -> None:
+    """Write the options the form shows, commit them and bring the server up."""
+    if api is None or working:
+        return
+    paths = job_paths(merge_current())
+    script = "\n".join([uci_script(paths["section"], paths["home"], paths["port"])]
+                       + apply_uci_lines(paths["section"], paths["restart"]))
+
+    def told(_result: dict) -> None:
+        say(f"uhttpd.{paths['section']} now serves {paths['home']} on "
+            f"port {paths['port']}")
+        check_device_later()
+
+    _quick(script, told, "applying the web server settings", timeout=120)
+
+
+def check_device_later() -> None:
+    """Re-check once the restarted server has had a moment to come up."""
+    try:
+        api.schedule.after(1.5, check_device)
+    except (AddonError, AttributeError, TypeError):
+        pass
+
+
+def move_home(_checked: bool = False) -> None:
+    """Rename the folder the web server is using to the name in the form.
+
+    This is the one thing here that moves a device's own files rather than
+    writing this addon's, so it is asked about by name first, and the script
+    refuses outright when the new name is already taken - a ``mv`` onto an
+    existing folder would bury the dashboard inside it rather than replace it.
+    """
+    if api is None or working:
+        return
+    values = merge_current()
+    paths = job_paths(values)
+    into = paths["home"]
+    section = paths["section"]
+    old = str(last_check.get("home") or "").strip() \
+        or home_path(config_get(values, "web_home", ""), "")
+    if old == into:
+        say(f"{into} is already what uhttpd.{section} serves")
+        return
+    if not api.ui.question(
+            "Move the served folder",
+            f"uhttpd.{section} is to stop serving\n\n  {old or '(nothing set)'}\n\n"
+            f"and serve\n\n  {into}\n\ninstead.\n\nThe folder on the device is "
+            "renamed, the setting is written with uci, committed, and the web "
+            "server restarted. Continue?", default=False):
+        say("the folder was left where it is")
+        return
+    restart = " ; ".join(paths["restart"]) if paths["restart"] else "true"
+    script = "\n".join([
+        f'OLD={quoted(old)}',
+        f'NEW={quoted(into)}',
+        'if [ ! -d "$OLD" ]; then echo "note: $OLD is not on the device, so only '
+        'the setting changes"; fi',
+        'if [ -e "$NEW" ]; then echo "STOP: $NEW is already there, so nothing '
+        'was moved"; exit 1; fi',
+        'if [ -d "$OLD" ]; then mv "$OLD" "$NEW" && echo "moved $OLD to $NEW"; fi',
+        uci_script(section, into, paths["port"]),
+        'echo "== after =="'
+        f' ; {restart} || echo "note: the web server did not restart"',
+    ])
+
+    def told(result: dict) -> None:
+        if "STOP" in str(result.get("out") or ""):
+            say("nothing was moved: the new name is already taken", bad=True)
+            return
+        say(f"{into} is what uhttpd.{section} serves now")
+        check_device_later()
+
+    _quick(script, told, "moving the served folder", timeout=180)
+
+
+def copy_raw(_checked: bool = False) -> None:
+    """The file read off the device, into the editable box below it."""
+    if api is None:
+        return
+    try:
+        text = str(api.tabs.widget_value(TAB, "raw_uci", "value") or "")
+        if not text:
+            say("there is nothing to copy: read the file first", bad=True)
+            return
+        api.tabs.set_widget(TAB, "raw_edit", "value", text)
+        say("the file is in the editor box below")
+    except AddonError:
+        pass
 
 
 def open_dashboard(_checked: bool = False) -> None:
     """The page in a tab of its own, so an install can be looked at straight away."""
     if api is None:
         return
-    values = merge_current()
-    paths = job_paths(values)
+    paths = job_paths(merge_current())
+    scheme = "https" if str(last_check.get("url") or "").startswith("https") else "http"
     url = ""
     try:
         url = str(api.session.web_url({"ip": "", "port": paths["port"],
                                        "path": paths["web_path"],
-                                       "scheme": "https"}) or "")
-    except AddonError:
+                                       "scheme": scheme}) or "")
+    except (AddonError, AttributeError, TypeError):
         url = ""
-    if not url.startswith("https"):
-        say("there is no address to open: put a host in the connection panel", bad=True)
+    if not url.startswith("http"):
+        say("there is no address to open: put a host in the connection panel",
+            bad=True)
         return
     try:
         if api.tabs.exists(PAGE):
@@ -1706,27 +2349,6 @@ def open_dashboard(_checked: bool = False) -> None:
         say(f"opened {url}")
     except AddonError as error:
         say(f"the page could not be opened: {error}", bad=True)
-
-
-# --- GitHub connections, reused then dropped ---
-
-_fetchers: dict[str, Fetcher] = {}
-
-
-def _http(values: dict) -> Fetcher:
-    """The shared fetcher, keyed by token so a changed one does not inherit connections."""
-    key = str(config_get(values, "token", "") or "")
-    fetcher = _fetchers.get(key)
-    if fetcher is None:
-        fetcher = Fetcher(token=key)
-        _fetchers[key] = fetcher
-    return fetcher
-
-
-def _drop_http() -> None:
-    for fetcher in _fetchers.values():
-        fetcher.close()
-    _fetchers.clear()
 
 
 # --- the buttons ---
@@ -1777,16 +2399,15 @@ def push_config(_checked: bool = False) -> None:
     if api is None:
         return
     api.config.update(values_of())
-    say("saved to addons/_data/web_installer/config.json")
+    say("saved to addons/_data/berry_web/config.json")
     api.log("config saved from the tab")
 
 
 def pull_config(_checked: bool = False) -> None:
     if api is None:
         return
-    values = api.config.all()
-    show_form(values)
-    say("form reloaded from the config")
+    show_form(api.config.all())
+    say("forms reloaded from the config")
 
 
 def stop_job(_checked: bool = False) -> None:
@@ -1797,15 +2418,30 @@ def stop_job(_checked: bool = False) -> None:
     say("there is nothing to stop")
 
 
+def to_page(page: int) -> None:
+    """One of the page buttons: jump the notebook to where the work is."""
+    if api is not None:
+        view_page(page)
+
+
 #: What each button on the tab does, by its spec id.
 HANDLERS.update({
+    "recheck": check_device,
+    "check": check_page,
+    "open": open_dashboard,
+    "to_installer": lambda: to_page(INSTALL_PAGE),
+    "to_uci": lambda: to_page(UHTTPD_PAGE),
+    "to_status": lambda: to_page(STATUS_PAGE),
     "fetch": lambda: _begin("fetch"),
     "install": lambda: _begin("install"),
-    "open": open_dashboard,
-    "restart": restart_server,
-    "check": check_page,
     "push": push_config,
     "pull": pull_config,
+    "read_uci": read_uci,
+    "refresh_raw": read_uci,
+    "copy_raw": copy_raw,
+    "apply_uci": apply_uci,
+    "restart": restart_server,
+    "move_home": move_home,
     "stop": stop_job,
 })
 
@@ -1819,6 +2455,8 @@ STAGES = {
     "backup": _stage_backup,
     "write": _stage_write,
     "prune": _stage_prune,
+    "theme": _stage_theme,
+    "uci": _stage_uci,
     "after": _stage_after,
     "verify": _stage_verify,
 }
@@ -1836,15 +2474,24 @@ def focus_tab(_checked: bool = False) -> None:
 
 
 def init(plugin_api: Any) -> None:
-    """Build the tab from the saved config."""
+    """Build the tab from the saved config, carrying the old installer's across."""
     global api
     api = plugin_api
+    # Read before anything is written: the file a retired addon left has no
+    # ``web_home`` in it, and once the defaults are on disk that fact is gone.
+    kept = _stored_config()
+    carried = bridge_settings(kept, _profile_root())
     values = api.config.declare(
         FIELDS, DEFAULTS,
-        title="Rasconf web installer - addons/_data/web_installer/config.json")
+        title="Berry web dashboard - addons/_data/berry_web/config.json")
+    if carried != kept:
+        values = api.config.update(carried)
+        api.log("the settings the retired installer left have been carried "
+                f"across: the dashboard is served from "
+                f"{values.get('web_home')}")
     build_tab()
     show_form(values)
-    api.ui.menu_item("Rasconf web installer", focus_tab, menu="Tools")
+    api.ui.menu_item("Berry web dashboard", focus_tab, menu="Tools")
 
 
 def _refresh_state(_payload: Any = None) -> None:
@@ -1858,11 +2505,13 @@ def _refresh_state(_payload: Any = None) -> None:
 
 
 def start() -> None:
-    """Say where this profile's files would go, as soon as the tab exists.
+    """Say where the files would go, then ask the host what it has.
 
     The chip is kept honest from here on: the main connection, either app-wide
     transport switch and this addon's own switches all redraw it, because the
-    addon may only use file transfer while every one of them is on.
+    addon may only use file transfer while every one of them is on. The look at
+    the device is what decides whether the tab opens on the status page or on the
+    installer, and it is only asked when there is a connection to ask it on.
     """
     if api is None:
         return
@@ -1872,6 +2521,15 @@ def start() -> None:
                  "transport_changed", "connections_enabled",
                  "connections_disabled"):
         api.events.on(name, _refresh_state)
+    try:
+        reachable = bool(api.device.is_connected("ssh"))
+    except (AddonError, AttributeError, TypeError):
+        reachable = False
+    if reachable:
+        check_device()
+    else:
+        say("not connected yet: press Connect and the dashboard will be looked for",
+            bad=True)
 
 
 def shutdown() -> None:
@@ -1880,6 +2538,7 @@ def shutdown() -> None:
     _drop_http()
     working = False
     job = None
+    last_check.clear()
     api = None
 
 
@@ -1893,12 +2552,11 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
 
 
 def on_config(payload: dict) -> None:
-    """The user changed the config in Settings: make the form match the file."""
+    """The user changed the config in Settings: make the forms match the file."""
     if api is None or str(payload.get("addon") or "") != api.id:
         return
-    values = api.config.all()
-    show_form(values)
-    say("config changed in Settings; the form now matches it")
+    show_form(api.config.all())
+    say("config changed in Settings; the forms now match it")
 
 
 if __name__ == "__main__":                     # run as a process addon

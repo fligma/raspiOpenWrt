@@ -1,18 +1,24 @@
-# Rasconf web dashboard
+# Berry web dashboard
 
 The web UI that runs on the Raspberry Pi itself: plain Python CGI served by
 uhttpd, no web framework and nothing else to install beyond `python3`. The
-Berry Manager addon **Web installer** puts this folder onto a device from
-GitHub, or copy it here yourself - it belongs in `/www_rasconf`.
+**Berry web dashboard** addon in the addon store (`berry_web`) puts this folder
+onto a device from GitHub and sets the web server up for it, or copy it here
+yourself - it belongs in `/www_berry`.
 
 ## Setup
 
+The addon does all of this; these are the commands it runs, so a device can be
+done by hand instead. The section is named `berry`, and an older install that
+used `uhttpd.rasconf` keeps working under that name until the folder itself is
+moved.
+
 ```sh
 apk add python3
-uci set uhttpd.rasconf=uhttpd
-uci add_list uhttpd.rasconf.listen_http='0.0.0.0:8989'
-uci set uhttpd.rasconf.home='/www_rasconf'
-uci set uhttpd.rasconf.cgi_prefix='/cgi-bin'
+uci set uhttpd.berry=uhttpd
+uci add_list uhttpd.berry.listen_http='0.0.0.0:8989'
+uci set uhttpd.berry.home='/www_berry'
+uci set uhttpd.berry.cgi_prefix='/cgi-bin'
 uci commit uhttpd
 /etc/init.d/uhttpd restart
 ```
@@ -20,7 +26,7 @@ uci commit uhttpd
 ## Credentials
 
 The dashboard asks for a PIN first. The PIN is stored as a SHA-256 hash in
-`/www_rasconf/cgi-bin/hash.file`, generated on the device with:
+`/www_berry/cgi-bin/hash.file`, generated on the device with:
 
 ```sh
 python -c "import hashlib; print(hashlib.sha256(b'YOUR_PASSWORD').hexdigest())"
@@ -28,8 +34,8 @@ python -c "import hashlib; print(hashlib.sha256(b'YOUR_PASSWORD').hexdigest())"
 
 The hash file is created automatically on first run with `pass123` as the
 PIN - change it before the device is reachable from anywhere but your LAN.
-It belongs to the device and is not part of this folder: the installer addon
-never uploads or deletes it.
+It belongs to the device and is not part of this folder: the addon keeps it out
+of every upload and every tidy-up.
 
 ## Pages and API
 
@@ -54,3 +60,8 @@ so deploy the whole `cgi-bin` folder (not just `index.py`):
 
 `css/`, `js/` and `assets/` hold the page's own styling, scripts and icons;
 the HTML references them by path, so they travel with `cgi-bin`.
+
+`css/theme.css` is not written by hand: it holds the colours of the Berry
+Manager theme that installed the page, and an install overwrites it. The
+committed copy carries the program's default theme, so a folder copied across
+by hand still looks like the app.

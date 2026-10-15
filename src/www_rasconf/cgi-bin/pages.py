@@ -8,7 +8,7 @@ def login_html():
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Rasconf - PIN Required</title>
+    <title>Berry - PIN Required</title>
     <link rel="icon" href="/assets/favicon.ico" sizes="any">
     <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
@@ -16,10 +16,11 @@ def login_html():
     <link rel="manifest" href="/assets/site.webmanifest">
     <link rel="stylesheet" href="/css/main.css">
     <link rel="stylesheet" href="/css/index.css">
+    <link rel="stylesheet" href="/css/theme.css">
 </head>
 <body class="login-page">
     <div class="login-card">
-        <h2>Raspberry Pi Access</h2>
+        <h2>Berry Dashboard</h2>
         <form method="POST" action="">
             <input type="password" name="pin" placeholder="Enter Security PIN" required autofocus>
             <button class="btn" type="submit">Unlock Dashboard</button>
@@ -35,7 +36,7 @@ def dashboard_html(config_json):
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Rasconf - Dashboard</title>
+    <title>Berry - Dashboard</title>
     <link rel="icon" href="/assets/favicon.ico" sizes="any">
     <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
@@ -43,6 +44,7 @@ def dashboard_html(config_json):
     <link rel="manifest" href="/assets/site.webmanifest">
     <link rel="stylesheet" href="/css/main.css">
     <link rel="stylesheet" href="/css/index.css">
+    <link rel="stylesheet" href="/css/theme.css">
     <script src="/js/main.js" defer></script>
     <script type="module" src="/js/index.js"></script>
 </head>
@@ -278,6 +280,6 @@ def dashboard_html(config_json):
             setTimeout(() => { msgEl.style.display = 'none'; }, 5000);
         }
     </script>
-    <script type="application/json" id="rasconf-config">__CONFIG_JSON__</script>
+    <script type="application/json" id="berry-config">__CONFIG_JSON__</script>
 </body>
 </html>""".replace("__CONFIG_JSON__", config_json)

@@ -185,6 +185,8 @@ class ProcessAPI:
         "ui.input": ("title", "label", "default", "secret"),
         "ui.choose": ("items",),
         "ui.notify": ("text", "ms"),
+        "ui.progress_notice": ("title", "text", "value", "maximum"),
+        "ui.progress_notice_close": (),
         "ui.menu_item": ("text", "callback", "menu", "shortcut"),
         "ui.dialog": ("spec", "title", "ok"),
         "ui.set_setting_widget": ("widget_or_spec",),
@@ -236,6 +238,8 @@ class ProcessAPI:
         "session.web_url": ("tab",),
         "session.rescan_addons": (),
         "session.set_addon_enabled": ("addon_id", "enabled"),
+        "session.addon_state": ("addon_id",),
+        "session.set_addon_running": ("addon_id", "running"),
         "peers.info": ("addon_id",),
         "peers.send": ("addon_id", "data"),
         "theme.exists": ("name",),
@@ -1015,6 +1019,9 @@ class StubAPI:
             if method == "session.app_icon":
                 # A test has no window, so there is no logo of its own to read.
                 return ""
+            if method in ("session.addon_state", "session.set_addon_running"):
+                # With no app beside it, nothing is installed and nothing runs.
+                return {"installed": False, "enabled": False, "running": False}
             return {} if method in ("session.profile", "session.settings",
                                     "session.status") else None
         if method.startswith("peers."):

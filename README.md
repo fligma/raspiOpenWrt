@@ -1,24 +1,25 @@
 ![Berry Manager screenshot](media/SCREENSHOT.png)
 
-# Berry Manager & the Rasconf dashboard
+# Berry Manager & the Berry dashboard
 
 Everything for running a Raspberry Pi as an OpenWrt router and looking after it
 from your desktop. The repository holds two products that work together:
 
 | Part | Lives in | What it is |
 | --- | --- | --- |
-| **Rasconf dashboard** | `src/www_rasconf` | A small web UI that runs *on the device*: Python CGI pages served by uhttpd, with interface status, wireless clients, temperature, load, traffic and storage, behind a PIN login |
+| **Berry dashboard** | `src/www_rasconf` | A small web UI that runs *on the device*: Python CGI pages served by uhttpd, with interface status, wireless clients, temperature, load, traffic and storage, behind a PIN login |
 | **Berry Manager** | `utils/update util` | A PyQt6 desktop app that manages the device over SSH/SFTP: named profiles, a real terminal, file browsing, embedded web tabs, and an addon system |
 
 Berry Manager is the manager; the dashboard is one of the things it manages.
-The bundled **Web installer** addon can install the dashboard onto a device
-straight from this repository - no checkout needed on the machine doing the
-installing.
+The **Berry web dashboard** addon in the store (`berry_web`) can install the
+dashboard onto a device straight from this repository, set uhttpd up for it and
+paint the page in the theme the manager is wearing - no checkout needed on the
+machine doing the installing.
 
-## The device side: Rasconf dashboard
+## The device side: the Berry dashboard
 
 `src/www_rasconf` is the tree that is deployed to the device's
-`/www_rasconf`, served by uhttpd on port 8989:
+`/www_berry`, served by uhttpd on port 8989:
 
 - `cgi-bin/index.py` - the CGI entry point; `?action=api` answers with the
   same data as JSON for scripts and for the manager's own views.
@@ -108,17 +109,15 @@ first in an `assets/<id>/` folder beside the addon's own file - so
 `addon.store/assets/cert_manager/cert_managericon.png` for a store addon's
 source, `addons/assets/multi_ssh/multi_sshicon.png` for a program dropped in
 beside the `.exe` - and then in the program's own `utils/update util/assets`,
-which is where the five bundled addons' pictures live. A square PNG is what the
+which is where the four bundled addons' pictures live. A square PNG is what the
 bar draws. With no file anywhere the tab wears the SVG the addon sends, and a
 tab that sends nothing wears `assets/defaulttabicon.png`.
 
-Five addons ship inside the program, and each has a Settings page of its own
+Four addons ship inside the program, and each has a Settings page of its own
 named after it:
 
 - **Berry** - the file manager: device and local pages in one tab, with a
   syntax-coloured editor.
-- **Web installer** - installs this repository's `src/www_rasconf` onto the
-  device from GitHub, with a plan table before anything is written.
 - **Berry addon store** - the store itself: reads the catalog published in
   `utils/update util/addon.store`, then downloads, tests and compiles any
   addon listed there into a program of its own in `addons`.
@@ -130,7 +129,9 @@ named after it:
   their groups, the tab bar by its knobs, or the JSON direct), the templates,
   and a reference of every `api.theme` call read off the running app.
 
-Everything else comes from that store - **Certificate manager**, **OpenWrt
+Everything else comes from that store - **Berry web dashboard** (the device-side
+page above, installed over SFTP with its uhttpd settings driven by `uci`),
+**Certificate manager**, **OpenWrt
 Log Viewer**, **OpenWrt Package Manager**, **Multi SSH** (any number of SSH
 sessions in sub-tabs, each on a connection of its own) - and an install is not a
 second-class addon. The store writes an `addons/<id>.json` manifest beside the program it
@@ -153,7 +154,7 @@ app reads it back without a restart.
 ## Repository layout
 
 ```
-src/www_rasconf/     the web dashboard deployed to the device
+src/www_rasconf/     the web dashboard deployed to /www_berry on the device
 utils/update util/   Berry Manager: the desktop app, its bundled addons and the addon store
 fresh_install/       OpenWrt factory image for a fresh Pi
 media/               logo and screenshots

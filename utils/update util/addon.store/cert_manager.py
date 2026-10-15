@@ -3,8 +3,10 @@
 
 Adds a ``Certificates`` tab. The certificate and key the web interface uses -
 ``/etc/ssl/mycert.crt`` and ``/etc/ssl/mycert.key`` by default - are listed and
-shown as ``openssl x509 -text`` output, and can be issued again in place over
-SSH, with the old pair backed up first and the web server restarted after.
+shown two ways, switched by a small tab on the right: a tidy GUI summary (subject,
+issuer, dates, serial, fingerprint, validity) or the raw ``openssl x509 -text``
+output. They can be issued again in place over SSH, with the old pair backed up
+first and the web server restarted after.
 
 Nothing is installed or hardcoded: the folder, both file names, the subject,
 the alternative names, the key type, the lifetime and the follow-up commands
@@ -30,11 +32,12 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Certificate manager",
-    "version": "1.3",
+    "version": "1.4",
     "author": "fligma",
-    "description": "Shows the certificate on the device and reissues the .crt and "
-                   ".key over SSH, with the subject, paths and follow-up commands "
-                   "kept in addons/_data/cert_manager/config.json.",
+    "description": "Shows the certificate on the device as a tidy summary or the raw "
+                   "openssl text, and reissues the .crt and .key over SSH, with the "
+                   "subject, paths and follow-up commands kept in "
+                   "addons/_data/cert_manager/config.json.",
     "requires": ["ssh"],
     # Everything is read and written over the profile's own session.
     "connection": "app",
@@ -108,9 +111,9 @@ FIELDS = [
      "placeholder": "LAN"},
     {"key": "subject.CN", "label": "Common name", "kind": "text",
      "hint": "The name the browser checks; blank uses the device address",
-     "placeholder": "knet3b.lan"},
+     "placeholder": "mydevice.lan"},
     {"key": "san_dns", "label": "DNS names", "kind": "list",
-     "hint": "Comma separated", "placeholder": "knet3b.lan, localhost"},
+     "hint": "Comma separated", "placeholder": "mydevice.lan, localhost"},
     {"key": "san_ip", "label": "IP addresses", "kind": "list",
      "hint": "Comma separated", "placeholder": "192.168.50.1"},
     {"key": "use_profile_host", "label": "Add this profile's address", "kind": "bool",
@@ -164,6 +167,10 @@ _UNSAFE = re.compile(r"[\"'`$;|&<>\\\n\r\t]")
 _IP = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 _DNS = re.compile(r"^[A-Za-z0-9.*_-]+$")
 _COUNTRY = re.compile(r"^[A-Za-z]{2}$")
+
+#: The markers :func:`view_script` prints between the parts of its answer, so
+#: the GUI summary can split what the device said back into those parts.
+_SECTION = re.compile(r"^==\s*(.+?)\s*==\s*$")
 
 #: The subject, in the order openssl writes it, and what each part is called.
 SUBJECT_ORDER = ("C", "ST", "L", "O", "OU", "CN")
@@ -331,9 +338,15 @@ def tab_spec(values: dict) -> dict:
     right = {"kind": "column", "children": [
         {"kind": "label", "id": "status", "text": "Nothing read from the device yet.",
          "word_wrap": True, "style": "color: #aaaaaa; padding: 2px 4px;"},
-        {"kind": "multi", "id": "viewer", "readonly": True,
-         "placeholder": "The certificate from the device appears here",
-         "tooltip": "What openssl x509 -text said about the file on the device"},
+        {"kind": "tabs", "id": "showtabs", "children": [
+            {"label": "GUI", "kind": "table", "id": "gui",
+             "columns": ["Field", "Value"], "stretch": 1, "col_widths": [110],
+             "tooltip": "The certificate as a tidy summary - subject, dates, "
+                        "serial, fingerprint and whether it is still valid"},
+            {"label": "Text", "kind": "multi", "id": "viewer", "readonly": True,
+             "placeholder": "The certificate from the device appears here",
+             "tooltip": "What openssl x509 -text said about the file on the device"},
+        ]},
     ]}
     return {"kind": "splitter", "children": [left, right]}
 
@@ -430,6 +443,10 @@ def show_output(result: dict) -> None:
     error = str(result.get("err") or "")
     body = text + (("\n" + error) if error.strip() else "")
     api.tabs.set_widget(TAB, "viewer", "text", body.strip() or "(the device gave no output)")
+    rows = summary_rows(text)
+    api.tabs.set_widget(TAB, "gui", "rows",
+                        rows or [["(nothing to show)",
+                                 "read the certificate with the button on the left"]])
 
 
 # --- reading the device ---
@@ -519,6 +536,65 @@ def parse_end_date(text: str) -> str:
             return f"expired {abs(days)} day(s) ago"
         return f"valid, {days} day(s) left"
     return ""
+
+
+def split_sections(text: str) -> dict[str, list[str]]:
+    """The device's answer cut back into the ``== name ==`` parts :func:`view_script` wrote."""
+    parts: dict[str, list[str]] = {}
+    name = ""
+    for line in str(text or "").splitlines():
+        hit = _SECTION.match(line.strip())
+        if hit:
+            name = hit.group(1).strip().lower()
+            parts.setdefault(name, [])
+            continue
+        if name and line.strip():
+            parts[name].append(line.rstrip())
+    return parts
+
+
+#: How the summary keys openssl prints are labelled in the GUI table.
+SUMMARY_LABELS = {"subject": "Subject", "issuer": "Issuer",
+                  "notbefore": "Valid from", "notafter": "Valid until",
+                  "serial": "Serial"}
+
+
+def summary_rows(text: str) -> list:
+    """``text`` (what :func:`view_script` printed) as rows for the GUI table: field, value.
+
+    The sections the script prints are read back one by one, so the summary
+    shows only what the device actually answered and a line it did not print
+    makes no row. A status that names an expiry is tinted red, the same word the
+    countdown in :func:`parse_end_date` uses.
+    """
+    parts = split_sections(text)
+    rows: list = []
+    for line in parts.get("files", []):
+        rows.append(["File", line.strip()])
+    for line in parts.get("summary", []):
+        key, _, value = line.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        label = SUMMARY_LABELS.get(key) or (key.replace("_", " ").title() or "Note")
+        if key == "notafter":
+            countdown = parse_end_date(line)
+            if countdown:
+                value = f"{value}  ({countdown})"
+        rows.append([label, value or "(none)"])
+    for line in parts.get("fingerprints", []):
+        rows.append(["Fingerprint", line.strip()])
+    for line in parts.get("still valid?", []):
+        words = line.strip()
+        if "expired" in words.lower() or "warning" in words.lower():
+            rows.append({"cells": ["Status", words], "color": "#ff6b6b"})
+        else:
+            rows.append(["Status", words])
+    for name, lines in parts.items():
+        if name.startswith("does it cover"):
+            host = name.replace("does it cover", "").strip().rstrip("?").strip()
+            for line in lines:
+                rows.append([f"Covers {host}".strip(), line.strip()])
+    return rows
 
 
 def read_device(_checked: bool = False) -> None:

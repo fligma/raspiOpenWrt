@@ -1,11 +1,29 @@
 {
   "addons": [
     {
+      "id": "berry_web",
+      "name": "Berry web dashboard",
+      "version": "1.0",
+      "author": "fligma",
+      "description": "Looks for the Berry dashboard on the connected host and, when it is not there, installs src/www_rasconf from GitHub over SFTP: a backup, the files, the theme this program is wearing, the uhttpd section written with uci, the exec bit on the CGI entry, a restart and a check that the page answers. Also views and edits those options and can move the served folder from /www_rasconf to /www_berry.",
+      "filename": "berry_web.py",
+      "requires": [
+        "ssh",
+        "sftp"
+      ],
+      "connection": "both",
+      "assets": [
+        "berry_webicon.png"
+      ],
+      "icon": "berry_webicon.png",
+      "test": "test_berry_web.py"
+    },
+    {
       "id": "cert_manager",
       "name": "Certificate manager",
-      "version": "1.3",
+      "version": "1.4",
       "author": "fligma",
-      "description": "Shows the certificate on the device and reissues the .crt and .key over SSH, with the subject, paths and follow-up commands kept in addons/_data/cert_manager/config.json.",
+      "description": "Shows the certificate on the device as a tidy summary or the raw openssl text, and reissues the .crt and .key over SSH, with the subject, paths and follow-up commands kept in addons/_data/cert_manager/config.json.",
       "filename": "cert_manager.py",
       "requires": [
         "ssh"
@@ -15,8 +33,7 @@
         "cert_managericon.png"
       ],
       "icon": "cert_managericon.png",
-      "test": "test_cert_manager.py",
-      "status": "updated"
+      "test": "test_cert_manager.py"
     },
     {
       "id": "multi_ssh",
@@ -33,8 +50,7 @@
         "multi_sshicon.png"
       ],
       "icon": "multi_sshicon.png",
-      "test": "test_multi_ssh.py",
-      "status": "updated"
+      "test": "test_multi_ssh.py"
     },
     {
       "id": "openwrt_logs",
@@ -51,8 +67,7 @@
         "openwrt_logsicon.png"
       ],
       "icon": "openwrt_logsicon.png",
-      "test": "test_openwrt_logs.py",
-      "status": "updated"
+      "test": "test_openwrt_logs.py"
     },
     {
       "id": "openwrt_package_manager",
@@ -70,8 +85,7 @@
         "openwrt_package_managericon.png"
       ],
       "icon": "openwrt_package_managericon.png",
-      "test": "test_openwrt_package_manager.py",
-      "status": "updated"
+      "test": "test_openwrt_package_manager.py"
     }
   ]
 }

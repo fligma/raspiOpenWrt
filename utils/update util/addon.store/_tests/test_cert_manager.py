@@ -100,6 +100,27 @@ ISSUED = {"code": 0,
                  "== after ==\nDONE\n",
           "err": ""}
 
+#: A whole read, exactly as view_script lays it out in == sections ==, so the GUI
+#: summary can be checked against what the device really answers with.
+VIEWED = (
+    "== files ==\n"
+    "-rw-r--r-- 1 root root 648 Oct 11 12:00 /etc/ssl/mycert.crt\n"
+    "== summary ==\n"
+    "subject=C = GB, ST = Somerset, CN = knet3b.lan\n"
+    "issuer=C = GB, CN = knet3b.lan\n"
+    "notBefore=Oct 11 12:00:00 2026 GMT\n"
+    "notAfter=Oct 11 12:00:00 2027 GMT\n"
+    "serial=3B3A2C1D\n"
+    "== fingerprints ==\n"
+    "SHA256 Fingerprint=A1:B2:C3:D4\n"
+    "== still valid? ==\n"
+    "the certificate has not expired\n"
+    "== does it cover 192.168.50.1? ==\n"
+    "yes, 192.168.50.1 appears in the certificate\n"
+    "== full text ==\n"
+    "Certificate:\n    Data:\n"
+)
+
 
 def check(condition: object, text: str) -> None:
     """One thing the addon has to do; all of them are reported, not just the first."""
@@ -359,6 +380,37 @@ def test_the_failure() -> None:
 
 # --- five: the tab, and the config it leaves behind ---
 
+def test_the_view() -> None:
+    """The GUI summary, out of the sections the device answers with."""
+    print("\n4c. the GUI summary the raw text becomes")
+    parts = cert_manager.split_sections(VIEWED)
+    check("summary" in parts and "fingerprints" in parts and "full text" in parts,
+          f"the answer did not split into its sections: {sorted(parts)}")
+    rows = cert_manager.summary_rows(VIEWED)
+    labels = [row["cells"][0] if isinstance(row, dict) else row[0] for row in rows]
+    for wanted in ("Subject", "Issuer", "Valid from", "Valid until",
+                   "Serial", "Fingerprint", "Status"):
+        check(wanted in labels, f"the GUI summary dropped the {wanted!r} line")
+    values = {row["cells"][0] if isinstance(row, dict) else row[0]:
+              (row["cells"][1] if isinstance(row, dict) else row[1]) for row in rows}
+    check("knet3b.lan" in values.get("Subject", ""),
+          f"the subject did not reach the summary: {values.get('Subject')!r}")
+    check("day(s)" in values.get("Valid until", ""),
+          f"the expiry has no countdown beside it: {values.get('Valid until')!r}")
+    check(any(label.startswith("Covers") for label in labels),
+          "whether it covers the address was dropped")
+    check(not rows_for("no sections here at all"),
+          "plain text with no == markers still made rows")
+    tinted = [row for row in cert_manager.summary_rows(
+        "== still valid? ==\nWARNING: the certificate has expired\n")
+        if isinstance(row, dict) and row.get("color")]
+    check(bool(tinted), "an expired certificate is not tinted in the summary")
+
+
+def rows_for(text: str) -> list:
+    return cert_manager.summary_rows(text)
+
+
 def test_the_tab(app: Any) -> None:
     print("\n5. the tab, built by Qt from the spec")
     import addon_api
@@ -366,10 +418,12 @@ def test_the_tab(app: Any) -> None:
     spec = cert_manager.tab_spec(cert_manager.with_clean_subject(LEGACY_SAVED))
     widget, registry = addon_api.build_spec(spec)
     wanted = {cert_manager.widget_id(key) for key in cert_manager.FIELDS_BY_KEY}
-    wanted |= {"status", "viewer"} | {name for name, _text in cert_manager.BUTTONS}
+    wanted |= {"status", "viewer", "gui"} | {name for name, _text in cert_manager.BUTTONS}
     check(not wanted - set(registry),
           f"the spec leaves out {sorted(wanted - set(registry)) or 'nothing'}")
     check(registry["viewer"].isReadOnly(), "the viewer can be typed into")
+    check(registry["gui"].columnCount() == 2,
+          "the GUI summary is not a two-column table of field and value")
     check(registry["subject_C"].text() == ""
           and registry["subject_ST"].text() == ""
           and registry["subject_CN"].text() == "",
@@ -379,7 +433,7 @@ def test_the_tab(app: Any) -> None:
           f"{registry['subject_C'].placeholderText()!r}")
     check("two letters" in registry["subject_C"].toolTip().lower(),
           "the Country tooltip does not mention the limit")
-    check(registry["subject_CN"].placeholderText() == "knet3b.lan",
+    check(registry["subject_CN"].placeholderText() == "mydevice.lan",
           "the Common name box has no example")
     missing_tip = [name for name, _text in cert_manager.BUTTONS
                    if not registry[name].toolTip()]
@@ -398,6 +452,7 @@ def test_the_tab(app: Any) -> None:
     for identifier, prop, value in [("status", "text", "hello"),
                                     ("status", "style", "color: #ffb020; padding: 2px 4px;"),
                                     ("viewer", "text", "subject=CN = knet3b.lan"),
+                                    ("gui", "rows", [["Subject", "CN = x"], ["Status", "valid"]]),
                                     ("reissue", "enabled", False),
                                     ("subject_C", "value", "NO")]:
         why = applies(identifier, prop, value)
@@ -598,6 +653,7 @@ def main() -> int:
     test_the_check()
     test_the_script()
     test_the_failure()
+    test_the_view()
     if app is not None:
         test_the_tab(app)
     else:

@@ -9,8 +9,8 @@ and both are quiet - a wrong answer does not crash, it just tells the user
 that an addon waits for a connection it never opens.
 
 The catalog the store reads is checked against the same rules, so a published
-entry and the row it will build cannot drift apart, and the four addons this
-repository ships are read as they really declare.
+entry and the row it will build cannot drift apart, and every addon this
+repository publishes is read as it really declares.
 
 No window is needed; run it from anywhere::
 
@@ -46,6 +46,11 @@ SHIPPED = {
     # Every shell this addon opens is its own socket, on its own thread, so it
     # is the one published addon that may not ride the app's session at all.
     "multi_ssh": (["ssh"], "own", "multi_sshicon.png"),
+    # The dashboard installer, which used to ship inside the program. It needs
+    # both transports - SSH for uci and the check, SFTP for the files - and says
+    # "both" so one session can be held open across a long transfer instead of
+    # opened once per file.
+    "berry_web": (["ssh", "sftp"], "both", "berry_webicon.png"),
 }
 
 FAILURES: list[str] = []

@@ -14,6 +14,6 @@ document.addEventListener('click', event => {
     }
 
     if (event.target.closest('[data-action="save-settings"]')) {
-        document.dispatchEvent(new CustomEvent('rasconf:save-settings'));
+        document.dispatchEvent(new CustomEvent('berry:save-settings'));
     }
 });

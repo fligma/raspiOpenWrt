@@ -19,6 +19,7 @@ from PyQt6.QtCore import (
     QPointF,
     QRectF,
     QSize,
+    QTimer,
     Qt,
     pyqtProperty,
     pyqtSignal,
@@ -26,6 +27,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QBrush,
     QColor,
+    QCursor,
     QFont,
     QFontMetrics,
     QIcon,
@@ -38,11 +40,13 @@ from PyQt6.QtGui import (
     QResizeEvent,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -51,6 +55,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QProgressBar,
     QSlider,
     QSpinBox,
     QStyle,
@@ -810,6 +815,289 @@ class ToggleSwitch(QCheckBox):
             )
 
 
+class _TipBubble(QLabel):
+    """One frameless label that fades in near the cursor and holds a tool-tip.
+
+    Qt's own tool-tip pops on at a spot it never leaves, and only if the pointer
+    rests still long enough; this is a plain top-level label whose opacity is
+    animated, so a tip arrives softly and a timer can then walk it along.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(None, Qt.WindowType.ToolTip
+                         | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setMargin(zoom_size(5))
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.setMaximumWidth(zoom_size(360))
+        self.setMinimumWidth(zoom_size(120))
+        theme_style(self, "QLabel { background-color: $soft; color: $text; "
+                          "border: 1px solid $accent; border-radius: 4px; }")
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade.setDuration(130)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def show_tip(self, text: str) -> None:
+        self.setText(text)
+        self.adjustSize()
+        self._fade_to(1.0)
+        self.show()
+
+    def hide_tip(self) -> None:
+        if not self.isVisible():
+            return
+        self._fade.stop()
+        self.setWindowOpacity(0.0)
+        self.hide()
+
+    def _fade_to(self, end: float, then_hide: bool = False) -> None:
+        self._fade.stop()
+        try:
+            self._fade.finished.disconnect()
+        except TypeError:
+            pass
+        self._fade.setStartValue(self.windowOpacity())
+        self._fade.setEndValue(end)
+        self._fade.start()
+
+
+class _SmartTip(QObject):
+    """The one tool-tip keeper for the whole window.
+
+    Installed as an application event filter, it answers ``ToolTip`` events
+    wherever they come from: any widget carrying text gets a bubble that fades
+    in and walks along under the cursor, and the native tool-tip never appears.
+    A widget with no text of its own is left to Qt, so menus and other built-in
+    tips keep working.
+    """
+
+    GAP = 16          # the bubble's corner sits this far off the pointer
+
+    def __init__(self, app: QApplication) -> None:
+        super().__init__(app)
+        self._app = app
+        self._bubble = _TipBubble()
+        self._target = None
+        self._region = None
+        self._timer = QTimer(self._bubble)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._tick)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self._bubble:
+            return False
+        etype = event.type()
+        if etype == QEvent.Type.ToolTip:
+            return self._on_tooltip(watched, event)
+        if etype in (QEvent.Type.Leave, QEvent.Type.MouseButtonPress,
+                     QEvent.Type.MouseButtonDblClick, QEvent.Type.Wheel,
+                     QEvent.Type.WindowDeactivate):
+            self.dismiss()
+        return False
+
+    def _on_tooltip(self, watched: QObject, event: QEvent) -> bool:
+        text = self._text_for(watched, event)
+        if not text:
+            return False
+        self.show_at(text, QCursor.pos(), watched)
+        return True
+
+    @staticmethod
+    def _text_for(widget: QObject, event: QEvent) -> str:
+        # A tab bar keeps one tip per tab, not on the bar itself.
+        if isinstance(widget, QTabBar) and hasattr(event, "pos"):
+            index = widget.tabAt(event.pos())
+            return str(widget.tabToolTip(index) or "") if index >= 0 else ""
+        getter = getattr(widget, "toolTip", None)
+        return str(getter() or "") if callable(getter) else ""
+
+    def show_at(self, text: str, global_pos, target, region=None) -> None:
+        """Fade the bubble in on ``text``, near ``global_pos``, tied to ``target``.
+
+        ``region`` is an optional ``(widget, global_pos) -> bool`` that says
+        which part of the target still counts as hovering it - a group box shows
+        its tip over the title words only.
+        """
+        self._target = target
+        self._region = region
+        self._bubble.show_tip(text)
+        self._place(global_pos)
+        self._timer.start()
+
+    def dismiss(self) -> None:
+        """Stop following and fade the bubble away."""
+        self._timer.stop()
+        self._target = None
+        self._region = None
+        self._bubble.hide_tip()
+
+    def showing(self) -> bool:
+        """Whether a tip is on screen right now."""
+        return self._bubble.isVisible()
+
+    def current_text(self) -> str:
+        """The words the bubble is holding, empty when it shows nothing."""
+        return str(self._bubble.text() or "")
+
+    def _tick(self) -> None:
+        try:
+            target = self._target
+            if target is None:
+                self.dismiss()
+                return
+            pos = QCursor.pos()
+            under = self._app.widgetAt(pos)
+            if under is None or not self._descendant(under, target):
+                self.dismiss()
+                return
+            if self._region is not None and not self._region(target, pos):
+                self.dismiss()
+                return
+            self._place(pos)
+        except RuntimeError:                # the widget went away mid-hover
+            self.dismiss()
+
+    def _place(self, pos) -> None:
+        bubble = self._bubble
+        size = bubble.size()
+        screen = self._app.screenAt(pos) or self._app.primaryScreen()
+        area = screen.availableGeometry()
+        x = pos.x() + zoom_size(self.GAP)
+        y = pos.y() + zoom_size(self.GAP)
+        if x + size.width() > area.right():
+            x = pos.x() - size.width() - zoom_size(self.GAP)
+        if y + size.height() > area.bottom():
+            y = pos.y() - size.height() - zoom_size(self.GAP)
+        bubble.move(max(area.left(), x), max(area.top(), y))
+
+    @staticmethod
+    def _descendant(widget, ancestor) -> bool:
+        while widget is not None:
+            if widget is ancestor:
+                return True
+            widget = widget.parentWidget()
+        return False
+
+
+#: The one keeper, made when :func:`install_smart_tooltips` runs.
+_SMART_TIP: "_SmartTip | None" = None
+
+
+def install_smart_tooltips(app: QApplication) -> "_SmartTip":
+    """Give the whole window the cursor-following, fading tool-tip; call it once.
+
+    The native ``QToolTip`` is replaced for every widget that carries text - and
+    for a group box's title, which :class:`_TitleTip` routes through here too.
+    """
+    global _SMART_TIP
+    _SMART_TIP = _SmartTip(app)
+    app.installEventFilter(_SMART_TIP)
+    return _SMART_TIP
+
+
+def smart_tip() -> "_SmartTip | None":
+    """The tool-tip keeper, if one has been installed."""
+    return _SMART_TIP
+
+
+class ProgressNotice(QFrame):
+    """A small card that floats over the window's corner and keeps a live job's
+    percentage on screen while it runs.
+
+    A tray toast says one thing and leaves; a job like a store install wants the
+    opposite - a number that moves while the work does, from a window the person
+    may have pushed behind anything else. So this is a frameless top-level card:
+    who is speaking, how far the job has got as a bar with its percent, and one
+    line of what it is doing now. The app keeps one per speaker and re-shows it
+    on every step; nothing here waits on the addon that owns it.
+
+    A notice that reaches its end holds for a few seconds and goes away on its
+    own, so the finish line is read rather than chased; a new job takes the same
+    card back before it closes. It never takes focus: ``WA_ShowWithoutActivating``
+    keeps the pointer where the user left it.
+    """
+
+    HOLD_MS = 4000      # a finished notice stays on screen this long
+    GAP = 18            # the card's margin from the window's corner
+
+    def __init__(self, win: QWidget) -> None:
+        super().__init__(win, Qt.WindowType.Tool
+                         | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(zoom_size(12), zoom_size(10),
+                                  zoom_size(12), zoom_size(10))
+        self._title = QLabel(self)
+        self._bar = QProgressBar(self)
+        self._bar.setRange(0, 100)
+        self._bar.setFormat("%p%")
+        self._bar.setTextVisible(True)
+        self._text = QLabel(self)
+        self._text.setWordWrap(True)
+        theme_style(self._title, "QLabel { color: $bright; font-weight: 700; }")
+        theme_style(self._text, "QLabel { color: $muted; }")
+        theme_style(self, "QFrame { background-color: $surface; border: 1px"
+                          " solid $accent; border-radius: 8px; }"
+                          " QProgressBar { border: 1px solid $border;"
+                          " border-radius: 5px; background-color: $soft;"
+                          " text-color: $text; height: 16px; }"
+                          " QProgressBar::chunk { border-radius: 4px;"
+                          " background-color: $accent; }")
+        self._closer: QTimer | None = None
+        self.setMaximumWidth(zoom_size(340))
+        self.setMinimumWidth(zoom_size(220))
+
+    def show_notice(self, title: str, text: str, value: int,
+                    maximum: int) -> None:
+        """Put the card up with this figure in it; a full bar closes it soon."""
+        limit = max(1, int(maximum))
+        shown = max(0, min(limit, int(value)))
+        self._bar.setMaximum(limit)
+        self._bar.setValue(shown)
+        self._title.setText(str(title or ""))
+        self._text.setText(str(text or ""))
+        self._text.setVisible(bool(str(text or "").strip()))
+        self._cancel_close()
+        self.adjustSize()
+        self._place()
+        self.show()
+        if shown >= limit:
+            self._hold_then_close()
+
+    def close_notice(self) -> None:
+        """Take the card away now, timer and all."""
+        self._cancel_close()
+        self.hide()
+
+    def _cancel_close(self) -> None:
+        if self._closer is not None:
+            self._closer.stop()
+            self._closer = None
+
+    def _hold_then_close(self) -> None:
+        self._cancel_close()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self.close_notice)
+        timer.start(self.HOLD_MS)
+        self._closer = timer
+
+    def _place(self) -> None:
+        """Sit the card inside the parent window's bottom-right corner."""
+        win = self.parentWidget()
+        if win is None:
+            return
+        gap = zoom_size(self.GAP)
+        spot = win.mapToGlobal(QPoint(win.width() - self.width() - gap,
+                                      win.height() - self.height() - gap))
+        self.move(max(0, spot.x()), max(0, spot.y()))
+
+
 class _TitleTip(QObject):
     """Answers tool-tip events for a group box, but only over its title.
 
@@ -817,7 +1105,9 @@ class _TitleTip(QObject):
     child without a tool-tip of its own inherits the parent's, so a note set on
     the panel followed the mouse across all the options inside it. The box is
     left with no tool-tip and this filter shows the text only while the pointer
-    rests on the words of the title, which sit on the top border.
+    rests on the words of the title, which sit on the top border. When the
+    cursor-following bubble is installed it drives that; otherwise the plain
+    ``QToolTip`` is used, so a bare widget test still shows the note.
     """
 
     LEFT = 12     # the "left: 12px" of QGroupBox::title in the app stylesheet
@@ -836,11 +1126,23 @@ class _TitleTip(QObject):
         # event was sent to. So the local point is taken as it stands and the
         # global one the tool-tip wants is the box's own mapping of it.
         where = event.pos()
+        engine = _SMART_TIP
         if self._over_title(watched, where):
-            QToolTip.showText(watched.mapToGlobal(where), self.text, watched)
+            if engine is not None:
+                engine.show_at(self.text, QCursor.pos(), watched,
+                               region=self._region_over)
+            else:
+                QToolTip.showText(watched.mapToGlobal(where), self.text, watched)
+        elif engine is not None:
+            engine.dismiss()
         else:
             QToolTip.hideText()
         return True
+
+    @classmethod
+    def _region_over(cls, box, global_pos) -> bool:
+        """Still over the title? the bubble asks this as the cursor walks."""
+        return cls._over_title(box, box.mapFromGlobal(global_pos))
 
     @classmethod
     def _over_title(cls, box: QGroupBox, point: QPoint) -> bool:

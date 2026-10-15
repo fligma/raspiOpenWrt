@@ -12,7 +12,7 @@ import {
 } from './render.js';
 import { postJson } from './api.js';
 
-const configElement = document.getElementById('rasconf-config');
+const configElement = document.getElementById('berry-config');
 const CONFIG = configElement ? JSON.parse(configElement.textContent) : {};
 
 // A task is one panel: how often it refreshes and when it is next due.
@@ -145,7 +145,7 @@ function init() {
     if (toggleButton) toggleButton.addEventListener('click', togglePause);
 }
 
-document.addEventListener('rasconf:save-settings', saveSettings);
+document.addEventListener('berry:save-settings', saveSettings);
 document.addEventListener('click', event => {
     const disconnectButton = event.target.closest('.disconnect-device');
     if (disconnectButton) disconnectDevice(disconnectButton.dataset.deviceMac);

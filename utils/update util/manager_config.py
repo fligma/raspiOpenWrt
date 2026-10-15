@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from manager_const import (
+    ADDON_ID_TRANSLATIONS,
     APP_CONFIG_EXAMPLE_FILE,
     APP_CONFIG_FILE,
     BASE_DIR,
@@ -79,6 +80,22 @@ def _deep_copy(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
 
+# --- values an older layout wrote under a name this version retired ---
+
+#: The device folder the dashboard used to live in, and the name it lives under
+#: now. A profile still holding the old path is taken to have never been changed
+#: by hand, so it follows the shipped default; anything else is the user's own
+#: arrangement and is left exactly as it is.
+LEGACY_REMOTE_ROOTS = {"/www_rasconf": "/www_berry"}
+
+
+def _translate_remote_root(value: Any) -> str:
+    """The remote folder to work in: the stored path, with a retired default
+    moved to the name the same install now uses."""
+    text = str(value if value is not None else DEFAULT_PROFILE["remote_root"])
+    return LEGACY_REMOTE_ROOTS.get(text, text)
+
+
 # --- value normalisation (the UI can trust it) ---
 
 def _normalize_values(config: dict) -> dict:
@@ -120,7 +137,7 @@ def _normalize_values(config: dict) -> dict:
     config["host"] = str(config.get("host", DEFAULT_PROFILE["host"]))
     config["username"] = str(config.get("username", DEFAULT_PROFILE["username"]))
     config["key_file"] = str(config.get("key_file", ""))
-    config["remote_root"] = str(config.get("remote_root", DEFAULT_PROFILE["remote_root"]))
+    config["remote_root"] = _translate_remote_root(config.get("remote_root"))
     config["source"] = str(config.get("source", DEFAULT_PROFILE["source"]))
     config["luci_url"] = str(config.get("luci_url", "http://192.168.1.1/"))
     config["web_path"] = str(config.get("web_path", "/cgi-bin/index.py"))
@@ -460,9 +477,39 @@ def _migrate_web_tabs(config: dict) -> dict:
 
 # --- addons: which run, and their data ---
 
+def _translate_addon_ids(cleaned: dict) -> dict:
+    """Fold a retired addon's record onto the addon that replaced it.
+
+    An addon that ships inside the program and later becomes something the store
+    publishes leaves every profile holding a record under the old name, with the
+    switches the user set and the values the addon saved. Rather than let that
+    quietly fall back to off, the record is moved: where only the retired name
+    exists it simply becomes the successor's, and where both exist the successor
+    wins on every switch and its saved keys are kept, with the retired record
+    filling in whatever the newer one never had.
+    """
+    for gone, came in ADDON_ID_TRANSLATIONS.items():
+        old = cleaned.pop(gone, None)
+        if old is None:
+            continue
+        fresh = cleaned.get(came)
+        if not isinstance(fresh, dict):
+            cleaned[came] = old
+            continue
+        for field, value in old.items():
+            if field == "settings":
+                merged = dict(value if isinstance(value, dict) else {})
+                merged.update(fresh.get("settings") or {})
+                fresh["settings"] = merged
+            elif field not in fresh:
+                fresh[field] = value
+    return cleaned
+
+
 def _normalize_addons(config: dict) -> dict:
     """Keep addons a plain id -> {enabled, own_connection, ssh_enabled,
-    sftp_enabled, settings} map; unknown ids kept, each off and on the main
+    sftp_enabled, settings} map; a retired addon's record is folded onto the
+    addon that took its place, each off and on the main
     connection by default, with both of its transports allowed by default."""
     raw = config.get("addons")
     if not isinstance(raw, dict):
@@ -483,7 +530,7 @@ def _normalize_addons(config: dict) -> dict:
             "sftp_enabled": bool(record.get("sftp_enabled", True)),
             "settings": settings if isinstance(settings, dict) else {},
         }
-    config["addons"] = cleaned
+    config["addons"] = _translate_addon_ids(cleaned)
     return config
 
 

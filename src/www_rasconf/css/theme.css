@@ -1,0 +1,18 @@
+/* Written by the Berry web dashboard addon: the colours of the
+   Berry Manager theme that installed this page. Edit the theme,
+   not this file - an install writes it again. */
+:root {
+    --color-background: #121212;
+    --color-surface: #212121;
+    --color-surface-raised: #2e2e2e;
+    --color-surface-tab: #2a2a2a;
+    --color-line: #3c3c3c;
+    --color-field: #1a1a1a;
+    --color-accent: #c51a4a;
+    --color-accent-hover: #a0153c;
+    --color-text: #e0e0e0;
+    --color-muted: #aaaaaa;
+    --color-muted-strong: #8f8f8f;
+    --color-success: #23d18b;
+    --color-error: #ff6b6b;
+}

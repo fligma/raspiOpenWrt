@@ -394,7 +394,7 @@ class BerryManager(
         key_browse = QPushButton("Browse...")
         key_browse.clicked.connect(self.choose_key_file)
         self.remote_root_input = QLineEdit(str(self.app_config["remote_root"]))
-        self.remote_root_input.setPlaceholderText("/www_rasconf")
+        self.remote_root_input.setPlaceholderText("/www_berry")
         self.trust_host_checkbox = QCheckBox("Trust and save unknown host key on first connection")
         self.trust_host_checkbox.setChecked(bool(self.app_config["trust_unknown_host"]))
         self.trust_host_checkbox.setToolTip(
@@ -973,6 +973,44 @@ class BerryManager(
         except Exception as error:          # a toast is never worth a traceback
             self.log(f"tray notice failed: {error}")
 
+    def progress_notice(self, key: str, title: str, text: str = "",
+                        value: int = 0, maximum: int = 100) -> None:
+        """The live card of a job that is still running, one per speaker.
+
+        ``key`` names who is talking - an addon calls this through
+        ``api.ui.progress_notice``, which hands its own id - and the same key
+        gets the same card back with new figures on every step of its job. A
+        card filled to ``maximum`` holds a few seconds and closes itself; the
+        window owns them all, so a closing app takes them with it.
+        """
+        notices = getattr(self, "_progress_notices", None)
+        if notices is None:
+            notices = self._progress_notices = {}
+        name = str(key or "addon")
+        notice = notices.get(name)
+        try:
+            if notice is None:
+                from manager_widgets import ProgressNotice
+
+                notice = ProgressNotice(self)
+                notices[name] = notice
+            notice.show_notice(str(title or ""), str(text or ""),
+                               int(value), max(1, int(maximum)))
+        except Exception as error:          # a card is never worth a traceback
+            self.log(f"progress notice: {error}")
+
+    def progress_notice_close(self, key: str) -> None:
+        """Take one speaker's card away; nothing when it never showed one."""
+        notice = getattr(self, "_progress_notices", {}).get(str(key or "addon"))
+        if notice is None:
+            return
+        try:
+            notice.close_notice()
+            notice.deleteLater()
+        except RuntimeError:                # the window went with it already
+            pass
+        self._progress_notices.pop(str(key or "addon"), None)
+
     # Interface zoom
 
     def ui_zoom(self) -> int:
@@ -1215,7 +1253,7 @@ class BerryManager(
         try:
             remote_root = self.remote_root_input.text().strip()
             if not remote_root.startswith("/"):
-                raise ValueError("Remote directory must be an absolute path, such as /www_rasconf")
+                raise ValueError("Remote directory must be an absolute path, such as /www_berry")
             remote_root = posixpath.normpath(remote_root)
             if remote_root == "/":
                 raise ValueError("Remote directory cannot be the filesystem root")

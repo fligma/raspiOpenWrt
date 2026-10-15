@@ -6,7 +6,7 @@ things have to be true and none of them can be read off the source alone:
 
 * the tab's spec really turns into the controls the addon later sets, and every
   property it sets is one that widget understands - the same question
-  ``test_web_installer.py`` asks, asked here of a notebook inside a notebook,
+  ``test_berry_web.py`` asks, asked here of a notebook inside a notebook,
   trees with children, and a colour line;
 * the themes folder is there when the program starts, with one theme in it, and
   that theme is still the shipped sheet written out;
@@ -97,6 +97,23 @@ def kinds_of(spec: Any, found: dict | None = None) -> dict:
         for value in spec:
             kinds_of(value, out)
     return out
+
+
+def node_of(spec: Any, identifier: str) -> Any:
+    """The spec node that carries one ``id``, however deep it is nested."""
+    if isinstance(spec, dict):
+        if str(spec.get("id")) == identifier:
+            return spec
+        for value in spec.values():
+            got = node_of(value, identifier)
+            if got is not None:
+                return got
+    elif isinstance(spec, (list, tuple)):
+        for value in spec:
+            got = node_of(value, identifier)
+            if got is not None:
+                return got
+    return None
 
 
 # --- the api the addon is handed ---
@@ -558,6 +575,63 @@ def test_colours(mgr: Any, api: Api) -> None:
     mgr.picked_token = "accent"
 
 
+def test_colour_wheel(mgr: Any, api: Api) -> None:
+    """A colour changed in one move - from the button or a right-click - live."""
+    print("\n6b. the wheel on a token, in one go")
+    # The spec offers the direct route: a right-click on the tree and a button.
+    tree = node_of(mgr.tab_spec(), "tokens")
+    check(isinstance(tree, dict) and "context" in (tree.get("on") or []),
+          "the colour tree does not offer a right-click")
+    check("chgcolor" in mgr.COMMANDS, "'Change colour...' has no handler")
+    check(node_of(mgr.tab_spec(), "chgcolor") is not None,
+          "the 'Change colour...' button is not on the tab")
+    # The button: the wheel opens on the token and its answer lands in the draft.
+    mgr.open_draft(SECOND)
+    mgr.pick_from("token", {"text": "accent"})
+    was = api.times("ui.pick_color")
+    api.picked_colour = "#0a0b0c"
+    mgr.on_widget(mgr.TAB, "chgcolor", "clicked", {})
+    check(api.times("ui.pick_color") == was + 1,
+          "'Change colour...' did not open the wheel")
+    check(mgr.token_value("accent") == "#0a0b0c",
+          f"the wheel's colour never reached the draft: {mgr.token_value('accent')!r}")
+    check("accent is #0a0b0c" in api.said(), f"it said {api.said()!r}")
+    # The live preview: the maker's frame repaints with the change in it.
+    painted = str(api.sent("mpreview", "style") or "")
+    check(api.sets("mpreview", "style"),
+          "a colour change never redrew the maker's preview")
+    check("#0a0b0c" in painted,
+          f"the preview did not wear the change: {painted[:60]!r}")
+    # A right-click whose wheel is cancelled changes nothing.
+    api.picked_colour = ""
+    api.chosen = "Change colour (wheel)"
+    held = json.dumps(mgr.draft, sort_keys=True)
+    mgr.on_widget(mgr.TAB, "tokens", "context", {"text": "text"})
+    check(json.dumps(mgr.draft, sort_keys=True) == held,
+          "a cancelled right-click still moved the draft")
+    # A right-click that picks the wheel sets the very token it landed on.
+    api.picked_colour = "#151617"
+    mgr.on_widget(mgr.TAB, "tokens", "context", {"text": "text"})
+    check(mgr.token_value("text") == "#151617",
+          f"the right-click's wheel left text as {mgr.token_value('text')!r}")
+    # Reset to default puts the shipped colour back on the token.
+    base = mgr.shipped_color("text")
+    check(base, "there is no shipped colour for 'text' to reset to")
+    api.chosen = "Reset to default"
+    mgr.on_widget(mgr.TAB, "tokens", "context", {"text": "text"})
+    check(mgr.token_value("text") == base,
+          f"reset left text as {mgr.token_value('text')!r}, not {base!r}")
+    # A right-click on a heading - a row that is no token - is ignored.
+    api.chosen = "Change colour (wheel)"
+    api.picked_colour = "#999999"
+    before = json.dumps(mgr.draft, sort_keys=True)
+    mgr.on_widget(mgr.TAB, "tokens", "context", {"text": "not_a_token"})
+    check(json.dumps(mgr.draft, sort_keys=True) == before,
+          "a right-click on a heading changed a colour")
+    api.chosen = ""
+    api.picked_colour = ""
+
+
 # --- seven: the tab bar ---
 
 def test_knobs(mgr: Any, api: Api) -> None:
@@ -926,6 +1000,9 @@ def test_hooks(mgr: Any, api: Api) -> None:
                lambda: mgr.on_widget(mgr.TAB, "save", "clicked", {}),
                lambda: mgr.pick_from("doc", {"text": "name"}),
                lambda: mgr.theme_menu({"text": DEFAULT}),
+               lambda: mgr.change_picked_colour(),
+               lambda: mgr.token_menu({"text": "accent"}),
+               lambda: mgr.shipped_color("accent"),
                lambda: mgr.save_draft(True), lambda: mgr.show_page(2),
                lambda: mgr.preview_current(),
                lambda: mgr.open_appearance_settings(),
@@ -1112,6 +1189,7 @@ def main() -> int:
         test_colours(mgr, api)
         test_knobs(mgr, api)
         test_save(mgr, api)
+        test_colour_wheel(mgr, api)
         test_source(mgr, api)
         test_files(mgr, api)
         test_docs(mgr, api)

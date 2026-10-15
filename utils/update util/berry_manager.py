@@ -25,7 +25,9 @@ from manager_config import load_app_config
 from manager_const import ICON_FILES, find_asset
 import manager_splash
 import manager_theme
+from manager_addons import prune_retired_addons
 from manager_gui import BerryManager
+from manager_widgets import install_smart_tooltips
 
 
 def main() -> int:
@@ -39,6 +41,13 @@ def main() -> int:
     # Whatever way this process goes down, no addon child outlives it;
     # the window's own closing path releases them long before this runs.
     atexit.register(kill_all_trees)
+
+    # An addon this version no longer ships can still be sitting in ``addons``
+    # from an older install, with its settings beside it. That is cleared before
+    # the window looks for anything to run, so an upgrade never starts a retired
+    # addon or lists one in Settings, and what it saved moves to the addon that
+    # took its place. The words are kept for the window's own log.
+    cleared = prune_retired_addons()
 
     app = QApplication(sys.argv)
     app.setApplicationName("Berry Manager")
@@ -54,9 +63,15 @@ def main() -> int:
     # which changes nothing but the revision count.
     manager_theme.ensure_installed()
     manager_theme.use(boot_config.get("theme", "default"))
+    # The cursor-following, fading tool-tip is the whole window's business, so
+    # it goes on the application object once, before any window is built; the
+    # bubble then wears the theme that was just resolved.
+    install_smart_tooltips(app)
     manager_splash.show(boot_config)
 
     window = BerryManager()
+    for line in cleared:
+        window.log(line)
     window.fit_window_to_screen()
     window.show()
     # The window is on screen: the card has said everything it had to say.

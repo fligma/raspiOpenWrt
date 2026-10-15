@@ -33,8 +33,11 @@ usable theme.
 
 Editing happens on a *draft*: the theme in the editor's hand, held complete in
 memory, changed a token or a knob at a time and shown as JSON that can be typed
-into directly. Nothing reaches the disk until **Save**, and nothing reaches the
-window until **Apply**, so a look can be ruined without anyone noticing.
+into directly. A colour can be changed in one move - press **Change colour...**
+or right-click a token and pick the wheel - and the **Live preview** at the top
+of the maker repaints on every change, so the look is seen as it is made.
+Nothing reaches the disk until **Save**, and nothing reaches the window until
+**Apply**, so a look can be ruined without anyone noticing.
 
 The **Docs** sub-tab is laid out like the Addon Dev panel's: a tree of the
 ``api.theme`` calls under headings, beside the page each one opens. It is read
@@ -58,17 +61,18 @@ from addon_common import (AddonError, config_get, find_addon_picture, jsonable,
 
 ADDON = {
     "name": "Theme Manager",
-    "version": "1.2",
+    "version": "1.3",
     "author": "fligma",
     "description": "Makes, edits and downloads the .theme files the program is "
                    "drawn from: every look on disk with a live preview beside "
                    "the list, a store that reads themes.store on GitHub (the "
                    "bundled catalog included, with the commit each published "
                    "theme came from), an editor that works on one theme at a "
-                   "time - colours by their groups, the tab bar by its knobs, "
-                   "or the JSON direct - and a reference of every api.theme "
-                   "call. Themes are set in Settings > Appearance, which the "
-                   "tab links to.",
+                   "time - colours by their groups (change one with the wheel "
+                   "in a click, against a live preview), the tab bar by its "
+                   "knobs, or the JSON direct - and a reference of every "
+                   "api.theme call. Themes are set in Settings > Appearance, "
+                   "which the tab links to.",
     "requires": [],
     # A look is a file beside this program; no device is involved.
     "connection": "none",
@@ -1323,9 +1327,16 @@ def edit_sources(_checked: bool = False) -> None:
 
 # --- the preview: a theme drawn small, next to you the whole time ---
 
-def preview_spec(frame: str, note_id: str, tokens_id: str) -> dict:
-    """A sample of the interface the picked theme's sheet is painted onto."""
-    return {"kind": "group", "id": frame, "text": "What it looks like",
+def preview_spec(frame: str, note_id: str, tokens_id: str,
+                 title: str = "What it looks like") -> dict:
+    """A sample of the interface the picked theme's sheet is painted onto.
+
+    Enough of the common widgets are here - a heading, a line, buttons, a
+    checkbox, a combo and a progress bar - that a theme's accent, surface and
+    state colours all show at once; the sheet is laid on the whole group, so
+    every one of them wears the theme being previewed.
+    """
+    return {"kind": "group", "id": frame, "text": title,
             "children": [
                 {"kind": "label", "id": note_id,
                  "text": "Pick a theme to see it here.", "word_wrap": True},
@@ -1337,6 +1348,12 @@ def preview_spec(frame: str, note_id: str, tokens_id: str) -> dict:
                     {"kind": "button", "text": "A button"},
                     {"kind": "button", "text": "Another"},
                 ]},
+                {"kind": "row", "children": [
+                    {"kind": "check", "text": "a switch", "checked": True},
+                    {"kind": "combo", "items": ["one", "two", "three"],
+                     "expand": True},
+                ]},
+                {"kind": "progress", "value": 60},
                 {"kind": "table", "id": tokens_id, "columns": ["Colour", "Hex"],
                  "stretch": 1, "col_widths": [110],
                  "tooltip": "The theme's own colour tokens, and the colour "
@@ -1469,7 +1486,7 @@ def edit_page() -> dict:
     """The Theme Maker: start a look from a template, then change it token by
     token, knob by knob, or as JSON."""
     return {"kind": "column", "children": [
-        {"kind": "splitter", "sizes": [3, 2], "children": [
+        {"kind": "splitter", "sizes": [3, 3], "children": [
             {"kind": "group", "text": "A look that does not exist yet",
              "children": [
                  {"kind": "row", "children": [
@@ -1493,7 +1510,8 @@ def edit_page() -> dict:
                  {"kind": "label", "id": "tplnote", "text": "", "word_wrap": True,
                   "style": _HEAD_STYLE},
              ]},
-            preview_spec("mpreview", "mprevnote", "mprevtokens"),
+            preview_spec("mpreview", "mprevnote", "mprevtokens",
+                         title="Live preview"),
         ]},
         {"kind": "row", "children": [
             {"kind": "label", "text": "Editing", "style": _HEAD_STYLE},
@@ -1513,9 +1531,10 @@ def edit_page() -> dict:
         ]},
         {"kind": "splitter", "sizes": [5, 4], "children": [
             {"kind": "tree", "id": "tokens", "columns": ["Colour", "Hex"],
-             "on": ["selected"],
+             "on": ["selected", "context"],
              "tooltip": "Every colour the interface is painted with, in the "
-                        "blocks it is used for. Pick one and set it on the right."},
+                        "blocks it is used for. Pick one and set it on the "
+                        "right; right-click it to change it with the wheel."},
             {"kind": "column", "children": [
                 {"kind": "label", "id": "tokennote", "text": "", "word_wrap": True,
                  "style": _HEAD_STYLE},
@@ -1526,6 +1545,9 @@ def edit_page() -> dict:
                      "tooltip": "Type a colour, or press the chip for the wheel"},
                     {"kind": "button", "id": "wheel", "text": "Wheel...",
                      "on": ["clicked"], "tooltip": "The app's colour wheel"},
+                    {"kind": "button", "id": "chgcolor", "text": "Change colour...",
+                     "on": ["clicked"], "tooltip": "Open the wheel on the picked "
+                                                   "token and set it in one go"},
                     {"kind": "button", "id": "setcolor", "text": "Set colour",
                      "on": ["clicked"], "tooltip": "Put that colour on the "
                                                    "picked token in the draft"},
@@ -1741,6 +1763,10 @@ def show_draft() -> None:
         show_token(picked_token)
     elif picked_knob:
         show_knob(picked_knob)
+    # Repaint the maker's preview from the draft every time it changes, so the
+    # sample is live: a colour set on a token shows in the preview at once.
+    preview_theme(draft, str((draft or {}).get("name") or draft_name),
+                  "mpreview", "mprevnote", "mprevtokens")
 
 
 def token_value(token: str) -> str:
@@ -1902,6 +1928,57 @@ def pick_colour(_checked: bool = False) -> None:
         return
     if found:
         put("hex", found)
+
+
+def shipped_color(token: str) -> str:
+    """The colour the shipped theme gives a token, '' when it is not a colour."""
+    for group in (api.theme.groups() if api is not None else []):
+        for one in group.get("tokens") or []:
+            if str(one.get("name")) == str(token):
+                return str(one.get("color") or "")
+    return ""
+
+
+def change_picked_colour(_checked: bool = False) -> None:
+    """One go at the wheel for the picked token: open it, and set the answer.
+
+    This is the direct route the two-step 'Wheel...' then 'Set colour' used to
+    force: the wheel opens on the token's current colour, and a chosen colour
+    is applied straight to the draft and shown live in the preview.
+    """
+    if api is None:
+        return
+    if not picked_token:
+        say("pick a colour from the list first", bad=True)
+        return
+    try:
+        found = api.ui.pick_color(f"Set {picked_token}", token_value(picked_token))
+    except AddonError:
+        return
+    if not found:
+        return
+    if apply_change("colors", picked_token, one_line(found)):
+        show_draft()
+        say(f"{picked_token} is {one_line(found)}")
+
+
+def token_menu(payload: dict) -> None:
+    """Right-click a colour token: change it with the wheel, or reset it."""
+    if api is None:
+        return
+    name = one_line((payload or {}).get("text"))
+    if not name or not any(str(one.get("name")) == name for group in
+                           api.theme.groups() for one in (group.get("tokens") or [])):
+        return
+    show_token(name)
+    chosen = api.ui.choose(["Change colour (wheel)", "Reset to default"])
+    if chosen == "Change colour (wheel)":
+        change_picked_colour()
+    elif chosen == "Reset to default":
+        base = shipped_color(name)
+        if base and apply_change("colors", name, base):
+            show_draft()
+            say(f"{name} is back to {base}")
 
 
 def set_knob(_checked: bool = False) -> None:
@@ -2495,6 +2572,7 @@ COMMANDS = {
     "sapply": apply_picked_store, "sdetails": details_picked,
     "ssources": edit_sources,
     "newdraft": blank_draft, "setcolor": set_colour, "wheel": pick_colour,
+    "chgcolor": change_picked_colour,
     "setknob": set_knob, "getsource": show_source, "putsource": use_source,
     "save": lambda: save_draft(False),
     "saveapply": lambda: save_draft(True), "discard": discard_draft,
@@ -2579,6 +2657,9 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         return
     if kind == "context" and name == "themes":
         theme_menu(payload or {})
+        return
+    if kind == "context" and name == "tokens":
+        token_menu(payload or {})
         return
     if kind == "context" and name == "slist":
         store_menu(payload or {})

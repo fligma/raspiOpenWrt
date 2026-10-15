@@ -8,7 +8,7 @@
       "port": 22,
       "username": "root",
       "key_file": "",
-      "remote_root": "/www_rasconf",
+      "remote_root": "/www_berry",
       "source": "",
       "trust_unknown_host": false,
       "remember_password": false,
@@ -48,7 +48,7 @@
       "addons": {
         "berry": { "enabled": true, "ssh_enabled": true, "sftp_enabled": true,"settings": {} },
         "addon_store": { "enabled": true, "settings": {} },
-        "web_installer": { "enabled": false, "ssh_enabled": true, "sftp_enabled": true, "settings": {} },
+        "berry_web": { "enabled": false, "ssh_enabled": true, "sftp_enabled": true, "settings": {} },
         "manager_update": { "enabled": true, "settings": {} }
       },
       "quick_commands": [

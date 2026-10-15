@@ -64,7 +64,7 @@ nothing and simply tells the user about a connection the addon never opens - and
 one runs every `test_*.py` in
 `addons/_tests` against the stubbed app - a failing test fails the build, and
 the tests themselves are never packaged. The one test that asks the real
-repository - the web installer's GitHub route, the half that cannot be checked
+repository - **Berry web dashboard**'s GitHub route, the half that cannot be checked
 from the source alone - is handed this run's own token, because sixty anonymous
 GitHub requests an hour are shared by everything a runner does, the catalog job
 of the same push among them; when GitHub still refuses, or no token is there, that
@@ -137,9 +137,10 @@ marks the window paints its tabs with (`defaulttabicon.png`,
 `terminalicon.png`, `settingsicon.png` for the pinned Settings cog),
 `storedefaultaddon.png` as the store's placeholder card, and one per shipped
 addon - `berryicon.png`, `addon_storeicon.png`, `manager_updateicon.png`,
-`theme_managericon.png`, `web_installericon.png`. A downloadable addon's own
+`theme_managericon.png`. A downloadable addon's own
 picture does not live here: it is kept with its source in
-`addon.store/assets/<id>` - `openwrt_logs/openwrt_logsicon.png`,
+`addon.store/assets/<id>` - `berry_web/berry_webicon.png`,
+`openwrt_logs/openwrt_logsicon.png`,
 `openwrt_package_manager/openwrt_package_managericon.png`,
 `multi_ssh/multi_sshicon.png`, `cert_manager/cert_managericon.png` - and arrives
 inside the program the store builds for that addon.
@@ -370,8 +371,9 @@ The pages of the Settings bar, and what each holds:
   [A Settings page an addon owns](#a-settings-page-an-addon-owns)).
 - **Installed addons**, last, and a page under its own name for every shipped
   addon
-  - The addons that ship inside the app - Berry, the Web installer, the Berry
-    addon store and the Berry Manager update - each get a Settings page titled
+  - The addons that ship inside the app - Berry, the Berry
+    addon store, the Berry Manager update and the Theme Manager - each get a
+    Settings page titled
     with their own name, carrying
     their enable switch, their SSH and SFTP switches, their config panel and
     their connection indicators (see below). **Berry** is switched from its page,
@@ -846,11 +848,11 @@ The object in `init` is the only door into the app:
 | Namespace | What it gives |
 | --- | --- |
 | `api.id`, `api.name`, `api.log(text)`, `api.error(text)` | identity and the shared log |
-| `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the two an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request) and `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything) |
+| `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the four an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request), `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything), `addon_state(id)` (how that addon stands here - `installed`, `enabled` and `running` as one dict, read off the app's own records) and `set_addon_running(id, running)` (write the switch *and* load or stop the addon, answering with the same state dict) |
 | `api.device` | SSH and SFTP over the app's one main connection, or a connection of the addon's own: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download`. Every call is refused unless the master switch, that transport's app-wide switch, the addon's own switch on its Settings page and that transport's switch on the same row are all on, the transport is listed under `"requires"`, and the connection it reaches is the one `"connection"` declares - which for an addon sharing the app's session also means that connection has to be open. A `terminal` leaf in one of the addon's own tabs is judged by exactly these gates too, only reached through `api.tabs.set_widget` instead of this namespace (see **Addons in other languages**) |
 | `api.tabs` | `add_web_tab`, `add_tab` - each taking `position`, `pinned` and `icon_only` - `close`, `rename`, `activate`, `names`, `exists`, `url`, `navigate`, `reload`, `view`, `widget`, `set_widget`, `widget_value`, `set_html`, `inject_css`, `inject_js`, `set_style`, `set_icon`, `icon`, `use_app_icon`, `set_pinned` |
 | `api.theme` | the looks the window is drawn from, one JSON file each in `themes`: `name`, `names`, `exists`, `folder`, `read`, `raw`, `colors`, `color`, `tabs`, `metric`, `icon_px`, `chrome_px`, `shows_captions`, `shows_dots`, `groups`, `token_knobs`, `stylesheet`, `sheet_of`, `validate`, `templates`, `template_text`, `reference`, and the five that move them - `use`, `save`, `copy`, `rename`, `remove` |
-| `api.ui` | `information`, `warning`, `error`, `question`, `input(title, label, default, secret=False)` - one line of text, `None` when the box was cancelled, and `secret` draws dots while it is typed, `choose`, `popup(title, text)` - a notice the app raises for the addon, named for whoever raised it, `notify`, `menu_item`, `dialog`, `pick_color(title, initial)` - the colour wheel, answering `#rrggbb` or `""`, `pick_file(title, kind, filter, initial)` - a file box on this machine, `kind` being `open`, `save` or `folder` and nothing picked answering `""`, `set_setting_widget`, `window()` |
+| `api.ui` | `information`, `warning`, `error`, `question`, `input(title, label, default, secret=False)` - one line of text, `None` when the box was cancelled, and `secret` draws dots while it is typed, `choose`, `popup(title, text)` - a notice the app raises for the addon, named for whoever raised it, `notify`, `progress_notice(title, text, value, maximum)` - a small card over the window's corner with a bar and its percentage, re-shown on every step of a long job and holding a moment before fading when it fills, `progress_notice_close()` - take that card away now, `menu_item`, `dialog`, `pick_color(title, initial)` - the colour wheel, answering `#rrggbb` or `""`, `pick_file(title, kind, filter, initial)` - a file box on this machine, `kind` being `open`, `save` or `folder` and nothing picked answering `""`, `set_setting_widget`, `window()` |
 | `api.events` | `on(name, callback)` (returns the unsubscribe callable), `off`, `names` |
 | `api.settings` | the addon's own saved dict, per profile: `all`, `get`, `set`, `update`, `pop`, `remove` |
 | `api.settings_pages` | a page of the app's own Settings window that the addon owns - `add`, `remove`, `names`, `exists`, `title`, `set_title`, `activate`, `widget`, `set_widget`, `widget_value`, and `set_icon`, which says a settings page wears no mark and answers False |
@@ -1042,7 +1044,7 @@ of colour dabs), `addons/addon_store.py` (a bag with an arrow into it),
 page lined in the device colours), `addon.store/openwrt_package_manager.py` (a
 package box), `addon.store/multi_ssh.py` (two shells, one behind the other,
 since more than one at a time is the whole point) and
-`addons/web_installer.py` (a browser window lowering a page onto a tray).
+`addon.store/berry_web.py` (a berry lying on a page, inside a browser frame).
 
 Each of them looks for a real file first, and the search is one rule with two
 places to look: the file named `{id}icon.png`, tried in the folder the addon's
@@ -1077,8 +1079,9 @@ points it at whatever `api.session.app_icon()` returns - the same picture the
 window and toolbar wear - and it keeps pointing there, so switching to the
 alternate icon in View changes the tab's mark in the same breath. Choosing a
 mark with `set_icon` ends the follow; `use_app_icon(tab, False)` drops it and
-takes the mark away. Every shipped addon now wears a mark of its own instead,
-including `addons/web_installer.py`, which used to follow the logo; the call
+takes the mark away. Every addon that ships inside the program now wears a mark
+of its own instead, and so does the store's **Berry web dashboard**, which took
+over the installer that used to follow the logo; the call
 stays for an addon that would rather look like the program than like itself.
 
 ### A Settings page an addon owns
@@ -1167,7 +1170,11 @@ at the interface zoom), and its `value` - or `set_widget(tab, id, "image", ...)`
 than show the user a path. A `list`, `tree` or `table` entry can wear a mark of
 its own too: a list item as `{"text": ..., "icon": ...}`, a row as a dict with
 `"icon"` beside `"cells"`, and that picture is drawn in front of the row's first
-cell. `on`
+cell. A `table` can also wear a check box in front of one column: the spec names
+the column with `"checkbox"` and lets several rows be picked at once with
+`"multi"`, a row carries `"check": True/False` to start ticked or not, and a box
+the user moves reports `toggled` with the row's text and what it is ticked to.
+`on`
 lists the interactions to report back: `clicked`, `toggled`, `changed`,
 `returned`, `selected` and, for a `list`, `tree` or `table`, `context` - a
 right-click, carrying the text of the row under the cursor, so an addon can
@@ -1441,8 +1448,10 @@ manifest declares (the `ssh`/`sftp` transports it asks for, whose connection it
 rides, which api version it speaks), whether it is installed here, and which
 version was recorded beside that install. **Refresh** re-reads the catalogs and
 marks the rows *new* and *updated*, and works out which installed addons the
-store has since moved past, **Install** takes the chosen one, **Update** rebuilds
-one that is behind over the top of what is there, and **Delete** takes it back.
+store has since moved past, **Install** takes the chosen ones, **Update**
+rebuilds the chosen ones that are behind over the top of what is there, and
+**Delete** takes one back. The buttons work on the whole selection: ctrl-click
+picks several rows and one job then works through them in order.
 The tab wears its own mark - `assets/addon_storeicon.png`, the one name the rule
 allows, then the SVG held in `TAB_ICON` when no file is there - sent through
 `api.tabs.set_icon`, so a compiled copy keeps it too,
@@ -1466,16 +1475,28 @@ recorded beside the install in its manifest - `addons/<id>.json` next to a
 loose program, `addons/<id>/<id>.json` inside a folder install; dotted
 versions are compared as numbers so `1.10` beats `1.9`, and an install with no
 recorded version is taken for behind whatever the catalog names. A row in that
-state is marked *update available* in amber. Choosing **Update** asks first,
-then runs the same steps as an install - the program in `addons/` is replaced
-as the new one is copied in, and an install the store made as a one-file gives
-up its loose `.exe` to make room for the folder - but leaves the addon's
-`addons/_data/<id>/` settings and its switch in Settings > Addons exactly as
-they were, so an addon that was on stays on. A fresh install still lands
-switched off; an update does not switch anything.
+state is marked *update available* in amber. Choosing **Update** asks first -
+once for the whole batch when several are picked - and then runs the same steps
+as an install: the addon is stopped and switched off before anything is
+downloaded, so the running program is not holding the file the new one replaces,
+and what its switch said beforehand is remembered; the program in `addons/` is
+replaced as the new one is copied in, and an install the store made as a
+one-file gives up its loose `.exe` to make room for the folder. The addon's
+`addons/_data/<id>/` settings are never touched, and its switch in Settings >
+Addons is put back exactly where it was once the new program lands - an addon
+that was on comes back on with the rescan that ends the job, and one that was
+off stays off. A fresh install has no prior switch to honour and still lands
+switched off.
 
-An install is one job at a time, and the tab says what it is doing the whole
-way through:
+An installed addon's row wears a check box in the store's own list: ticking it
+switches that addon on and unticking it stops it, the same record and the same
+load-or-stop that Settings > Addons performs, so an addon can be woken up from
+the store without leaving the tab. The box is drawn from the app's live answer
+(`api.session.addon_state`), not from a file the store keeps, and moving one
+while a job is working is put right by the job's own last repaint.
+
+An install is one job - of one addon or of ten - and the tab says what it is
+doing the whole way through:
 
 1. the addon's `.py`, its assets under `assets/<id>` of that source's store
    folder and, when the source publishes one, its `test_<id>.py` are downloaded
@@ -1504,13 +1525,25 @@ way through:
    PyInstaller is not installed the store puts it in with `pip` rather than
    asking you to;
 4. the program lands in `addons/<id>/` (`<id>.exe` on Windows, `addon.bin` on
-   Linux), the downloads and the build are thrown away, and the addon is
-   written into the active profile as **switched off**, so nothing of it runs
-   until you turn it on;
+   Linux) and the downloads and the build are thrown away - an install writes
+   the addon into the active profile as **switched off**, so nothing of it runs
+   until you turn it on, and an update puts its switch back where it stood
+   before the job stopped it;
 5. Settings is rescanned and its row appears on the **Installed addons**
    page with a switch, its own SSH and SFTP switches, a config panel and -
    where its manifest declared `"connection": "both"` - an *own connection*
-   option, like any other addon's, waiting to be turned on.
+   option, like any other addon's, waiting to be turned on. The rescan reopens
+   whichever tab was showing when it started, so working in the store does not
+   throw the user somewhere else when it finishes.
+
+The whole of a job runs without holding the tab still, and it does not lean on
+the status line alone: every step also raises a small live card over the
+window's corner - `api.ui.progress_notice` - whose bar carries the percentage
+for the *whole* batch, a finished addon counting as one full share, so ten
+installs creep by tenths of a tenth and the number never runs back. The card
+fills to hundred on the job's last line, holds a few seconds and fades; a job
+that ends bad closes it straight away and the status line says how far the
+batch got before it stopped.
 
 Step 4 also writes down what the addon's own source declared, which is what
 makes that row a full one before the program has ever run: a `<id>.json`
@@ -1642,40 +1675,52 @@ check that refuses a doomed request, the script for each kind of key, both
 failure routes, the tab as Qt builds it and the icon it sends, and **Run test**
 in the Addon Dev tab runs it.
 
-### Shipped addon: Rasconf web installer
+### Store addon: Berry web dashboard
 
-`addons/web_installer.py` adds a **Web installer** tab and a Tools menu entry. It
-puts the dashboard the device serves - the tree under `src/www_rasconf` in this
-project's repository - onto the device *from GitHub*, so a Pi can be given the
-web interface from a machine that has the built `.exe` and no checkout of the
-repository anywhere near it. The files go into the current profile's remote
-folder - the root Berry opens on - over the connection panel's own SFTP
-settings.
+`addon.store/berry_web.py` adds a **Berry web** tab and a Tools menu entry, and
+is what puts the dashboard the device serves - the tree under `src/www_rasconf`
+in this project's repository - onto a Pi. It is installed from the store rather
+than shipped, and it is the successor of the addon that used to sit in
+`addons/web_installer.py`: the config keys are named the same, and an install
+that had that one carries its settings across by itself (see
+[What an upgrade clears](#what-an-upgrade-clears)).
+
+It looks before it acts. One SSH command asks the connected host whether the
+served folder is there and how many files it holds, what `uci` says
+`uhttpd.berry.home` is, whether `python3` is on the path, and what comes back
+when the host is asked for its own page on the configured port. A page that
+answers as the dashboard lands the tab on **Status**; a missing folder, a port
+that says nothing or a page that belongs to something else lands it on the
+**Installer**, where the work is.
 
 | Button | What it does |
 | --- | --- |
-| **Fetch files** | Asks GitHub what is in that folder at that branch or tag, downloads it into `addons/_data/web_installer/staging/`, asks the device what it already has, and fills the plan table. Writes nothing. |
-| **Install** | The same, and then, after one confirmation that lists what will happen: back the folder up on the device, write the files, tidy away the leftovers if the config asks, `chmod 755` the CGI entry, run the restart command, and ask the device for its own page. |
-| **Open dashboard** | The page in an embedded tab, following the profile's host |
-| **Restart web server** | The configured restart command and nothing else |
+| **Re-check** | That one command again, and the tab rearranged around the answer |
 | **Check page** | `curl`, or busybox `wget`, against `127.0.0.1` and then the address in the connection panel, and says whether the dashboard answered |
-| **Save to config** | Keeps what is in the form in `addons/_data/web_installer/config.json` |
-| **Reload from config** | Puts the saved values back into the form |
+| **Open dashboard** | The page in an embedded tab, following the profile's host |
+| **Fetch files** | Asks GitHub what is in that folder at that branch or tag, downloads it into `addons/_data/berry_web/staging/`, asks the device what it already has, and fills the plan table. Writes nothing. |
+| **Install** | The same, and then, after one confirmation that lists what will happen: back the folder up on the device, write the files, tidy away the leftovers if the config asks, write `css/theme.css` from the theme the app is wearing, set the uhttpd section up with `uci`, `chmod 755` the CGI entry, run the restart command, and ask the device for its own page |
+| **Read** / **Refresh** | `uci show uhttpd.<section>` and `/etc/config/uhttpd` into the **Raw file** page, read-only: the file is shown here, never written from here |
+| **Apply** | The options on the **Options** page, with `uci set` and one `uci commit`, then the read-back and the restart |
+| **Move folder to this name** | Renames the folder the server is using to the name in the form, points `uhttpd.<section>.home` at it, commits and restarts - `/www_rasconf` to `/www_berry` in one action |
+| **Restart web server** | The configured restart command and nothing else |
+| **Save to config** | Keeps what is in the forms in `addons/_data/berry_web/config.json` |
+| **Reload from config** | Puts the saved values back into the forms |
 | **Stop** | Gives up on the job in hand; what has already gone across stays on the device |
 
-The tab gives the whole width to what the job is doing: a header line carries
-where the files come from and where they land beside a chip that says whether
-the device is connected; a step flow across the top -
-`○ Files → ○ Compare → ○ Backup → ○ Write → ○ Restart → ○ Check` - lights the
-step running now, ticks the ones the route walked and dims the ones this job
-never takes; and three badges count the plan up (*N to write*, *N already
-there*, *N extra on device*) above a notebook of three pages - **Files**, the
-plan table, **Log**, and **Settings**, the form that used to spend half the
-width standing beside the plan in a split.
-The plan table is one row per file with its size, what the device has of it and
-what this job means to do - `new`, `already there`, `replaced`, `written again` -
-the row tinted by that action, so an update is read before it is run, and a
-look-around costs one API call and a download.
+The tab gives the whole width to what is happening: a header line carries where
+the files come from, which folder they land in and a chip saying whether this
+addon may reach the device over SFTP; a step flow across the top -
+`○ Files → ○ Compare → ○ Backup → ○ Write → ○ Serve → ○ Restart → ○ Check` -
+lights the step running now, ticks the ones the route walked and dims the ones
+this job never takes; and three badges count the plan up (*N to write*,
+*N already there*, *N extra on device*) above a notebook of three pages -
+**Status**, **Installer** (its own notebook of the plan table, the log and the
+install form) and **uhttpd** (the options form and the raw file). The plan table
+is one row per file with its size, what the device has of it and what this job
+means to do - `new`, `already there`, `replaced`, `written again` - the row
+tinted by that action, so an update is read before it is run, and a look-around
+costs one API call and a download.
 
 - A file whose size matches what is there is left alone (**Leave a file alone
   when its size matches**), which is what makes a second install take a second
@@ -1691,37 +1736,53 @@ look-around costs one API call and a download.
   dashboard's own layout and says out loud that a file added since would be
   missed there. A branch or tag that is not there is caught on the first file
   and stopped, rather than asked for twenty-one more times.
-- Everything is config: the repository, the ref, the folder inside it, the
-  subfolder of the remote directory, what is never sent, what is never deleted,
-  the backup folder, the entry file, the restart commands, the port and path to
-  check afterwards. Setting **Files come from** to **Local folder** installs
-  from a folder on this machine - the profile's own source by default - and then
-  needs no internet at all.
+- Everything is config: the repository, the ref, the folder inside it, what is
+  never sent, what is never deleted, the served folder's own name
+  (`web_home`, where the retired addon had only the profile's root plus a
+  subfolder), the uhttpd section, the port and path to check afterwards, the
+  backup folder, the entry file and the restart commands. Setting **Files come
+  from** to **Local folder** installs from a folder on this machine - the
+  profile's own source by default - and then needs no internet at all.
+- The words that reach the device are built from config, so each one is checked
+  on the way: a served folder is refused unless it is a plain absolute path, a
+  section name unless it is a bare word, and every value goes into `uci` inside
+  its own quotes. A move asks by name first and its script refuses outright when
+  the new name is already taken, because a `mv` onto an existing folder would
+  bury the dashboard inside it rather than replace it.
 - The job runs one file per `api.schedule.after` tick, so the bar and the table
   move the whole way through. Each stage of the route - finding the files,
-  downloading, asking the device, backing up, writing, tidying away, restarting,
-  checking the page - owns a weighted slice of the bar and writes its word inside
-  it, so the bar says what is happening and keeps moving while the device thinks;
-  the last file of a download no longer lands the job at 95% with four stages
-  still to go, and the bar ends full only when the route really is over. The two
-  one-command buttons use the bar the same way, and the step flow above it
-  follows the route stage by stage. The tab is a spec and its eight
-  buttons report through `on_widget`, and a compiled copy of this addon cannot
-  hold an SSH session (`device.open` is refused), so the same writing code sends
-  each file with `device.upload` instead - one connection per file rather than
-  one for the lot, which is the only thing that differs. Its mark is its own
-  too: `assets/web_installericon.png`, and the browser-window drawing held as
-  text in `TAB_ICON` when the file is missing - it no longer follows the
-  program's logo, so nothing it does depends on which logo the window is
-  wearing.
+  downloading, asking the device, backing up, writing, tidying away, painting
+  the page, setting the server up, restarting, checking - owns a weighted slice
+  of the bar and writes its word inside it, so the bar says what is happening and
+  keeps moving while the device thinks, and ends full only when the route really
+  is over. The one-command buttons use the bar the same way.
+- The page's colours come along with it: `css/theme.css` is written from
+  `api.theme.colors()` - the app's tokens onto the custom properties the
+  dashboard's own stylesheet declares - and uploaded with the rest, so the page
+  in the browser is the same colours as the window that installed it. The
+  committed copy under `src/www_rasconf/css/` carries the shipped default theme,
+  so a folder copied across by hand still looks right.
+- The tab is a spec and its thirteen buttons report through `on_widget`. The
+  manifest says `connection: "both"`, so a person may put it on a connection of
+  its own, which is also what lets a long transfer hold one session open instead
+  of opening one per file; on the app's session the same writing code sends each
+  file with `device.upload` instead, and paths above the profile's root -
+  `/www_berry` usually is one - go with `outside_root=True`. Its mark follows the
+  rule like every other addon's: `addon.store/assets/berry_web/berry_webicon.png`
+  when the file is there, and otherwise the browser-window-and-drupelets drawing
+  held as text in `TAB_ICON`.
 
-`addons/_tests/test_web_installer.py` drives the whole route - the tab built by
-Qt (its notebook, step flow and badges included), a real fetch from GitHub, an
-install against a faked device, the local
-folder, a branch that is not there, and the bar watched stage by stage: that it
-moves for every stage, names each one, never goes backwards and ends full - and
-**Run test** in the Addon Dev tab runs it, skipping the parts that need GitHub
-when this machine cannot reach it.
+`addon.store/_tests/test_berry_web.py` drives the whole route without a device -
+the tab built by Qt (its three pages, the nested uhttpd notebook, the tables and
+the step flow), a canned answer from a host read back five different ways, which
+page each answer lands the tab on, the `uci` script and every refusal in front of
+it, the move, the settings carried across from the retired addon, the stylesheet
+made from a fixed set of colours, and the bar watched stage by stage. Both routes
+the files come by are checked too: this checkout walked as the dashboard, and a
+repository list cut down to what is installed, with the built-in list standing in
+when GitHub refuses - the one half that asks the real repository running only when
+this machine names a token for it.
+**Run test** in the Addon Dev tab runs it.
 
 ### Shipped addon: Berry file manager
 
@@ -2120,7 +2181,7 @@ app reads that copy as a set of *shipped* addons:
   still written beside the `.exe`, in the writable `addons/_data/<id>/config.json`, so
   a shipped addon is configured per installation exactly like a dropped-in one.
 - "Shipped" is decided by a stable list, `manager_const.SHIPPED_ADDON_IDS`
-  (`berry`, `web_installer`, `addon_store`, `manager_update`, `theme_manager`),
+  (`berry`, `addon_store`, `manager_update`, `theme_manager`),
   on top of the
   `builtin` flag, so a
   source checkout - where `HAS_BUILTIN_ADDONS` is off - still gives those addons
@@ -2128,7 +2189,9 @@ app reads that copy as a set of *shipped* addons:
   page. The certificate, log, package and multi-ssh addons are not in that list:
   they live in `addon.store` and
   are installed from the store, which marks what it builds with an `origin` of
-  its own so the app puts it on the **Installed addons** page instead.
+  its own so the app puts it on the **Installed addons** page instead. The web
+  installer used to be in it; it is the store's **Berry web dashboard** now, and
+  is named in `RETIRED_SHIPPED_ADDON_IDS` for that reason.
 - Two addons of one id cannot both be *the* addon called `mytool`, and a file in
   the folder beats the copy inside the program - it is the one the user can read
   and change. The shipped copy is kept as the row's alternative, and the Addon
@@ -2159,6 +2222,59 @@ The rest of the frozen path model is unchanged:
 `config` and `addons/_data` are created beside the `.exe` on the first
 run, which is where the certificate addon's file ends up - also for an addon
 that came inside the program, since its settings are not the build's to keep.
+
+### What an upgrade clears
+
+An addon that stops shipping does not stop existing. Its file is gone from the
+build, but everything the *user's* side of the program wrote about it stays:
+
+- a copy in the addons folder - a loose `.py`, a program the Addon Dev tab
+  compiled (`.exe` or `.bin`), and the `<id>.json` manifest that came with it.
+  Discovery reads that folder whatever is in it, so such a copy is not inert: it
+  comes back as a drop-in addon row wearing a retired addon's code, which is the
+  one place a file nobody ships can still be run;
+- `addons/_data/<id>/` - the config the addon was given, its staging folder,
+  whatever else it kept beside it;
+- a record in every profile under `addons -> <id>`, saying whether it was
+  switched on, whether it ran on a connection of its own, which transports it
+  may use, and its own settings;
+- and, for the web installer, a `remote_root` naming the folder it installed
+  into.
+
+A new version that simply drops the addon would leave all four behind, and the
+user would meet a stale row in Settings and a folder nothing reads. So a retired
+addon is named rather than forgotten. `manager_const.RETIRED_SHIPPED_ADDON_IDS`
+lists the ids that used to ship, and `ADDON_ID_TRANSLATIONS` says which addon
+replaces each one - `web_installer` is answered by the store's `berry_web`. Two
+things read those tables:
+
+- `manager_addons.prune_retired_addons(log)` runs once at startup, from
+  `berry_manager.py` after the addon manager is built and before the tabs are
+  populated, so it lands on the first launch of a new version rather than on
+  somebody hunting for a cleanup. It removes the leftover program files and the
+  sidecar manifest, and it *moves* `addons/_data/<id>` onto the successor's
+  folder when that folder is not there yet - so an install that worked keeps its
+  repository, its token and its keep list instead of starting over. When the
+  successor's folder already exists the user has run the new addon, and the old
+  folder goes. It returns the lines it acted on, which are logged as they are
+  found, and touches nothing whose id it was not given.
+- `manager_config._normalize_addons` folds the profile's record the same way as
+  it is read: the retired id's switch and transports move onto the successor,
+  the successor's own record wins wherever both exist, and the retired key goes.
+  `_translate_remote_root` follows it, rewriting only the folder that was the
+  shipped default - `/www_rasconf` to `/www_berry` - because a path somebody
+  chose themselves is theirs, not a leftover of a renamed addon.
+
+What the device holds is deliberately not swept. `/www_rasconf` is left serving
+until the user presses **Move folder to this name**, which renames it, points
+`uhttpd.<section>.home` at the new name and restarts - because a folder an
+upgrade renames on its own is a dashboard that stops answering, and the old one
+can always be renamed back.
+
+`addons/_tests/test_retire.py` runs both halves against a folder it builds and
+tears down: the sweep's moves and deletions, what it leaves alone, and the
+config translation - a retired record folded onto its successor, a default path
+moved, a chosen one kept.
 
 ## Logs
 

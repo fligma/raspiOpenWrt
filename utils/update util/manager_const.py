@@ -49,7 +49,7 @@ def find_asset(filename: str) -> Path | None:
 #: The program's own version, the one the About dialog shows and the update
 #: addon compares against the tags published on GitHub (``berry`` + this).
 #: One line to change per release, everything else reads it from here.
-APP_VERSION = "1.6.6"
+APP_VERSION = "1.6.8"
 UPDATE_TAG_PREFIX = "berry"
 
 # --- file names and fixed identifiers ---
@@ -104,8 +104,20 @@ HARNESS_DIR = RESOURCE_DIR / "harness" if IS_COMPILED else BASE_DIR
 # An addon the store installs marks its own manifest instead,
 # so nothing here may claim it: these ids name the files in
 # ``addons`` and nothing published in ``addon.store``.
-SHIPPED_ADDON_IDS = {"berry", "web_installer", "addon_store",
+SHIPPED_ADDON_IDS = {"berry", "addon_store",
                      "manager_update", "theme_manager"}
+
+#: Addons the source used to ship and no longer does, with the addon that took
+#: their place. The id is not simply forgotten: a profile's record for the old
+#: name is folded onto the new one, so the switches somebody already set and the
+#: values an addon saved keep working when an installer becomes a store addon.
+ADDON_ID_TRANSLATIONS = {"web_installer": "berry_web"}
+
+#: Retired names whose leftovers in ``addons`` and ``addons/_data`` are swept on
+#: startup, by ``manager_addons.prune_retired_addons``. Anything still listed
+#: under ``ADDON_ID_TRANSLATIONS`` has its settings folder carried over rather
+#: than thrown away; a name only listed here is deleted outright.
+RETIRED_SHIPPED_ADDON_IDS = ("web_installer",)
 
 # Per-addon folder addons/_data/<id>/ holds its config.json
 # and fields.json. The underscore makes the scanner skip it,
@@ -148,7 +160,7 @@ DEFAULT_PROFILE = {
     "port": 22,
     "username": "root",
     "key_file": "",
-    "remote_root": "/www_rasconf",
+    "remote_root": "/www_berry",
     "source": str(DEFAULT_SOURCE),
     "trust_unknown_host": False,
     "remember_password": False,

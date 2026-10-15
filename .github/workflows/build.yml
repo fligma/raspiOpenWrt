@@ -228,6 +228,16 @@ jobs:
         python tools/make_addon_icons.py --check
         python tools/make_store_icons.py --check
 
+    - name: Check the dashboard's icons are the app's
+      working-directory: "utils/update util"
+      run: |
+        # The web dashboard wears the program's own mark as its favicon set and
+        # its home-screen tiles, drawn out of assets/icon.png by one tool. A
+        # logo that changed without those running would leave the browser
+        # showing an icon nothing else in the app shows, and no test would say
+        # so - the files are pictures, not code. See tools/make_web_icons.py.
+        python tools/make_web_icons.py --check
+
     - name: Check the theme store catalog is up to date
       working-directory: "utils/update util"
       run: |
@@ -246,12 +256,13 @@ jobs:
         # marks their tabs wear (● ○ ✓), which would abort the print itself.
         # With this, every child python writes UTF-8 whatever the console is.
         PYTHONIOENCODING: utf-8
-        # One test asks the real repository: the web installer's GitHub route is
-        # the half that cannot be checked from the source alone. Anonymous
-        # requests are capped at sixty an hour for a machine, and a runner spends
-        # that with every job on it - the catalog job of this very push among
-        # them - so the ask is made with this run's own token. Without one the
-        # test says so and skips that half rather than failing on a refusal.
+        # One test asks the real repository: the Berry web dashboard's GitHub
+        # route is the half that cannot be checked from the source alone.
+        # Anonymous requests are capped at sixty an hour for a machine, and a
+        # runner spends that with every job on it - the catalog job of this very
+        # push among them - so the ask is made with this run's own token. Without
+        # one the test says so and skips that half rather than failing on a
+        # refusal.
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         # Every addon's test lives beside it: the shipped addons in addons/_tests,

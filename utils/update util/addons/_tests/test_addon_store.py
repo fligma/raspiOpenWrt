@@ -27,6 +27,10 @@ Three things get looked at:
 * how the store works out that the catalog is ahead of what is installed: the
   version kept beside an install, the way two dotted versions are compared, and
   what Update refuses, asks and then does when it goes ahead;
+* the store's own switches and its batch: the row's check box that takes an
+  installed addon on and off, the stop-and-switch-off every job starts with and
+  the switch an update puts back, the live notice that counts the whole batch
+  in percent, and the queue that keeps going addon after addon;
 * the catalog generator that rebuilds ``index.json`` from the store folder, the
   store's rule that an addon's test is run before it is compiled, which Python
   it is allowed to build with, and how a refused pip install is retried;
@@ -582,7 +586,7 @@ def test_the_updates(store: Any) -> None:
     api = fresh(store)
     real_dir = store.addons_dir
     real_entries, real_updates = store.entries, store.updates
-    real_begin, real_python = store._begin, store._ensure_python
+    real_begin, real_python = store._begin_job, store._ensure_python
     real_dev, real_compile = store._dev, store._compile
     try:
         with tempfile.TemporaryDirectory() as where:
@@ -675,11 +679,16 @@ def test_the_updates(store: Any) -> None:
             api.answer("ui.question", True)
             began: list = []
 
-            def fake_begin(verb, entry=None):
-                began.append((verb, (entry or {}).get("id")))
-                store.job = {"verb": verb}
+            def fake_begin(verb, items):
+                began.append((verb, (items[0] or {}).get("id")))
+                store.job = {"verb": verb, "values": {}, "source": "",
+                             "stream": None, "on_ok": None, "fail": "",
+                             "lines": [], "harness": None, "widened": False,
+                             "details": {}, "id": "", "queue": list(items),
+                             "total": len(items), "done": 0, "restore": {},
+                             "did": []}
                 return store.job
-            store._begin = fake_begin
+            store._begin_job = fake_begin
             store._ensure_python = lambda: "python"
 
             class _Ready:
@@ -698,11 +707,258 @@ def test_the_updates(store: Any) -> None:
             check(store.job.get("id") == "hello_store"
                   and store.job.get("from_version") == "0.9",
                   f"the job did not remember what it was updating from: {store.job}")
+            # the switch is only stopped when the app says the addon is really
+            # running here: the stub answers that nothing is installed, so the
+            # job must not have written any switch on its way in
+            check(not api.called("session.set_addon_running"),
+                  "a job for an addon the app does not have still tried to stop it")
     finally:
         store.addons_dir = real_dir
         store.entries, store.updates = real_entries, real_updates
-        store._begin, store._ensure_python = real_begin, real_python
+        store._begin_job, store._ensure_python = real_begin, real_python
         store._dev, store._compile = real_dev, real_compile
+        store.job = None
+        store.working = False
+        store.shutdown()
+
+
+# --- three b2: the row's switch, the batch, and the live notice ---
+
+def test_the_switches(store: Any) -> None:
+    """The list's check boxes, a batch that works through its queue, the notice.
+
+    Nothing here reaches the network or a compiler: the job machinery is driven
+    on the stub api with the compile and the rescan stood in for, so what gets
+    read is the store's own doing - which switch it remembers, which it stops,
+    when it puts one back, how far the percentage has come, and the order a
+    batch keeps its addons in.
+    """
+    print("\n5f. the row's switch, the batch, and the live notice")
+    api = fresh(store)
+    real_dir = store.addons_dir
+    real_entries, real_updates = store.entries, store.updates
+    real_begin_job, real_python = store._begin_job, store._ensure_python
+    real_dev, real_compile = store._dev, store._compile
+    real_tidy, real_reload = store._tidy, store._reload
+    real_start, real_show = store._start_next, store.show_entries
+    try:
+        with tempfile.TemporaryDirectory() as where:
+            folder = Path(where)
+            store.addons_dir = lambda: folder
+            store.entries = store.parse_catalog(CATALOG)
+            store.updates = {}
+            odd = store.entry_for("odd_id")
+            (folder / "hello_store.exe").write_text("x", encoding="utf-8")
+
+            # an installed row wears the app's switch; an uninstalled one has none
+            api.answer("session.addon_state", {"installed": True, "enabled": True,
+                                               "running": True})
+            api.calls.clear()
+            store.show_entries()
+            byid = {store.find_entry(row["cells"][0])["id"]: row
+                    for row in (last_row_call(api) or [])}
+            check(byid["hello_store"].get("check") is True,
+                  f"the enabled addon's row wore no tick: {byid['hello_store']}")
+            check("check" not in byid["odd_id"],
+                  "a row nobody has installed gained a switch anyway")
+            api.answer("session.addon_state", {"installed": True, "enabled": False,
+                                               "running": False})
+            api.calls.clear()
+            store.show_entries()
+            byid = {store.find_entry(row["cells"][0])["id"]: row
+                    for row in (last_row_call(api) or [])}
+            check(byid["hello_store"].get("check") is False,
+                  "the switched-off addon's row was ticked as if it were on")
+
+            # the tick itself: the app's switch is written and the tab kept
+            api.answer("session.set_addon_running", {"installed": True,
+                                                     "enabled": True,
+                                                     "running": True})
+            api.calls.clear()
+            store.on_widget(store.TAB, "list", "toggled",
+                            {"text": "Hello from the store  \u25cf new",
+                             "checked": True, "cells": []})
+            check(api.asked("session.set_addon_running", "addon_id")
+                  == "hello_store"
+                  and api.asked("session.set_addon_running", "running") is True,
+                  f"a tick did not reach the app as a switch-on: "
+                  f"{api.last('session.set_addon_running')}")
+            check("switched hello_store on" in last_status(api),
+                  f"the switch did not say what it did: {last_status(api)!r}")
+            check(any(where == "tabs.activate" for where, _a, _n in api.calls),
+                  "an addon woken from the store stole the store's own tab")
+
+            # a tick during a job is the job's business, not the tick's
+            store.working = True
+            api.calls.clear()
+            store.on_widget(store.TAB, "list", "toggled",
+                            {"text": "Hello from the store", "checked": False})
+            check(not api.called("session.set_addon_running"),
+                  "a tick during a job moved a switch the job was holding")
+            store.working = False
+
+            # a job stops the addon it is about to replace, and remembers how
+            # the switch stood; an addon the app does not have is left alone
+            api.answer("session.addon_state", {"installed": True, "enabled": True,
+                                               "running": True})
+            store.job = {"verb": "update", "restore": {}, "total": 1, "done": 0}
+            api.calls.clear()
+            store._prep_one("hello_store")
+            check(store.job["restore"] == {"hello_store": True},
+                  f"the job did not remember the switch it took over: "
+                  f"{store.job['restore']}")
+            check(api.asked("session.set_addon_running", "running") is False,
+                  "the addon was left running while its file is replaced")
+            api.calls.clear()
+            api.answer("session.addon_state", {"installed": False,
+                                               "enabled": False, "running": False})
+            store._prep_one("odd_id")
+            check("odd_id" not in store.job["restore"],
+                  "an addon the app does not have was remembered anyway")
+            check(not api.called("session.set_addon_running"),
+                  "a job tried to stop an addon that is not running here")
+            api.calls.clear()
+            store._restore_enabled("hello_store")
+            check(api.asked("session.set_addon_enabled", "addon_id")
+                  == "hello_store"
+                  and api.asked("session.set_addon_enabled", "enabled") is True,
+                  "the update did not put the switch back where it was found")
+            api.calls.clear()
+            store._restore_enabled("odd_id")
+            check(not api.called("session.set_addon_enabled"),
+                  "a fresh install's switch was written as if it were an update")
+            store.job = None
+
+            # the notice: the percentage is the whole batch's, and the ending
+            # either fills it or closes it
+            store.job = {"total": 2, "done": 1}
+            api.calls.clear()
+            store._progress("compiling widget...", 0.5)
+            check(api.called("ui.progress_notice")
+                  and api.asked("ui.progress_notice", "value") == 75
+                  and api.asked("ui.progress_notice", "maximum") == 100,
+                  f"the batch's half-way did not read 75 percent: "
+                  f"{api.last('ui.progress_notice')}")
+            check("2 of 2: compiling widget..." in last_status(api),
+                  f"the status line did not count the batch: {last_status(api)!r}")
+            store.job = {"total": 3, "done": 1}
+            api.calls.clear()
+            store._finish("the download stopped", bad=True)
+            check(api.called("ui.progress_notice_close"),
+                  "a job that ended bad left its notice hanging on screen")
+            check("stopped after 1 of 3" in last_status(api),
+                  f"the failed batch did not say how far it got: "
+                  f"{last_status(api)!r}")
+            store.job = {"total": 1, "done": 1}
+            api.calls.clear()
+            store._finish("installed addons/widget")
+            check(api.asked("ui.progress_notice", "value") == 100,
+                  "the job's last line never filled the notice to hundred")
+            store.job, store.working = None, False
+
+            # the batch install: two rows picked, one question, the queue held
+            (folder / "hello_store.exe").unlink()
+            api.answer("session.addon_state", {"installed": False,
+                                               "enabled": False, "running": False})
+            api.answer("tabs.widget_value",
+                       ["Hello from the store  \u25cf new", "Odd"])
+            api.answer("ui.question", True)
+            compiled: list = []
+            store._ensure_python = lambda: "python"
+
+            class _Ready:
+                @staticmethod
+                def pyinstaller_ready():
+                    return True, ""
+            store._dev = lambda: _Ready()
+            store._compile = lambda ident: compiled.append(ident)
+            api.calls.clear()
+            store.install_selected()
+            check(store.job is not None and store.job.get("total") == 2
+                  and [entry["id"] for entry in store.job["queue"]] == ["odd_id"],
+                  f"the batch did not start with the second addon queued: "
+                  f"{store.job}")
+            check(compiled == ["hello_store"],
+                  f"the batch did not set the first addon building: {compiled}")
+            check([arguments for where, arguments, _n in api.calls
+                   if where == "ui.question"]
+                  and api.calls and "Install 2 addons" in
+                  str([a for _w, a, _n in api.calls if _w == "ui.question"][-1][1]),
+                  "a two-addon install asked per addon, or not at all")
+
+            # and the queue goes on from a finished addon; only its last one
+            # ends the job and asks for the rescan
+            started: list = []
+            reloads: list = []
+            store._tidy = lambda ident: None
+            store._reload = lambda: reloads.append("reload")
+            store._start_next = lambda: started.append(
+                [entry["id"] for entry in (store.job or {}).get("queue") or []])
+
+            class _Step:
+                def staged_name(self, ident, onefile, root=None):
+                    made = folder / f"{ident}.staged.exe"
+                    made.write_text("x", encoding="utf-8")
+                    return made
+
+                def install_build(self, staged, ident, onefile):
+                    target = folder / ident / f"{ident}.exe"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("x", encoding="utf-8")
+                    return target
+            store._dev = lambda: _Step()
+            api.calls.clear()
+            store._install_step("hello_store")
+            check(started == [["odd_id"]] and store.job is not None
+                  and store.job["done"] == 1,
+                  f"the first addon of the batch did not hand on to the next: "
+                  f"{started} / {store.job}")
+            check(not reloads,
+                  "the rescan came before the batch's last addon")
+            store._start_next = real_start
+            store.job["queue"] = []
+            store._install_step("odd_id")
+            check("installed 2 addons - hello_store, odd_id" in last_status(api),
+                  f"the batch did not end by naming what it installed: "
+                  f"{last_status(api)!r}")
+            check(reloads == ["reload"] and store.job is None
+                  and not store.working,
+                  f"the batch's end did not close itself and rescan: {reloads} "
+                  f"/ {store.job}")
+
+            # the batch update: only what is behind is taken, in one job, and
+            # it is asked for once
+            store.entries = store.parse_catalog({"addons": [
+                {"id": "hello_store", "name": "Hello", "version": "1.1"},
+                {"id": "odd_id", "name": "Odd", "version": "0.2"}]})
+            (folder / "hello_store.json").write_text('{"version": "1.0"}',
+                                                     encoding="utf-8")
+            (folder / "odd_id" / "odd_id.json").parent.mkdir(parents=True,
+                                                              exist_ok=True)
+            (folder / "odd_id" / "odd_id.json").write_text('{"version": "0.1"}',
+                                                           encoding="utf-8")
+            api.answer("tabs.widget_value", ["Hello", "Odd"])
+            api.answer("ui.question", True)
+            began: list = []
+            store._begin_job = lambda verb, items: (
+                began.append((verb, [entry["id"] for entry in items])), None)[1]
+            store._start_next = lambda: None
+            api.calls.clear()
+            store.update_selected()
+            check(began == [("update", ["hello_store", "odd_id"])],
+                  f"the picked update did not take both behind addons at once: "
+                  f"{began}")
+            asked = [arguments for where, arguments, _n in api.calls
+                     if where == "ui.question"]
+            check(asked and str(asked[-1][0]) == "Update addons",
+                  "a two-addon update asked per addon, or not at all")
+    finally:
+        store.addons_dir = real_dir
+        store.entries, store.updates = real_entries, real_updates
+        store._begin_job, store._ensure_python = real_begin_job, real_python
+        store._dev, store._compile = real_dev, real_compile
+        store._tidy, store._reload = real_tidy, real_reload
+        store._start_next, store.show_entries = real_start, real_show
         store.job = None
         store.working = False
         store.shutdown()
@@ -2212,6 +2468,7 @@ def main() -> int:
     test_the_pane(store)
     test_installed(store)
     test_the_updates(store)
+    test_the_switches(store)
     test_the_sources(store)
     test_bundled_assets(store)
     test_the_generator(store)
