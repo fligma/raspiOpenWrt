@@ -815,7 +815,15 @@ def test_the_icon() -> None:
     icon = str(api.last("tabs.set_icon")[1][1])
     check(icon.endswith("berry_webicon.png") or icon.startswith("<svg"),
           f"the tab was handed something odd as its mark: {icon[:60]!r}")
-    picture = ROOT / "addon.store" / "assets" / "berry_web" / berry_web.TAB_ICON_FILE
+    # Where the picture is depends on how this test runs: read from the
+    # repository it sits in addon.store/assets/<id>/; run by the store as part
+    # of an install, the very same file is downloaded flat beside this test.
+    # Either is the mark the store is expected to show, so neither may fail it.
+    here = Path(__file__).resolve().parent
+    candidates = [here / "assets" / berry_web.TAB_ICON_FILE,
+                  ROOT / "addon.store" / "assets" / "berry_web"
+                  / berry_web.TAB_ICON_FILE]
+    picture = next((one for one in candidates if one.is_file()), candidates[-1])
     check(picture.is_file(), f"the store card has no picture at {picture}")
     berry_web.shutdown()
 
