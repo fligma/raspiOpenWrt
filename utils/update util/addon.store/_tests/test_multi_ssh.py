@@ -188,8 +188,15 @@ def test_manifest(addon: Any, api: Api) -> None:
           "the manifest names no picture, so the store picks one by the rule")
     check(addon.TAB_ICON_FILE == "multi_sshicon.png",
           f"the tab's mark follows {{addon}}icon.png: {addon.TAB_ICON_FILE!r}")
-    picture = (ROOT / "addon.store" / "assets" / "multi_ssh"
-               / addon.TAB_ICON_FILE)
+    # Where the picture is depends on how this test runs: read from the
+    # repository it sits in addon.store/assets/<id>/; run by the store as part
+    # of an install, the very same file is downloaded flat beside this test.
+    # Either is the mark the store is expected to show, so neither may fail it.
+    here = Path(__file__).resolve().parent
+    candidates = [here / "assets" / addon.TAB_ICON_FILE,
+                  ROOT / "addon.store" / "assets" / "multi_ssh"
+                  / addon.TAB_ICON_FILE]
+    picture = next((one for one in candidates if one.is_file()), candidates[-1])
     check(picture.is_file(), f"{picture.name} is in the store's assets folder")
     # The tab's shape, since the fake container trusts it rather than building
     # it: a sessions container, standing in for itself while it is empty.

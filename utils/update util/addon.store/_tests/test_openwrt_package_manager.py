@@ -155,8 +155,15 @@ def test_manifest_and_config(addon: Any, api: Api) -> None:
           "the manifest names no picture, so the store picks one by the rule")
     check(addon.TAB_ICON_FILE == "openwrt_package_managericon.png",
           f"the tab's own mark follows {{addon}}icon.png: {addon.TAB_ICON_FILE!r}")
-    picture = (ROOT / "addon.store" / "assets" / "openwrt_package_manager"
-               / addon.TAB_ICON_FILE)
+    # Where the picture is depends on how this test runs: read from the
+    # repository it sits in addon.store/assets/<id>/; run by the store as part
+    # of an install, the very same file is downloaded flat beside this test.
+    # Either is the mark the store is expected to show, so neither may fail it.
+    here = Path(__file__).resolve().parent
+    candidates = [here / "assets" / addon.TAB_ICON_FILE,
+                  ROOT / "addon.store" / "assets" / "openwrt_package_manager"
+                  / addon.TAB_ICON_FILE]
+    picture = next((one for one in candidates if one.is_file()), candidates[-1])
     check(picture.is_file(), f"{picture.name} is in the store's assets folder")
     addon.init(api)
     check(api.called("config.declare"), "addon must declare its config form")

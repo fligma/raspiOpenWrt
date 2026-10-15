@@ -499,8 +499,15 @@ def test_the_mark(app: Any) -> None:
               "the trophy is pasted onto a background square instead of being drawn")
     check(cert_manager.TAB_ICON_FILE == "cert_managericon.png",
           f"the tab's mark follows {{addon}}icon.png: {cert_manager.TAB_ICON_FILE!r}")
-    shipped = (ROOT / "addon.store" / "assets" / "cert_manager"
-               / cert_manager.TAB_ICON_FILE)
+    # Where the picture is depends on how this test runs: read from the
+    # repository it sits in addon.store/assets/<id>/; run by the store as part
+    # of an install, the very same file is downloaded flat beside this test.
+    # Either is the mark the store is expected to show, so neither may fail it.
+    here = Path(__file__).resolve().parent
+    candidates = [here / "assets" / cert_manager.TAB_ICON_FILE,
+                  ROOT / "addon.store" / "assets" / "cert_manager"
+                  / cert_manager.TAB_ICON_FILE]
+    shipped = next((one for one in candidates if one.is_file()), candidates[-1])
     check(shipped.is_file(), f"{shipped.name} is in the store's assets folder")
     _check_the_lookup()
     if app is None:
