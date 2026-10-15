@@ -1929,6 +1929,11 @@ def _begin(verb: str, entry: dict | None = None) -> dict:
     except AddonError:
         pass
     note(f"{job['source']}: this job reads the store from here")
+    # The page hears the job once, here. The steps themselves go only to the
+    # floating notice: a status line rewritten on every one of them reads as
+    # a flicker in the middle of the tab while the card's bar already counts
+    # the same work up in the corner.
+    say(f"{verb} starting...")
     _progress(f"{verb} starting...", 0.0)
     return job
 
@@ -1977,13 +1982,16 @@ def _finish(text: str, bad: bool = False) -> None:
 
 
 def _progress(text: str, frac: float) -> None:
-    """One step of the job: the status line, and the live notice's percentage.
+    """One step of the job: the live notice's line and its percentage.
 
     The percentage covers the whole batch: a finished addon counts as one full
     share and the one in hand contributes its part of a share, so the bar of
     ten installs creeps by tenths of a tenth and never runs back. Only the
     ending itself reaches hundred percent, because the notice holds and fades
     the moment it is filled.
+
+    Nothing here touches the tab's status line - the download notice wears the
+    steps, and the page hears the job only at its start and its end.
     """
     if api is None or job is None:
         return
@@ -1996,7 +2004,6 @@ def _progress(text: str, frac: float) -> None:
         api.ui.progress_notice("Berry addon store", line, percent, 100)
     except Exception:
         pass
-    say(line)
 
 
 def _prep_one(id_value: str) -> None:
@@ -2468,17 +2475,20 @@ def _clear_old_flat(id_value: str) -> None:
     """Take out a one-file install of ours before the folder takes its place.
 
     A store build before this one left ``addons/<id>.exe`` and its manifest
-    loose in the addons folder. An update now copies a folder program into
-    ``addons/<id>/``, and two same-id programs leave the app guessing, so the
-    old pair goes first - only when the loose manifest says the store wrote
-    it, since anything else of that name is somebody else's.
+    loose in the addons folder, and on a machine with no executable suffix the
+    one-file program is the bare ``addons/<id>`` - the very name a folder build
+    needs, where it would refuse to land. An update now copies a folder program
+    into ``addons/<id>/``, and two same-id programs leave the app guessing, so
+    the old lot goes first - only when the loose manifest says the store wrote
+    it, since anything else of that name is somebody else's. The folder itself
+    is never one of these candidates: a file is what is cleared here.
     """
     folder = addons_dir()
     name = clean_id(id_value)
     if not name or addon_origin(folder, id_value) != STORE_ORIGIN:
         return
     for stale in (folder / f"{name}.exe", folder / f"{name}.bin",
-                  folder / f"{name}.json"):
+                  folder / f"{name}.json", folder / name):
         try:
             if stale.is_file():
                 stale.unlink()

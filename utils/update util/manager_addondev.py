@@ -3691,20 +3691,28 @@ def write_test(addon_id: str, tab: str = "") -> Path:
 
 
 def install_build(staged: Path, addon_id: str, onefile: bool) -> Path:
-    """Move the build result where the runtime looks: ``addons/<id>.exe`` or ``addons/<id>/``."""
+    """Move the build result where the runtime looks: ``addons/<id>.exe`` or ``addons/<id>/``.
+
+    An older install of the same id goes first whichever shape it was left in:
+    on a machine with no executable suffix a one-file program and a folder
+    program both want the bare name ``addons/<id>``, so the build landing now
+    replaces what stands there rather than arguing with it. The store has
+    already stopped the addon before calling this, and the Addon Dev tab only
+    ever writes an id it is building itself.
+    """
+    if not str(addon_id or "").strip() or str(addon_id).strip() in (".", ".."):
+        raise OSError("the build has no addon id to install under")
+    for stale in (ADDONS_DIR / f"{addon_id}{ADDON_EXECUTABLE_SUFFIX}",
+                  ADDONS_DIR / addon_id):
+        if stale.is_dir():
+            shutil.rmtree(stale)
+        elif stale.is_file():
+            stale.unlink()
     if onefile:
         target = ADDONS_DIR / f"{addon_id}{ADDON_EXECUTABLE_SUFFIX}"
-        if target.is_dir():
-            raise OSError(f"{target} is a folder")
-        if target.exists():
-            target.unlink()
         shutil.copy2(staged, target)
         return target
     target = ADDONS_DIR / addon_id
-    if target.exists():
-        if not target.is_dir():
-            raise OSError(f"{target} is a file, not the folder this build needs")
-        shutil.rmtree(target)
     shutil.copytree(staged.parent, target)
     program = target / staged.name
     if ADDON_EXECUTABLE_SUFFIX == "":

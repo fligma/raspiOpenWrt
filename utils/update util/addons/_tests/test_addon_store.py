@@ -829,8 +829,9 @@ def test_the_switches(store: Any) -> None:
                   "a fresh install's switch was written as if it were an update")
             store.job = None
 
-            # the notice: the percentage is the whole batch's, and the ending
-            # either fills it or closes it
+            # the notice: the percentage is the whole batch's and the notice
+            # alone wears the steps - the page's status line is not rewritten
+            # mid-job - and the ending either fills the card or closes it
             store.job = {"total": 2, "done": 1}
             api.calls.clear()
             store._progress("compiling widget...", 0.5)
@@ -839,8 +840,13 @@ def test_the_switches(store: Any) -> None:
                   and api.asked("ui.progress_notice", "maximum") == 100,
                   f"the batch's half-way did not read 75 percent: "
                   f"{api.last('ui.progress_notice')}")
-            check("2 of 2: compiling widget..." in last_status(api),
-                  f"the status line did not count the batch: {last_status(api)!r}")
+            check(api.asked("ui.progress_notice", "text")
+                  == "2 of 2: compiling widget...",
+                  f"the notice did not count the batch: "
+                  f"{api.last('ui.progress_notice')}")
+            check(last_status(api) == "",
+                  f"a live step rewrote the page's status line: "
+                  f"{last_status(api)!r}")
             store.job = {"total": 3, "done": 1}
             api.calls.clear()
             store._finish("the download stopped", bad=True)
@@ -858,6 +864,27 @@ def test_the_switches(store: Any) -> None:
 
             # the batch install: two rows picked, one question, the queue held
             (folder / "hello_store.exe").unlink()
+
+            # the old loose shapes go before the folder takes their name: on a
+            # Unix machine the one-file program is the bare addons/<id>, the
+            # very name this build wants for its folder, and only a manifest
+            # the store wrote says the store may clear it
+            (folder / "hello_store.json").write_text(
+                json.dumps({store.ORIGIN_KEY: store.STORE_ORIGIN}),
+                encoding="utf-8")
+            (folder / "hello_store").write_text("x", encoding="utf-8")
+            (folder / "hello_store.exe").write_text("x", encoding="utf-8")
+            store._clear_old_flat("hello_store")
+            check(not (folder / "hello_store").is_file()
+                  and not (folder / "hello_store.exe").exists(),
+                  "a loose store program of the addon's own name was left "
+                  "to block the folder")
+            (folder / "odd_id").write_text("x", encoding="utf-8")
+            store._clear_old_flat("odd_id")
+            check((folder / "odd_id").is_file(),
+                  "a program the store never installed was cleared anyway")
+            (folder / "odd_id").unlink()
+
             api.answer("session.addon_state", {"installed": False,
                                                "enabled": False, "running": False})
             api.answer("tabs.widget_value",
@@ -878,6 +905,8 @@ def test_the_switches(store: Any) -> None:
                   and [entry["id"] for entry in store.job["queue"]] == ["odd_id"],
                   f"the batch did not start with the second addon queued: "
                   f"{store.job}")
+            check("install starting" in last_status(api),
+                  f"the page never heard the job begin: {last_status(api)!r}")
             check(compiled == ["hello_store"],
                   f"the batch did not set the first addon building: {compiled}")
             check([arguments for where, arguments, _n in api.calls

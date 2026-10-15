@@ -1131,6 +1131,11 @@ class ProgressNotice(QFrame):
         self.adjustSize()
         self._place()
         self.show()
+        # A window manager is free to ignore where a window was put before it
+        # was ever mapped, which leaves the card sitting in the middle of the
+        # screen; placing again once it is visible pins it to the corner the
+        # first place only aimed at.
+        self._place()
         if shown >= limit:
             self._hold_then_close()
 
