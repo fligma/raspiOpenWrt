@@ -92,6 +92,7 @@ from manager_net import (
     SharedSessionWorker,
     credential_id,
 )
+import manager_splash
 import manager_theme
 from manager_terminal import TerminalMixin
 from manager_widgets import (
@@ -145,6 +146,7 @@ class BerryManager(
         self.tray: QSystemTrayIcon | None = None
         self.tray_menu: QMenu | None = None
         self.app_config = load_app_config()
+        manager_splash.progress(0.10, "Reading your settings")
         self.addons = AddonManager(self)
         self._cert_bypass_session = cert_bypass_active()
         self.current_term_color = "#e0e0e0"
@@ -167,19 +169,28 @@ class BerryManager(
         # the first stylesheet the window ever sets is already the right one.
         manager_theme.ensure_installed()
         manager_theme.use(self.app_config.get("theme", "default"))
+        manager_splash.progress(0.25, "Fitting the look")
 
         self.build_menu()
+        manager_splash.progress(0.40, "Building the menu")
         self.build_ui()
+        manager_splash.progress(0.60, "Building the window")
         self.apply_runtime_settings()
         self.apply_window_icon()
+        manager_splash.progress(0.70, "Polishing the panels")
         self.build_tray()
 
+        # The addon phase reports itself: reload() and start_done() name every
+        # addon as they read it in and tell it to begin, across their own band
+        # of the bar (see manager_splash.addon_step).
+        manager_splash.progress(0.72, "Looking for addons")
         self.addons.reload()
         self.addons.start_done()
         self.sync_tab_transport_dots()
         self._natural_tab_order = self.capture_tab_order()
         self._apply_remembered_order()
         self._select_default_tab()
+        manager_splash.progress(0.95, "Arranging the tabs")
 
         # One main connection carries both transports, so one switch brings it
         # up at startup; the terminal attaches to it from there. It comes up for
@@ -1948,6 +1959,18 @@ class BerryManager(
             bool(self.app_config.get("system_notifications", True)))
         startup_form.addRow(self.notify_check)
 
+        self.splash_check = ToggleSwitch("Show the startup splash")
+        self.splash_check.setToolTip(
+            "The card that appears while the program is opening: the logo, "
+            "the part of the boot it is loading and a bar with a percentage, "
+            "painted from the theme in force. Switching it off opens the "
+            "window straight away, with nothing on screen saying what the "
+            "program is doing while it builds."
+        )
+        self.splash_check.setChecked(
+            bool(self.app_config.get("splash_enabled", True)))
+        startup_form.addRow(self.splash_check)
+
         self.logging_group, log_form = self._make_toggle_group(
             "Enable logging to file", bool(self.app_config.get("logging_enabled", True))
         )
@@ -2081,6 +2104,7 @@ class BerryManager(
         self.app_config["ignore_cert_errors"] = self.cert_bypass_check.isChecked()
         self.app_config["addon_dev_enabled"] = self.addon_dev_check.isChecked()
         self.app_config["system_notifications"] = self.notify_check.isChecked()
+        self.app_config["splash_enabled"] = self.splash_check.isChecked()
         self.app_config["remember_tab_order"] = self.tab_order_check.isChecked()
         self.save_app_config()
         self.apply_runtime_settings()
@@ -2210,6 +2234,10 @@ class BerryManager(
         self.notify_check.blockSignals(True)
         self.notify_check.setChecked(bool(cfg.get("system_notifications", True)))
         self.notify_check.blockSignals(False)
+
+        self.splash_check.blockSignals(True)
+        self.splash_check.setChecked(bool(cfg.get("splash_enabled", True)))
+        self.splash_check.blockSignals(False)
 
         set_cert_bypass(bool(cfg.get("ignore_cert_errors")))
         self._update_cert_bypass_state()

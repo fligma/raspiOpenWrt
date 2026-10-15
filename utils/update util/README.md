@@ -320,6 +320,13 @@ The pages of the Settings bar, and what each holds:
     an icon in the area, which is what the notices come from - right-click it to
     quit, left-click to bring the window back (`system_notifications`, on as
     shipped; off, every message stays inside the window)
+  - **Show the startup splash** - the card that comes up the moment the
+    program is launched, before anything else is on screen: the logo, the
+    line naming what the boot is loading right now - the menu, the panels,
+    each addon by name as it is read in and told to begin - and a bar with a
+    percentage, painted from the theme in force with a border around the edge
+    and no title bar of its own (`splash_enabled`, on as
+    shipped; off, the screen stays empty until the window itself appears)
   - **Enable logging to file** - when off, nothing is written to
     `berry_manager.log`. While on it exposes the maximum on-screen log lines
     and the log file path. The on-screen pane under the tabs is switched
@@ -381,7 +388,7 @@ bug report name the copy they came from. That one value is also what
 never disagrees with itself about which version it is. The box also links that
 number to the release built from it - `manager_const.PROJECT_RELEASE_URL` with
 `UPDATE_TAG_PREFIX` in front of the version, which is the tag the workflow
-pushes, so 1.6.2 opens `.../releases/tag/berry1.6.2` - making the About box a
+pushes, so 1.6.3 opens `.../releases/tag/berry1.6.3` - making the About box a
 door to the build it names rather than a caption about it.
 
 The bar holds two things at once: the row of tabs the user arranges, and a short
@@ -551,6 +558,7 @@ is applied when the window opens; nothing needs a restart.
 | `ssh_enabled` | App-wide SSH gate and SSH tab visibility: off, the terminal tab is gone and addons are refused SSH work, whatever their own switch says |
 | `addon_dev_enabled` | Show the Addon Dev tab and its Tools menu entry |
 | `system_notifications` | Allow notices in the system's notification area - an addon's `api.ui.popup` and this program's own news, such as an update being available. Off, those words reach the status line and the log only |
+| `splash_enabled` | Show the startup splash while the window is built - the frameless, themed card with the logo, the boot step being loaded and a percentage (see `manager_splash`). Off, the program opens with nothing on screen until the window appears |
 | `reboot_wait_seconds` | Downtime allowed for a reboot before the first reconnect attempt (0-600) |
 | `reboot_retry_interval` | Seconds between reconnect attempts until the device answers (1-300) |
 | `reboot_auto_watch` | Offer to watch for the device when a reboot command is sent |
@@ -1451,13 +1459,21 @@ way through:
 
 1. the addon's `.py`, its assets under `assets/<id>` of that source's store
    folder and, when the source publishes one, its `test_<id>.py` are downloaded
-   into `addons/_data/addon_store/staging`;
+   into `addons/_data/addon_store/staging`. A picture that will not arrive is
+   said and left out rather than refused: assets are decoration, every addon can
+   draw its own tab mark, and only the `.py` is needed to build anything;
 2. the test is run against the downloaded file, with the modules it imports put
    on the search path. What the addon itself failed stops the install; a run
    that never got past importing Qt, or the app's own modules, is this machine's
    doing and is only said out loud;
 3. PyInstaller builds a one-file program for it, with the
-   `addon_client.serve` launcher behind it and its assets packed inside. When
+   `addon_client.serve` launcher behind it and its assets packed inside. The
+   program is told to wear the addon's own picture, which on Windows means an
+   `.ico`: PyInstaller converts a PNG only when Pillow happens to be installed,
+   and it is in no requirement of this project, so the PNG is rewrapped here -
+   its own bytes inside an icon directory when it is small enough to count, or
+   drawn down to 256 px by Qt when it is not - and passed over with no icon at
+   all rather than stopping the build. When
    PyInstaller is not installed the store puts it in with `pip` rather than
    asking you to;
 4. the program lands in `addons/<id>.exe` (an extension-less `addons/<id>.bin`

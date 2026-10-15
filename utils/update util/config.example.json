@@ -19,6 +19,7 @@
       "auto_connect": false,
       "use_alt_icon": false,
       "system_notifications": true,
+      "splash_enabled": true,
       "sftp_enabled": true,
       "ssh_enabled": true,
       "addon_dev_enabled": false,

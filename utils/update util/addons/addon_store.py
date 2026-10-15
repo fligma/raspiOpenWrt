@@ -1887,7 +1887,13 @@ def _fetch_file(values: dict, remote: str, target: Path,
 
 
 def _compile(id_value: str) -> None:
-    """Fetch the addon's .py and any assets into staging, then build it here."""
+    """Fetch the addon's .py and any assets into staging, then build it here.
+
+    A picture that will not arrive is said and skipped rather than refused: the
+    assets are decoration, and every addon can draw its own tab mark, so losing
+    one is worth a line in the log and nothing more. The source itself is not -
+    without it there is no addon to build.
+    """
     if job is None:
         return
     entry = entry_for(id_value)
@@ -1908,12 +1914,16 @@ def _compile(id_value: str) -> None:
     if entry.get("icon") and entry["icon"] not in names:
         names.append(entry["icon"])
     assets = staging() / "assets"
+    left = []
     for index, name in enumerate(names, 1):
         say(f"downloading asset {name} ({index} of {len(names)})...")
         why = _fetch_file(values, f"assets/{id_value}/{name}", assets / name)
         if why:
-            _finish(f"an asset could not be fetched ({name}): {why}", bad=True)
-            return
+            note(f"{name} could not be fetched: {why}")
+            left.append(name)
+    if left:
+        say(f"{len(left)} asset(s) are not packed with it; the addon still builds "
+            "and wears the mark it draws itself")
     test_path = None
     test_name = entry.get("test") or ""
     if test_name:

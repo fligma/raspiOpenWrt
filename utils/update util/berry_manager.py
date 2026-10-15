@@ -23,6 +23,8 @@ from manager_browser import (clear_replaced_program, relaunch_process,
                              set_cert_bypass, take_restart_request)
 from manager_config import load_app_config
 from manager_const import ICON_FILES, find_asset
+import manager_splash
+import manager_theme
 from manager_gui import BerryManager
 
 
@@ -32,7 +34,8 @@ def main() -> int:
     # only this fresh copy can take the moved-aside file away.
     clear_replaced_program()
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
-    set_cert_bypass(bool(load_app_config().get("ignore_cert_errors")))
+    boot_config = load_app_config()
+    set_cert_bypass(bool(boot_config.get("ignore_cert_errors")))
     # Whatever way this process goes down, no addon child outlives it;
     # the window's own closing path releases them long before this runs.
     atexit.register(kill_all_trees)
@@ -44,9 +47,20 @@ def main() -> int:
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))
 
+    # The splash goes up before the window is built, so the wait has a face,
+    # and paints itself on the way in: the first thing a launch shows is the
+    # card, not a blank screen. The theme is resolved here for it to be
+    # painted from; the window runs the same two calls again on its way in,
+    # which changes nothing but the revision count.
+    manager_theme.ensure_installed()
+    manager_theme.use(boot_config.get("theme", "default"))
+    manager_splash.show(boot_config)
+
     window = BerryManager()
     window.fit_window_to_screen()
     window.show()
+    # The window is on screen: the card has said everything it had to say.
+    manager_splash.finish()
     return app.exec()
 
 

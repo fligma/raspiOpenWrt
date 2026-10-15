@@ -159,6 +159,7 @@ def _normalize_values(config: dict) -> dict:
         "auto_connect",
         "use_alt_icon",
         "system_notifications",
+        "splash_enabled",
         "log_visible",
         "sftp_enabled",
         "ssh_enabled",

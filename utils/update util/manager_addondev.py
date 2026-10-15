@@ -63,6 +63,8 @@ import shutil
 import subprocess
 import sys
 from string import Template
+import struct
+import tempfile
 import threading
 import time
 from typing import Any
@@ -1156,28 +1158,160 @@ def buildable(addon: Any) -> tuple[bool, str]:
 
 
 def icon_for_build() -> Path | None:
-    """The app icon, when PyInstaller can use it as-is."""
+    """The program's own mark as a file this build can wear, or nothing.
+
+    The shipped icon is a PNG, so on Windows it is rewrapped here too: a program
+    built by this tab or by the store then carries the berry rather than
+    PyInstaller's own logo.
+    """
     path = find_asset(ICON_FILES[0])
-    if path is not None and path.suffix.lower() in (".ico", ".icns"):
+    return usable_icon(path) if path is not None else None
+
+
+#: The ``--icon`` shapes PyInstaller reads as it stands on each platform. Any
+#: other one it converts only when Pillow happens to be installed, and the Python
+#: a user builds with has no reason to have it: requirements.txt does not name
+#: Pillow anywhere, and the store installs nothing but PyInstaller itself.
+ICON_FORMATS = {
+    "win32": (".ico", ".exe"),
+    "darwin": (".icns",),
+}
+
+#: The eight bytes that say a file is a PNG, and where its width and height sit.
+_PNG_HEAD = b"\x89PNG\r\n\x1a\n"
+
+
+def icon_formats() -> tuple[str, ...]:
+    """What may be handed to ``--icon`` here without being converted first."""
+    return ICON_FORMATS.get(sys.platform, (".ico", ".icns", ".png"))
+
+
+def png_size(data: bytes) -> tuple[int, int] | None:
+    """A PNG's width and height out of its own header; nothing when it is not one."""
+    if not data.startswith(_PNG_HEAD) or len(data) < 24:
+        return None
+    width, height = struct.unpack(">II", data[16:24])
+    return int(width), int(height)
+
+
+def ico_from_png(png: Path, target: Path) -> Path | None:
+    """One PNG rewrapped as a Windows ``.ico`` with nothing but the standard library.
+
+    An icon directory may hold PNG-compressed image data - Windows has read it
+    since Vista - so the reserved word, the type, the one directory entry and the
+    picture's own bytes follow each other here with nothing decoded in between. A
+    file that is not a PNG, a side the directory cannot count (it holds one byte,
+    and 0 means 256) and a disk that will not have the file all answer with
+    nothing rather than a broken icon.
+    """
+    try:
+        data = png.read_bytes()
+    except OSError:
+        return None
+    size = png_size(data)
+    if size is None or not all(1 <= side <= 256 for side in size):
+        return None
+    header = struct.pack("<HHH", 0, 1, 1)
+    # A directory entry is 16 bytes, so the picture starts after both of them.
+    dirent = struct.pack("<BBBBHHII", size[0] % 256, size[1] % 256, 0, 0,
+                         1, 32, len(data), len(header) + 16)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(header + dirent + data)
+    except OSError:
+        return None
+    return target
+
+
+#: How wide a Windows icon's directory can say a picture is: one byte per side,
+#: and 0 stands for 256. Anything bigger is taken down to it before being packed.
+ICO_MAX_SIDE = 256
+
+
+def ico_scaled(png: Path, target: Path) -> Path | None:
+    """One PNG too wide for an icon's directory, drawn down and packed by Qt.
+
+    :func:`ico_from_png` cannot count past 256, and the marks addons publish are
+    often 512 - too big for the directory and too dear to throw away. Qt is
+    already here (this tab is built out of it) and its ICO writer takes the
+    picture down whole. A Qt without the ICO plugin, a file it cannot read and a
+    disk that will not have the answer all say nothing, which costs a build its
+    icon and not its program.
+    """
+    try:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QImage
+
+        image = QImage(str(png))
+        if image.isNull():
+            return None
+        if max(image.width(), image.height()) > ICO_MAX_SIDE:
+            image = image.scaled(ICO_MAX_SIDE, ICO_MAX_SIDE,
+                                 Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+        if not image.save(str(target), "ICO"):
+            return None
+    except Exception:                          # noqa: BLE001 - only a picture at stake
+        return None
+    return target if target.is_file() else None
+
+
+def scratch_ico(png: Path) -> Path | None:
+    """One PNG's ``.ico`` in a file nobody keeps.
+
+    A build's icon is read once and thrown away, so writing it beside the picture
+    would pack the same art into the program twice under two names - and a
+    read-only bundle could not write anywhere at all.
+    """
+    try:
+        handle = tempfile.NamedTemporaryFile(suffix=".ico", delete=False)
+    except OSError:
+        return None
+    where = Path(handle.name)
+    try:
+        handle.close()
+    except OSError:
+        return None
+    return ico_from_png(png, where) or ico_scaled(png, where)
+
+
+def usable_icon(path: Path) -> Path | None:
+    """One picture as a file this platform's PyInstaller can use; nothing if it cannot.
+
+    This is where a store addon's ``<id>icon.png`` - a tab and card mark, made
+    for the bar and not for a Windows executable - is settled: on Windows it is
+    rewrapped rather than handed over raw, because PyInstaller would otherwise
+    stop the whole build over a picture, and a build that cannot use it at all
+    loses its icon rather than its program.
+    """
+    try:
+        if not path.is_file():
+            return None
+        suffix = path.suffix.lower()
+    except OSError:
+        return None
+    if suffix in icon_formats():
         return path
+    if suffix == ".png" and sys.platform == "win32":
+        return scratch_ico(path)
     return None
 
 
 def icon_choice(icon: Any) -> Path | None:
-    """The ``--icon`` file for a build: a named one that is usable, the app's, or none.
+    """The ``--icon`` file for a build: one PyInstaller can read, the app's, or none.
 
     ``icon`` is ``True`` for the program's own mark, ``False``/empty for none, or
     a path an addon brought with it (a store addon's own icon). A named icon that
-    is missing or the wrong shape falls back to the app's, so a build never dies
-    over a bad picture.
+    is missing or the wrong shape is rewrapped if it can be, and falls back on the
+    app's if it cannot, so a build never dies over a picture.
     """
     if not icon:
         return None
     if icon is True:
         return icon_for_build()
-    path = Path(icon)
-    if path.is_file() and path.suffix.lower() in (".ico", ".icns", ".png"):
-        return path
+    made = usable_icon(Path(icon))
+    if made is not None:
+        return made
     return icon_for_build()
 
 
@@ -1929,6 +2063,13 @@ A build carries a plain copy of the protocol modules it imports
 (``addon_common``, ``addon_client``). A program built without that copy says so
 rather than start a test that cannot finish.
 
+The picture a program is told to wear follows the rule above: the addon's own
+``<id>icon.png`` when it brought one, Berry Manager's mark otherwise. On Windows
+either is rewrapped as an ``.ico`` first, because PyInstaller converts a PNG only
+when Pillow happens to be installed and this project never asks for it. A
+picture that cannot be made to fit costs a build its icon and not its program,
+and an asset that will not download is said and left out of the install.
+
 ## Publishing on the addon store
 
 The store reads one or more GitHub repositories, each with an ``index.json`` in
@@ -2413,8 +2554,8 @@ class AddonDevWidget(QWidget):
             "either way, and a build without a console may lose the protocol pipe")
         self.icon_check = QCheckBox("app icon")
         self.icon_check.setChecked(True)
-        self.icon_check.setToolTip("Use Berry Manager's icon when it is a format "
-                                   "PyInstaller accepts (.ico / .icns)")
+        self.icon_check.setToolTip("Use Berry Manager's icon, redrawn as an .ico "
+                                   "on Windows when the shipped picture is a PNG")
         self.prefer_check = QCheckBox("run the compiled copy when it is ready")
         for button in (self.onefile_check, self.console_check, self.icon_check,
                        self.prefer_check):

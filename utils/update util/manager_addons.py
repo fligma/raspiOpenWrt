@@ -89,6 +89,7 @@ from manager_const import (
     SHIPPED_ADDON_IDS,
     THEMES_DIR,
 )
+import manager_splash
 from manager_widgets import (ToggleSwitch, tab_caption, tip_on_title,
                              transport_dot)
 
@@ -954,9 +955,12 @@ class AddonManager:
                 # Same id still on: tear the old one down so new code runs.
                 self.unload(previous)
         self.addons = discovered
-        for addon in self.addons:
-            if addon.enabled:
-                self.load(addon)
+        wanted = [addon for addon in self.addons if addon.enabled]
+        for number, addon in enumerate(wanted, start=1):
+            # Named on the boot splash while it is up; harmless afterwards.
+            manager_splash.addon_step(number, len(wanted),
+                                      addon.name or addon.id)
+            self.load(addon)
         self.refresh_rows()
         self._restore_window_tabs()
 
@@ -2195,7 +2199,11 @@ class AddonManager:
     def start_done(self) -> None:
         """Called once the window is fully built: tell the addons to begin."""
         self._started = True
-        for addon in self.loaded():
+        running = self.loaded()
+        for number, addon in enumerate(running, start=1):
+            manager_splash.addon_step(number, len(running),
+                                      addon.name or addon.id,
+                                      verb="Starting", band=manager_splash.ADDON_START_BAND)
             self._call_hook(addon, "start")
         self.notify("startup", {"tabs": self._tab_titles()})
 

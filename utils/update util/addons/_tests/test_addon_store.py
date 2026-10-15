@@ -2018,6 +2018,155 @@ def test_the_child_env() -> None:
             sys.frozen = saved_frozen
 
 
+# --- eleven: the pictures an install brings, and the ones a build can wear ---
+
+def test_the_pictures(store: Any) -> None:
+    """A picture that will not arrive is skipped, and a PNG is not handed over raw.
+
+    An install's assets are decoration - every addon draws its own tab mark - so
+    one that GitHub will not give out is said and left behind, never a refused
+    install. And a store addon's ``<id>icon.png`` is a PNG, which Windows
+    PyInstaller only converts when Pillow happens to be installed, so what
+    reaches ``--icon`` has to be a file this platform can wear as it stands.
+    """
+    print("\n14. an asset that will not arrive, and an icon a build can use")
+    fresh(store)
+    real_fetch, real_job, real_entries = store._fetch_file, store.job, store.entries
+    real_maybe, real_finish = store._maybe_test, store._finish
+    real_say, real_note = store.say, store.note
+    saved_data = os.environ.get("RASCONF_ADDON_DATA")
+    words: list = []
+    ended: list = []
+    reached: list = []
+    try:
+        with tempfile.TemporaryDirectory() as box:
+            data = Path(box) / "data"
+            os.environ["RASCONF_ADDON_DATA"] = str(data)
+            store.entries = store.parse_catalog(CATALOG)
+            hello = store.entries[0]                     # assets and icon, as listed
+            check(hello["assets"] and hello["icon"],
+                  f"the catalog row used here carries no pictures to fetch: {hello}")
+            store.say = lambda text, bad=False: words.append((str(text), bool(bad)))
+            store.note = lambda text: words.append((str(text), False))
+            store._finish = lambda text, bad=False: ended.append((str(text), bool(bad)))
+            store._maybe_test = lambda id_value, source, test_path: reached.append(
+                (id_value, str(test_path) if test_path else None))
+
+            def only_the_source(values: dict, remote: str, target: Path,
+                                folder: str | None = None) -> str:
+                if remote.startswith("assets/"):
+                    return "GitHub answered 404"
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+                Path(target).write_text("# addon\n", encoding="utf-8")
+                return ""
+            store._fetch_file = only_the_source
+            store.job = {"values": store.source_values(store.MAIN_SOURCE)}
+            store._compile("hello_store")
+            check(not [pair for pair in ended if pair[1]],
+                  f"a picture that would not download refused the install: {ended}")
+            check(len(reached) == 1 and reached[0][0] == "hello_store"
+                  and str(reached[0][1] or "").endswith("test_hello_store.py"),
+                  f"the install stopped before the addon was compiled: {reached}")
+            check((data / "staging" / "hello_store.py").is_file(),
+                  "the addon's own file did not make it into staging")
+            check(not (data / "staging" / "assets").exists(),
+                  "an asset that was not fetched was still left in the staging folder")
+            said = " ".join(text for text, _bad in words)
+            check("helloicon.png could not be fetched" in said,
+                  f"the missing picture was never said out loud: {said!r}")
+            check("wears the mark it draws itself" in said,
+                  f"nobody was told the addon still builds without it: {said!r}")
+
+        for text, _bad in words:
+            if "could not be fetched" in text or "mark it draws" in text:
+                look(text)
+    finally:
+        store._fetch_file = real_fetch
+        store._finish = real_finish
+        store._maybe_test = real_maybe
+        store.say, store.note = real_say, real_note
+        store.job, store.entries = real_job, real_entries
+        if saved_data is not None:
+            os.environ["RASCONF_ADDON_DATA"] = saved_data
+        else:
+            os.environ.pop("RASCONF_ADDON_DATA", None)
+
+    # the icon a build is handed, and the PNG -> ICO rewrap that keeps it
+    try:
+        import struct
+
+        import manager_addondev as dev
+    except Exception as error:                      # noqa: BLE001 - app modules
+        look(f"manager_addondev is not importable here: {error}")
+        return
+    png_bytes = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+                 + struct.pack(">II", 128, 128) + b"\x08\x02\x00\x00\x00"
+                 + struct.pack(">I", 0))
+    check(dev.png_size(png_bytes) == (128, 128),
+          f"a PNG's own header was not read: {dev.png_size(png_bytes)!r}")
+    check(dev.png_size(b"not a png at all") is None,
+          "something that is not a PNG was measured as one")
+    with tempfile.TemporaryDirectory() as box:
+        pic = Path(box) / "widgeticon.png"
+        pic.write_bytes(png_bytes)
+        ico = dev.ico_from_png(pic, Path(box) / "made.ico")
+        check(ico is not None and ico.is_file(),
+              "one PNG was not rewrapped as an icon at all")
+        if ico is not None:
+            body = ico.read_bytes()
+            head = struct.unpack("<HHH", body[:6])
+            entry = struct.unpack("<BBBBHHII", body[6:22])
+            check(head == (0, 1, 1),
+                  f"the icon's header is not one picture of type icon: {head}")
+            check(entry[:4] == (128, 128, 0, 0) and entry[4:6] == (1, 32),
+                  f"the icon's directory entry is wrong: {entry}")
+            check(entry[6] == len(png_bytes) and entry[7] == 22,
+                  f"the icon does not point at the PNG's own bytes: {entry}")
+            check(body[22:] == png_bytes, "the icon holds something other than the PNG")
+        check(dev.ico_from_png(pic.with_suffix(".missing"),
+                               Path(box) / "no.ico") is None,
+              "a picture that is not there still made an icon")
+        wide = Path(box) / "wide.png"
+        wide.write_bytes(b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+                         + struct.pack(">II", 512, 512) + b"\x08\x02\x00\x00\x00"
+                         + struct.pack(">I", 0))
+        check(dev.ico_from_png(wide, Path(box) / "wide.ico") is None,
+              "a side the icon directory cannot count was packed into one anyway")
+
+        formats = dev.icon_formats()
+        check(".ico" in formats if sys.platform == "win32" else True,
+              f"Windows is not said to want an icon: {formats}")
+        picked = dev.usable_icon(pic)
+        check(picked is not None and Path(picked).suffix.lower() in formats,
+              f"a build was handed a file this platform cannot wear: {picked!r}")
+        if sys.platform == "win32":
+            check(Path(picked) != pic and Path(picked).suffix.lower() == ".ico",
+                  f"a PNG reached a Windows build as a PNG: {picked!r}")
+        else:
+            check(Path(picked) == pic,
+                  f"a picture that is usable here was remade anyway: {picked!r}")
+        check(dev.usable_icon(pic.with_suffix(".missing")) is None,
+              "an icon named by the catalog but never downloaded came back as a file")
+        check(dev.icon_choice(False) is None,
+              "a build with no icon was given one anyway")
+        app = dev.icon_choice(True)
+        check(app is None or Path(str(app)).suffix.lower() in formats,
+              f"the program's own mark was handed over in a shape to fail on: {app!r}")
+        if app is not None:
+            worn = Path(str(app)).read_bytes()
+            check(struct.unpack("<HHH", worn[:6]) == (0, 1, 1),
+                  f"what a build is told to wear is not an icon: {worn[:6]!r}")
+            own = dev.find_asset(dev.ICON_FILES[0])
+            look(f"{own.name if own is not None else 'no shipped mark'} "
+                 f"{dev.png_size(own.read_bytes()) if own is not None else ''} "
+                 f"reaches a build as a {len(worn)} byte {Path(str(app)).suffix}")
+        wear = dev.icon_choice(str(pic))
+        check(wear is not None and Path(str(wear)).suffix.lower() in formats,
+              f"an addon's own PNG was handed over raw: {wear!r}")
+        look(f"{sys.platform} wears {formats}; a PNG build icon arrives as "
+             f"{Path(str(dev.icon_choice(str(pic)))).name}")
+
+
 # --- run it ---
 
 def main() -> int:
@@ -2050,6 +2199,7 @@ def main() -> int:
     test_delete_toggle(store)
     test_the_manifest(store)
     test_the_child_env()
+    test_the_pictures(store)
 
     if FAILURES:
         print()
