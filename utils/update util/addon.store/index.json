@@ -15,8 +15,7 @@
         "cert_managericon.png"
       ],
       "icon": "cert_managericon.png",
-      "test": "test_cert_manager.py",
-      "status": "updated"
+      "test": "test_cert_manager.py"
     },
     {
       "id": "multi_ssh",
@@ -33,8 +32,7 @@
         "multi_sshicon.png"
       ],
       "icon": "multi_sshicon.png",
-      "test": "test_multi_ssh.py",
-      "status": "updated"
+      "test": "test_multi_ssh.py"
     },
     {
       "id": "openwrt_logs",
@@ -51,8 +49,7 @@
         "openwrt_logsicon.png"
       ],
       "icon": "openwrt_logsicon.png",
-      "test": "test_openwrt_logs.py",
-      "status": "updated"
+      "test": "test_openwrt_logs.py"
     },
     {
       "id": "openwrt_package_manager",
@@ -70,8 +67,7 @@
         "openwrt_package_managericon.png"
       ],
       "icon": "openwrt_package_managericon.png",
-      "test": "test_openwrt_package_manager.py",
-      "status": "updated"
+      "test": "test_openwrt_package_manager.py"
     }
   ]
 }
