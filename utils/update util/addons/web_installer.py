@@ -45,7 +45,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 # Qt-free contract half: runs standalone and in tests.
-from addon_common import AddonError, config_get, find_icon, merge_config
+from addon_common import AddonError, config_get, find_addon_picture, merge_config
 
 ADDON = {
     "name": "Rasconf web installer",
@@ -543,35 +543,46 @@ def tab_spec(values: dict) -> dict:
     ]}
 
 
-#: The picture the tab wears when the assets folder holds one. A file named for
-#: the standard rule - ``web_installericon.png`` - is found without this being
-#: touched; the name below is the one shipped before the rule existed.
-TAB_ICON_FILE = "webinstallericon.png"
+#: The tab's mark: a window with something arriving in it, since this addon
+#: fetches a build and puts it on the device. Held as an SVG document so the tab
+#: wears the same thing whether or not the assets folder holds a picture file.
+TAB_ICON = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+    '<rect x="2.5" y="3.5" width="19" height="17" rx="2.6" fill="none"'
+    ' stroke="#7fb3d5" stroke-width="1.5"/>'
+    '<path d="M2.5 7.6h19" stroke="#7fb3d5" stroke-width="1.2"/>'
+    '<circle cx="5.2" cy="5.6" r="0.9" fill="#e0e0e0"/>'
+    '<circle cx="8" cy="5.6" r="0.9" fill="#e0e0e0"/>'
+    '<path d="M12 10v5.4" stroke="#c51a4a" stroke-width="1.8"'
+    ' stroke-linecap="round"/>'
+    '<path d="M9.4 12.9 12 15.6l2.6-2.7" fill="none" stroke="#c51a4a"'
+    ' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+    '<path d="M8.2 18h7.6" stroke="#23d18b" stroke-width="1.8"'
+    ' stroke-linecap="round"/>'
+    '</svg>'
+)
+
+#: The picture the tab wears when the assets folder holds one: this addon's id
+#: and then ``icon.png``, so ``web_installericon.png`` - the one name every
+#: addon's picture is looked up under, written here only to say where it goes.
+TAB_ICON_FILE = "web_installericon.png"
 
 
 def tab_icon() -> str:
-    """The addon's own picture as a path, or nothing when it has none."""
-    folder = None
+    """The addon's own picture as a path, or its drawing when no folder has one."""
+    paths = None
     try:
-        folder = api.paths.assets
+        paths = api.paths
     except (AddonError, AttributeError, TypeError):    # no api on a bare import
-        folder = None
-    return find_icon(folder, "web_installer", TAB_ICON_FILE)
+        paths = None
+    return find_addon_picture(paths, "web_installer") or TAB_ICON
 
 
 def build_tab() -> None:
     """The tab as a spec, and its buttons as reports; nothing holds a widget."""
     api.tabs.add_tab(TAB, spec=tab_spec(merge_config(DEFAULTS, api.config.stored())),
                      style=TAB_STYLE)
-    try:
-        picture = tab_icon()
-        if picture:
-            api.tabs.set_icon(TAB, picture)
-        else:
-            # Nothing of its own to wear: keep the program's mark, as before.
-            api.tabs.use_app_icon(TAB)
-    except AddonError as error:             # an app with no icon of its own
-        api.log(f"web installer tab icon: {error}")
+    api.tabs.set_icon(TAB, tab_icon())
 
 
 def show_form(values: dict) -> None:

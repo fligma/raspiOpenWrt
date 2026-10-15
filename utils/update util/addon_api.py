@@ -23,9 +23,9 @@ The namespaces on ``api``
     Everything the current Berry Manager session knows:
     ``profile()`` (active profile, never the password), ``settings()``,
     ``status()`` (host/port/user/remote root plus which protocols are up),
-    ``tabs()``, ``current_tab()``, ``version()``, ``app_stylesheet()`` (already
-    scaled to the interface zoom), ``zoom()`` (that percentage), ``app_icon()``
-    (the logo the program wears itself).
+    ``tabs()``, ``current_tab()``, ``version()``, ``app_stylesheet()`` (the theme
+    in force, already scaled to the interface zoom), ``zoom()`` (that
+    percentage), ``app_icon()`` (the logo the program wears itself).
 
 ``api.device``
     SSH and SFTP. The program keeps one main connection to the device and it
@@ -90,9 +90,11 @@ The namespaces on ``api``
 
 ``api.ui``
     ``information/warning/error(title, text)``, ``question(title, text)`` ->
-    bool, ``input(title, label, default)`` -> str, ``notify(text)``,
+    bool, ``input(title, label, default, secret=False)`` -> str or ``None``,
+    ``notify(text)``,
     ``menu_item(text, callback, menu="Tools", shortcut=None)``,
-    ``dialog(spec)``, ``window()`` (the main window, for advanced use),
+    ``dialog(spec)``, ``pick_color()`` -> a hex colour, ``pick_file()`` -> a path
+    on this machine, ``window()`` (the main window, for advanced use),
     ``set_setting_widget(spec_or_widget)`` (this addon's own extra settings).
 
 ``api.events``
@@ -102,9 +104,27 @@ The namespaces on ``api``
     ``profile_changed``, ``settings_applied``, ``addon_enabled``,
     ``addon_disabled``, ``addon_config_changed``, ``transport_changed`` (one
     transport gate moved: ``scope`` says whether the app-wide switch or an
-    addon's own did, with ``transport``, ``addon`` and ``enabled`` beside it).
+    addon's own did, with ``transport``, ``addon`` and ``enabled`` beside it),
+    ``theme_changed`` (the look moved: ``theme`` is what is worn now, ``wanted``
+    what was asked for, and the two differ when a file was missing).
     A module-level ``on_event(name, payload)`` or ``on_<name>(payload)``
     function is called too.
+
+``api.theme``
+    The window's own look, read from ``themes/<name>.theme`` - one JSON object
+    of named colours, the shape of the tabs, and a few lines of stylesheet of
+    its own. An addon's *page* keeps its own styling; the tab bar, the window's
+    surfaces and its text are the theme's business, so an addon that wants to
+    match the window asks rather than assumes. Reading: ``name``, ``names``,
+    ``exists``, ``folder``, ``read``, ``raw``, ``colors``, ``color``, ``tabs``,
+    ``metric``, ``icon_px``, ``chrome_px``, ``shows_captions``, ``shows_dots``,
+    ``stylesheet``, ``groups``, ``token_knobs``, ``reference``, ``templates``,
+    ``template_text``, ``validate``. Changing: ``use(name)`` applies one and
+    keeps the choice in the profile, ``save(name, theme)`` writes a file (and
+    redraws when it is the one in force), ``copy``, ``rename`` and ``remove``
+    look after the rest. A theme never breaks the window: an unknown token or a
+    colour that is not a colour is reported by ``validate`` and the shipped
+    value is kept for it.
 
 ``api.settings``
     This addon's own persisted dict: ``get``, ``set``, ``update``, ``pop``,
@@ -141,7 +161,8 @@ The namespaces on ``api``
     folder for this addon's files, which is also where its ``config.json``
     lives), ``config`` (this addon's own config file), ``configs`` (this addon's
     data folder - the same place), ``base``, ``addons``, ``assets`` (the pictures
-    that ship inside the program, read-only), ``log``.
+    that ship inside the program, read-only), ``themes`` (the ``.theme`` files
+    the window is painted from), ``log``.
 
 ``api.peers``
     ``list()``, ``info(id)``, ``send(id, data)`` -> the target's
@@ -155,10 +176,17 @@ A JSON object describing one widget, recursively:
 ``grid``, ``form``, ``group`` (``text`` = title), ``scroll``, ``splitter``,
 ``tabs`` (one sub-page per child, the child's ``label`` its caption; move
 between the sub-pages with ``set_widget(tab, id, "current", n)`` and read the
-visible one back with ``widget_value(tab, id, "index")``).
+visible one back with ``widget_value(tab, id, "index")``). A ``tabs`` container
+can also be filled while it is on show: ``set_widget(tab, id, "add_page",
+{"label": ..., "spec": ...})`` builds one more sub-page (``"position"`` puts it
+somewhere other than the end, ``"current": False`` leaves the view where it is),
+``"remove_page"`` takes one away by index or caption, and
+``widget_value(tab, id, "pages")`` reads every caption back - which is how an
+addon opens a sub-page per connection and shuts it again.
 ``label``, ``button``, ``line``, ``multi`` (plain text edit), ``check``,
 ``combo``, ``list``, ``tree``, ``table``, ``progress``, ``spin``, ``slider``,
-``spacer``, ``image``, ``web`` - all take ``id``, ``text``, ``tooltip``,
+``spacer``, ``image``, ``web``, ``color`` (a hex line with the colour wheel
+behind its swatch), ``terminal`` - all take ``id``, ``text``, ``tooltip``,
 ``style`` (a stylesheet, so an addon can style its own tab), ``enabled``,
 ``visible``, ``font_size`` (drawn at the interface zoom), ``items``, ``value``,
 ``placeholder``, ``checked``, ``minimum``,
@@ -178,17 +206,36 @@ row can wear a mark of its own.
 A ``multi`` may name a ``highlight`` language (``python``, ``json``, ``html``,
 ``css``, ``javascript``, ``ini``) for syntax colors; change it later with
 ``set_widget(tab, id, "highlight", lang)``.
+A ``terminal`` is the app's own terminal widget - the screen that draws the
+device's escape sequences and sends the keys typed into it - driven by a
+connection of its own rather than the app's main session, so one tab can hold
+as many as it likes and each is a separate machine. ``set_widget(tab, id,
+"connect", {...})`` brings it up and takes ``"host"``, ``"port"``,
+``"username"`` and either ``"password"`` or ``"key_file"`` (a plain
+``"user@host:port"`` string says the same thing), ``"disconnect"`` drops it,
+``"send"`` types raw bytes, ``"command"`` types a line with the Enter added and
+``"write"`` prints a note on the screen from the addon. Its ``value``, or
+``widget_value(tab, id, "text")``, is what is showing; ``"state"`` says what it
+is attached to (never the password) and ``"grid"`` its shape. It needs
+``"requires": ["ssh"]`` and ``"connection": "own"`` in the manifest, like any
+other work done over a connection of its own.
 ``on`` lists the events sent back to the addon: ``clicked``, ``toggled``,
 ``changed``, ``returned``, ``selected`` and, for a ``table``/``tree``/``list``,
-``context`` (a right-click, carrying the text of the row under the cursor).
+``context`` (a right-click, carrying the text of the row under the cursor). A
+``terminal`` answers to ``ready`` (its connection came up), ``closed`` (it went
+down, asked for or lost) and ``failed`` (carrying the reason), and to ``bell``
+and ``title`` (the screen's own news) when it is asked for them.
 ``rows`` on a ``table``/``tree`` takes a list of cell lists, or of dicts:
 ``{"cells": [...], "color": "#rrggbb", "background": "...", "overlay": "...",
 "icon": "..."}`` - the colours ride along with the row, so one line can wear the
 colour of its own device, and an overlay (a search highlight) can wash over it
 without hiding it. ``icon`` puts the addon's own picture in front of the first
-cell. A table paints its rows through its own delegate: the app sheet
-names ``::item`` colours, and a stylesheet colour would otherwise win over
-every per-item brush and drop all of this on the floor.
+cell. A ``tree`` row may also carry ``"children"``, itself a list of the same
+shape, so one line can hold the lines under it - a file tree of documentation,
+a folder of keys - and ``"expanded"`` says whether it starts open. A table
+paints its rows through its own delegate: the app sheet names ``::item``
+colours, and a stylesheet colour would otherwise win over every per-item brush
+and drop all of this on the floor.
 """
 
 from __future__ import annotations
@@ -281,14 +328,15 @@ from addon_common import (
 )
 from manager_config import web_tab_url
 from manager_const import (
-    APP_STYLESHEET,
     APP_VERSION,
     LOG_FILE,
     current_zoom,
     scaled_sheet,
     zoom_size,
 )
-from manager_net import create_ssh_client, exec_remote, remote_join, safe_relative_path
+from manager_net import (create_ssh_client, exec_remote, remote_join,
+                         safe_relative_path, OwnShellWorker)
+import manager_theme
 from manager_widgets import tab_caption
 
 try:  # the web kinds are inert when QtWebEngine is not installed
@@ -347,13 +395,23 @@ _LAYPOUT_KINDS = {
 }
 
 
-#: Row shades for the table delegate, which paints rows by hand.
-_ROW_BASE = QColor("#212121")
-_ROW_ALT = QColor("#1a1a1a")
-_ROW_HOVER = QColor("#2c2c2c")
-_ROW_SELECTED = QColor("#6b1730")
-_ROW_TEXT = QColor("#e0e0e0")
-_ROW_TEXT_SELECTED = QColor("#ffffff")
+#: Row shades for the table delegate, which paints rows by hand. They are read
+#: from the theme in force rather than written down, so an addon's table sits in
+#: the same room as the rest of the window whatever is being worn; the shipped
+#: look gives the colours that were hard-coded here.
+_ROW_TOKENS = {"base": "surface", "alternate": "sunken", "hover": "row_hover",
+               "selected": "selection", "text": "text", "text_selected": "bright"}
+_row_cache: tuple[int, dict[str, QColor]] | None = None
+
+
+def row_colours() -> dict[str, QColor]:
+    """The table's row shades, from the theme in force; rebuilt when the look moves."""
+    global _row_cache
+    revision = manager_theme.revision()
+    if _row_cache is None or _row_cache[0] != revision:
+        _row_cache = (revision, {key: QColor(manager_theme.color(token, default=""))
+                                 for key, token in _ROW_TOKENS.items()})
+    return _row_cache[1]
 
 #: Extra slot a row dict can carry: a search highlight over the background.
 ROW_OVERLAY_ROLE = Qt.ItemDataRole.UserRole + 11
@@ -370,8 +428,9 @@ class _RowStyleDelegate(QStyledItemDelegate):
         hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
         alternate = bool(
             option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
-        base = (_ROW_SELECTED if selected else _ROW_HOVER if hover
-                else _ROW_ALT if alternate else _ROW_BASE)
+        shades = row_colours()
+        base = QColor(shades["selected"] if selected else shades["hover"] if hover
+                      else shades["alternate"] if alternate else shades["base"])
         painter.setPen(Qt.PenStyle.NoPen)
         for brush in (QBrush(base), index.data(Qt.ItemDataRole.BackgroundRole),
                       index.data(ROW_OVERLAY_ROLE)):
@@ -394,7 +453,7 @@ class _RowStyleDelegate(QStyledItemDelegate):
         if text:
             fore = index.data(Qt.ItemDataRole.ForegroundRole)
             colour = (fore.color() if isinstance(fore, QBrush)
-                      else _ROW_TEXT_SELECTED if selected else _ROW_TEXT)
+                      else shades["text_selected"] if selected else shades["text"])
             painter.setPen(colour)
             painter.setFont(option.font)
             elided = painter.fontMetrics().elidedText(
@@ -523,7 +582,12 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
         font = widget.font()
         # The addon's size drawn at the interface zoom.
         font.setPointSize(zoom_size(int(spec["font_size"])))
-        widget.setFont(font)
+        # A terminal counts its cells from the font it holds itself, so the
+        # font has to go through its own door rather than Qt's blanket one.
+        if getattr(widget, "_addon_terminal", None) is not None:
+            widget.set_font(font)
+        else:
+            widget.setFont(font)
     wanted = spec.get("on")
     if events is not None and wanted is not None:
         _connect_events(widget, wanted, str(identifier or ""), events)
@@ -573,9 +637,47 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
                                 "texts": [item.text() for item in widget.selectedItems()]}))
         elif isinstance(widget, QTreeWidget):
             widget.itemSelectionChanged.connect(
-                lambda: events(identifier, "selected", {"count": len(widget.selectedItems())}))
+                lambda: events(identifier, "selected", _tree_selection(widget)))
             widget.itemDoubleClicked.connect(
-                lambda item, _col=0: events(identifier, "selected", {"text": item.text(0)}))
+                lambda item, _col=0: events(identifier, "selected", {
+                    "text": item.text(0), "cells": _row_cells(item)}))
+    terminal = getattr(widget, "_addon_terminal", None)
+    if terminal is not None:
+        # A terminal's news comes from its shell thread and from the screen
+        # itself. The addon lists in ``on`` which of it it wants to hear; the
+        # shell reports through the same route when its connection comes up,
+        # goes down or fails, so one hook serves all of it.
+        asked = set(names)
+
+        def report(event: str, payload: Any = None) -> None:
+            if event in asked:
+                events(identifier, event, dict(payload or {}))
+
+        terminal["report"] = report
+        if "bell" in asked:
+            widget.bell.connect(lambda: report("bell"))
+        if "title" in asked:
+            widget.title_changed.connect(
+                lambda text: report("title", {"text": str(text)}))
+
+
+def _row_cells(item: QTreeWidgetItem) -> list[str]:
+    """Every column of one row, as the tree shows it."""
+    return [str(item.text(column) or "") for column in range(item.columnCount())]
+
+
+def _tree_selection(widget: QTreeWidget) -> dict:
+    """What is picked in a ``tree``: how many, and the first one's label and cells.
+
+    The label alone cannot tell two rows of the same name apart once a tree
+    nests, so the whole line rides along: an addon's documentation tree puts one
+    word per row and reads it back here.
+    """
+    picked = widget.selectedItems()
+    first = picked[0] if picked else None
+    return {"count": len(picked),
+            "text": str(first.text(0)) if first is not None else "",
+            "cells": _row_cells(first) if first is not None else []}
 
 
 def _context_text(item: Any) -> str:
@@ -692,6 +794,7 @@ _EXT_LANG = {
     ".html": "html", ".htm": "html", ".xml": "html", ".svg": "html",
     ".css": "css",
     ".ini": "ini", ".cfg": "ini", ".conf": "ini", ".editorconfig": "ini",
+    ".theme": "json",
     ".sh": "bash", ".bash": "bash", ".zsh": "bash", ".ksh": "bash",
     ".bashrc": "bash", ".profile": "bash", ".shrc": "bash",
 }
@@ -815,14 +918,24 @@ def _build_one(spec: dict, registry: dict,
 
     if kind == "tabs":
         tabs = QTabWidget()
+        # Keep how to build more: a container can be handed a sub-page after
+        # the tab is on screen, and that page has to write into the same
+        # registry and route its events the same way as the rest of the tab.
+        # ``ids`` runs beside the pages, holding the ids each one owns, so
+        # taking a page away can drop its controls out of the registry and
+        # close any terminal inside it.
+        tabs._addon_pages = {"registry": registry, "events": events, "ids": []}
         for child in children:
             if not isinstance(child, dict):
                 continue
             child = dict(child)
             label = str(child.pop("label", child.get("text", "Tab")))
+            owned = set(registry)
             widget = _build_one(child, registry, events)
             if widget is not None:
                 tabs.addTab(widget, label)
+                tabs._addon_pages["ids"].append(
+                    [key for key in registry if key not in owned])
         _apply_common(tabs, spec, registry, events)
         return tabs
 
@@ -961,6 +1074,26 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         if QWebEngineView is None:
             return QLabel("QtWebEngine is not available in this installation.")
         return QWebEngineView()
+    if kind == "terminal":
+        # The app's own terminal screen, for an addon that wants a shell of its
+        # own. Read late rather than imported at the top: a bare addon test
+        # harness can build specs without the terminal module in sight, and an
+        # addon that never asks for a shell should not be the reason it fails.
+        try:
+            from manager_term import TerminalScreen
+        except Exception as error:            # a terminal-less app is still an app
+            return QLabel(f"No terminal available here: {error}")
+        screen = TerminalScreen()
+        # Everything the shell thread and the ``connect`` property share.
+        # ``report`` is put there by ``_connect_events`` when the spec asks for
+        # the terminal's events; ``last`` is what a closed shell was attached
+        # to, so ``state`` still answers after the connection has gone.
+        screen._addon_terminal = {
+            "shell": None,
+            "report": None,
+            "last": {"connected": False, "host": "", "port": 22, "username": ""},
+        }
+        return screen
     return None
 
 
@@ -1091,53 +1224,359 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
         if hasattr(widget, "clear"):
             widget.clear()
         for row in value or []:
-            # A row is a list of cells, or a dict carrying colours and a mark:
-            # ``{"cells": [...], "color": "#rrggbb", "background": "...",
-            #   "overlay": "...", "icon": "<path or svg>"}`` - painted by the
-            # table's delegate. The icon rides in front of the first cell, which
-            # is what lets a list of addons show each one's own picture.
-            cells, fore, back, over = row, None, None, None
-            mark = None
-            if isinstance(row, dict):
-                cells = row.get("cells", row.get("row", ""))
-                fore = row.get("color", row.get("foreground"))
-                back = row.get("background", row.get("bg"))
-                over = row.get("overlay", row.get("highlight"))
-                mark = row.get("icon")
-            cells = cells if isinstance(cells, (list, tuple)) else [cells]
-            item = QTreeWidgetItem([str(cell) for cell in cells])
-            for column, cell in enumerate(cells):
-                # Qt elides a wide cell; the tooltip carries the whole text.
-                item.setToolTip(column, str(cell))
-            for colour, paint in ((fore, item.setForeground),
-                                  (back, item.setBackground)):
-                if not colour:
-                    continue
-                tint = QColor(str(colour))
-                if not tint.isValid():
-                    continue
-                brush = QBrush(tint)
-                for column in range(len(cells)):
-                    paint(column, brush)
-            if over:
-                tint = QColor(str(over))
-                if tint.isValid():
-                    brush = QBrush(tint)
-                    for column in range(len(cells)):
-                        item.setData(column, ROW_OVERLAY_ROLE, brush)
-            if mark:
-                icon = build_icon(mark)
-                if icon is not None:
-                    item.setIcon(0, icon)
-            widget.addTopLevelItem(item)
+            _place_row(widget, row, None)
     elif prop == "clear":
         if hasattr(widget, "clear"):
             widget.clear()
+    elif prop in ("connect", "disconnect", "send", "command", "write"):
+        # A terminal's own connection, and the note an addon prints on it. The
+        # first three reach the device, so they pass the gates of
+        # :func:`_authorize_terminal`, called by the two ``set_widget``
+        # implementations - the only places that hold an api.
+        if prop == "connect":
+            _terminal_connect(widget, value)
+        elif prop == "disconnect":
+            _terminal_disconnect(widget)
+        elif prop == "write":
+            if _is_terminal(widget):
+                widget.write_local(text)
+            else:
+                raise AddonError("'write' prints on a terminal screen")
+        elif prop == "send":
+            _terminal_send(widget, value)
+        else:
+            _terminal_send(widget, value, line=True)
+    elif prop in ("add_page", "remove_page"):
+        # Sub-pages built after the tab is on screen: how an addon opens one
+        # page per connection and takes it away again when the link drops.
+        if _tabs_store(widget) is None:
+            raise AddonError(f"'{prop}' needs a tabs container")
+        if prop == "add_page":
+            _tabs_add_page(widget, value)
+        else:
+            _tabs_remove_page(widget, value)
+    elif prop == "font_size":
+        font = widget.font()
+        font.setPointSize(zoom_size(int(value or 10)))
+        # A terminal counts its cells from the font it holds itself.
+        if _is_terminal(widget):
+            widget.set_font(font)
+        else:
+            widget.setFont(font)
+
+
+def _make_row(row: Any) -> tuple[QTreeWidgetItem, Any, bool]:
+    """One ``rows`` entry as an item, with whatever is nested under it.
+
+    A row is a list of cells, or a dict carrying colours, a mark and - for a
+    ``tree`` - the rows under it, so one line can hold a whole branch: a file
+    tree of documentation, a folder of keys. Returns the item, the children to
+    hang below it, and whether it starts open.
+    """
+    cells, fore, back, over = row, None, None, None
+    mark = None
+    kids: Any = None
+    open_it = False
+    if isinstance(row, dict):
+        cells = row.get("cells", row.get("row", ""))
+        fore = row.get("color", row.get("foreground"))
+        back = row.get("background", row.get("bg"))
+        over = row.get("overlay", row.get("highlight"))
+        mark = row.get("icon")
+        kids = row.get("children", row.get("rows"))
+        open_it = bool(row.get("expanded", row.get("open")))
+    cells = cells if isinstance(cells, (list, tuple)) else [cells]
+    item = QTreeWidgetItem([str(cell) for cell in cells])
+    for column, cell in enumerate(cells):
+        # Qt elides a wide cell; the tooltip carries the whole text.
+        item.setToolTip(column, str(cell))
+    for colour, paint in ((fore, item.setForeground), (back, item.setBackground)):
+        if not colour:
+            continue
+        tint = QColor(str(colour))
+        if not tint.isValid():
+            continue
+        brush = QBrush(tint)
+        for column in range(len(cells)):
+            paint(column, brush)
+    if over:
+        tint = QColor(str(over))
+        if tint.isValid():
+            brush = QBrush(tint)
+            for column in range(len(cells)):
+                item.setData(column, ROW_OVERLAY_ROLE, brush)
+    if mark:
+        icon = build_icon(mark)
+        if icon is not None:
+            item.setIcon(0, icon)
+    return item, kids, open_it
+
+
+def _place_row(widget: QWidget, row: Any, parent: QTreeWidgetItem | None) -> None:
+    """Put one row - and the rows under it - into a ``table`` or ``tree``.
+
+    The icon rides in front of the first cell, which is what lets a list of
+    addons show each one's own picture; colours ride the row itself, painted by
+    the table's delegate rather than the app sheet.
+    """
+    item, kids, open_it = _make_row(row)
+    if parent is None:
+        widget.addTopLevelItem(item)
+    else:
+        parent.addChild(item)
+    for child in (kids or []):
+        _place_row(widget, child, item)
+    if open_it:
+        item.setExpanded(True)
+
+
+# --- a terminal's own connection, and sub-pages built after the fact ---
+
+#: The terminal properties that reach a machine over SSH, and so may only be
+#: used once the gates ``device.run`` passes through have passed for this addon.
+TERMINAL_PRIVILEGED = ("connect", "send", "command")
+
+
+def _is_terminal(widget: Any) -> bool:
+    """Whether this widget is an addon's ``terminal`` screen."""
+    return getattr(widget, "_addon_terminal", None) is not None
+
+
+def _terminal_settings(value: Any) -> dict:
+    """The machine a terminal is pointed at, from either shape an addon uses:
+    a dict of host/port/username/password, or a ``user@host:port`` string."""
+    if isinstance(value, dict):
+        return {str(key): item for key, item in value.items()}
+    text = str(value or "").strip()
+    settings: dict = {}
+    if "@" in text:
+        settings["username"], _, text = text.partition("@")
+    if ":" in text and text.count(":") == 1:     # host:port, not an IPv6 literal
+        settings["host"], _, settings["port"] = text.rpartition(":")
+    else:
+        settings["host"] = text
+    return settings
+
+
+def _terminal_report(widget: QWidget, event: str, payload: Any = None) -> None:
+    """Tell the addon one of its terminals has news, if it asked to hear it."""
+    report = (getattr(widget, "_addon_terminal", None) or {}).get("report")
+    if callable(report):
+        try:
+            report(event, payload)
+        except Exception:                        # a dead tab must not kill a shell
+            pass
+
+
+def _terminal_connect(widget: QWidget, value: Any) -> None:
+    """Bring this terminal's own connection up and hand the shell to the screen."""
+    state = getattr(widget, "_addon_terminal", None)
+    if state is None:
+        raise AddonError("that widget is not a terminal")
+    shell = state.get("shell")
+    if shell is not None and shell.isRunning():
+        return                     # already up: a second call would drop the screen
+    settings = _terminal_settings(value)
+    if not str(settings.get("host", "")).strip():
+        raise AddonError("a terminal needs a host to connect to")
+    cols, rows = widget.grid_size()
+    shell = OwnShellWorker(settings, cols=cols, rows=rows, parent=widget)
+    state["shell"] = shell
+    state["last"] = dict(shell.state)
+    who = shell.state["username"]
+    where = f"{shell.state['host']}:{shell.state['port']}"
+    widget.write_local(f"Connecting to {who}@{where}\n" if who
+                       else f"Connecting to {where}\n")
+    shell.received.connect(widget.feed)
+    shell.connected.connect(lambda: _terminal_connected(widget))
+    shell.failed.connect(lambda message: _terminal_failed(widget, message))
+    shell.disconnected.connect(lambda: _terminal_closed(widget))
+    widget.send_data.connect(shell.send)
+    widget.resized.connect(shell.resize)
+    shell.start()
+    widget.setFocus()
+
+
+def _terminal_connected(widget: QWidget) -> None:
+    """The shell thread is talking to the device."""
+    state = getattr(widget, "_addon_terminal", None) or {}
+    shell = state.get("shell")
+    details = dict(shell.state) if shell is not None else dict(state.get("last") or {})
+    details["connected"] = True
+    state["last"] = details
+    widget.write_local("Connected.\n")
+    _terminal_report(widget, "ready", details)
+
+
+def _terminal_failed(widget: QWidget, message: str) -> None:
+    """The connection did not come up, or died mid-session; the reason shows on
+    the screen, where the user is looking, as well as in the addon's event."""
+    widget.write_local(f"SSH error: {message}\n")
+    _terminal_report(widget, "failed", {"error": str(message)})
+
+
+def _terminal_closed(widget: QWidget) -> None:
+    """The shell thread has finished, however it ended: unhook it, say so on the
+    screen and let the addon know, which is how a sub-page closes itself when its
+    connection drops."""
+    state = getattr(widget, "_addon_terminal", None)
+    if state is None:
+        return
+    shell = state.pop("shell", None)
+    details = dict(shell.state) if shell is not None else dict(state.get("last") or {})
+    details["connected"] = False
+    state["last"] = details
+    if shell is not None:
+        # Until this thread ends, the screen's keystrokes belong to it.
+        try:
+            widget.send_data.disconnect(shell.send)
+            widget.resized.disconnect(shell.resize)
+        except (TypeError, RuntimeError):
+            pass                      # a connect that failed never wired them
+        shell.deleteLater()
+    widget.write_local("Connection closed.\n")
+    _terminal_report(widget, "closed", details)
+
+
+def _terminal_disconnect(widget: QWidget) -> None:
+    """Ask for this terminal's connection to be dropped; nothing if it is not up."""
+    state = getattr(widget, "_addon_terminal", None)
+    if state is None:
+        raise AddonError("that widget is not a terminal")
+    shell = state.get("shell")
+    if shell is not None and shell.isRunning():
+        shell.stop()                  # ``closed`` reports when the thread is done
+
+
+def _terminal_stop(widget: QWidget, patience: int = 3000) -> None:
+    """End a terminal's shell and wait for the thread, for a page that is about
+    to be thrown away: a running QThread deleted under Qt is a crash, not a leak."""
+    state = getattr(widget, "_addon_terminal", None)
+    if state is None:
+        return
+    shell = state.pop("shell", None)
+    if shell is None:
+        return
+    try:
+        widget.send_data.disconnect(shell.send)
+        widget.resized.disconnect(shell.resize)
+    except (TypeError, RuntimeError):
+        pass
+    shell.stop()
+    shell.wait(patience)
+    state["last"] = {**(state.get("last") or {}), "connected": False}
+
+
+def _terminal_send(widget: QWidget, value: Any, line: bool = False) -> None:
+    """Type into a terminal; a list is sent one after another, so one broadcast
+    field can hand the same command to several shells in a single call."""
+    state = getattr(widget, "_addon_terminal", None)
+    if state is None:
+        raise AddonError("that widget is not a terminal")
+    shell = state.get("shell")
+    if shell is None or not shell.isRunning():
+        raise AddonError("this terminal has no connection to write to")
+    pieces = value if isinstance(value, (list, tuple)) else [value]
+    for piece in pieces:
+        text = str(piece if piece is not None else "")
+        if not text:
+            continue
+        shell.send_line(text) if line else shell.send(text)
+
+
+def _terminal_text(widget: QWidget) -> str:
+    """What is on a terminal's screen now: the visible rows, one per line, each
+    without the blanks it carries to stay as wide as the grid."""
+    try:
+        rows = ["".join(cell[0] for cell in row).rstrip() for row in widget.lines]
+    except (AttributeError, TypeError, IndexError):
+        return ""
+    return "\n".join(rows)
+
+
+def _tabs_store(widget: QWidget) -> dict | None:
+    """The build information a ``tabs`` container kept for itself, or ``None``."""
+    return getattr(widget, "_addon_pages", None)
+
+
+def _tabs_add_page(widget: QWidget, value: Any) -> int:
+    """Build one more sub-page and put it in the container; returns its index."""
+    store = _tabs_store(widget)
+    if store is None:
+        raise AddonError("that widget is not a tabs container")
+    entry = value if isinstance(value, dict) else {"spec": value}
+    spec = entry.get("spec")
+    if not isinstance(spec, dict):
+        raise AddonError("add_page needs a spec dict for the new sub-page")
+    spec = dict(spec)
+    label = str(entry.get("label", spec.pop("label", spec.get("text", "Tab"))))
+    registry, events = store["registry"], store["events"]
+    owned = set(registry)
+    page = _build_one(spec, registry, events)
+    if page is None:
+        raise AddonError(f"add_page could not build that spec: {spec.get('kind')!r}")
+    index = widget.count()
+    if entry.get("position") is not None:
+        index = max(0, min(int(entry["position"]), widget.count()))
+    widget.insertTab(index, page, label)
+    store["ids"].insert(index, [key for key in registry if key not in owned])
+    if entry.get("current", True):
+        widget.setCurrentIndex(index)
+    return index
+
+
+def _tabs_remove_page(widget: QWidget, value: Any) -> bool:
+    """Take one sub-page away: its controls leave the tab's registry, any
+    terminal inside it is closed, and the page itself goes."""
+    store = _tabs_store(widget)
+    if store is None:
+        raise AddonError("that widget is not a tabs container")
+    index = -1
+    if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+        index = int(value)
+    else:
+        wanted = str(value or "")
+        for candidate in range(widget.count()):
+            if widget.tabText(candidate) == wanted:
+                index = candidate
+                break
+    if index < 0 or index >= widget.count():
+        return False
+    page = widget.widget(index)
+    ids = store["ids"].pop(index) if index < len(store["ids"]) else []
+    for identifier in ids:
+        control = store["registry"].pop(identifier, None)
+        if _is_terminal(control):
+            _terminal_stop(control)
+    widget.removeTab(index)
+    if page is not None:
+        page.deleteLater()
+    return True
+
+
+def _authorize_terminal(api: "AddonAPI", prop: str, widget: QWidget) -> None:
+    """Refuse a terminal action that reaches a machine until the addon has said
+    it may use SSH and has a connection of its own to do it on.
+
+    The same gates ``device.run`` passes through: the master switch, this
+    addon's switch, that addon's SSH switch, its ``requires`` list, and - since
+    a terminal is never a view of the app's main session - a manifest that
+    declared a connection of its own. Reading a screen, typing into one that is
+    already up, printing a note on it and letting go of it are not gated: the
+    permission was asked for once, when the connection was opened.
+    """
+    device = api.device
+    device._guard("ssh", uses_main=False)
+    device._allow_own()
+    device._mark("ssh")
 
 
 def read_widget_value(widget: QWidget, what: str = "value") -> Any:
     """The counterpart of :func:`apply_widget_property`."""
     numeric = (QSpinBox, QDoubleSpinBox, QSlider, QProgressBar)
+    if what in ("text", "value") and _is_terminal(widget):
+        # A terminal holds no text widget at all: the answer is the screen.
+        return _terminal_text(widget)
     if what == "text":
         return widget.text() if hasattr(widget, "text") else widget.toPlainText()
     if what == "html":
@@ -1170,6 +1609,19 @@ def read_widget_value(widget: QWidget, what: str = "value") -> Any:
         # The page a ``tabs`` container shows, or a combo's entry.
         current = getattr(widget, "currentIndex", None)
         return int(current()) if callable(current) else None
+    if what == "pages":
+        # Every caption a ``tabs`` container holds, in order.
+        return [str(widget.tabText(index))
+                for index in range(widget.count())] if hasattr(widget, "tabText") else None
+    if what == "state" and _is_terminal(widget):
+        # What a terminal is attached to, password left out of it by design.
+        state = widget._addon_terminal
+        shell = state.get("shell")
+        if shell is not None:
+            return dict(shell.state)
+        return dict(state.get("last") or {"connected": False})
+    if what == "grid" and _is_terminal(widget):
+        return list(widget.grid_size())
     # Spin boxes and progress bars answer to text() with the formatted label.
     if isinstance(widget, numeric):
         return int(widget.value())
@@ -1268,8 +1720,8 @@ class SessionAPI:
         return APP_VERSION
 
     def app_stylesheet(self) -> str:
-        """The app's dark theme, already scaled to the interface zoom."""
-        return scaled_sheet(APP_STYLESHEET)
+        """The theme the window is drawn from, already scaled to the interface zoom."""
+        return scaled_sheet(manager_theme.stylesheet())
 
     def zoom(self) -> int:
         """The interface density in percent; 100 is as shipped."""
@@ -2012,6 +2464,33 @@ class UIAPI:
         colour = QColorDialog.getColor(start, self._win, self._titled(title))
         return colour.name() if colour.isValid() else ""
 
+    def pick_file(self, title: str = "Choose a file", kind: str = "open",
+                  filter: str = "", initial: str = "") -> str:
+        """A file box: ``kind`` is ``open``, ``save`` or ``folder``, and the answer
+        is the path picked or ``""`` when nothing was.
+
+        ``filter`` is Qt's own shape - ``"Keys (*.pem *.key);;All files (*)"`` -
+        and empty lets anything through. ``initial`` is where the box starts: a
+        folder, or a file already named, so an addon can hand back whatever the
+        user had chosen last. A file chosen here is on this machine; an addon
+        that means to put it on the device says so itself - nothing is uploaded
+        behind its back.
+        """
+        from PyQt6.QtWidgets import QFileDialog
+
+        mode = str(kind or "open").strip().lower()
+        start = str(initial or "")
+        if mode == "folder":
+            return QFileDialog.getExistingDirectory(self._win, self._titled(title),
+                                                   start) or ""
+        if mode in ("save", "write"):
+            picked, _ = QFileDialog.getSaveFileName(self._win, self._titled(title),
+                                                    start, str(filter or ""))
+            return picked or ""
+        picked, _ = QFileDialog.getOpenFileName(self._win, self._titled(title),
+                                                start, str(filter or ""))
+        return picked or ""
+
     def popup(self, title: str, text: str) -> None:
         """A notice for the user, named for the addon raising it: a toast from the
         app's tray icon when it has one and notifications are allowed, and the
@@ -2327,6 +2806,11 @@ class TabsAPI:
         entry = self._store.pop(str(name), None)
         if entry is None:
             return False
+        for control in (entry.get("registry") or {}).values():
+            # A shell left running when its page goes out is a thread still
+            # writing into a widget that no longer is.
+            if _is_terminal(control):
+                _terminal_stop(control)
         self._win.remove_transient_tab(entry["page"])
         index = self._win.tabs.indexOf(entry["page"])
         if index >= 0:
@@ -2420,7 +2904,12 @@ class TabsAPI:
         widget = self.widget(name, identifier)
         if widget is None:
             return False
-        apply_widget_property(widget, str(prop), value)
+        prop = str(prop)
+        if prop in TERMINAL_PRIVILEGED and _is_terminal(widget):
+            # Opening a connection and typing down one are the app's business
+            # as much as ``device.run`` is, so they pass the same gates.
+            _authorize_terminal(self._api, prop, widget)
+        apply_widget_property(widget, prop, value)
         return True
 
     def widget_value(self, name: str, identifier: str, what: str = "value") -> Any:
@@ -2752,7 +3241,10 @@ class SettingsPagesAPI:
         widget = self.widget(name, identifier)
         if widget is None:
             return False
-        apply_widget_property(widget, str(prop), value)
+        prop = str(prop)
+        if prop in TERMINAL_PRIVILEGED and _is_terminal(widget):
+            _authorize_terminal(self._api, prop, widget)
+        apply_widget_property(widget, prop, value)
         return True
 
     def widget_value(self, name: str, identifier: str,
@@ -2998,9 +3490,226 @@ class PathsAPI:
         return ASSETS_DIR
 
     @property
+    def themes(self) -> Path:
+        """The themes folder beside the program, where every ``.theme`` file lives."""
+        return manager_theme.folder()
+
+    @property
     def log(self) -> Path:
         """The app log file - the one :meth:`AddonAPI.log` writes into."""
         return LOG_FILE
+
+
+class ThemeAPI:
+    """The look of the window: what the theme in force says, and how to change one.
+
+    A theme is one JSON object - a handful of named colours, the shape of the
+    tabs, and a few lines of stylesheet of its own - kept in
+    ``themes/<name>.theme``. Reading is safe from any thread; ``use`` and
+    ``save`` redraw the window, so they belong on the GUI thread, which the
+    process bridge already routes here.
+    """
+
+    def __init__(self, api: "AddonAPI") -> None:
+        self._api = api
+
+    def _window(self) -> Any:
+        """The app window, when there is one to ask; a test or a build has none."""
+        return getattr(self._api, "win", None)
+
+    def _repaint(self, name: str) -> None:
+        """Tell the window the look moved, if a window is here to hear it."""
+        win = self._window()
+        apply = getattr(win, "apply_theme", None)
+        if callable(apply):
+            apply(name)
+
+    def name(self) -> str:
+        """The theme the window is drawn from, by its file's name."""
+        return manager_theme.current_name()
+
+    def names(self) -> list[str]:
+        """Every theme on disk, ``default`` first and the rest in order."""
+        return manager_theme.names()
+
+    def exists(self, name: str) -> bool:
+        """Whether a theme of that name has a file behind it."""
+        return manager_theme.exists(str(name))
+
+    def folder(self) -> str:
+        """The themes folder, made on the way so it is always there to write in."""
+        return str(manager_theme.folder())
+
+    def read(self, name: str = "") -> dict:
+        """One theme complete - every colour and every knob, the ones in force
+        when no name is given - as the dict its file stands for."""
+        return jsonable(manager_theme.theme(name or None))
+
+    def raw(self, name: str) -> dict:
+        """One theme file exactly as written, with nothing filled in; ``{}`` when
+        it is missing or cannot be read."""
+        return jsonable(manager_theme.raw(name))
+
+    def colors(self, name: str = "") -> dict:
+        """Every colour token and the hex it currently means."""
+        return manager_theme.colors(name or None)
+
+    def color(self, token: str, name: str = "", default: str = "") -> str:
+        """One colour token as a hex; ``default`` when the interface has no such token."""
+        return manager_theme.color(str(token), name or None, default)
+
+    def tabs(self, name: str = "") -> dict:
+        """Every tab knob and the size it currently means, in pixels at 100% zoom."""
+        return manager_theme.tabs(name or None)
+
+    def metric(self, knob: str, name: str = "") -> Any:
+        """One tab knob by itself; ``None`` when no such knob is drawn."""
+        return manager_theme.tab_metric(str(knob), name or None)
+
+    def icon_px(self) -> int:
+        """The smallest a tab's picture is drawn, at 100% zoom."""
+        return manager_theme.icon_px()
+
+    def chrome_px(self) -> int:
+        """What a tab spends on itself besides its text, at 100% zoom."""
+        return manager_theme.chrome_px()
+
+    def shows_captions(self) -> bool:
+        """Whether a tab may show its name at all; off leaves the bar icon-only."""
+        return manager_theme.shows_captions()
+
+    def shows_dots(self) -> bool:
+        """Whether the SSH/SFTP dots are worn beside a tab's name."""
+        return manager_theme.shows_dots()
+
+    def stylesheet(self, name: str = "") -> str:
+        """The whole application sheet for one theme, at 100% zoom."""
+        return manager_theme.stylesheet(name or None)
+
+    def sheet_of(self, theme: dict) -> str:
+        """The sheet a theme that is still being edited would produce."""
+        return manager_theme.sheet_of(theme)
+
+    def validate(self, theme: dict) -> list[str]:
+        """What is wrong with a candidate theme, one line each; empty when it is
+        usable. Unknown tokens are reported because they will be ignored."""
+        return manager_theme.validate(theme)
+
+    def groups(self) -> list[dict]:
+        """The colour tokens in the blocks an editor shows them in: ``{title,
+        tokens: [{name, color, hint}]}`` for the theme in force."""
+        return jsonable([
+            {"title": title,
+             "tokens": [{"name": token, "color": manager_theme.color(token),
+                        "hint": manager_theme.token_hint(token)}
+                        for token in tokens]}
+            for title, tokens in manager_theme.groups()])
+
+    def token_knobs(self) -> list[dict]:
+        """Every tab knob the bar answers to, with what it means and the size it
+        is drawn at now: ``{name, value, kind, hint}``.
+
+        ``kind`` says whether the knob is a number of pixels or a switch, so an
+        editor can put the right control beside it without being told.
+        """
+        from manager_const import THEME_TABS
+        from manager_theme import TAB_HINTS
+
+        live = manager_theme.tabs()
+        return jsonable([
+            {"name": knob, "value": live.get(knob), "kind": "switch"
+             if isinstance(THEME_TABS[knob], bool) else "pixels",
+             "hint": TAB_HINTS.get(knob, "")}
+            for knob in THEME_TABS])
+
+    def templates(self) -> list[dict]:
+        """The looks a new theme may be begun from: ``{name, blurb, theme}``."""
+        return jsonable(manager_theme.templates())
+
+    def template_text(self, name: str) -> str:
+        """One template as the text of a ``.theme`` file, ready for an editor."""
+        return manager_theme.template_text(str(name))
+
+    def use(self, name: str) -> str:
+        """Draw the window from one theme and keep the choice for this profile;
+        the name actually used, which falls back to ``default`` for a theme with
+        no file."""
+        win = self._window()
+        apply = getattr(win, "apply_theme", None)
+        if callable(apply):
+            return str(apply(str(name)))
+        return manager_theme.use(str(name))
+
+    def save(self, name: str, theme: dict, force: bool = False) -> str:
+        """Write one theme to its file; raises with what is wrong unless ``force``.
+
+        Saving the look already in force redraws the window from it, which is
+        what an editor wants: the change shows as soon as the file lands.
+        """
+        wanted = manager_theme.safe_name(name) or manager_theme.current_name()
+        manager_theme.write(wanted, theme, force=bool(force))
+        if manager_theme.current_name() == wanted:
+            self._repaint(wanted)
+        return wanted
+
+    def copy(self, name: str, target: str) -> str:
+        """Duplicate a theme under a new name; the name, or a refusal when that
+        name is already taken."""
+        return manager_theme.copy(str(name), str(target))
+
+    def remove(self, name: str) -> bool:
+        """Delete one theme file; ``False`` for the shipped default, which stays."""
+        wanted = str(name)
+        was = manager_theme.current_name()
+        gone = manager_theme.remove(wanted)
+        if gone and was == manager_theme.current_name() and wanted != was:
+            self._repaint(was)
+        return bool(gone)
+
+    def reference(self) -> list[dict]:
+        """Every call on ``api.theme`` itself: ``{name, args, doc}``.
+
+        Read off the live object rather than written down twice, so the
+        documentation a theme editor shows cannot fall behind the API it
+        describes. Positional and keyword arguments are spelled out as the
+        signature has them, defaults included.
+        """
+        out: list[dict] = []
+        for name in dir(ThemeAPI):
+            if name.startswith("_"):
+                continue
+            function = getattr(ThemeAPI, name, None)
+            if not callable(function):
+                continue
+            try:
+                signature = inspect.signature(function)
+            except (TypeError, ValueError):
+                continue
+            parts = []
+            for parameter in signature.parameters.values():
+                if parameter.name in ("self", "api"):
+                    continue
+                shown = parameter.name
+                if parameter.default is not inspect.Parameter.empty:
+                    shown += "=" + repr(parameter.default)
+                parts.append(shown)
+            out.append(jsonable({
+                "name": name,
+                "args": f"api.theme.{name}({', '.join(parts)})",
+                "doc": inspect.getdoc(function) or ""}))
+        return out
+
+    def rename(self, name: str, target: str) -> str:
+        """A theme under a new name, the old file gone; the new name.
+
+        Copy then remove, so a half-finished rename cannot leave the theme with
+        no file at all: nothing is deleted until the new one has landed.
+        """
+        fresh = self.copy(name, target)
+        self.remove(name)
+        if manager_theme.current_name() == str(name):
+            self.use(fresh)
+        return fresh
 
 
 class PeersAPI:
@@ -3051,6 +3760,7 @@ class AddonAPI:
         self.config = ConfigAPI(self)
         self.schedule = SchedulerAPI(self)
         self.paths = PathsAPI(self)
+        self.theme = ThemeAPI(self)
         self.peers = PeersAPI(self)
 
     def log(self, text: Any) -> None:

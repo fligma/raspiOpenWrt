@@ -232,11 +232,28 @@ class ProcessAPI:
         "config.save_text": ("raw",),
         "config.path": (),
         "ui.pick_color": ("title", "initial"),
+        "ui.pick_file": ("title", "kind", "filter", "initial"),
         "session.web_url": ("tab",),
         "session.rescan_addons": (),
         "session.set_addon_enabled": ("addon_id", "enabled"),
         "peers.info": ("addon_id",),
         "peers.send": ("addon_id", "data"),
+        "theme.exists": ("name",),
+        "theme.read": ("name",),
+        "theme.raw": ("name",),
+        "theme.colors": ("name",),
+        "theme.color": ("token", "name", "default"),
+        "theme.tabs": ("name",),
+        "theme.metric": ("knob", "name"),
+        "theme.stylesheet": ("name",),
+        "theme.sheet_of": ("theme",),
+        "theme.validate": ("theme",),
+        "theme.template_text": ("name",),
+        "theme.use": ("name",),
+        "theme.save": ("name", "theme", "force"),
+        "theme.copy": ("name", "target"),
+        "theme.rename": ("name", "target"),
+        "theme.remove": ("name",),
     }
 
     def __init__(self, addon_id: str = "", name: str = "") -> None:
@@ -266,7 +283,7 @@ class ProcessAPI:
         self.base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) \
             else Path(__file__).resolve().parent
         for namespace in ("device", "ui", "tabs", "settings", "settings_pages",
-                          "config", "peers", "session"):
+                          "config", "peers", "session", "theme"):
             setattr(self, namespace, _Namespace(self, namespace))
         self.events = _Events(self)
         self.schedule = _Schedule(self)
@@ -641,6 +658,16 @@ class _Paths:
         return self._env("RASCONF_ASSETS", self.base / "assets")
 
     @property
+    def themes(self) -> Path:
+        """The themes folder the window is painted from, made on the way."""
+        folder = self._env("RASCONF_THEMES", self.base / "themes")
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return folder
+
+    @property
     def log(self) -> Path:
         return self._env("RASCONF_LOG", self.base / "berry_manager.log")
 
@@ -694,6 +721,30 @@ def serve(target: str | Path, addon_id: str = "") -> int:
 
 # --- Testing one addon without the app ---
 
+def _stub_rename(name: str, target: str, manager_theme: Any) -> str:
+    """``theme.rename`` as the app does it: copy first, then drop the old file."""
+    fresh = manager_theme.copy(name, target)
+    manager_theme.remove(name)
+    return fresh
+
+
+def _stub_reference() -> list[dict]:
+    """``theme.reference`` read off the live API class itself.
+
+    ``ThemeAPI.reference`` introspects its own class and never asks a window for
+    anything, so calling it unbound answers a stub with exactly the words the
+    app would: the reference a theme editor shows cannot fall behind the API it
+    describes. With no Qt beside the stub there is no class to read, and the
+    answer is the empty list every other stub reply falls back to.
+    """
+    try:
+        from addon_api import ThemeAPI
+
+        return list(ThemeAPI.reference(None) or [])
+    except Exception:            # no addon_api here: nothing to describe
+        return []
+
+
 class StubAPI:
     """An ``api`` that records what it was asked for, for testing an addon without the app."""
 
@@ -714,7 +765,7 @@ class StubAPI:
         # through ``api.schedule.after``.
         self.schedule = self.timers
         for namespace in ("device", "ui", "tabs", "settings", "settings_pages",
-                          "config", "peers", "session", "events"):
+                          "config", "peers", "session", "events", "theme"):
             setattr(self, namespace, _StubNamespace(self, namespace))
         # The real folders, from the same environment a compiled addon reads.
         self.paths = _Paths(self)
@@ -768,6 +819,93 @@ class StubAPI:
     def error(self, text: Any) -> None:
         self.logs.append(f"error: {text}")
 
+    # --- the look, answered from the real files where they can be read ---
+
+    def theme_answer(self, method: str, ask: Callable[[str, Any], Any]) -> Any:
+        """A ``theme.*`` call, answered by :mod:`manager_theme` if it is importable.
+
+        The module needs no window and no Qt, so a test sees the same palettes,
+        knobs and files the app would answer with - in the folder the
+        ``RASCONF_THEMES`` variable points at, which a test sets to its own
+        before anything is read. With no app beside the addon (a compiled
+        build on its own), the canned answers below keep the shape of every
+        reply without touching a file.
+        """
+        try:
+            import manager_theme
+        except ImportError:
+            manager_theme = None
+        wanted = ask("name", "")
+        if manager_theme is not None:
+            answers = {
+                "theme.name": lambda: manager_theme.current_name(),
+                "theme.names": manager_theme.names,
+                "theme.exists": lambda: manager_theme.exists(wanted),
+                "theme.folder": lambda: str(manager_theme.folder()),
+                "theme.read": lambda: manager_theme.theme(wanted or None),
+                "theme.raw": lambda: manager_theme.raw(wanted),
+                "theme.colors": lambda: manager_theme.colors(wanted or None),
+                "theme.color": lambda: manager_theme.color(
+                    ask("token", ""), wanted or None, ask("default", "")),
+                "theme.tabs": lambda: manager_theme.tabs(wanted or None),
+                "theme.metric": lambda: manager_theme.tab_metric(
+                    ask("knob", ""), wanted or None),
+                "theme.icon_px": manager_theme.icon_px,
+                "theme.chrome_px": manager_theme.chrome_px,
+                "theme.shows_captions": manager_theme.shows_captions,
+                "theme.shows_dots": manager_theme.shows_dots,
+                "theme.stylesheet": lambda: manager_theme.stylesheet(wanted or None),
+                "theme.sheet_of": lambda: manager_theme.sheet_of(ask("theme", {})),
+                "theme.validate": lambda: manager_theme.validate(ask("theme", {})),
+                "theme.groups": lambda: [
+                    {"title": title,
+                     "tokens": [{"name": token,
+                                 "color": manager_theme.color(token),
+                                 "hint": manager_theme.token_hint(token)}
+                                 for token in tokens]}
+                    for title, tokens in manager_theme.groups()],
+                "theme.token_knobs": lambda: [
+                    {"name": knob, "value": value, "kind": "switch"
+                     if isinstance(value, bool) else "pixels", "hint": hint}
+                    for knob, value, hint in manager_theme.knobs()],
+                "theme.reference": _stub_reference,
+                "theme.templates": manager_theme.templates,
+                "theme.template_text": lambda: manager_theme.template_text(wanted),
+                "theme.use": lambda: manager_theme.use(wanted),
+                "theme.save": lambda: str(manager_theme.write(
+                    ask("name", ""), ask("theme", {}) or {},
+                    force=bool(ask("force", False))).stem),
+                "theme.copy": lambda: manager_theme.copy(ask("name", ""),
+                                                         ask("target", "")),
+                "theme.rename": lambda: _stub_rename(
+                    ask("name", ""), ask("target", ""), manager_theme),
+                "theme.remove": lambda: manager_theme.remove(wanted),
+            }
+            answer = answers.get(method)
+            if answer is not None:
+                return answer()
+        # No app module beside the addon: a well-formed nothing, in the shape
+        # the app would answer in, so an addon's guards see the same types.
+        if method == "theme.name":
+            return "default"
+        if method in ("theme.names", "theme.groups", "theme.token_knobs",
+                      "theme.templates", "theme.reference", "theme.validate"):
+            return [] if method != "theme.names" else ["default"]
+        if method in ("theme.colors", "theme.tabs", "theme.read", "theme.raw"):
+            return {}
+        if method in ("theme.exists", "theme.remove"):
+            return False
+        if method in ("theme.shows_captions", "theme.shows_dots"):
+            return True
+        if method in ("theme.icon_px", "theme.chrome_px"):
+            return 24 if method == "theme.icon_px" else 34
+        if method in ("theme.use", "theme.copy", "theme.rename", "theme.save"):
+            return str(ask("target", "") or wanted or "")
+        if method in ("theme.stylesheet", "theme.sheet_of", "theme.template_text",
+                      "theme.folder", "theme.color"):
+            return ""
+        return None
+
     # --- sensible answers ---
 
     def default(self, method: str, arguments: Any, named: Any) -> Any:
@@ -802,7 +940,9 @@ class StubAPI:
         if method.startswith("ui."):
             if method == "ui.question":
                 return True
-            if method == "ui.input":
+            if method in ("ui.input", "ui.pick_color", "ui.pick_file"):
+                # A box that asks for something answers with nothing at all:
+                # the same as a person pressing Cancel.
                 return ""
             return None                       # a notice, a menu entry, a dialog
         if method.startswith("tabs."):
@@ -879,6 +1019,8 @@ class StubAPI:
                                     "session.status") else None
         if method.startswith("peers."):
             return [] if method == "peers.list" else None
+        if method.startswith("theme."):
+            return self.theme_answer(method, ask)
         if method.startswith("events."):
             if method == "events.on":
                 return lambda: None

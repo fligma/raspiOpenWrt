@@ -35,7 +35,7 @@ sits in `fresh_install/`.
 
 ## The desktop side: Berry Manager
 
-`utils/update util` is the whole application - fifteen small modules, one
+`utils/update util` is the whole application - sixteen small modules, one
 entry point (`berry_manager.py`) and no build step to run it:
 
 ```sh
@@ -54,8 +54,13 @@ What it gives you:
   prompts work, quick-command buttons sit above it, and a reboot watch
   reconnects when the device comes back.
 - **Files over SFTP**, custom embedded browser tabs (including the dashboard
-  itself, with a self-signed-certificate switch), interface zoom, and a dark
-  theme with a colour wheel for anything coloured.
+  itself, with a self-signed-certificate switch), interface zoom, and
+  **themes** - the whole look of the window is one `themes/<name>.theme` JSON
+  file, and the app writes `default.theme` into that folder the first time it
+  runs, so there is always something to edit and always something to fall back
+  on. View > Theme and Settings > Appearance choose which one is worn; the
+  bundled Theme Manager makes them, and a colour wheel is there for anything
+  coloured.
 - **Addons** - the app's extension system, described below.
 
 Packaging is one PyInstaller command, and the GitHub workflow
@@ -90,13 +95,24 @@ def init(api):
 ```
 
 `api.device` (SSH/SFTP, threads and all), `api.tabs` (own tabs, web tabs,
-widgets built from declarative specs, tab icons), `api.ui` (dialogs, menus,
-a colour wheel), `api.config`/`api.settings` (per-installation JSON file and
+widgets built from declarative specs, tab icons, sub-pages added while the tab
+is open, terminal leaves on connections of their own), `api.theme` (the looks the
+window is drawn from, read and written as files), `api.ui` (dialogs, menus,
+secret inputs, a colour wheel, a file box), `api.config`/`api.settings` (per-installation JSON file and
 per-profile notes), `api.schedule`, `api.peers` (addons talking to each
 other) and `api.session`/`api.paths` make up the full surface - each is
 documented with examples in the app README's **Addons** chapter.
 
-Three addons ship inside the program, and each has a Settings page of its own
+An addon's tab mark costs no code either: one name, `<id>icon.png`, looked for
+first in an `assets/<id>/` folder beside the addon's own file - so
+`addon.store/assets/cert_manager/cert_managericon.png` for a store addon's
+source, `addons/assets/multi_ssh/multi_sshicon.png` for a program dropped in
+beside the `.exe` - and then in the program's own `utils/update util/assets`,
+which is where the five bundled addons' pictures live. A square PNG is what the
+bar draws. With no file anywhere the tab wears the SVG the addon sends, and a
+tab that sends nothing wears `assets/defaulttabicon.png`.
+
+Five addons ship inside the program, and each has a Settings page of its own
 named after it:
 
 - **Berry** - the file manager: device and local pages in one tab, with a
@@ -106,17 +122,27 @@ named after it:
 - **Berry addon store** - the store itself: reads the catalog published in
   `utils/update util/addon.store`, then downloads, tests and compiles any
   addon listed there into a program of its own in `addons`.
+- **Berry Manager update** - checks the repository's releases, and downloads,
+  verifies and swaps in a newer build, with the previous file kept as a way
+  back.
+- **Theme Manager** - makes and edits the `.theme` files: every look on disk
+  with its author, an editor that works on one draft at a time (colours by
+  their groups, the tab bar by its knobs, or the JSON direct), the templates,
+  and a reference of every `api.theme` call read off the running app.
 
 Everything else comes from that store - **Certificate manager**, **OpenWrt
-Log Viewer**, **Hello from the store** - and an install is not a second-class
-addon. The store writes an `addons/<id>.json` manifest beside the program it
+Log Viewer**, **OpenWrt Package Manager**, **Multi SSH** (any number of SSH
+sessions in sub-tabs, each on a connection of its own) - and an install is not a
+second-class addon. The store writes an `addons/<id>.json` manifest beside the program it
 built (its name, version, author and the transports it needs) and seeds its
 settings form, so the moment it is switched on it sits on the Settings
 **Installed addons** page with the same switch, restart, own-connection option
 and config panel as the bundled ones, which each keep a page of their own beside
-it. Deleting it from the store takes the program and that manifest back and
-leaves `addons/_data/<id>` alone, so a reinstall
-keeps your settings.
+it. Deleting it from the store takes the program and that manifest back, and
+takes `addons/_data/<id>` with it unless you say otherwise - the switch on the
+store's Settings page for every delete, the check box beside the source at the
+top of the tab for this one - so a reinstall keeps your settings whenever that
+is what you asked for.
 
 The **Addon Dev** tab (Tools > Addon Dev) works on addon files themselves:
 read the manifest and source, run a generated test script against a recording

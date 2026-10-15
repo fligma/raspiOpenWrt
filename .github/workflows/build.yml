@@ -193,6 +193,23 @@ jobs:
         # tools/check_connection_saying.py.
         python tools/check_connection_saying.py
 
+    - name: Check every picture file is where the rule says it is
+      working-directory: "utils/update util"
+      run: |
+        # Every addon wears a mark of its own, under one name: its id and then
+        # icon.png - in assets/ for an addon that ships inside the program, in
+        # addon.store/assets/<id>/ for one the store publishes, and the program's
+        # own marks (the tab default, the terminal, the Settings cog, the tile an
+        # addon with no picture is shown with) in assets/ as well. A missing file
+        # stops nothing, which is the problem: the tab quietly draws the fallback
+        # in its source and the store's card shows a default tile, so a picture
+        # that was never made is only noticed by whoever looks for it. The same two
+        # tools write these pictures out of the drawings in the sources, so what is
+        # expected and what is shipped come from one place; see
+        # tools/make_addon_icons.py and tools/make_store_icons.py.
+        python tools/make_addon_icons.py --check
+        python tools/make_store_icons.py --check
+
     - name: Run the addon test scripts
       shell: pwsh
       working-directory: "utils/update util"
@@ -366,7 +383,9 @@ jobs:
           "An addon that came with the program is packed inside the executable",
           "and can only be switched on and off there. A file dropped here with",
           "the same name takes the place of that shipped addon. Each addon keeps",
-          "its own settings in addons/_data/<name>/config.json."
+          "its own settings in addons/_data/<name>/config.json, and its own tab",
+          "picture in addons/assets/<name>/<name>icon.png - or in assets/ beside",
+          "the program, under that same name."
         ) -join [Environment]::NewLine
         Set-Content -Path dist/addons/README.txt -Value $note -Encoding utf8
 

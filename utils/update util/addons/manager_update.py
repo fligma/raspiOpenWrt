@@ -76,7 +76,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from addon_common import AddonError, config_get, find_icon, merge_config
+from addon_common import AddonError, config_get, find_addon_picture, merge_config
 
 ADDON = {
     "name": "Berry Manager update",
@@ -290,30 +290,30 @@ TAB_ICON = (
     '</svg>'
 )
 
-#: The name this program shipped the tab's picture under, before the
-#: ``{package}icon.png`` rule; tried after the standard name.
-TAB_ICON_FILE = "updateicon.png"
+#: The picture the tab wears when a folder it is read from holds one: this
+#: addon's id and then ``icon.png``, the one name every addon's picture is
+#: looked up under. Written out only to say where the file goes.
+TAB_ICON_FILE = "manager_updateicon.png"
 
 #: This addon's own id: what the icon rule and its data folder are named for.
 OWN_ID = "manager_update"
 
 
 def tab_icon() -> str:
-    """The shipped picture if the assets folder has one, else the drawn mark.
+    """The shipped picture if a folder this addon is read from has one, else the
+    drawn mark.
 
-    ``manager_updateicon.png`` is the standard name every addon's picture is
-    looked for under first; the older ``updateicon.png`` is still tried, so a
-    copy that has worn one since before the rule keeps wearing it.
+    ``manager_updateicon.png`` is the only name the lookup makes, in the addon's
+    own assets folder and then in the program's, so the file in either decides
+    what the tab wears and nothing here has to be kept in step with it.
     """
-    folder = None
+    paths = None
     try:
-        folder = api.paths.assets
+        paths = api.paths
     except (AddonError, AttributeError, TypeError):    # no api on a bare import
-        folder = None
-    if folder is None:
-        return TAB_ICON
+        paths = None
     try:
-        return find_icon(folder, OWN_ID, TAB_ICON_FILE) or TAB_ICON
+        return find_addon_picture(paths, OWN_ID) or TAB_ICON
     except (OSError, AddonError):
         return TAB_ICON
 

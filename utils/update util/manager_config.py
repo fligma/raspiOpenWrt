@@ -39,6 +39,10 @@ from manager_const import (
     UI_ZOOM_MIN,
 )
 
+# Needs no window and nothing from this module, so no import loop: a theme is
+# read from its file the way a profile is read from its own.
+import manager_theme
+
 CONFIG_VERSION = 3
 
 # Layout keys, never a profile's settings.
@@ -107,6 +111,12 @@ def _normalize_values(config: dict) -> dict:
     config["reboot_retry_interval"] = _coerce_int(config.get("reboot_retry_interval"), 10, 1, 300)
     config["port"] = _coerce_int(config.get("port"), DEFAULT_PROFILE["port"], 1, 65535)
     config["default_tab"] = str(config.get("default_tab", "Berry"))
+    # A theme is a file name, and a file that is not there is not a mistake to
+    # throw on somebody: the shipped default is used instead, so a profile
+    # copied onto another machine - or a theme deleted from its own - still
+    # opens. ``manager_theme`` makes the themes folder on the way.
+    config["theme"] = (manager_theme.safe_name(config.get("theme"))
+                       or DEFAULT_APP_CONFIG["theme"])
     config["host"] = str(config.get("host", DEFAULT_PROFILE["host"]))
     config["username"] = str(config.get("username", DEFAULT_PROFILE["username"]))
     config["key_file"] = str(config.get("key_file", ""))

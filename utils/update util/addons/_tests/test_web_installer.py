@@ -365,9 +365,24 @@ def test_look_around(installer: Any, app: Any, defaults: dict) -> list:
     check(api.called("config.declare") and api.called("tabs.add_tab")
           and api.called("ui.menu_item"),
           "init did not declare its config, add its tab and add its menu entry")
-    check((installer.TAB,) in [tuple(arguments) for where, arguments, _n in api.calls
-                               if where == "tabs.use_app_icon"],
-          "the tab never asked to wear the program's own icon")
+    # The tab wears a mark of its own now - the picture in the assets folder when
+    # one is there, its drawing when it is not - so it is no longer sent to the
+    # program's logo.
+    check(str(installer.TAB_ICON).startswith("<svg"),
+          "the installer holds no drawing of its own to fall back on")
+    check(api.called("tabs.set_icon"),
+          "the tab never set an icon of its own")
+    sent = [str(api.argument("tabs.set_icon", "icon", arguments, named, ""))
+            for where, arguments, named in api.calls if where == "tabs.set_icon"]
+    check(sent == [installer.tab_icon()],
+          f"the tab did not wear what its tab_icon() settles on: {sent}")
+    check(not [1 for where, _arguments, _named in api.calls
+               if where == "tabs.use_app_icon"],
+          "the tab asked for the program's icon while holding one of its own")
+    check(installer.TAB_ICON_FILE == "web_installericon.png",
+          f"the tab's mark follows {{addon}}icon.png: {installer.TAB_ICON_FILE!r}")
+    check((ROOT / "assets" / installer.TAB_ICON_FILE).is_file(),
+          f"{installer.TAB_ICON_FILE} is not in the program's assets folder")
     check(REMOTE in str(api.last("target", "text")),
           f"start did not say the files go to {REMOTE}: {api.last('target', 'text')!r}")
     installer.on_widget(installer.TAB, "fetch", "clicked", {})

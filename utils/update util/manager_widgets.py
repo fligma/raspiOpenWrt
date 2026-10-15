@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+import weakref
+from string import Template
 
 from PyQt6.QtCore import (
     QEvent,
@@ -63,37 +65,105 @@ from PyQt6.QtWidgets import (
 )
 
 from manager_const import find_asset, scaled_sheet, zoom_size
+import manager_theme
+
+
+# --- the bits of the look a widget paints for itself ---
+
+#: Widgets this module handed a sheet written in theme tokens, so a theme
+#: change can pour new colours into them too. Held weakly: a widget that goes
+#: away takes its sheet with it, and nobody has to unregister it.
+_themed: list[weakref.ref] = []
+
+
+def theme_text(text: str) -> str:
+    """``$token`` in a hand-written sheet becomes the colour or size the theme means."""
+    values = {str(key): str(value) for key, value in
+              {**manager_theme.colors(), **manager_theme.tabs()}.items()}
+    return Template(str(text or "")).safe_substitute(**values)
+
+
+def theme_style(widget: QWidget, sheet: str) -> QWidget:
+    """Give one widget a small sheet of its own, written in the theme's tokens.
+
+    The application stylesheet covers the standard parts of a widget; this is
+    for the handful of rules a widget needs beyond them - a caption in the
+    accent, a heading drawn flat - which would otherwise fix a colour that a
+    theme exists to change.
+    """
+    if getattr(widget, "_theme_sheet", None) is None:
+        _themed.append(weakref.ref(widget))
+    widget._theme_sheet = str(sheet or "")
+    return paint_theme_style(widget)
+
+
+def paint_theme_style(widget: QWidget) -> QWidget:
+    """Re-apply one widget's own sheet, at the zoom and from the colours in force."""
+    sheet = str(getattr(widget, "_theme_sheet", "") or "")
+    if sheet:
+        widget.setStyleSheet(scaled_sheet(theme_text(sheet)))
+    return widget
+
+
+def refresh_theme_styles() -> int:
+    """Re-paint every widget that carries a sheet of its own; says how many did."""
+    alive: list[weakref.ref] = []
+    for ref in _themed:
+        widget = ref()
+        if widget is None:
+            continue
+        alive.append(ref)
+        try:
+            paint_theme_style(widget)
+        except RuntimeError:               # the C++ side went with the theme
+            continue
+    _themed[:] = alive
+    return len(alive)
 
 
 # --- tab captions and the pictures a crowded bar falls back on ---
 
 #: What a tab spends on itself besides its text - the sheet's side padding,
-#: its borders and the small gap before the icon - counted at 100% zoom.
+#: its borders and the small gap before the icon - counted at 100% zoom, and
+#: the number used if a theme cannot be read. Narrower than ``_TAB_MIN_TEXT``
+#: a caption could not be read anyway: below it the tab drops its text
+#: entirely and wears its icon alone.
 _TAB_CHROME = 34
-#: Narrower than this a caption could not be read anyway (100% zoom): below
-#: it the tab drops its text entirely and wears its icon alone.
 _TAB_MIN_TEXT = 24
 
 #: The pictures this module paints itself, made once and kept: the bar
 #: refits on every resize, and repainting the same glyphs each time is waste.
 #: File-backed marks live here too, so an unreadable asset is tried once.
+#: A theme change bumps the revision below, and every one is painted again.
 _DRAWN_ICONS: dict[str, QIcon] = {}
+_ICONS_REVISION = -1
 
-#: Every tab picture is painted at least this wide (at 100% zoom), whatever
-#: the bar's own icon size measures. The tab keeps the size the icon size
-#: gives it - only the drawn mark grows, so a bigger picture never means a
-#: bigger tab.
+#: Every tab picture is painted at least this wide (at 100% zoom), whatever the
+#: bar's own icon size measures, when the theme asks for nothing: the tab keeps
+#: the size the icon size gives it - only the drawn mark grows, so a bigger
+#: picture never means a bigger tab.
 _TAB_ICON_DRAW = 24
+
+
+def tab_chrome() -> int:
+    """What a tab spends on itself besides its text, from the theme in force."""
+    return manager_theme.chrome_px() or _TAB_CHROME
 
 
 def tab_icon_side(bar: QTabBar) -> int:
     """The edge a tab's picture is drawn at: the bar's icon size, but never
-    smaller than the comfortable mark. Zoomed with the rest of the bar."""
-    return max(int(bar.iconSize().width()), zoom_size(_TAB_ICON_DRAW))
+    smaller than the mark the theme asks for. Zoomed with the rest of the bar."""
+    return max(int(bar.iconSize().width()),
+               zoom_size(manager_theme.icon_px() or _TAB_ICON_DRAW))
 
 
 def _drawn_icon(key: str, paint: Callable[[QPainter], None], filename: str = "") -> QIcon:
     """One tab picture, made once and remembered; a shipped asset wins, the paint glyph is the fallback so a bare checkout still draws something."""
+    global _ICONS_REVISION
+    if _ICONS_REVISION != manager_theme.revision():
+        # A different theme is in force: whatever was painted belongs to it.
+        _DRAWN_ICONS.clear()
+        _ICONS_REVISION = manager_theme.revision()
     icon = _DRAWN_ICONS.get(key)
     if icon is None:
         path = find_asset(filename) if filename else None
@@ -111,51 +181,73 @@ def _drawn_icon(key: str, paint: Callable[[QPainter], None], filename: str = "")
     return icon
 
 
+def paint_default_tab(p: QPainter) -> None:
+    """Four rounded tiles in the bar's grey with one accent corner.
+
+    Drawn in the 32-unit space a tab picture is painted into, and shared with
+    ``tools/make_store_icons.py``, which writes the same mark out as
+    ``assets/defaulttabicon.png`` - so the file a person can edit and the drawing
+    that stands in when it is gone cannot drift apart.
+    """
+    p.setPen(Qt.PenStyle.NoPen)
+    for n, (x, y) in enumerate(((5.0, 5.0), (18.5, 5.0),
+                                (5.0, 18.5), (18.5, 18.5))):
+        p.setBrush(QColor(manager_theme.color("accent")) if n == 0
+                   else QColor(manager_theme.color("icon_alt")))
+        p.drawRoundedRect(QRectF(x, y, 8.5, 8.5), 2.2, 2.2)
+
+
 def default_tab_icon() -> QIcon:
-    """The mark for any tab that arrives without one: the shipped defaulttabicon.png, else four rounded tiles in the bar's grey with one accent corner."""
-    def paint(p: QPainter) -> None:
-        p.setPen(Qt.PenStyle.NoPen)
-        for n, (x, y) in enumerate(((5.0, 5.0), (18.5, 5.0),
-                                    (5.0, 18.5), (18.5, 18.5))):
-            p.setBrush(QColor("#c51a4a") if n == 0 else QColor("#9db4c8"))
-            p.drawRoundedRect(QRectF(x, y, 8.5, 8.5), 2.2, 2.2)
-    return _drawn_icon("default_tab", paint, "defaulttabicon.png")
+    """The mark for any tab that arrives without one: the shipped
+    defaulttabicon.png, else the same four tiles drawn here."""
+    return _drawn_icon("default_tab", paint_default_tab, "defaulttabicon.png")
+
+
+def paint_terminal_tab(p: QPainter) -> None:
+    """A shell frame with a raspberry prompt, in the 32-unit picture space."""
+    frame = QPen(QColor(manager_theme.color("icon_alt")))
+    frame.setWidthF(2.4)
+    p.setPen(frame)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(QRectF(4.0, 6.0, 24.0, 20.0), 3.0, 3.0)
+    prompt = QPen(QColor(manager_theme.color("accent")))
+    prompt.setWidthF(2.2)
+    prompt.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(prompt)
+    p.drawLine(QPointF(8.5, 12.5), QPointF(12.5, 16.0))
+    p.drawLine(QPointF(12.5, 16.0), QPointF(8.5, 19.5))
+    p.drawLine(QPointF(14.5, 19.5), QPointF(20.0, 19.5))
 
 
 def terminal_tab_icon() -> QIcon:
-    """The picture the SSH terminal tab wears: the shipped terminalicon.png, else a drawn shell frame with a raspberry prompt."""
-    def paint(p: QPainter) -> None:
-        frame = QPen(QColor("#9db4c8"))
-        frame.setWidthF(2.4)
-        p.setPen(frame)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(QRectF(4.0, 6.0, 24.0, 20.0), 3.0, 3.0)
-        prompt = QPen(QColor("#c51a4a"))
-        prompt.setWidthF(2.2)
-        prompt.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(prompt)
-        p.drawLine(QPointF(8.5, 12.5), QPointF(12.5, 16.0))
-        p.drawLine(QPointF(12.5, 16.0), QPointF(8.5, 19.5))
-        p.drawLine(QPointF(14.5, 19.5), QPointF(20.0, 19.5))
-    return _drawn_icon("terminal_tab", paint, "terminalicon.png")
+    """The picture the SSH terminal tab wears: the shipped terminalicon.png,
+    else the same shell frame drawn here."""
+    return _drawn_icon("terminal_tab", paint_terminal_tab, "terminalicon.png")
+
+
+def paint_settings_tab(p: QPainter) -> None:
+    """A rim with eight short teeth, in the 32-unit picture space.
+
+    At 18px anything longer reads as a sun, not a cog, which is why the stubs are
+    short and the rim thick.
+    """
+    pen = QPen(QColor(manager_theme.color("icon_tint")))
+    pen.setWidthF(3.0)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    p.drawEllipse(QRectF(9.0, 9.0, 14.0, 14.0))
+    for step in range(8):
+        angle = math.radians(step * 45)
+        dx, dy = math.cos(angle), math.sin(angle)
+        p.drawLine(QPointF(16 + 8.2 * dx, 16 + 8.2 * dy),
+                   QPointF(16 + 11.2 * dx, 16 + 11.2 * dy))
 
 
 def settings_tab_icon() -> QIcon:
-    """The cog the pinned Settings tab always wears: a rim with eight teeth, kept at every width because Settings is never squeezed away."""
-    def paint(p: QPainter) -> None:
-        pen = QPen(QColor("#d6d6d6"))
-        pen.setWidthF(3.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
-        # A thick rim with short stubs standing out of it: at 18px anything
-        # longer reads as a sun, not a cog.
-        p.drawEllipse(QRectF(9.0, 9.0, 14.0, 14.0))
-        for step in range(8):
-            angle = math.radians(step * 45)
-            dx, dy = math.cos(angle), math.sin(angle)
-            p.drawLine(QPointF(16 + 8.2 * dx, 16 + 8.2 * dy),
-                       QPointF(16 + 11.2 * dx, 16 + 11.2 * dy))
-    return _drawn_icon("settings_tab", paint)
+    """The cog the pinned Settings tab always wears: the shipped settingsicon.png,
+    else the same rim and eight teeth drawn here. Kept at every width because
+    Settings is never squeezed away."""
+    return _drawn_icon("settings_tab", paint_settings_tab, "settingsicon.png")
 
 
 def tab_caption(bar: QTabBar, index: int) -> str:
@@ -228,13 +320,13 @@ def _draw_centered_tab_label(opt: QStyleOptionTab, painter: QPainter, bar: QTabB
     if text:
         enabled = bool(opt.state & QStyle.StateFlag.State_Enabled)
         if not enabled:
-            color = QColor("#666666")
+            color = QColor(manager_theme.color("faint"))
         elif opt.state & QStyle.StateFlag.State_Selected:
-            color = QColor("#e0e0e0")
+            color = QColor(manager_theme.color("text"))
         elif opt.state & QStyle.StateFlag.State_MouseOver:
-            color = QColor("#ffffff")
+            color = QColor(manager_theme.color("bright"))
         else:
-            color = QColor("#aaaaaa")
+            color = QColor(manager_theme.color("muted"))
         painter.setPen(QPen(color))
         painter.drawText(x, rect.top(), text_w + zoom_size(_TAB_LABEL_SLACK),
                          rect.height(),
@@ -399,9 +491,12 @@ class RightPinnedTabBar(QTabBar):
         # the overage. Two or three rounds settle; the loop cap is a brake.
         # The drawn mark can be wider than the bar's measured icon, and the
         # caption has to clear the picture as painted, not as measured.
-        text_room = per - tab_icon_side(self) - zoom_size(_TAB_CHROME)
+        text_room = per - tab_icon_side(self) - zoom_size(tab_chrome())
+        # A theme may say a tab never wears a name at all; that is decided
+        # before any measuring, and the loop below takes the captions off.
+        allow_captions = manager_theme.shows_captions()
         for _ in range(4):
-            icon_only = text_room < zoom_size(_TAB_MIN_TEXT)
+            icon_only = not allow_captions or text_room < zoom_size(_TAB_MIN_TEXT)
             for i in movable:
                 caption = tab_caption(self, i)
                 if icon_only:
@@ -524,7 +619,7 @@ class TabTransportDots(QWidget):
             dot.setObjectName("statusDotOffline")
             dot.setToolTip(f"{transport.upper()}: not connected")
             mark = QLabel(letter)
-            mark.setStyleSheet(scaled_sheet("color: #aaaaaa; font-size: 8pt;"))
+            theme_style(mark, "color: $muted; font-size: 8pt;")
             layout.addWidget(dot)
             layout.addWidget(mark)
             self._dots[transport] = (dot, mark)
@@ -532,9 +627,11 @@ class TabTransportDots(QWidget):
     def set_state(self, states: dict[str, str]) -> None:
         """Colour each dot from one owner's transport states (``on``, ``ready``
         or ``off``); a transport missing from the dict is not used at all, so
-        its mark and dot leave the tab's label."""
+        its mark and dot leave the tab's label. A theme that switches the dots
+        off takes them all away, whatever the states say."""
+        worn = manager_theme.shows_dots()
         for transport, (dot, mark) in self._dots.items():
-            mode = states.get(transport)
+            mode = states.get(transport) if worn else None
             dot.setVisible(mode is not None)
             mark.setVisible(mode is not None)
             if mode is None:
@@ -562,8 +659,8 @@ class TabCloseButton(QToolButton):
 
     NAME = "tabCloseButton"  # what tells the transport-dot pass to spare it
     SIDE = 18          # the box's edge at 100% zoom
-    INK = "#9a9a9a"    # the bar's own caption grey
-    HOT = "#ff6b6b"    # and the warning red it takes up under the pointer
+    INK = "close_ink"  # the token the mark is drawn in
+    HOT = "close_hot"  # and the one it takes up under the pointer
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -602,8 +699,8 @@ class TabCloseButton(QToolButton):
         mark = box * 0.44
         left = (self.width() - mark) / 2.0
         top = (self.height() - mark) / 2.0
-        pen = QPen(QColor(self.HOT if self.underMouse() or self.isDown()
-                          else self.INK))
+        pen = QPen(QColor(manager_theme.color(
+            self.HOT if self.underMouse() or self.isDown() else self.INK)))
         pen.setWidthF(max(1.5, box * 0.11))
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
@@ -673,9 +770,11 @@ class ToggleSwitch(QCheckBox):
         track_w, track_h = self._track()
         track_top = (self.height() - track_h) / 2
         if on:
-            track, border = QColor("#c51a4a"), QColor("#8f1236")
+            track = QColor(manager_theme.color("accent"))
+            border = QColor(manager_theme.color("accent_edge"))
         else:
-            track, border = QColor("#2b2b2b"), QColor("#4a4a4a")
+            track = QColor(manager_theme.color("toggle_off"))
+            border = QColor(manager_theme.color("raise_edge"))
         if not enabled:
             track.setAlpha(120)
             border.setAlpha(120)
@@ -692,7 +791,8 @@ class ToggleSwitch(QCheckBox):
         travel = track_w - track_h
         center_x = radius + self._handle * travel
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#f5f5f5") if enabled else QColor("#888888"))
+        painter.setBrush(QColor(manager_theme.color(
+            "toggle_handle" if enabled else "toggle_handle_off")))
         painter.drawEllipse(
             QRectF(center_x - handle_r, track_top + radius - handle_r, handle_r * 2, handle_r * 2)
         )
@@ -772,7 +872,7 @@ class ToggleGroup(QGroupBox):
         outer.setSpacing(6)
         header = QHBoxLayout()
         caption = QLabel(title)
-        caption.setStyleSheet("color: #c51a4a; font-weight: 600;")
+        theme_style(caption, "color: $accent; font-weight: 600;")
         header.addWidget(caption)
         header.addStretch(1)
         self.switch = ToggleSwitch(parent=self)
@@ -829,16 +929,17 @@ class CollapseGroup(QGroupBox):
         self.header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.header.setAutoRaise(True)
         self.header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.header.setStyleSheet(
+        theme_style(
+            self.header,
             # Every state flat: the app sheet paints a QToolButton as a raised
             # box and its :checked state in the accent colour, which would turn
             # an open category into a button. A sheet on the widget itself
             # outranks the app's, so the heading reads as a caption with an
-            # arrow, in the same crimson as any other category title.
+            # arrow, in the same colour as any other category title.
             "QToolButton, QToolButton:hover, QToolButton:pressed,"
             " QToolButton:checked, QToolButton:selected {"
             " background-color: transparent; border: none; padding: 0; }"
-            "QToolButton { color: #c51a4a; font-weight: 600; }"
+            "QToolButton { color: $accent; font-weight: 600; }"
         )
         if tip:
             # Only the heading is asked about: the body holds the information the

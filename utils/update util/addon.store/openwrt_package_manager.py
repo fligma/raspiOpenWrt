@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """OpenWrt Package Manager Addon
 Audits installed packages, updates repositories, and manages software via apk (default) or opkg.
+Each table carries the package's own description, read off the device: ``opkg
+list`` for the legacy backend, ``apk info -a`` for the modern one.
 """
 
 from __future__ import annotations
+import json
 import shlex
 from typing import Any
-from addon_common import AddonError, find_icon
+from addon_common import AddonError, find_addon_picture
 
 #: Every word this addon sends to a device shell that came from anywhere other
 #: than the addon itself - the search box, a name a table cell is showing -
@@ -18,15 +21,14 @@ SHQ = shlex.quote
 
 ADDON = {
     "name": "OpenWrt Package Manager",
-    "version": "1.2",
+    "version": "1.3",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh", "sftp"],
     # Every command runs over the profile's own session; none is opened here.
     "connection": "app",
-    # The picture this addon ships, under the name its own assets folder uses
-    # rather than the standard one, so the store can show it before install.
-    "icon": "openwrtpkgmgr.png",
+    # The picture is published under the standard name - the id and then
+    # ``icon.png`` - so the manifest names none and the store finds it by rule.
     "description": "Audits installed OpenWrt packages and manages software installation via apk or opkg.",
 }
 
@@ -43,25 +45,26 @@ TAB_ICON = (
     '</svg>'
 )
 
-#: The picture named in the manifest and shipped in the store's assets folder.
-TAB_ICON_FILE = "openwrtpkgmgr.png"
+#: The picture this addon's own assets folder is expected to hold: its id and
+#: then ``icon.png``, the rule every addon follows, so there is no name to keep
+#: in step here - dropping the picture in is enough.
+TAB_ICON_FILE = "openwrt_package_managericon.png"
 
 
 def tab_icon() -> str:
-    """The shipped picture if the assets folder has one, else the drawn mark.
+    """The shipped picture if a folder this addon is read from has one, else the
+    drawn mark.
 
-    ``openwrtpkgmgr.png`` is the name this addon's picture is published under, so
-    it is offered after the standard ``openwrt_package_managericon.png``: follow
-    the rule and the file is found with nothing here to change.
+    One name is looked for - ``openwrt_package_managericon.png`` - in this addon's
+    own ``addon.store/assets/openwrt_package_manager`` folder and then in the
+    program's, so an addon that follows the rule needs nothing here beyond its id.
     """
-    folder = None
+    paths = None
     try:
-        folder = api.paths.assets
+        paths = api.paths
     except (AddonError, AttributeError, TypeError):    # no api in a bare import
-        folder = None
-    if folder is None:
-        return TAB_ICON
-    return find_icon(folder, "openwrt_package_manager", TAB_ICON_FILE) or TAB_ICON
+        paths = None
+    return find_addon_picture(paths, "openwrt_package_manager") or TAB_ICON
 
 CONFIG_FIELDS = [
     {
@@ -119,7 +122,11 @@ TAB_SPEC = {
 }
 
 api = None
-_installed_cache = []
+_installed_cache = []      # (name, version) as the device listed what it runs
+_browse_cache = []         # (name, version, description) as a feed search answered
+_descriptions = {}         # package name -> the sentence the device keeps for it
+_desc_state = ""           # '', 'out' while a read is running, 'done' once filled
+_filter = ""               # the text the installed table is showing only
 
 def init(plugin_api: Any) -> None:
     global api
@@ -150,10 +157,68 @@ def _on_tab_changed(_payload: Any) -> None:
     except Exception:
         pass
 
+def split_apk(line: str) -> tuple:
+    """One ``name-version`` answer cut where the version starts.
+
+    A package name may hold dashes of its own (``kmod-ipt-nat6``) and so may a
+    version (``1.2.3-r1``), so the cut is the first dash with a digit behind it:
+    a name cannot start a segment with one, a version always does. A line with
+    no such dash is taken as a bare name.
+    """
+    for index, char in enumerate(line):
+        if char == "-" and line[index + 1:index + 2].isdigit():
+            return line[:index].strip(), line[index + 1:].strip()
+    return line, ""
+
+
+def parse_descriptions(text: str) -> dict:
+    """The ``{name: description}`` map off one backend's dump.
+
+    ``opkg list`` writes ``name - version - description`` on a line; apk's
+    ``--format json`` is an array of records or one record per line, so both
+    shapes are read. Anything that cannot be placed by a name is left out - a
+    description on the wrong package is worse than none.
+    """
+    out: dict[str, str] = {}
+    body = str(text or "")
+    if _pm_backend() == "opkg":
+        for line in body.splitlines():
+            parts = [part.strip() for part in line.split(" - ", 2)]
+            if len(parts) == 3 and parts[0] and parts[2]:
+                out[parts[0]] = parts[2]
+        return out
+    records: list = []
+    stripped = body.strip()
+    try:
+        data = json.loads(stripped)
+    except ValueError:
+        for line in stripped.splitlines():
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                continue
+    else:
+        records = data if isinstance(data, list) else [data]
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        name = str(record.get("name") or "").strip()
+        summary = " ".join(str(record.get("description") or "").split())
+        if name and summary:
+            out[name] = summary
+    return out
+
+
+def description_of(name: str) -> str:
+    """What the device says about one package; blank until it has been read."""
+    return str(_descriptions.get(name) or "")
+
+
 def fetch_installed() -> None:
     backend = _pm_backend()
     api.ui.notify(f"Fetching installed packages using {backend}...")
-    
+    global _desc_state
+    _desc_state = ""            # a fresh list is worth a fresh read of the text
     cmd = "apk info -v" if backend == "apk" else "opkg list-installed"
     api.device.run_async(cmd, on_done=_got_installed)
 
@@ -162,48 +227,81 @@ def _got_installed(result: dict) -> None:
     if int(result.get("code", -1)) != 0:
         api.ui.error("Package Manager", "Failed to list installed packages.")
         return
-    
+
     backend = _pm_backend()
-    lines = str(result.get("out", "")).splitlines()
     _installed_cache = []
-    rows = []
-    
-    for line in lines:
+    for line in str(result.get("out", "")).splitlines():
         line = line.strip()
         if not line:
             continue
         if backend == "opkg":
-            parts = line.split(" - ", 1)
-            if len(parts) == 2:
-                name, ver = parts[0].strip(), parts[1].strip()
-                _installed_cache.append((name, ver))
-                rows.append([name, ver, ""])
+            # "opkg list-installed" writes "name - version".
+            parts = [part.strip() for part in line.split(" - ", 1)]
+            _installed_cache.append((parts[0],
+                                     parts[1] if len(parts) > 1 else ""))
         else:
-            # apk info -v output parsing (typically package-version)
-            parts = line.rsplit("-", 2)
-            if len(parts) >= 2:
-                # Basic heuristic for apk info -v splitting name vs version
-                name = "-".join(parts[:-2]) if len(parts) > 2 else parts[0]
-                ver = f"{parts[-2]}-{parts[-1]}" if len(parts) > 2 else parts[1]
-                if not name:
-                    name = line
-                    ver = ""
-                _installed_cache.append((name, ver))
-                rows.append([name, ver, ""])
-            else:
-                _installed_cache.append((line, ""))
-                rows.append([line, "", ""])
-            
-    api.tabs.set_widget("Package Manager", "inst_table", "rows", rows)
-    api.tabs.set_widget("Package Manager", "inst_status", "text", f"Loaded {len(_installed_cache)} installed packages ({backend}).")
+            # "apk info -v" writes one "name-version" per line.
+            _installed_cache.append(split_apk(line))
+    show_installed()
+    fetch_descriptions()
 
-def filter_installed(query: str) -> None:
-    query = query.lower()
+def installed_rows(query: str = "") -> list:
+    """The installed list as table rows, filtered by name and carrying each
+    package's description once the device has given one."""
+    needle = str(query or "").lower()
     rows = []
     for name, ver in _installed_cache:
-        if query in name.lower():
-            rows.append([name, ver, ""])
-    api.tabs.set_widget("Package Manager", "inst_table", "rows", rows)
+        if needle and needle not in name.lower():
+            continue
+        rows.append([name, ver, description_of(name)])
+    return rows
+
+def show_installed() -> None:
+    """Redraw the installed table and say what it holds."""
+    api.tabs.set_widget("Package Manager", "inst_table", "rows",
+                        installed_rows(_filter))
+    have = sum(1 for name, _ver in _installed_cache if description_of(name))
+    api.tabs.set_widget(
+        "Package Manager", "inst_status", "text",
+        f"Loaded {len(_installed_cache)} installed packages ({_pm_backend()}); "
+        f"{have} with a description.")
+
+def filter_installed(query: str) -> None:
+    global _filter
+    _filter = str(query or "")
+    show_installed()
+
+def fetch_descriptions() -> None:
+    """Read the sentences the device keeps for its packages, once per list.
+
+    Neither backend puts a description in the list of what is installed: apk
+    keeps them in its repository index and opkg in its feed list, so the names
+    come from one command and the words from another. One answer covers every
+    package the device knows about - installed or not, in either table - so this
+    is asked for at most once between refreshes, and a device that will not
+    answer simply leaves the column blank.
+    """
+    global _desc_state
+    if _desc_state:
+        return
+    _desc_state = "out"
+    cmd = ("opkg list" if _pm_backend() == "opkg"
+           else "apk query --fields name,version,description --format json")
+    api.device.run_async(cmd, on_done=_got_descriptions, timeout=90)
+
+def _got_descriptions(result: dict) -> None:
+    """Fold the descriptions in and redraw both tables."""
+    global _desc_state
+    _desc_state = ""
+    if int(result.get("code", -1)) != 0:
+        return
+    found = parse_descriptions(str(result.get("out", "")))
+    if not found:
+        return
+    _descriptions.update(found)
+    _desc_state = "done"
+    show_installed()
+    show_browse()
 
 def update_feeds() -> None:
     backend = _pm_backend()
@@ -224,13 +322,13 @@ def search_online(term: str) -> None:
     api.device.run_async(cmd, on_done=_got_search)
 
 def _got_search(result: dict) -> None:
+    global _browse_cache
     if int(result.get("code", -1)) != 0:
         api.ui.error("Search", "Feed search failed.")
         return
     backend = _pm_backend()
-    lines = str(result.get("out", "")).splitlines()
-    rows = []
-    for line in lines:
+    _browse_cache = []
+    for line in str(result.get("out", "")).splitlines():
         line = line.strip()
         if not line:
             continue
@@ -238,17 +336,32 @@ def _got_search(result: dict) -> None:
             # "opkg list" answers with name - version - description.
             parts = [part.strip() for part in line.split(" - ", 2)]
             if len(parts) == 3:
-                rows.append([parts[0], parts[1], parts[2]])
+                _browse_cache.append((parts[0], parts[1], parts[2]))
             elif len(parts) == 2:
-                rows.append([parts[0], parts[1], ""])
+                _browse_cache.append((parts[0], parts[1], ""))
             else:
-                rows.append([line, "", ""])
+                _browse_cache.append((line, "", ""))
         else:
-            # apk search output typically lists package names or package-version
-            rows.append([line, "", ""])
-            
-    api.tabs.set_widget("Package Manager", "browse_table", "rows", rows)
-    api.ui.notify(f"Found {len(rows)} matching packages.")
+            # "apk search" answers with one "name-version" per line, and the
+            # words for it come from the same index read as everything else.
+            name, ver = split_apk(line)
+            _browse_cache.append((name, ver, ""))
+    for name, _ver, summary in _browse_cache:
+        if summary:
+            _descriptions[name] = summary
+    show_browse()
+    api.ui.notify(f"Found {len(_browse_cache)} matching packages.")
+    fetch_descriptions()
+
+def browse_rows() -> list:
+    """The last search as table rows, the index read's words preferred."""
+    rows = []
+    for name, ver, summary in _browse_cache:
+        rows.append([name, ver, description_of(name) or summary])
+    return rows
+
+def show_browse() -> None:
+    api.tabs.set_widget("Package Manager", "browse_table", "rows", browse_rows())
 
 def _done_change(result: dict, verb: str, pkg_name: str) -> None:
     """Tell the user how the install or removal went, then pace a refresh of

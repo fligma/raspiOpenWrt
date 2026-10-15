@@ -422,19 +422,87 @@ def test_the_tab(app: Any) -> None:
 
 # --- seven: the mark beside the tab's label ---
 
+class _TwoFolders:
+    """A stand-in for ``api.paths`` that knows two assets folders and nothing else."""
+
+    def __init__(self, addon: Path, assets: Path) -> None:
+        self._addon = addon
+        self._assets = assets
+
+    @property
+    def addon(self) -> Path:
+        return self._addon
+
+    @property
+    def assets(self) -> Path:
+        return self._assets
+
+
+def _check_the_lookup() -> None:
+    """That the one name is tried in both of the folders a picture may live in.
+
+    An installed addon carries its assets inside the program it was built into and
+    an addon being written sits beside its own source; the same file name has to
+    reach either, which is the whole of what ``find_addon_picture`` promises.
+    """
+    import shutil
+    import tempfile
+
+    import addon_common
+
+    work = Path(tempfile.mkdtemp(prefix="cert_icons_"))
+    try:
+        own = work / "addon" / "assets" / "cert_manager"
+        program = work / "assets"
+        own.mkdir(parents=True)
+        program.mkdir(parents=True)
+        name = cert_manager.TAB_ICON_FILE
+        (own / name).write_bytes(b"own")
+        (program / name).write_bytes(b"program")
+        paths = _TwoFolders(work / "addon", program)
+        check(addon_common.find_addon_picture(paths, "cert_manager")
+              == str(own / name),
+              "the addon's own assets folder does not win over the program's")
+        (own / name).unlink()
+        check(addon_common.find_addon_picture(paths, "cert_manager")
+              == str(program / name),
+              "nothing is worn from the program's assets when the addon has none")
+        (program / name).unlink()
+        check(addon_common.find_addon_picture(paths, "cert_manager") == "",
+              "an addon with no picture anywhere was handed a path anyway")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_the_mark(app: Any) -> None:
-    """The trophy: what the addon sends, and what the app makes of it."""
+    """The trophy: what the addon sends, and where the picture it sends from is."""
     print("\n7. the tab's mark")
     api = fresh(PROPER, saved=PROPER)
+    # Furniture rather than a page: the tab belongs to the pinned run beside
+    # Settings and wears no caption there, so it is reached by its mark alone.
+    check(bool(api.asked("tabs.add_tab", "pinned")),
+          "the certificate tab is not pinned beside Settings")
+    check(bool(api.asked("tabs.add_tab", "icon_only")),
+          "the certificate tab still shows its name where it is pinned")
     check(api.called("tabs.set_icon"), "the addon gave its tab no icon")
     sent = str(api.asked("tabs.set_icon", "icon"))
-    check(sent == cert_manager.TAB_ICON,
-          "what the addon sent is not its own TAB_ICON")
-    check(sent.startswith("<svg") and sent.rstrip().endswith("</svg>"),
-          "the icon is not a self-contained SVG document, so a compiled copy of "
-          "this addon could not send it")
-    check("#161616" not in sent and "#212121" not in sent,
-          "the trophy is pasted onto a background square instead of being drawn")
+    check(sent == cert_manager.tab_icon(),
+          "what the addon sent is not the mark its own tab_icon() settles on")
+    drawn = sent.startswith("<svg") and sent.rstrip().endswith("</svg>")
+    check(drawn or sent.lower().endswith(".png"),
+          "the mark is neither a self-contained SVG document nor a picture file, "
+          f"so a compiled copy of this addon could not send it: {sent[:40]!r}")
+    if drawn:
+        # A picture file is a person's own artwork and gets no say about its
+        # colours; the drawing the addon falls back to has to stand alone.
+        check("#161616" not in sent and "#212121" not in sent,
+              "the trophy is pasted onto a background square instead of being drawn")
+    check(cert_manager.TAB_ICON_FILE == "cert_managericon.png",
+          f"the tab's mark follows {{addon}}icon.png: {cert_manager.TAB_ICON_FILE!r}")
+    shipped = (ROOT / "addon.store" / "assets" / "cert_manager"
+               / cert_manager.TAB_ICON_FILE)
+    check(shipped.is_file(), f"{shipped.name} is in the store's assets folder")
+    _check_the_lookup()
     if app is None:
         look("no Qt here, so the drawing itself is not checked")
         return

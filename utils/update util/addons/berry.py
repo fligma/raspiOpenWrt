@@ -23,7 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from addon_common import AddonError, find_icon      # the Qt-free half of the contract
+from addon_common import AddonError, find_addon_picture      # the Qt-free half of the contract
 
 ADDON = {
     "name": "Berry file manager",
@@ -187,26 +187,27 @@ EDITOR_ICON = (
     '</svg>'
 )
 
-# Picture the tab wears if the assets folder has one. The standard name for an
-# addon called ``berry`` is ``berryicon.png``, so it needs no declaring.
+# Picture the tab wears when the assets folder holds one. The standard name for
+# an addon called ``berry`` is ``berryicon.png``, so it needs no declaring: it is
+# written here only so a person knows what file to put where.
 TAB_ICON_FILE = "berryicon.png"
 
 
 def tab_icon() -> str:
-    """The shipped picture if the assets folder has one, else the drawn mark.
+    """The shipped picture if a folder this addon is read from has one, else the
+    drawn mark.
 
-    ``find_icon`` is how every addon's picture is looked up: the standard
-    ``<id>icon.png`` first, then the names this one has shipped under, so a
-    picture dropped in the assets folder is picked up without a code change.
+    ``find_addon_picture`` is how every addon's picture is looked up: one name -
+    this addon's id and then ``icon.png`` - tried in the addon's own assets folder
+    and then in the program's, so a picture dropped in either is worn without a
+    code change.
     """
-    folder = None
+    paths = None
     try:
-        folder = api.paths.assets
+        paths = api.paths
     except (AddonError, AttributeError, TypeError):    # no api on a bare import
-        folder = None
-    if folder is None:
-        return TAB_ICON
-    return find_icon(folder, "berry", TAB_ICON_FILE) or TAB_ICON
+        paths = None
+    return find_addon_picture(paths, "berry") or TAB_ICON
 
 
 SHQ = shlex.quote

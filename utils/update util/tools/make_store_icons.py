@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
-"""Draw the two pictures the store and the package manager are shipped with.
+"""Write the pictures the program itself wears into its assets folder.
 
-Both are flat marks in the program's own colours - near-black behind, the crimson
-of the group titles, the green of a thing that is working - drawn at any size from
-one pass so they can be made again bigger, or nudged, rather than edited in a
-bitmap. Nothing here is needed at runtime; run it from this folder::
+Three of these marks are drawn by the interface at run time when no file is
+beside it - the four tiles any unnamed tab wears, the shell the terminal tab
+wears, the cog the pinned Settings tab wears - and this writes those same
+drawings out as files, so what ships and what stands in for it cannot disagree:
+the painters come out of :mod:`manager_widgets` itself, in the 32-unit space the
+bar paints them into. The fourth is the store's own default - the tile an addon
+with no picture of its own is shown with - drawn here in the program's colours
+because no run-time code has any need to draw it.
 
-    python tools/make_store_icons.py
+An addon's own mark is not this tool's business: ``tools/make_addon_icons.py``
+writes those out of each addon's ``TAB_ICON``, under ``<id>icon.png``, in the
+folder that addon is read from.
 
-and it writes:
+Nothing here is needed at runtime; run it from this folder::
 
-* ``assets/storedefaultaddon.png`` - what an addon with no picture of its own is
-  shown with, in the list and on the pane beside it;
-* ``addon.store/assets/openwrt_package_manager/openwrtpkgmgr.png`` - the picture
-  OpenWrt Package Manager declares as its own ``icon``, which is why it is not
-  named ``openwrt_package_managericon.png`` like everything else.
+    python tools/make_store_icons.py [--side 128] [--force] [--check]
 
-Both are square PNGs with a transparent field outside the rounded tile, so they
-read the same on any background the interface is wearing.
+A file already in place is left alone unless ``--force``, because the point is to
+hand somebody a picture to redraw, not to overwrite the one they redrew.
+``--check`` writes nothing and names whatever is missing, exiting 1 - which is how
+a workflow can hold the folder to the rule without drawing anything.
+
+Each raster is square and 128 a side by default, with the field outside the mark
+left transparent, so one file reads the same at every zoom and on any theme.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -123,6 +131,12 @@ def draw_packages(size: int = SIDE) -> QImage:
 
     The three lines with ticks are what a package manager reads and writes; the
     crate is where they came from; the flaps standing open are that it is a store.
+
+    No file is written from it any more: OpenWrt Package Manager 1.3 put its own
+    mark under the ``<id>icon.png`` rule, and ``tools/make_addon_icons.py`` draws
+    that one out of the addon's own ``TAB_ICON``. It is kept because the tile it
+    sits on is the shape a hand-drawn card wants, and a fork that names a picture
+    in its manifest can still be drawn from here.
     """
     image, scale, painter = _canvas(size)
     _tile(painter, scale, size)
@@ -140,26 +154,93 @@ def draw_packages(size: int = SIDE) -> QImage:
     return image
 
 
-#: The file each mark is written to, and the function that draws it.
-TARGETS = (
-    (ROOT / "assets" / "storedefaultaddon.png", draw_default),
-    (ROOT / "addon.store" / "assets" / "openwrt_package_manager"
-     / "openwrtpkgmgr.png", draw_packages),
-)
+def draw_interface_mark(paint: Any, size: int = 128) -> QImage:
+    """One of the bar's own paintings, written out as a file of ``size`` a side.
+
+    The painter is the very function ``manager_widgets`` falls back to when no
+    asset is beside it, called in the 32-unit space it was written for and scaled
+    up from there - so the shipped picture and the stand-in are one drawing seen
+    at two sizes rather than two drawings that have to be kept alike. The colours
+    come from the theme in force, which in a fresh checkout is the built-in one.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))       # the tool runs from its own folder
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    canvas = QImage(int(size), int(size), QImage.Format.Format_ARGB32_Premultiplied)
+    canvas.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.scale(size / 32.0, size / 32.0)
+    paint(painter)
+    painter.end()
+    return canvas
 
 
-def main() -> int:
+def _interface_targets(size: int) -> list:
+    """The three marks the window paints itself, paired with where each goes.
+
+    Read here rather than at import time: a machine with no Qt installed still
+    has no business failing a tool it never runs, and ``--check`` needs the paths
+    long before anything is drawn.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import manager_widgets
+
+    return [
+        (ROOT / "assets" / "defaulttabicon.png",
+         lambda: draw_interface_mark(manager_widgets.paint_default_tab, size)),
+        (ROOT / "assets" / "terminalicon.png",
+         lambda: draw_interface_mark(manager_widgets.paint_terminal_tab, size)),
+        (ROOT / "assets" / "settingsicon.png",
+         lambda: draw_interface_mark(manager_widgets.paint_settings_tab, size)),
+    ]
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Write what the assets folder does not hold, and say what it should hold."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--side", type=int, default=128,
+                        help="the picture's width and height (default 128)")
+    parser.add_argument("--force", action="store_true",
+                        help="rewrite a file that is already there")
+    parser.add_argument("--check", action="store_true",
+                        help="write nothing, only report which pictures are missing")
+    args = parser.parse_args(argv)
+    size = max(16, int(args.side))
+
+    targets = [(ROOT / "assets" / "storedefaultaddon.png",
+                lambda: draw_default(size))] + _interface_targets(size)
+    if args.check:
+        missing = [str(path.relative_to(ROOT)) for path, _draw in targets
+                   if not path.is_file()]
+        for name in missing:
+            print(f"missing  {name}")
+        if missing:
+            print(f"{len(missing)} of the program's own pictures are not in assets")
+            return 1
+        print(f"the program's own {len(targets)} picture(s) are all in assets")
+        return 0
+
     QApplication.instance() or QApplication([])   # a GUI bar, no window
     made = 0
-    for path, drawer in TARGETS:
+    kept = 0
+    for path, drawer in targets:
+        if path.is_file() and not args.force:
+            kept += 1
+            print(f"kept     {path.relative_to(ROOT)}")
+            continue
         image = drawer()
         path.parent.mkdir(parents=True, exist_ok=True)
         if not image.save(str(path), "PNG"):
             print(f"FAILED: {path} could not be written")
             return 1
         made += 1
-        print(f"wrote {path} at {image.width()}x{image.height()}")
-    print(f"{made} icon(s)")
+        print(f"wrote    {path.relative_to(ROOT)} at {image.width()}x{image.height()}")
+    print(f"{made} written, {kept} already there")
     return 0
 
 

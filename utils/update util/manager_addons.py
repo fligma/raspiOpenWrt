@@ -87,6 +87,7 @@ from manager_const import (
     HAS_BUILTIN_ADDONS,
     LOG_FILE,
     SHIPPED_ADDON_IDS,
+    THEMES_DIR,
 )
 from manager_widgets import (ToggleSwitch, tab_caption, tip_on_title,
                              transport_dot)
@@ -290,7 +291,7 @@ class ProcessBridge:
 
     #: Requests served on the GUI thread because they touch Qt.
     GUI_METHODS = ("ui.", "tabs.", "session.", "events.", "settings.", "config.",
-                   "settings_pages.", "schedule.", "peers.")
+                   "settings_pages.", "schedule.", "peers.", "theme.")
 
     #: Asked by the addon about a job the app is still running for it. These
     #: never reach the api: the bridge answers them from its own registry,
@@ -381,6 +382,7 @@ class ProcessBridge:
             "RASCONF_ADDONS": str(ADDONS_DIR),
             "RASCONF_BASE": str(BASE_DIR),
             "RASCONF_ASSETS": str(ASSETS_DIR),  # a build unpacks beside the exe
+            "RASCONF_THEMES": str(THEMES_DIR),
             "RASCONF_LOG": str(LOG_FILE),
         })
         return env
@@ -679,7 +681,7 @@ class AddonManager:
         "ssh_connected", "ssh_disconnected", "operation_done", "tab_changed",
         "profile_changed", "settings_applied", "addon_enabled", "addon_disabled",
         "addon_config_changed", "connections_enabled", "connections_disabled",
-        "transport_changed",
+        "transport_changed", "theme_changed",
     )
 
     def __init__(self, window: Any) -> None:

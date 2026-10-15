@@ -11,7 +11,28 @@
         "ssh"
       ],
       "connection": "app",
+      "assets": [
+        "cert_managericon.png"
+      ],
+      "icon": "cert_managericon.png",
       "test": "test_cert_manager.py"
+    },
+    {
+      "id": "multi_ssh",
+      "name": "Multi SSH",
+      "version": "1.0",
+      "author": "fligma",
+      "description": "Opens as many SSH sessions as you like in sub-tabs, each on a connection of its own, with quickstart entries that ask only for a password and one field that types a command into every session at once.",
+      "filename": "multi_ssh.py",
+      "requires": [
+        "ssh"
+      ],
+      "connection": "own",
+      "assets": [
+        "multi_sshicon.png"
+      ],
+      "icon": "multi_sshicon.png",
+      "test": "test_multi_ssh.py"
     },
     {
       "id": "openwrt_logs",
@@ -33,7 +54,7 @@
     {
       "id": "openwrt_package_manager",
       "name": "OpenWrt Package Manager",
-      "version": "1.2",
+      "version": "1.3",
       "author": "fligma",
       "description": "Audits installed OpenWrt packages and manages software installation via apk or opkg.",
       "filename": "openwrt_package_manager.py",
@@ -43,9 +64,9 @@
       ],
       "connection": "app",
       "assets": [
-        "openwrtpkgmgr.png"
+        "openwrt_package_managericon.png"
       ],
-      "icon": "openwrtpkgmgr.png",
+      "icon": "openwrt_package_managericon.png",
       "test": "test_openwrt_package_manager.py"
     }
   ]

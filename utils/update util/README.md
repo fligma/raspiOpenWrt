@@ -120,24 +120,41 @@ PyInstaller collect them. Commit a new module with the rest of
 
 ### Assets
 
-`assets/` holds the pictures the program ships with: `icon.png` and `icon2.png`
-for the logo, `storedefaultaddon.png` as the store's placeholder card, and the
-tab marks `defaulttabicon.png`, `terminalicon.png` and `berryicon.png`. A
-downloadable addon's own picture does not live here: it is kept with its source
-in `addon.store/assets/<id>` - `openwrt_logs/openwrt_logsicon.png`,
-`openwrt_package_manager/openwrtpkgmgr.png` - and arrives beside the addon when
-the store installs it.
+`assets/` holds every picture the program is shipped with, and that now includes
+the addons that live inside it: `icon.png` and `icon2.png` for the logo, the
+marks the window paints its tabs with (`defaulttabicon.png`,
+`terminalicon.png`, `settingsicon.png` for the pinned Settings cog),
+`storedefaultaddon.png` as the store's placeholder card, and one per shipped
+addon - `berryicon.png`, `addon_storeicon.png`, `manager_updateicon.png`,
+`theme_managericon.png`, `web_installericon.png`. A downloadable addon's own
+picture does not live here: it is kept with its source in
+`addon.store/assets/<id>` - `openwrt_logs/openwrt_logsicon.png`,
+`openwrt_package_manager/openwrt_package_managericon.png`,
+`multi_ssh/multi_sshicon.png`, `cert_manager/cert_managericon.png` - and arrives
+inside the program the store builds for that addon.
 
-The naming rule for those pictures is one line: an addon's icon is called
-`{package}icon.png`, built from the addon's id, so `berryicon.png` and
-`openwrt_logsicon.png` are found without any code. `addon_common.find_icon`
-tries that name first and then any older or declared name it is offered
-(`updateicon.png`, `storeicon.png`, a manifest's `"icon"`), and gives up quietly
-when the folder holds nothing readable. A picture is never required: an addon
-without one is drawn its own mark on the bar and shown `storedefaultaddon.png`
-as a card. The two pictures the program ships are drawn by
-`tools/make_store_icons.py` rather than edited in a bitmap, so either can be
-remade bigger or nudged in one run.
+The naming rule for an addon's picture is one line, and it is the same in both
+folders: the addon's id and then `icon.png`, so `berry` is worn by
+`berryicon.png` and `openwrt_logs` by `openwrt_logsicon.png`, with nothing in
+either file naming it. `addon_common.find_addon_picture` is the lookup: it tries
+that one name in the folder the addon's own file sits in - `assets/<id>/` under
+it, which is where a store addon's picture is - and then in the program's
+`assets`, so the same file name reaches an addon being written, one shipped
+inside the program and one installed from the store. Nothing is tried under any
+older name: the aliases this lookup used to keep (`updateicon.png`,
+`storeicon.png`, `themeicon.png`, `webinstallericon.png`, `openwrtpkgmgr.png`)
+were retired once every mark had its file, and one name per addon is one less
+thing to remember - which is what the picture of the package manager learned in
+1.3, when its card and its tab mark both changed with the file's name and no code
+in between. A picture is never required: an addon without one is drawn the SVG in
+its own `TAB_ICON` on the bar and shown `storedefaultaddon.png` as a card, and a
+tab with neither wears `defaulttabicon.png`. The files themselves are written by
+two tools rather than edited in a bitmap, so either can be remade bigger or
+nudged in one run: `tools/make_addon_icons.py` draws each addon's out of its
+`TAB_ICON`, and `tools/make_store_icons.py` the program's own out of the painters
+in `manager_widgets`. Both take `--force` to rewrite a file that is already there
+and `--check` to name what is missing, and the workflow runs both checks, so a
+picture that was never made stops the build instead of quietly never arriving.
 
 Nothing hard-codes the folder: `manager_const.find_asset(name)` looks in `assets`
 beside the resources, then the old top-level location, then beside the
@@ -148,7 +165,7 @@ the bundle). An addon reaches the same folder through `api.paths.assets`.
 
 ## Modules
 
-Fifteen files, each holding one area of the app:
+Fifteen files, each holding one area of the app, and a sixteenth holding the look:
 
 | Module | Holds |
 | --- | --- |
@@ -166,7 +183,8 @@ Fifteen files, each holding one area of the app:
 | `addon_api.py` | The `api` object every addon receives and the declarative widget builder; the plain helpers are re-exported from `addon_common` |
 | `addon_common.py` | The Qt-free half of the contract: errors, JSON results, the config and build-mark files. Imported by an addon, by a test and by the app |
 | `addon_client.py` | The addon side of the pipe - the `api` a process addon uses, `serve()` for its own process, and the recording stub a test runs against |
-| `manager_const.py` | Paths, defaults and the app stylesheet |
+| `manager_theme.py` | The look of the window, Qt-free: reading, checking, writing and rendering the `themes/<name>.theme` files, and the templates a new one is begun from |
+| `manager_const.py` | Paths, defaults, the colour tokens and tab knobs a theme is made of, and the app stylesheet built from them |
 
 The three device tabs are mixins (`BrowserMixin`, `MainConnectionMixin`,
 `TerminalMixin`) that `BerryManager` inherits alongside `QMainWindow`, so the
@@ -360,7 +378,11 @@ The window is titled `Berry Manager V` plus `manager_const.APP_VERSION`: the
 version is said in the title bar as well as in Help > About, so a screenshot and a
 bug report name the copy they came from. That one value is also what
 `api.session.version()` answers with and what the release job tags, so a build
-never disagrees with itself about which version it is.
+never disagrees with itself about which version it is. The box also links that
+number to the release built from it - `manager_const.PROJECT_RELEASE_URL` with
+`UPDATE_TAG_PREFIX` in front of the version, which is the tag the workflow
+pushes, so 1.6.2 opens `.../releases/tag/berry1.6.2` - making the About box a
+door to the build it names rather than a caption about it.
 
 The bar holds two things at once: the row of tabs the user arranges, and a short
 run kept against the right edge. An empty, disabled *gap* tab soaks up whatever
@@ -370,7 +392,8 @@ drifting at its end. Those tabs are window furniture: never dragged into the
 order, never written to `tab_order`, keeping their place while the tabs beside them
 come and go. Settings wears no caption, only the gear drawn for it
 (`manager_widgets.settings_tab_icon`), and an addon's tab does the same when it
-asks to be icon-only - the store's and the manager updater's both do (see
+asks to be icon-only - the store's, the manager updater's and the certificate
+manager's all do (see
 [Tabs an addon owns](#tabs-an-addon-owns)). A tab that shows no name has not lost
 it: the full name lives in the tab's own data, which is what its tooltip says,
 what the start-tab picker lists and what the saved order is written in.
@@ -386,6 +409,52 @@ transport dot arrives or goes, whenever the window is resized and at every step 
 View > Zoom - which is why a tab that arrives after an addon was switched on costs
 the rest of them no more width than it should, and why no caption is left sized
 for a bar that stopped having that width several drags ago.
+
+### Themes: the look of the window
+
+The window is drawn from one file: `themes/<name>.theme`, a small JSON object, and
+`manager_theme.py` is the whole of reading, checking, writing and rendering those
+files. It holds no Qt at all, which is why the app and an addon running as its own
+process see the same look. The folder is made the first time the program runs, with
+`default.theme` written into it - the shipped look spelled out, so there is always
+a file to copy from and something to fall back on. `THEMES_DIR` is that folder, and
+the `RASCONF_THEMES` environment variable moves it, which is how a build keeps its
+themes with its user instead of beside a read-only install.
+
+A theme says six things. `name`, `author` and `blurb` are for people, and are the
+words the list shows. `colors`, `tabs` and `styles` are what the window is built
+from, and anything a file leaves out is taken from the shipped look, so two colours
+in a file is a complete theme. `colors` names the tokens of
+`manager_const.THEME_COLORS` - surfaces, lines, words, accents, state - grouped for
+editors by `THEME_COLOR_GROUPS`; `tabs` holds the thirteen values of `THEME_TABS`,
+which are the shape of the tab bar: `icon_px`, `radius_px`, the paddings, gaps and
+underline, the widths a tab may not go under, and the two switches `captions` and
+`dots`; `styles` is a few lines of Qt stylesheet for whatever those do not reach.
+
+The bar itself belongs to the app, so a tab an addon adds is drawn with the same
+icon size, corner radius and caption policy as the tabs beside it, whatever the
+addon's own page looks like. The page belongs to the addon: the bundled ones read
+the current look through `api.theme` and paint themselves from it, rather than
+writing the same hex numbers down twice (see
+[Tabs an addon owns](#tabs-an-addon-owns)).
+
+Which look is worn is the `theme` key, kept with the profile, so two profiles can
+wear two looks. View > **Theme** lists every file on disk with the one in use
+ticked, and adds the folder and the editor below them; it fills itself as the menu
+opens rather than at startup, so a theme written in the same run is pickable.
+Settings > **Appearance** is the same choice as a picker, a blurb line and two
+buttons. Both go through `apply_theme`, which rebuilds the sheet, re-applies the
+zoom, saves the config and sends `theme_changed` - nothing needs a restart. A name
+with no file behind it draws the default, and the status line says so instead of
+quietly showing something else.
+
+A file is checked on the way in. `validate` answers one line per problem - a colour
+that is not a colour, a token the interface does not have, a knob outside 0-200 px,
+a switch holding a word - and `save` refuses an invalid theme unless the write is
+forced. `default` cannot be deleted, and a name that would not make a legal file
+name has its bad characters turned into `_`. Making and editing themes is the job of
+the bundled **Theme Manager** addon; an addon that only wants to follow the look
+needs nothing beyond `api.theme` and `theme_changed`.
 
 ### HTTPS in the embedded tabs
 
@@ -490,6 +559,7 @@ is applied when the window opens; nothing needs a restart.
 | `tab_order` | That order, exactly as the Settings **Tab order** list shows it: the full name kept in each tab's data rather than the caption the bar has room for, and without the gap and the pinned run, which are never moved. `[]` means the built-in arrangement (SSH, the web tabs, then the addons) |
 | `terminal_font_size` | SSH terminal font point size (before the interface zoom) |
 | `ui_zoom` | Interface density in percent, set by View > Zoom in/out (60-200, 100 as shipped) |
+| `theme` | Which `themes/<name>.theme` the window is drawn from, named without the suffix; set by View > Theme and Settings > Appearance, and a name with no file behind it falls back to `default` |
 | `max_log_lines` | Lines kept in the on-screen log (the log file is not truncated) |
 | `log_visible` | Show the log pane at the bottom of the window (View > Show log console) |
 | `terminal_history_limit` | Quick-command runs remembered in `command_history.json` |
@@ -758,9 +828,10 @@ The object in `init` is the only door into the app:
 | --- | --- |
 | `api.id`, `api.name`, `api.log(text)`, `api.error(text)` | identity and the shared log |
 | `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the two an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request) and `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything) |
-| `api.device` | SSH and SFTP over the app's one main connection, or a connection of the addon's own: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download`. Every call is refused unless the master switch, that transport's app-wide switch, the addon's own switch on its Settings page and that transport's switch on the same row are all on, the transport is listed under `"requires"`, and the connection it reaches is the one `"connection"` declares - which for an addon sharing the app's session also means that connection has to be open |
+| `api.device` | SSH and SFTP over the app's one main connection, or a connection of the addon's own: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download`. Every call is refused unless the master switch, that transport's app-wide switch, the addon's own switch on its Settings page and that transport's switch on the same row are all on, the transport is listed under `"requires"`, and the connection it reaches is the one `"connection"` declares - which for an addon sharing the app's session also means that connection has to be open. A `terminal` leaf in one of the addon's own tabs is judged by exactly these gates too, only reached through `api.tabs.set_widget` instead of this namespace (see **Addons in other languages**) |
 | `api.tabs` | `add_web_tab`, `add_tab` - each taking `position`, `pinned` and `icon_only` - `close`, `rename`, `activate`, `names`, `exists`, `url`, `navigate`, `reload`, `view`, `widget`, `set_widget`, `widget_value`, `set_html`, `inject_css`, `inject_js`, `set_style`, `set_icon`, `icon`, `use_app_icon`, `set_pinned` |
-| `api.ui` | `information`, `warning`, `error`, `question`, `input`, `choose`, `popup(title, text)` - a notice the app raises for the addon, named for whoever raised it, `notify`, `menu_item`, `dialog`, `set_setting_widget`, `window()` |
+| `api.theme` | the looks the window is drawn from, one JSON file each in `themes`: `name`, `names`, `exists`, `folder`, `read`, `raw`, `colors`, `color`, `tabs`, `metric`, `icon_px`, `chrome_px`, `shows_captions`, `shows_dots`, `groups`, `token_knobs`, `stylesheet`, `sheet_of`, `validate`, `templates`, `template_text`, `reference`, and the five that move them - `use`, `save`, `copy`, `rename`, `remove` |
+| `api.ui` | `information`, `warning`, `error`, `question`, `input(title, label, default, secret=False)` - one line of text, `None` when the box was cancelled, and `secret` draws dots while it is typed, `choose`, `popup(title, text)` - a notice the app raises for the addon, named for whoever raised it, `notify`, `menu_item`, `dialog`, `pick_color(title, initial)` - the colour wheel, answering `#rrggbb` or `""`, `pick_file(title, kind, filter, initial)` - a file box on this machine, `kind` being `open`, `save` or `folder` and nothing picked answering `""`, `set_setting_widget`, `window()` |
 | `api.events` | `on(name, callback)` (returns the unsubscribe callable), `off`, `names` |
 | `api.settings` | the addon's own saved dict, per profile: `all`, `get`, `set`, `update`, `pop`, `remove` |
 | `api.settings_pages` | a page of the app's own Settings window that the addon owns - `add`, `remove`, `names`, `exists`, `title`, `set_title`, `activate`, `widget`, `set_widget`, `widget_value`, and `set_icon`, which says a settings page wears no mark and answers False |
@@ -772,10 +843,14 @@ The object in `init` is the only door into the app:
 The events are `startup`, `shutdown`, `sftp_connected`, `sftp_disconnected`,
 `ssh_connected`, `ssh_disconnected`, `operation_done`, `tab_changed`,
 `profile_changed`, `settings_applied`, `addon_enabled`, `addon_disabled`,
-`addon_config_changed` and `transport_changed` - the last one carries the
-`transport`, plus a `scope` of `"app"` or `"addon"` saying which switch moved
-and, for an addon's own, its `addon` id; an addon that shows a connection state
-of its own redraws from it.
+`addon_config_changed`, `transport_changed` and `theme_changed`. A
+`transport_changed` carries the `transport`, plus a `scope` of `"app"` or
+`"addon"` saying which switch moved and, for an addon's own, its `addon` id; an
+addon that shows a connection state of its own redraws from it. A `theme_changed`
+carries `theme` - the look the window is drawn from now - and `wanted`, the name
+that was asked for, which differs only when that theme has no file. Anything that
+painted itself with colours read earlier re-reads them there; a tab built from a
+spec needs nothing, because the window repaints it under it.
 
 Device work runs in a small shared thread pool, so a slow command never
 freezes the window. `run()` waits for the result while keeping the interface
@@ -791,6 +866,9 @@ main connection needs nothing else - no credentials, no password - only that
 the connection is open. A call that opens a connection of its own uses the
 profile's saved connection details, which means a password has to be in the
 connection panel (or saved with **Remember password**) for it to connect at all.
+A `terminal` leaf is the one thing that does not read the profile at all: it
+connects on exactly the details the addon hands to `connect`, which is how an
+addon can ask for a password of its own and keep it in nothing it saves.
 
 Every `api.device` call passes the same gates, in this order. The **switches**:
 the master switch in the connection panel, that transport's app-wide switch
@@ -915,10 +993,14 @@ still says it - and only a pinned tab may keep a blank caption, because the bar 
 a movable tab's name back the moment it re-measures. Both apply to an embedded page
 from `add_web_tab` as well, and both can be changed afterwards with
 `api.tabs.set_pinned(tab, pinned=True, icon_only=False)`; `pinned=False` lets the
-tab back into the row with its caption restored. That is how the **Addon store** and
-**Manager update** tabs come to sit beside Settings as two marks rather than take
-places in the order the user arranged: like the page they open, they are the
-window's furniture, recognised by their pictures.
+tab back into the row with its caption restored. That is how the **Addon store**,
+**Manager update** and **Certificates** tabs come to sit beside Settings as three
+marks rather than take places in the order the user arranged: like the page they
+open, they are the window's furniture, recognised by their pictures. The
+certificate manager asks for it the same way the other two do - `pinned=True,
+icon_only=True` on its `add_tab` call - so nothing about it is special-cased in
+the app, and renaming a tab is no reason to give it back its caption: the tooltip
+still says what it is.
 
 A tab can also carry a mark beside its label, the way a page's favicon sits
 beside its title: `api.tabs.set_icon(tab, icon)`, with `api.tabs.icon(tab)` to
@@ -933,23 +1015,37 @@ it loses the mark, says so in the log and leaves the tab working, which is all a
 decoration is worth. An embedded page is left alone: it keeps following the
 favicon the page itself sends, which is set by the device and not by the addon.
 
-Four addons use this: `addons/berry.py` (a cluster of drupelets),
-`addons/manager_update.py` (a download mark), `addon.store/cert_manager.py` (a
-trophy) and `addon.store/openwrt_logs.py` (a log
-page lined in the device colours). Each holds its mark as an SVG string in
-`TAB_ICON` for exactly that reason, and each looks for a real picture first,
-through `api.paths.assets` and the one rule every addon follows - the file
-named `{package}icon.png`, from the addon's id, so `assets/berryicon.png`,
-`assets/manager_updateicon.png`, `assets/cert_managericon.png` and
-`assets/openwrt_logsicon.png`; a name a program has worn since before the rule
-is still tried after it (`updateicon.png`, `storeicon.png`), and the drawing is
-worn when no file is there at all. `addon_common.find_icon` is that lookup, and
-an addon installed from the store really does have the file, because the build
-packs it inside the program and a process addon's `api.paths.assets` answers
-with its own bundle first. A tab that never names a mark is not
-left bare either: it wears the program's default tab picture
-(`assets/defaulttabicon.png`), and the SSH tab
-wears `assets/terminalicon.png`. Every tab mark is drawn larger than the bar
+Every addon wears a mark of its own now, and each holds it as an SVG string in
+`TAB_ICON` for exactly that reason: `addons/berry.py` (a cluster of drupelets),
+`addons/manager_update.py` (a download mark), `addons/theme_manager.py` (a tray
+of colour dabs), `addons/addon_store.py` (a bag with an arrow into it),
+`addon.store/cert_manager.py` (a trophy), `addon.store/openwrt_logs.py` (a log
+page lined in the device colours), `addon.store/openwrt_package_manager.py` (a
+package box), `addon.store/multi_ssh.py` (two shells, one behind the other,
+since more than one at a time is the whole point) and
+`addons/web_installer.py` (a browser window lowering a page onto a tray).
+
+Each of them looks for a real file first, and the search is one rule with two
+places to look: the file named `{id}icon.png`, tried in the folder the addon's
+own source keeps its pictures in - `assets/<id>/` beside it, which is where a
+store addon's file is - and then in the program's `assets`. `berry` is therefore
+worn by `assets/berryicon.png` and `multi_ssh` by
+`addon.store/assets/multi_ssh/multi_sshicon.png`, with no addon naming its file
+anywhere in its source. `addon_common.find_addon_picture` is that lookup, and it
+is what closed the gap `find_icon` left open: `api.paths.assets` always answers
+with the *program's* folder, so a store addon's own picture was never found
+while the addon was being written - only inside the executable the store builds,
+which packs the assets flat. Nothing is tried under an older name now: the
+aliases the lookup used to keep (`updateicon.png`, `storeicon.png`,
+`themeicon.png`, `webinstallericon.png`, `openwrtpkgmgr.png`) are retired, and
+the drawing in `TAB_ICON` is worn when no file is there at all.
+
+A tab that never names a mark is not left bare either: it wears the program's
+default tab picture (`assets/defaulttabicon.png`), the SSH tab wears
+`assets/terminalicon.png` and the pinned Settings tab wears
+`assets/settingsicon.png` - each of the three falling back on the same drawing
+in `manager_widgets` when the file is absent, so the shipped picture and the
+painted one can never drift apart. Every tab mark is drawn larger than the bar
 measures it at, so the pictures read clearly without the tabs growing.
 
 The addon store's cards follow the same rule, and an addon that shipped no
@@ -962,8 +1058,9 @@ points it at whatever `api.session.app_icon()` returns - the same picture the
 window and toolbar wear - and it keeps pointing there, so switching to the
 alternate icon in View changes the tab's mark in the same breath. Choosing a
 mark with `set_icon` ends the follow; `use_app_icon(tab, False)` drops it and
-takes the mark away. `addons/web_installer.py` does this, so its tab and the
-program never disagree about what they look like.
+takes the mark away. Every shipped addon now wears a mark of its own instead,
+including `addons/web_installer.py`, which used to follow the logo; the call
+stays for an addon that would rather look like the program than like itself.
 
 ### A Settings page an addon owns
 
@@ -1034,7 +1131,9 @@ with a `kind`, and containers hold `children`:
 
 Kinds: `column`, `row`, `grid`, `form`, `group`, `scroll`, `splitter`, `tabs`,
 `label`, `button`, `line`, `multi`, `check`, `combo`, `list`, `tree`, `table`,
-`progress`, `spin`, `slider`, `spacer`, `image`, `web`. Common attributes: `id`, `text`,
+`progress`, `spin`, `slider`, `spacer`, `image`, `web`, `color` (a hex line with
+the colour wheel behind its swatch) and `terminal` (its own paragraph below).
+Common attributes: `id`, `text`,
 `tooltip`, `style` (a Qt stylesheet, so the addon can theme its own tab),
 `enabled`, `visible`, `font_size`, `items`, `rows`, `value`, `checked`,
 `placeholder`, `readonly`, `minimum`, `maximum`, `columns`, `word_wrap`,
@@ -1051,7 +1150,18 @@ its own too: a list item as `{"text": ..., "icon": ...}`, a row as a dict with
 `"icon"` beside `"cells"`, and that picture is drawn in front of the row's first
 cell. `on`
 lists the interactions to report back: `clicked`, `toggled`, `changed`,
-`returned`, `selected`. `api.ui.dialog(spec)` and
+`returned`, `selected` and, for a `list`, `tree` or `table`, `context` - a
+right-click, carrying the text of the row under the cursor, so an addon can
+answer with a menu from `api.ui.choose` without a second round trip. A `tabs`
+container is not fixed at the moment it is built either: `set_widget(tab, id,
+"add_page", {"label": ..., "spec": ...})` puts one more sub-page on it - of any
+kind, including a `terminal` - with `"position"` for somewhere other than the
+end and `"current": False` to leave the view where it is, `"remove_page"` takes
+one away by index or by caption, and `widget_value(tab, id, "pages")` reads
+every caption back, which is how an addon opens a page per connection and shuts
+it again. Removing by caption is the safer of the two answers, because a page
+taken out of the middle moves the numbers of the ones after it and no caption
+does. `api.ui.dialog(spec)` and
 `api.ui.set_setting_widget(spec)` use the same format, which is how a non-Qt
 addon gets its own controls in Settings.
 
@@ -1063,6 +1173,30 @@ route works while the addon is imported and goes silent the moment the same file
 is compiled. The same applies to `setEnabled`: use
 `api.tabs.set_widget(tab, id, "enabled", False)` rather than the widget. Address
 the tab by id in both directions and one file serves the app and its own program.
+
+A `terminal` leaf is the app's own terminal screen - the widget that draws the
+device's escape sequences and sends the keys typed into it - run on a connection
+of its own rather than the app's main session, so one tab can hold several and
+each is a separate machine. `set_widget(tab, id, "connect", {...})` brings one
+up and takes `host`, `port`, `username` and either `password` or `key_file` (a
+plain `"user@host:port"` string says the same thing); `"disconnect"` drops it,
+`"send"` types raw bytes, `"command"` types a line with the Enter added, and
+`"write"` prints a note from the addon onto the screen without sending it
+anywhere. `widget_value` answers `"text"` for what is showing, `"grid"` for its
+shape and `"state"` for what it is attached to - and `"state"` leaves the
+password out, so an addon can show where a shell is without echoing what opened
+it. In `on` it answers `ready` (the link came up), `closed` (it went down,
+asked for or lost) and `failed` (carrying the reason), plus `bell` and `title`
+when it asks for them. The three properties that reach the device - `connect`,
+`send`, `command` - go through the same gates as any `api.device` call: the
+manifest needs `"requires": ["ssh"]` and a `"connection"` of `"own"` (or `"both"`
+with the addon's own connection switch on), and the master switch and the app's
+SSH switch apply as always. Everything else on the leaf stays available,
+because reading what is on a screen and writing a line on it are the addon's
+business with its own widget. `addon.store/multi_ssh.py` is the worked example:
+it adds a sub-page per session, puts one `terminal` in each, and asks for the
+password with `api.ui.input(..., secret=True)` every time rather than keeping one
+in a file.
 
 An executable may also carry a `<id>.json` (or `addon.json`, `manifest.json`)
 next to it with `name`, `version`, `author`, `description` and, if it is not a
@@ -1284,9 +1418,9 @@ version was recorded beside that install. **Refresh** re-reads the catalogs and
 marks the rows *new* and *updated*, and works out which installed addons the
 store has since moved past, **Install** takes the chosen one, **Update** rebuilds
 one that is behind over the top of what is there, and **Delete** takes it back.
-The tab wears its own mark - `assets/addon_storeicon.png`, the standard name, then
-the older `assets/storeicon.png`, then the SVG held in `TAB_ICON` when the program
-ships neither - sent through `api.tabs.set_icon`, so a compiled copy keeps it too,
+The tab wears its own mark - `assets/addon_storeicon.png`, the one name the rule
+allows, then the SVG held in `TAB_ICON` when no file is there - sent through
+`api.tabs.set_icon`, so a compiled copy keeps it too,
 and it asks for `pinned=True, icon_only=True`: the store is somewhere a user goes
 from the window's edge rather than a page they laid out, so it holds beside
 Settings as its mark and never costs the rest of the row any width - and its
@@ -1343,11 +1477,18 @@ declaration saying whose connection it may use, and an `origin` mark
 saying the store put it there - and its `fields.json` form, with a `config.json`
 seeded from the addon's defaults, under `addons/_data/<id>`. Both are read
 without importing or running any of the addon, since the source is parsed with
-`ast`; both are what **Delete** takes back together with the program, while the
-`_data` folder is left alone, so a reinstall comes home to the settings you had.
+`ast`; both are what **Delete** takes back together with the program. What
+Delete does with the addon's own `addons/_data/<id>` folder is a switch rather
+than a surprise: `delete_config` in the store's own config, shown on its
+Settings row as **Delete takes an addon's settings too**, starts **on** - an
+addon that is gone should not leave a folder nobody owns - and a delete that is
+about to take one says which folder, and names the two switches that would leave
+it alone, before it does anything. Afterwards the status line says which of the
+two happened, naming the folder it left behind when it left one. A reinstall
+after a delete that kept the folder therefore comes home to the settings it had.
 
 That manifest is also why an install is never filed among the bundled addons:
-`manager_const.SHIPPED_ADDON_IDS` names the only four that came inside the
+`manager_const.SHIPPED_ADDON_IDS` names the only five that came inside the
 program, and anything else is treated as the user's own.
 
 Where the addons come from is a list rather than one repository, and **Sources...**
@@ -1376,7 +1517,11 @@ the modules it imports are fetched from, so an addon arrives with exactly what s
 beside the catalog row naming it. The header chip at the top of the tab says where
 the list points: one source named in full, several named by the first and counted,
 and the token - shared by every source, for a private repository or when anonymous
-requests are refused - stays editable in that same config file.
+requests are refused - stays editable in that same config file. The same header
+holds the answer about settings for this session only: a **delete settings**
+check box beside the chip, drawn from `delete_config` and put back under it
+whenever the config is saved from Settings, so a page edit always wins and a
+change made here is gone when the tab is rebuilt.
 
 A catalog entry needs nothing but the `.py` and its manifest - a tab, a button
 and a test script beside it is the smallest thing that can be listed there, and
@@ -1390,7 +1535,11 @@ installed from the addon store, which compiles it and leaves its settings form
 filled in before it is ever started. It adds a **Certificates** tab and a
 Tools menu entry, and works on the certificate pair the device's web interface
 serves - `/etc/ssl/mycert.crt` and `/etc/ssl/mycert.key` by default, both names
-and the folder coming from `addons/_data/cert_manager/config.json`.
+and the folder coming from `addons/_data/cert_manager/config.json`. Its tab is
+asked for as `pinned=True, icon_only=True`, the way the store's and the manager
+updater's are, so the trophy sits beside Settings rather than take width from
+the row the user arranged - one api call, no special case in the app, and the
+name still in the tooltip.
 
 | Button | What it does |
 | --- | --- |
@@ -1419,9 +1568,12 @@ validity - which is the shape the embedded tabs expect.
 Its tab is a spec and its five buttons arrive as `on_widget`, so nothing here
 changes when the file is compiled: **View current** issues the same SSH script
 either way, and the callback that fills the viewer in comes back through the
-pipe. The tab's trophy is an SVG document held as text in `TAB_ICON` and sent
-with `api.tabs.set_icon`, so a compiled copy still gets its mark - there is no
-file beside it to lose and no Qt in it to draw with.
+pipe. Its mark follows the rule like every other addon's: the picture at
+`addon.store/assets/cert_manager/cert_managericon.png` is worn when the file is
+there, and otherwise the trophy is an SVG document held as text in `TAB_ICON`
+and sent with `api.tabs.set_icon`, so a compiled copy still gets its mark - the
+text crosses the pipe unchanged, with no file beside it to lose and no Qt in it
+to draw with.
 
 Two parts of the subject are not negotiable, because openssl says so: the
 `Country` holds exactly two letters (`GB`, `NO`, `DE`) or nothing at all, and
@@ -1513,8 +1665,11 @@ look-around costs one API call and a download.
   buttons report through `on_widget`, and a compiled copy of this addon cannot
   hold an SSH session (`device.open` is refused), so the same writing code sends
   each file with `device.upload` instead - one connection per file rather than
-  one for the lot, which is the only thing that differs. Its mark follows the
-  program's own icon, so the tab changes together with View > Alternate icon.
+  one for the lot, which is the only thing that differs. Its mark is its own
+  too: `assets/web_installericon.png`, and the browser-window drawing held as
+  text in `TAB_ICON` when the file is missing - it no longer follows the
+  program's logo, so nothing it does depends on which logo the window is
+  wearing.
 
 `addons/_tests/test_web_installer.py` drives the whole route - the tab built by
 Qt (its notebook, step flow and badges included), a real fetch from GitHub, an
@@ -1625,6 +1780,50 @@ the tab and editor as Qt builds them (the two-page frame, the headers, the
 right-click policy, and the live syntax highlighter on the editor) - and **Run
 test** in the Addon Dev tab runs it.
 
+### Shipped addon: Theme Manager
+
+`addons/theme_manager.py` is the program's own editor for the looks it is drawn
+from, and the reason `.theme` files are worth dropping into the folder. It adds one
+pinned tab, **Theme Manager**, with three sub-tabs of its own - the app owns the
+outer bar and its shape, this addon owns the page.
+
+**Themes** is the folder as a table: every name on disk with its author and its
+blurb, starred when the window is drawn from it, and six buttons under it - Apply,
+Edit it, Duplicate, Rename, Delete, and the folder itself. Delete asks first (a
+config switch), and `default` refuses either way. A right-click on a row opens the
+same commands, and works on the row that was clicked rather than the row the table
+was still pointing at.
+
+**Edit** works on one *draft*: the theme held complete in memory, with the name of
+the file it would be written to. Colours are picked from a tree grouped by what they
+are used for and changed by typing a hex value or by the app's colour wheel; the tab
+knobs are picked from a tree of pixels and switches, each answered by the box that
+fits it; and the JSON of the draft can be typed into directly, then read back with
+**Use the JSON**. Every change is checked by `api.theme.validate` before the draft
+keeps it, in the app's own words - `colors.accent is not a colour: '#zz'`,
+`tabs.icon_px is out between 0 and 200 px` - and the box mirrors the draft, so what
+is on show is what would be written. Nothing reaches the disk until **Save**, and
+nothing reaches the window until **Apply**; a switch under the editor's name makes
+saving the theme already in force redraw as well. **Re-read from disk** throws the
+draft away, and a name that has no file behind it cannot be opened at all.
+
+**New from template** takes the name typed above it and one of the four shipped
+starting looks - the dark `default`, the light one, `deep sea` and `ember` - writes
+the file, and opens it in the editor to be changed. A new draft is never allowed to
+be named over a file that exists.
+
+**Docs** is laid out like the Addon Dev panel's: a tree of every `api.theme` call,
+under headings that count their own lines, beside the page each one opens. The
+calls, their signatures and their descriptions are read off the running API with
+`api.theme.reference()`, so the page cannot disagree with the program it describes,
+and only the six guides beside it are written down in the addon.
+
+The addon never touches the disk or the window itself - everything goes through
+`api.theme`, `api.tabs` and `api.ui`, so the same file works imported into the app
+and run as its own process, and `addons/_tests/test_theme_manager.py` can drive the
+whole route - make, colour, knob, refuse, save, apply, duplicate, rename, delete -
+against a folder of its own.
+
 ### Shipped addon: Berry Manager update
 
 `addons/manager_update.py` adds a **Manager update** tab and a Tools menu
@@ -1705,9 +1904,9 @@ the run, so clicking back and forth costs nothing. The header keeps the status
 line and an `owner/repo @ prefix*` chip saying where the tags come from, and
 below the panes **Check now**, **Install the picked version** and **Open
 releases page** (the repository's releases in an embedded tab) report through
-`on_widget`. It wears `assets/manager_updateicon.png` - the standard name every
-addon's picture is looked for under - falling back on the older
-`assets/updateicon.png` and then on a drawn download mark, and it is pinned and
+`on_widget`. It wears `assets/manager_updateicon.png` - the one name every
+shipped addon's picture is looked for under - falling back on the drawn download
+mark held in `TAB_ICON` when the file is missing, and it is pinned and
 icon-only like the store's, holding beside Settings instead of taking a place in
 the row of tabs.
 
@@ -1759,6 +1958,99 @@ the first of those: a 2.7 program in an app that cannot carry the job reads no
 logs in the multi view, and the store's **Install** will not overwrite an addon
 that is already there, so it takes **Delete** and then **Install** to move over.
 
+### Store addon: OpenWrt Package Manager
+
+`addon.store/openwrt_package_manager.py` adds a **Package Manager** tab of two
+pages: **Installed Packages** and **Install Software**. One config choice -
+`package_manager`, `apk` or `opkg` - decides every command the addon runs, so a
+modern OpenWrt release and a legacy opkg one are the same tab, and the same is
+true of `apk update`/`opkg update`, `apk search`/`opkg list`, `apk add`/`opkg
+install` and `apk del`/`opkg remove`. Both pages are tables of three columns,
+and the third one is the reason 1.3 exists: **a description of each package,
+read off the device**. Neither backend puts one in the list of what is running -
+apk keeps the words in its repository index and opkg in its feed list - so after
+the installed names are in, the addon asks for the whole dump
+(`apk query --fields name,version,description --format json`, or `opkg list`) and
+folds the sentences into both tables, saying how many arrived on the status
+line. A package the index has nothing about is still listed with its name and
+version; a guess at which description belongs to which name is worse than none.
+The cut of one `apk info -v` line into `name` and `version` is the same care in
+miniature: it splits at the first dash with a digit behind it, since a name
+cannot start a segment with one and a version always does.
+
+Its picture moved to the rule's own name in 1.3, to
+`addon.store/assets/openwrt_package_manager/openwrt_package_managericon.png`,
+so the store's card and the
+tab's mark come from the one file. The catalog's `icon` key names that same
+file, and `addon_common.find_addon_picture` reaches it in either folder, so the
+picture is the same whether the addon is being written, built by the store or
+shipped inside the program. It rides the
+app's session (`"connection": "app"`, `"requires": ["ssh", "sftp"]`), and
+`addon.store/_tests/test_openwrt_package_manager.py` covers the parsing of both
+backends' answers and the rows each table is given.
+
+### Store addon: Multi SSH
+
+`addon.store/multi_ssh.py` is the store's first addon that says
+`"connection": "own"` and means it shell by shell: one tab holds a row of
+sub-tabs and every sub-tab is a session on a socket and a thread of its own, to
+the same machine twice if asked. Nothing in it is a view of the connection the
+user opened in the connection panel - pressing Connect there changes nothing
+here, and nothing here moves it.
+
+The tab is three things: a row at the top that types one command into every
+session that is up, a **Quickstart** group on the left, and the sessions
+themselves on the right, in a `tabs` container that starts with a
+*No session* page standing in for nothing being open.
+
+| | |
+| --- | --- |
+| **Connect** | Opens the selected quickstart entry: asks for the password and nothing else, adds a sub-page and brings the shell up on it |
+| **New** | A session to any address, once - asked for as one line (`user@host:port` is read as it is written) and never saved |
+| **Add / Edit / Remove** | Keeps the quickstart list: name, address, port, user, and a key file instead of a password if one is named |
+| **Icon** | Gives an entry a picture of its own |
+| **Reload from config** | Reads the file again, picking up entries edited outside the app |
+| **Broadcast** | Types what is in the top field into each session that is up, Enter does the same |
+
+The entries live in `addons/_data/multi_ssh/config.json` under `quickstart`, as
+the list of objects they are, and are named in no `FIELDS` entry - which is what
+lets them be a list at all: the Settings form starts from the file, so a key it
+does not show is written back untouched, and the addon is free to add and drop
+rows without a form being rebuilt around them. The same is true of an entry's
+picture, which is *copied* into `addons/_data/multi_ssh/icons` from wherever
+`api.ui.pick_file` found it and named after the entry, so the row keeps its icon
+whatever happens to the file it came from, and a data folder moved to another
+machine takes its icons with it.
+
+A password is asked for every single time, with `api.ui.input(...,
+secret=True)`, and is kept nowhere: not in `config.json`, not in the settings
+dict, not in the state the addon can read back off the shell - because this
+config file is plain JSON that people share in bug reports and copy onto other
+machines, and the app's own credential store is the app's, not an addon's. What
+the screen of a session shows is what its keys typed there go to.
+
+Each sub-page is a line of its own - who it is connected to, how it is doing,
+and **Connect** and **Disconnect** - over a `terminal` leaf. The shell reports
+`ready`, `failed` and `closed` back to the addon, and what `closed` means is one
+switch: **Close the tab when the link drops**, on, takes the page away with the
+connection and puts the *No session* page back when it was the last one; off,
+the page stays exactly where it was with its scrollback intact, the state line
+reading `disconnected` and **Connect** asking for the password again. That is
+the way to keep the output of a machine that drops, and a **Disconnect** press
+reports `closed` like any other, so the one switch decides for both ways a link
+goes. A broadcast to a session whose shell has
+already gone is not pretended to work: the leaf refuses the write, the loop
+counts it, marks that session down and says how many could not be reached.
+
+The rest of the config is what a new session is offered - a user, a port, and
+whether a host key nobody has seen is accepted or refused - and its picture is
+found by the rule like every other addon's, at
+`addon.store/assets/multi_ssh/multi_sshicon.png`.
+`addon.store/_tests/test_multi_ssh.py` runs it against a fake row of sub-pages
+that honours `add_page`, `remove_page` and `pages`, so the checks are about the
+tabs the addon really opens and shuts, and that no value it saved anywhere holds
+the password it was handed.
+
 ### Addons inside the built executable
 
 The build packs the addons it finds in `addons` **inside the program**, and the
@@ -1784,12 +2076,13 @@ app reads that copy as a set of *shipped* addons:
   still written beside the `.exe`, in the writable `addons/_data/<id>/config.json`, so
   a shipped addon is configured per installation exactly like a dropped-in one.
 - "Shipped" is decided by a stable list, `manager_const.SHIPPED_ADDON_IDS`
-  (`berry`, `web_installer`, `addon_store`, `manager_update`), on top of the
+  (`berry`, `web_installer`, `addon_store`, `manager_update`, `theme_manager`),
+  on top of the
   `builtin` flag, so a
   source checkout - where `HAS_BUILTIN_ADDONS` is off - still gives those addons
   a Settings page of their own rather than a row on the **Installed addons**
-  page. The certificate
-  and log addons are not in that list any more: they live in `addon.store` and
+  page. The certificate, log, package and multi-ssh addons are not in that list:
+  they live in `addon.store` and
   are installed from the store, which marks what it builds with an `origin` of
   its own so the app puts it on the **Installed addons** page instead.
 - Two addons of one id cannot both be *the* addon called `mytool`, and a file in

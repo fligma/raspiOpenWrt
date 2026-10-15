@@ -81,8 +81,6 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -93,6 +91,8 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -125,7 +125,13 @@ from manager_const import (
     PROJECT_GITHUB_URL,
     find_asset,
 )
+import manager_theme
 from manager_widgets import tip_on_title
+
+#: How wide the branches of the Docs tree are drawn, and how far their lines are
+#: pushed in: the two numbers that make the list read as a folder tree.
+DOCS_INDENT = 16
+DOCS_MIN_W = 236
 
 #: How often the tables ask the runtime what it knows.
 REFRESH_MS = 2000
@@ -559,7 +565,8 @@ ADDON = {
     # connection per call), "both" (the user chooses on this addon's Settings
     # row) or "none" - which says no more than leaving "requires" out above.
     "connection": "app",
-    # A picture called <id>icon.png in this addon's assets folder is found on
+    # A picture called <id>icon.png in the assets folder beside this file - in
+    # assets/<id>/, or in the program's own assets - is found on
     # its own, both for the tab's mark and for its card in the addon store, so
     # only a file named differently needs this key.
     # "icon": "oldname.png",
@@ -1497,8 +1504,9 @@ the row, or ``"none"`` - which says no more than leaving ``requires`` out, and i
 answered on the row and in **Connection status** as *no device connection*
 rather than with a dot that could never go green. An addon that ships inside the
 program always rides its session, whatever it declared. ``icon`` names the
-picture the addon wears; a file named by the ``{package}icon.png`` rule is found
-without being declared at all (see [Notices and icons](guide:notice)).
+picture the addon wears; a file named ``<id>icon.png`` in either of the two
+folders the rule allows is found without being declared at all (see
+[Notices and icons](guide:notice)).
 
 ## Mind the process boundary
 
@@ -1528,14 +1536,15 @@ steal the view; [activate](api:tabs.activate) puts it on screen.
 Layouts: ``column`` / ``vbox``, ``row`` / ``hbox``, ``grid``, ``form``,
 ``group``, ``scroll``, ``splitter``, ``tabs``. Leaves: ``label``, ``button``,
 ``line``, ``color``, ``multi``, ``check``, ``combo``, ``list``, ``tree``,
-``table``, ``progress``, ``spin``, ``slider``, ``spacer``, ``image``, ``web``.
+``table``, ``progress``, ``spin``, ``slider``, ``spacer``, ``image``, ``web``,
+``terminal``.
 
 Anything with an ``id`` can be read and written afterwards with
 [set_widget](api:tabs.set_widget) and [widget_value](api:tabs.widget_value).
 The property names are the spec's own: ``text``, ``value``, ``rows``,
 ``items``, ``clear``, ``append``, ``placeholder``, ``tooltip``, ``style``,
 ``enabled``, ``visible``, ``checked``, ``highlight``, ``maximum``, ``format``,
-``current``.
+``current``, ``font_size``.
 
 An ``image`` leaf is a picture of its own: ``size`` caps how far it may measure
 in either direction (at the interface zoom), and its ``value`` - or
@@ -1567,6 +1576,53 @@ tabs are made this way. A mark has nothing left but its tooltip to say who it
 belongs to, so the app fills that in with the addon's name and its tab's - an
 addon that asks to be drawn as a mark should send a picture of its own with it
 (see [Notices and icons](guide:notice)).
+
+## Pages added and taken away
+
+A ``tabs`` container is not fixed at build time. ``set_widget(tab, id,
+"add_page", {"label": "eth1", "spec": {...}})`` builds one more sub-page out of
+the same spec language and puts it at the end - ``"position"`` says elsewhere,
+``"current": False`` leaves the view where it is - ``"remove_page"`` takes one
+away by index or by caption, and [widget_value](api:tabs.widget_value) with
+``"pages"`` reads every caption back. A control that only ever exists while its
+page does needs no cleaning up: taking the page away drops its controls out of
+the tab's registry, and closes any terminal sitting on it.
+
+## A terminal of your own
+
+A ``terminal`` leaf is the app's own terminal screen - the widget that draws the
+device's escape sequences and sends the keys typed into it - on a connection of
+its own rather than the app's main session. So one tab can hold four of them and
+four machines are being watched, each on its own thread, and closing one takes
+nothing else down with it.
+
+    {"kind": "terminal", "id": "shell", "on": ["ready", "closed", "failed"]}
+
+    api.tabs.set_widget("My addon", "shell", "connect",
+                        {"host": "192.168.1.1", "username": "root",
+                         "password": typed})
+
+``"disconnect"`` drops it, ``"command"`` types a line with the Enter added (a
+list types several, so one field can reach every shell open), ``"send"`` types
+raw bytes and ``"write"`` prints a note from the addon itself. Its ``value`` is
+what is on the screen, ``"state"`` says what it is attached to - host, port,
+username, and whether it is up; never the password - and ``"grid"`` its shape.
+The screen says what happens to it: *Connecting to*, *Connected*, *SSH error:*
+and *Connection closed.* are drawn where the user is looking, and the same news
+arrives in ``on_widget`` as ``ready``, ``closed`` and ``failed`` - which is how a
+sub-page can close itself the moment its link drops.
+
+Because this is a connection of its own, the addon has to have asked for it: a
+manifest with ``"requires": ["ssh"]`` and ``"connection": "own"``, and the same
+switches [api.device.run](api:device.run) passes through. Reading a screen,
+typing into one that is already up and letting go of one are never refused - the
+permission was asked for once, when the connection was opened. A key file, if
+the addon offers one, comes from [api.ui.pick_file](api:ui.pick_file); nothing is
+uploaded behind anybody's back. A password is asked for in the same spirit:
+[api.ui.input](api:ui.input) with ``secret=True`` draws dots while the user types
+and answers ``None`` when the box is cancelled - and asking each time, rather than
+keeping one in a config file that gets shared and backed up, is the design an
+addon with several machines should reach for.
 
 ## Pages on the device
 
@@ -1606,11 +1662,16 @@ the detail is one click away.
 
 ## Wearing a picture
 
-Put the file in the addon's own assets folder, named after the addon:
-``{package}icon.png`` built from the id, so ``mytool`` wears
-``mytoolicon.png``. That name is looked for on its own, both for the tab's mark
-and for the card in the addon store, so a picture costs no code and no manifest
-key. A file named anything else is declared instead:
+One name, in either of two folders: the addon's id and then ``icon.png``, so
+``mytool`` is worn by ``mytoolicon.png``. The file goes in an ``assets`` folder
+beside the addon's own source, in a subfolder named after the addon -
+``assets/mytool/mytoolicon.png`` under the folder the ``.py`` sits in, which for
+a store addon is ``addon.store/assets/mytool/mytoolicon.png`` - and the program's
+own ``assets/mytoolicon.png`` is tried too, which is where an addon shipped
+inside the program keeps its picture. Neither name is written anywhere in the
+addon's code: ``addon_common.find_addon_picture`` is the lookup that tries both
+folders, and a square PNG - the marks the program ships are 128x128 - is what
+the tab draws. A file named anything else is declared instead:
 
     ADDON = {..., "icon": "oldname.png"}
 
@@ -1619,9 +1680,10 @@ with [set_icon](api:tabs.set_icon), and the store shows the program's own
 ``storedefaultaddon.png``, so an addon is never filed under a blank box and still
 found by eye. A compiled build keeps its assets packed inside it and
 [api.paths.assets](api:paths.assets) is where they are read from;
-``addon_common.find_icon`` is the same rule for an addon drawing a picture into a
-widget of its own, and [api.session.app_icon](api:session.app_icon) is the
-program's own mark when it wants to sit beside it.
+``addon_common.find_icon`` takes a folder and an id and is the same rule for an
+addon drawing a picture into a widget of its own, and
+[api.session.app_icon](api:session.app_icon) is the program's own mark when it
+wants to sit beside it.
 """),
 
     ("settings-pages", "A page in Settings", """
@@ -1653,6 +1715,87 @@ form built from the declared fields.
 
 For one or two switches use [api.ui.set_setting_widget](api:ui.set_setting_widget)
 instead - the same controls, but under the addon's own row.
+"""),
+
+    ("themes", "Themes: the look of the app", """
+# Themes: the look of the app
+
+A look is one small JSON file - ``themes/<name>.theme``, beside the program. The
+app reads the file it is drawn from when it starts, and writes
+``themes/default.theme`` when the folder holds none, so there is always something
+to copy and always something to fall back on.
+
+    {
+      "name": "deep sea",
+      "author": "fligma",
+      "blurb": "dark blues, soft edges",
+      "colors": {"accent": "#2b8aa8", "base": "#0d1b2a"},
+      "tabs": {"icon_px": 30, "radius_px": 8, "captions": false},
+      "styles": "QToolTip { color: #e8f4f8; }"
+    }
+
+What the file does not say comes from the shipped look, so two colours in it make
+a whole, usable theme. The three parts each own:
+
+- ``colors`` - every colour the interface is painted with, by its token name.
+- ``tabs`` - the shape of the tab bar: how big a tab's picture is, its air and
+  corners, and whether it shows its name and its connection dots at all.
+- ``styles`` - a few lines of sheet for whatever the first two do not reach.
+
+## Who owns what
+
+The theme owns the furniture; the addon owns its own page. A tab's icon size, its
+colours and whether it carries a caption come from the theme and not from the
+addon - [api.tabs.set_icon](api:tabs.set_icon) hands over a picture and the theme
+decides how big it is drawn, so an addon that sizes its own mark is fighting the
+look rather than wearing it.
+
+What an addon does choose is the look of its tab's content, and the way to keep
+that in step with the theme is to ask for the colours instead of writing them
+down:
+
+    colors = api.theme.colors()
+    sheet = "QPushButton { background: %s; }" % colors["raise"]
+
+## Reading and writing a look
+
+- [names](api:theme.names), [exists](api:theme.exists) and
+  [folder](api:theme.folder) are the files; ``folder()`` makes the folder on the
+  way, so an addon always has somewhere to write.
+- [read](api:theme.read) is one theme complete, every token filled in;
+  [raw](api:theme.raw) is the file as written, which is what an editor shows.
+- [colors](api:theme.colors) and [tabs](api:theme.tabs) are the two halves as
+  dicts, [color](api:theme.color) one token by name, and
+  [groups](api:theme.groups) and [token_knobs](api:theme.token_knobs) the same
+  thing in the shapes an editor lists them in - colour blocks with their hints,
+  and each tab knob marked as pixels or as a switch.
+- [validate](api:theme.validate) says what is wrong with a candidate, one line
+  each, before it is written; [save](api:theme.save) refuses anything it dislikes
+  unless it is told to force.
+- [use](api:theme.use) draws the window from a theme and keeps the choice for
+  this profile. [copy](api:theme.copy), [rename](api:theme.rename) and
+  [remove](api:theme.remove) move the files; the shipped ``default`` stays.
+- [templates](api:theme.templates) are the looks a new theme may be begun from,
+  and [template_text](api:theme.template_text) is one as the text of a file.
+- [stylesheet](api:theme.stylesheet) is the whole sheet the app applies, and
+  [sheet_of](api:theme.sheet_of) is what a draft still being edited would give.
+- [reference](api:theme.reference) is this list, read off the running API, for an
+  addon that wants to document the namespace the way the Theme Manager's Docs tab
+  does.
+
+## When the look moves
+
+Applying a theme sends [theme_changed](api:events.on) with
+``{"theme": worn, "wanted": asked}``: what the window is drawn from now, and the
+name that was asked for, which differ only when that theme has no file. Anything
+that painted itself with colours read earlier should read them again there; a tab
+built from a spec and coloured by the app's own sheet needs nothing, because the
+window repaints it under it.
+
+The program's editor for all of this is the bundled **Theme Manager** addon. It
+works on one draft at a time - a colour, a knob, or the JSON direct - and nothing
+reaches the disk until Save, or the window until Apply, so a look can be ruined
+without anyone noticing.
 """),
 
     ("config", "Config, settings and defaults", """
@@ -1818,6 +1961,7 @@ GUIDE_FOR_NAMESPACE = {
     "events": "events",
     "settings": "config",
     "settings_pages": "settings-pages",
+    "theme": "themes",
     "config": "config",
     "schedule": "anatomy",
     "paths": "anatomy",
@@ -2038,6 +2182,10 @@ class AddonDevWidget(QWidget):
         self.build: _Stream | None = None
         self.test: _Stream | None = None
         self._loading = False
+        # The Docs tree, by the key each line carries, and the folds the tree had
+        # before 'find' opened them. Both are filled by _fill_docs.
+        self._docs_items: dict[str, QTreeWidgetItem] = {}
+        self._docs_folds: dict[str, bool] | None = None
 
         # A table, five panes and many notes do not fit a short window, so all
         # of it lives in one scroll area and takes the height it needs.
@@ -2474,12 +2622,17 @@ class AddonDevWidget(QWidget):
         layout.addLayout(row)
 
         split = QSplitter()
-        self.docs_list = QListWidget()
-        self.docs_list.setSelectionMode(
+        self.docs_tree = QTreeWidget()
+        self.docs_tree.setHeaderHidden(True)
+        self.docs_tree.setColumnCount(1)
+        self.docs_tree.setRootIsDecorated(True)
+        self.docs_tree.setIndentation(DOCS_INDENT)
+        self.docs_tree.setUniformRowHeights(True)
+        self.docs_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
-        self.docs_list.currentItemChanged.connect(self._docs_moved)
-        self.docs_list.setMinimumWidth(210)
-        split.addWidget(self.docs_list)
+        self.docs_tree.currentItemChanged.connect(self._docs_moved)
+        self.docs_tree.setMinimumWidth(DOCS_MIN_W)
+        split.addWidget(self.docs_tree)
         self.docs_view = QTextBrowser()
         self.docs_view.setOpenLinks(False)
         self.docs_view.setMinimumWidth(380)
@@ -2495,76 +2648,138 @@ class AddonDevWidget(QWidget):
         self._fill_docs()
         return page
 
-    def _add_docs_header(self, text: str) -> None:
-        """A line in the list that names a group and cannot be picked."""
-        item = QListWidgetItem(text)
-        item.setFlags(Qt.ItemFlag.NoItemFlags)
-        item.setForeground(QBrush(QColor("#c51a4a")))
-        self.docs_list.addItem(item)
+    def _add_docs_branch(self, key: str, text: str, tip: str,
+                         expanded: bool = False) -> QTreeWidgetItem:
+        """A group in the tree: it opens a page of its own and holds the lines
+        under it, the way a folder holds the files it is named for.
 
-    def _add_docs_item(self, key: str, text: str, tip: str = "",
-                       search: str = "") -> None:
-        """A page in the list, addressed by the same key its links carry."""
-        item = QListWidgetItem(text)
-        item.setData(Qt.ItemDataRole.UserRole, key)
-        item.setToolTip(tip)
+        Bold and in the theme's accent, so the eye sorts the tree into its
+        namespaces before it reads a single method name.
+        """
+        item = QTreeWidgetItem([text])
+        item.setData(0, Qt.ItemDataRole.UserRole, key)
+        item.setToolTip(0, tip)
+        item.setExpanded(expanded)
+        item.setForeground(0, QBrush(QColor(
+            manager_theme.color("accent", default="#c51a4a"))))
+        font = item.font(0)
+        font.setBold(True)
+        item.setFont(0, font)
+        self.docs_tree.addTopLevelItem(item)
+        self._docs_items[key] = item
+        return item
+
+    def _add_docs_leaf(self, branch: QTreeWidgetItem, key: str, text: str,
+                       tip: str = "", search: str = "") -> QTreeWidgetItem:
+        """A page in the tree, addressed by the same key its links carry."""
+        item = QTreeWidgetItem([text])
+        item.setData(0, Qt.ItemDataRole.UserRole, key)
+        item.setToolTip(0, tip)
         # What 'find' reads: the key and the call as well as the label and the
         # first line, so typing 'pinned' still turns up add_tab, whose signature
         # is the place the option is actually spelled out.
-        item.setData(self.SEARCH_ROLE,
+        item.setData(0, self.SEARCH_ROLE,
                      f"{key} {text} {tip} {search}".casefold())
-        self.docs_list.addItem(item)
+        branch.addChild(item)
+        self._docs_items[key] = item
+        return item
+
+    def _docs_branches(self) -> list[QTreeWidgetItem]:
+        """Every group in the tree, in the order the tree shows them."""
+        return [one for one in (self.docs_tree.topLevelItem(index)
+                                for index in range(
+                                    self.docs_tree.topLevelItemCount()))
+                if one is not None]
 
     def _fill_docs(self) -> None:
-        """The list down the left: the guides first, then the reference itself."""
-        self.docs_list.blockSignals(True)
-        self.docs_list.clear()
-        self._add_docs_header("Guides")
+        """The tree down the left: the guides first, then one group per
+        namespace, every method and property a line under the name it is
+        actually called through."""
+        self.docs_tree.blockSignals(True)
+        self.docs_tree.clear()
+        self._docs_items = {}
+        guides = self._add_docs_branch(
+            "page:guides", f"Guides ({len(GUIDES)})",
+            "The pages that read like a manual, from the first addon to the "
+            "last option.", expanded=True)
         for key, title, text in GUIDES:
-            self._add_docs_item(f"guide:{key}", title,
-                                text.strip().splitlines()[0] if text.strip() else title,
-                                search=text)
+            self._add_docs_leaf(
+                guides, f"guide:{key}", title,
+                text.strip().splitlines()[0] if text.strip() else title,
+                search=text)
         for page in api_reference():
-            head = f"{page['title']}  ({len(page['entries'])})"
-            self._add_docs_header(head)
+            branch = self._add_docs_branch(
+                f"page:{page['addr'] or 'api'}",
+                f"{page['title']} ({len(page['entries'])})",
+                page["summary"] or "The calls of this namespace.")
             for entry in page["entries"]:
                 addr = f"{page['addr']}." if page["addr"] else ""
-                self._add_docs_item(f"api:{addr}{entry['name']}", entry["name"],
-                                    entry["summary"], search=entry["call"])
-        self.docs_list.blockSignals(False)
+                self._add_docs_leaf(branch, f"api:{addr}{entry['name']}",
+                                    entry["name"], entry["summary"],
+                                    search=entry["call"])
+        self.docs_tree.blockSignals(False)
         self._show_docs_key("guide:start")
 
     def _filter_docs(self, text: str) -> None:
-        """Only the pages that answer to what was typed; a heading is not a result.
+        """Only the pages that answer to what was typed, and the groups that
+        still hold one; a group opens itself so a hit is never folded away.
 
-        Every word typed has to turn up somewhere in the row - label, summary or
-        call - which lets 'tabs pinned' narrow the list to the one line asked for.
+        Every word typed has to turn up somewhere in the line - label, summary
+        or call - which lets 'tabs pinned' narrow the tree to the one entry
+        asked for. Emptying the box folds the groups back as they were, since
+        the opening was the filter's doing and not whoever was reading.
         """
         words = str(text or "").strip().casefold().split()
-        for index in range(self.docs_list.count()):
-            item = self.docs_list.item(index)
-            if item is None:
-                continue
-            if not str(item.data(Qt.ItemDataRole.UserRole) or ""):
-                item.setHidden(bool(words))
-                continue
-            haystack = str(item.data(self.SEARCH_ROLE) or "")
-            item.setHidden(not all(word in haystack for word in words))
+        if words and self._docs_folds is None:
+            self._docs_folds = {self._branch_key(one): one.isExpanded()
+                                for one in self._docs_branches()}
+        folds = self._docs_folds or {}
+        self.docs_tree.blockSignals(True)
+        for branch in self._docs_branches():
+            hits = 0
+            for index in range(branch.childCount()):
+                leaf = branch.child(index)
+                if leaf is None:
+                    continue
+                haystack = str(leaf.data(0, self.SEARCH_ROLE) or "")
+                match = all(word in haystack for word in words)
+                leaf.setHidden(not match)
+                hits += 1 if match else 0
+            branch.setHidden(bool(words) and not hits)
+            branch.setExpanded(folds.get(self._branch_key(branch), True)
+                               if not words else hits > 0)
+        self.docs_tree.blockSignals(False)
+        if not words:
+            self._docs_folds = None
+
+    @staticmethod
+    def _branch_key(item: QTreeWidgetItem) -> str:
+        """The key a line of the tree is addressed by, empty for none."""
+        return str(item.data(0, Qt.ItemDataRole.UserRole) or "")
 
     def _show_docs_key(self, key: str) -> bool:
-        """Jump the list to one page, by the key its links carry."""
-        for index in range(self.docs_list.count()):
-            item = self.docs_list.item(index)
-            if item is not None and str(item.data(Qt.ItemDataRole.UserRole) or "") == key:
-                self.docs_list.setCurrentRow(index)
-                return True
-        return False
+        """Jump the tree to one page, by the key its links carry: its group is
+        opened, the line is picked and the page is scrolled into view."""
+        item = self._docs_items.get(str(key))
+        if item is None:
+            return False
+        branch = item.parent()
+        self.docs_tree.blockSignals(True)
+        if branch is not None:
+            branch.setHidden(False)
+            branch.setExpanded(True)
+        self.docs_tree.setCurrentItem(item)
+        self.docs_tree.scrollToItem(
+            item, QAbstractItemView.ScrollHint.PositionAtCenter)
+        self.docs_tree.blockSignals(False)
+        self._render_docs(str(key))
+        return True
 
-    def _docs_moved(self, current: QListWidgetItem | None,
-                   _previous: QListWidgetItem | None) -> None:
+    def _docs_moved(self, current: QTreeWidgetItem | None,
+                   _previous: QTreeWidgetItem | None) -> None:
         if current is None:
             return
-        self._render_docs(str(current.data(Qt.ItemDataRole.UserRole) or ""))
+        self._render_docs(self._branch_key(current))
 
     def _open_guide(self, key: str) -> None:
         """Come to the Docs pane and show one guide: the way a Test or Compile
@@ -2635,12 +2850,40 @@ class AddonDevWidget(QWidget):
             parts.append("<p>" + " \u00b7 ".join(walk) + "</p>")
         return "".join(parts)
 
+    def _branch_page(self, key: str) -> str:
+        """The page a group shows: every line under it, linked, so the tree can
+        be read from either side of the split."""
+        branch = self._docs_items.get(key)
+        if branch is None:
+            return "<p>nothing in the docs answers to that.</p>"
+        parts = [f"<h2>{_escape(branch.text(0))}</h2>"]
+        note = str(branch.toolTip(0) or "")
+        if note:
+            parts.append(f"<p>{_inline(note)}</p>")
+        lines = []
+        for index in range(branch.childCount()):
+            leaf = branch.child(index)
+            label = leaf.text(0)
+            summary = str(leaf.toolTip(0) or "")
+            if len(summary) > 96:
+                summary = summary[:96].rsplit(" ", 1)[0] + "\u2026"
+            lines.append(
+                f'<li><a href="{self._branch_key(leaf)}">{_escape(label)}</a>'
+                + (f" \u2014 {_inline(summary)}" if summary else "") + "</li>")
+        parts.append("<ul>" + "".join(lines) + "</ul>")
+        return "".join(parts)
+
     def _render_docs(self, key: str) -> None:
         kind, _, rest = str(key).partition(":")
         if not rest:
             return
-        self.docs_view.setHtml(self._guide_page(rest) if kind == "guide"
-                               else self._entry_page(rest))
+        if kind == "guide":
+            page = self._guide_page(rest)
+        elif kind == "api":
+            page = self._entry_page(rest)
+        else:
+            page = self._branch_page(key)
+        self.docs_view.setHtml(page)
 
     def show_docs(self) -> None:
         """The Docs button above: come to this pane and read the selected addon."""

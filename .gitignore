@@ -16,6 +16,8 @@ local tools
 
 utils/update util/config/
 utils/update util/addons/_data/
+# The themes folder the program writes beside itself on first boot.
+utils/update util/themes/
 
 utils/update util/addons/_build/
 utils/update util/addons/*.exe

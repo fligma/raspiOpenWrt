@@ -12,8 +12,8 @@ import posixpath
 import threading
 from typing import Any
 
-from PyQt6.QtCore import QEvent, QObject, QSize, QTimer, Qt
-from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QKeySequence, QPixmap, QResizeEvent, QTextCursor
+from PyQt6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QUrl
+from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QIcon, QKeySequence, QPixmap, QResizeEvent, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -66,15 +66,15 @@ from manager_config import (
     set_active_profile,
 )
 from manager_const import (
-    APP_STYLESHEET,
     APP_VERSION,
     BASE_DIR,
     DEFAULT_PROFILE,
     ICON_FILES,
     KEYRING_SERVICE,
     LOG_FILE,
-    PROJECT_GITHUB_URL,
     PROJECT_LICENSE_URL,
+    PROJECT_RELEASE_URL,
+    THEMES_DIR,
     UI_ZOOM_DEFAULT,
     UPDATE_TAG_PREFIX,
     find_asset,
@@ -92,6 +92,7 @@ from manager_net import (
     SharedSessionWorker,
     credential_id,
 )
+import manager_theme
 from manager_terminal import TerminalMixin
 from manager_widgets import (
     CollapseGroup,
@@ -102,12 +103,19 @@ from manager_widgets import (
     TRANSPORT_DOT,
     ToggleGroup,
     ToggleSwitch,
+    refresh_theme_styles,
     settings_tab_icon,
     label_tab,
     tab_caption,
     tip_on_title,
     transport_dot,
 )
+
+
+#: The caption the Theme Manager addon gives its own tab; View > Theme looks for
+#: it by this name so the menu can jump straight to the editor. The addon spells
+#: the same words out in its own file.
+THEME_MANAGER_TAB = "Theme Manager"
 
 
 class BerryManager(
@@ -153,6 +161,12 @@ class BerryManager(
         # About box says the same thing, from the same constant.
         self.setWindowTitle(f"Berry Manager V{APP_VERSION}")
         self.resize(1180, 780)
+
+        # The look is decided before anything is drawn: the themes folder is
+        # made if it is not there, and the profile's theme is read from it so
+        # the first stylesheet the window ever sets is already the right one.
+        manager_theme.ensure_installed()
+        manager_theme.use(self.app_config.get("theme", "default"))
 
         self.build_menu()
         self.build_ui()
@@ -276,6 +290,18 @@ class BerryManager(
         self.action_alt_icon.setToolTip("Switch between the default and alternate toolbar icon")
         self.action_alt_icon.toggled.connect(self.toggle_window_icon)
         view_menu.addAction(self.action_alt_icon)
+        view_menu.addSeparator()
+
+        # Themes are listed as they are found, every time the menu opens: a
+        # file dropped into ``themes`` while the program runs should be
+        # pickable without a restart, the same way the profile list works.
+        self.theme_group = QActionGroup(self)
+        self.theme_group.setExclusive(True)
+        self.theme_group.triggered.connect(self._theme_chosen)
+        self.theme_menu = QMenu("Theme", self)
+        self.theme_menu.aboutToShow.connect(self.refresh_theme_menu)
+        view_menu.addMenu(self.theme_menu)
+        self.refresh_theme_menu()
 
         tools_menu = menubar.addMenu("&Tools")
         self.action_edit_quick = QAction("Edit quick commands...", self)
@@ -940,9 +966,12 @@ class BerryManager(
         self.statusBar().showMessage(f"Interface zoom: {percent}%", 3000)
 
     def apply_zoom(self) -> None:
-        """Draw every part of the window at the saved zoom, multiplying the sheet's px/pt and the terminal font."""
+        """Draw every part of the window at the saved zoom, from the theme in force."""
         percent = set_zoom(self.ui_zoom())
-        self.setStyleSheet(scaled_sheet(APP_STYLESHEET, percent))
+        self.setStyleSheet(scaled_sheet(manager_theme.stylesheet(), percent))
+        # A few pieces are painted or styled outside the app sheet - a group
+        # heading, the dots in a tab - and are re-poured from the theme here.
+        refresh_theme_styles()
         pane = getattr(self, "log_output", None)
         if pane is not None:
             pane.setMaximumHeight(zoom_size(130, percent))
@@ -957,17 +986,129 @@ class BerryManager(
             self.sync_tab_transport_dots()
 
     def zoom_tab_icons(self, percent: int) -> None:
-        """Scale the tab icons (addon ones included) from the style's baseline, so 100% matches as shipped."""
+        """Scale the tab icons (addon ones included) from the style's baseline and the theme's mark size, so 100% under the default theme matches as shipped."""
         bar = self.tabs.tabBar()
         base = getattr(self, "_tab_icon_base", None)
         if base is None:
             base = max(1, bar.iconSize().width())
             self._tab_icon_base = base
-        side = zoom_size(base, percent)
-        bar.setIconSize(QSize(side, side))
+        asked = zoom_size(base, percent)
+        from_theme = manager_theme.icon_px()
+        if from_theme:
+            asked = max(asked, zoom_size(from_theme, percent))
+        bar.setIconSize(QSize(asked, asked))
 
         if hasattr(bar, "refit"):
             bar.refit()
+
+    # Themes
+
+    def theme_names(self) -> list[str]:
+        """Every theme on disk, the one in force named first for a reader."""
+        return manager_theme.names()
+
+    def refresh_theme_menu(self) -> None:
+        """Fill View > Theme from the folder, marking the theme in force.
+
+        Called as the menu opens rather than once at startup: a ``.theme`` file
+        written by the Theme Manager, or dropped in by hand, should be pickable
+        in the same run it appeared in.
+        """
+        menu = getattr(self, "theme_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        # A fresh group each pass: an action taken out of the old one is
+        # deleted with the menu, and Qt unlinks it as it goes.
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        group.triggered.connect(self._theme_chosen)
+        self.theme_group = group           # the window holds it, or Qt drops it
+        chosen = manager_theme.current_name()
+        for name in manager_theme.names():
+            action = QAction(name, self)
+            action.setCheckable(True)
+            action.setChecked(name == chosen)
+            action.setData(name)
+            action.setToolTip(
+                "Draw the window from "
+                f"themes/{name}.theme - colours and the shape of the tabs.")
+            group.addAction(action)
+            menu.addAction(action)
+        menu.addSeparator()
+        open_action = QAction("Open the themes folder...", self)
+        open_action.setToolTip(f"Where the ``.theme`` files live: {THEMES_DIR}")
+        open_action.triggered.connect(self.open_themes_folder)
+        menu.addAction(open_action)
+        editor_action = QAction("Theme Manager...", self)
+        editor_action.setToolTip(
+            "The addon that makes and edits themes, with the templates and the "
+            "documentation: its tab is switched on in Settings > Addons.")
+        editor_action.triggered.connect(self.show_theme_manager)
+        menu.addAction(editor_action)
+        self._reload_theme_combo()
+
+    def _theme_chosen(self, action: QAction) -> None:
+        """One click in View > Theme."""
+        self.apply_theme(action.data())
+
+    def apply_theme(self, name: object) -> str:
+        """Draw the window from one ``.theme`` file and remember it for this profile.
+
+        Returns the theme actually used: a name with no file behind it falls
+        back to the default, and the status line says so rather than quietly
+        showing something else.
+        """
+        wanted = manager_theme.safe_name(name) or "default"
+        used = manager_theme.use(wanted)
+        self.app_config["theme"] = used
+        self.apply_zoom()
+        self.save_app_config()
+        self.refresh_theme_menu()
+        note = f"Theme: {used}" if used == wanted else f"No theme named {wanted}"
+        self.statusBar().showMessage(note, 3000)
+        self.log(note)
+        self.addon_event("theme_changed", theme=used, wanted=wanted)
+        return used
+
+    def open_themes_folder(self) -> None:
+        """Show the themes folder in the system's file viewer."""
+        manager_theme.ensure_installed()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(THEMES_DIR)))
+
+    def show_theme_manager(self) -> None:
+        """Come to the Theme Manager's own tab, or say where to switch it on."""
+        bar = self.tabs.tabBar()
+        for index in range(self.tabs.count()):
+            if tab_caption(bar, index) == THEME_MANAGER_TAB:
+                self.tabs.setCurrentIndex(index)
+                return
+        self.notify_popup("Themes", "The Theme Manager addon is not running: "
+                                    "switch it on under Settings > Addons.")
+
+    def _reload_theme_combo(self) -> None:
+        """Keep the Settings > Appearance picker in step with the folder."""
+        combo = getattr(self, "theme_combo", None)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(manager_theme.names())
+        index = combo.findText(manager_theme.current_name())
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+        note = getattr(self, "theme_note", None)
+        if note is not None:
+            data = manager_theme.theme()
+            blurb = str(data.get("blurb") or "").strip()
+            who = str(data.get("author") or "").strip()
+            tail = f" - {who}" if who else ""
+            note.setText((blurb or "A theme is a handful of colours and the "
+                                 "shape of the tabs, written as JSON.") + tail)
+
+    def _on_theme_chosen_combo(self, name: str) -> None:
+        """The Settings > Appearance picker moved."""
+        self.apply_theme(name)
 
     def toggle_log_console(self, shown: bool) -> None:
         """View > Show log console: fold the bottom log pane away, or bring it back."""
@@ -1821,6 +1962,43 @@ class BerryManager(
         startup_form.addRow(self.logging_group)
         self._settings_category("Startup & defaults").addWidget(startup_group)
 
+        # Appearance: the look is a file on disk, so this page only chooses it
+        # and points at the folder - making one is the Theme Manager's job.
+        appearance_group = QGroupBox("Theme")
+        tip_on_title(appearance_group,
+            "Every theme is one JSON file in the themes folder beside Berry "
+            "Manager. The file sets the colours of the whole window and the "
+            "shape of the tabs; an addon's own page keeps its own styling.")
+        appearance_form = QFormLayout(appearance_group)
+        appearance_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.theme_combo = QComboBox()
+        self.theme_combo.setToolTip(
+            "Draw the window from this theme; the choice is kept in the "
+            "profile, so another profile can wear another look.")
+        self.theme_combo.currentTextChanged.connect(self._on_theme_chosen_combo)
+        appearance_form.addRow("Theme in force", self.theme_combo)
+        theme_row = QHBoxLayout()
+        open_theme_btn = QPushButton("Open the themes folder...")
+        open_theme_btn.setToolTip(f"Show {THEMES_DIR} in the file viewer")
+        open_theme_btn.clicked.connect(self.open_themes_folder)
+        theme_row.addWidget(open_theme_btn)
+        theme_editor_btn = QPushButton("Theme Manager...")
+        theme_editor_btn.setToolTip(
+            "Make and edit themes, from a template or from the look in force, "
+            "with the documentation of every colour token and tab knob.")
+        theme_editor_btn.clicked.connect(self.show_theme_manager)
+        theme_row.addWidget(theme_editor_btn)
+        theme_row.addStretch(1)
+        theme_wrap = QWidget()
+        theme_wrap.setLayout(theme_row)
+        appearance_form.addRow(theme_wrap)
+        self.theme_note = QLabel()
+        self.theme_note.setStyleSheet("color: #aaaaaa;")
+        self.theme_note.setWordWrap(True)
+        appearance_form.addRow(self.theme_note)
+        self._settings_category("Appearance").addWidget(appearance_group)
+        self._reload_theme_combo()
+
         tabs_category = QGroupBox("Custom tabs")
         tip_on_title(tabs_category, "Embedded browser tabs. These are always shown.")
         tabs_body = QVBoxLayout(tabs_category)
@@ -2225,11 +2403,13 @@ class BerryManager(
     def show_about(self) -> None:
         box = QMessageBox(self)
         box.setWindowTitle("About Berry")
+        # A release is published under its own tag page, so the link is the tag
+        # put where GitHub shows its notes rather than the plain tag list.
         tag = f"{UPDATE_TAG_PREFIX}{APP_VERSION}"
         box.setText(
             f"<b>Berry Manager V{APP_VERSION}</b><br>"
             "Manage routers and devices over ssh&sftp<br>"
-            f'GitHub: <a href="{PROJECT_GITHUB_URL}/tags/{tag}" '
+            f'GitHub: <a href="{PROJECT_RELEASE_URL}{tag}" '
             f'style="color: #c51a4a">{tag}</a><br>'
             f'License: <a href="{PROJECT_LICENSE_URL}" '
             'style="color: #c51a4a">MIT License</a><br><br>'

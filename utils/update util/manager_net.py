@@ -293,6 +293,117 @@ class SSHShellWorker(QThread):
             self.disconnected.emit()
 
 
+# --- a shell on a connection of its own ---
+
+class OwnShellWorker(QThread):
+    """One PTY shell that owns its whole connection: it opens the socket, pumps
+    it both ways and closes it again, all on this thread.
+
+    SSHShellWorker above is a view of the app's main session and can only ever
+    be one of those. This is the other shape - a session in its own right - and
+    it is what an addon that wants several terminals side by side needs: two of
+    these to different boxes are two unrelated connections, and neither takes
+    the app's own session down when it is closed.
+
+    The settings dict is the app's usual shape (host, port, username and either
+    a password or a key file); whatever it leaves out falls back to the normal
+    defaults, so an addon only has to name the machine. ``state`` says what is
+    attached, and never carries the password."""
+
+    connected = pyqtSignal()
+    received = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    disconnected = pyqtSignal()
+
+    #: What a short dict has to hold at minimum to reach a machine at all.
+    DEFAULTS = {"port": 22, "username": "", "password": "", "key_file": "",
+                "trust_unknown_host": True, "ssh_timeout": 12}
+
+    def __init__(self, settings: dict, cols: int = 80, rows: int = 24,
+                 parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        # A half-written dict from an addon is normal: fill the rest in.
+        self.settings = dict(self.DEFAULTS)
+        for name, value in dict(settings or {}).items():
+            if value is not None and value != "":
+                self.settings[name] = value
+        self.settings["port"] = _coerce_int(self.settings.get("port"), 22, 1, 65535)
+        self.cols, self.rows = max(2, int(cols)), max(2, int(rows))
+        self.outgoing: queue.Queue = queue.Queue()
+        self.stop_requested = threading.Event()
+        self.channel: paramiko.Channel | None = None
+        self.client: paramiko.SSHClient | None = None
+        self.state: dict = {"connected": False,
+                           "host": str(self.settings.get("host", "")),
+                           "port": int(self.settings["port"]),
+                           "username": str(self.settings.get("username", ""))}
+
+    def send(self, text: str) -> None:
+        """Queue raw text for the shell, exactly as typed - no Enter added."""
+        self.outgoing.put(text)
+
+    def send_line(self, text: str) -> None:
+        """Queue a line for the shell; the Enter key is added for you."""
+        self.outgoing.put(text + "\n")
+
+    def resize(self, cols: int, rows: int) -> None:
+        """Queue a new terminal shape; the PTY follows on the worker thread."""
+        self.outgoing.put(("resize", int(cols), int(rows)))
+
+    def stop(self) -> None:
+        """Ask for a shutdown; closing the channel also breaks any blocked read."""
+        self.stop_requested.set()
+        if self.channel is not None:
+            try:
+                self.channel.close()
+            except Exception:
+                pass
+
+    def run(self) -> None:
+        """Open the connection, then alternate reading output and flushing queued input; the short timeout keeps it responsive to typing and to stop."""
+        try:
+            if self.stop_requested.is_set():
+                return
+            self.client = create_ssh_client(self.settings)
+            self.channel = self.client.invoke_shell(term="xterm-256color",
+                                                    width=self.cols,
+                                                    height=self.rows)
+            self.channel.settimeout(0.1)
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            self.state["connected"] = True
+            self.connected.emit()
+            while not self.stop_requested.is_set() and not self.channel.closed:
+                if self.channel.recv_ready():
+                    data = decoder.decode(self.channel.recv(65536))
+                    if data:
+                        self.received.emit(data)
+                try:
+                    outgoing = self.outgoing.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if isinstance(outgoing, tuple):       # a queued resize
+                    self.cols, self.rows = outgoing[1], outgoing[2]
+                    self.channel.resize_pty(width=self.cols, height=self.rows)
+                    continue
+                self.channel.sendall(outgoing.encode("utf-8"))
+        except Exception as error:
+            if not self.stop_requested.is_set():
+                self.failed.emit(str(error) or type(error).__name__)
+        finally:
+            # Everything this worker opened goes with it: nothing of the app's.
+            self.state["connected"] = False
+            for handle in (self.channel, self.client):
+                if handle is None:
+                    continue
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            self.channel = None
+            self.client = None
+            self.disconnected.emit()
+
+
 # --- reboot wait (the SSH tab's Reboot button) ---
 
 class RebootWaitWorker(QThread):

@@ -9,7 +9,7 @@ and both are quiet - a wrong answer does not crash, it just tells the user
 that an addon waits for a connection it never opens.
 
 The catalog the store reads is checked against the same rules, so a published
-entry and the row it will build cannot drift apart, and the three addons this
+entry and the row it will build cannot drift apart, and the four addons this
 repository ships are read as they really declare.
 
 No window is needed; run it from anywhere::
@@ -35,13 +35,17 @@ import manager_addons                                          # noqa: E402
 
 CATALOG = ROOT / "addon.store" / "index.json"
 
-#: What the store's own three addons say, and the picture the catalog should
-#: name for each: nothing where it has no picture of its own, since the store
-#: then shows the default one.
+#: What the store's published addons say, and the picture the catalog should
+#: name for each: every one of them now wears its own, under the ``<id>icon.png``
+#: rule, in ``addon.store/assets/<id>/`` beside its source.
 SHIPPED = {
-    "cert_manager": (["ssh"], "app", ""),
+    "cert_manager": (["ssh"], "app", "cert_managericon.png"),
     "openwrt_logs": (["ssh"], "both", "openwrt_logsicon.png"),
-    "openwrt_package_manager": (["ssh", "sftp"], "app", "openwrtpkgmgr.png"),
+    "openwrt_package_manager": (["ssh", "sftp"], "app",
+                                "openwrt_package_managericon.png"),
+    # Every shell this addon opens is its own socket, on its own thread, so it
+    # is the one published addon that may not ride the app's session at all.
+    "multi_ssh": (["ssh"], "own", "multi_sshicon.png"),
 }
 
 FAILURES: list[str] = []

@@ -73,7 +73,12 @@ left exactly as it is, and the switch in Settings > Addons is not touched, so an
 addon that was on stays on.
 
 Deleting one takes that compiled program (or folder) back out of ``addons/`` and
-rescans, leaving the addon's own ``_data`` settings where they are.
+rescans. By default it takes the addon's own ``_data`` settings with it, since
+those are what an install prepared; the switch on the store's Settings page
+leaves them in place for every start, and the check box beside the source at the
+top of the tab leaves them, or takes them, for this one. Either way the settings
+of an addon the store did not install are never touched, and this store's own
+folder - its sources and its token - is not up for deletion by itself.
 
 Compiling needs a Python on this machine and PyInstaller within it. The
 interpreter is looked for as ``python3``, then ``python``, then the Windows ``py``
@@ -113,12 +118,13 @@ from urllib.parse import quote
 # Qt-free contract half: runs standalone and in tests.
 from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_manifest_path,
                           addon_origin, config_get, connection_kind,
-                          connection_words, default_icon_path, find_icon, jsonable,
+                          connection_words, default_icon_path, find_addon_picture,
+                          jsonable,
                           merge_config, read_config_json, requires_list, write_config_json)
 
 ADDON = {
     "name": "Berry addon store",
-    "version": "1.2",
+    "version": "1.3",
     "author": "fligma",
     "description": "Lists the addons published in the repository's addon.store "
                    "folder, downloads a chosen one into a staging folder and "
@@ -140,6 +146,10 @@ entries: list[dict] = []    # the catalog read last time
 shown: list[dict] = []      # the rows the list is painting right now
 picked = ""                 # the id the detail pane is describing
 updates: dict[str, dict] = {}   # id -> {installed, available}, what the catalog is ahead of
+#: None while the session's check box has not been touched, and after that what
+#: it says. The config file keeps the answer for every session; this holds a
+#: one-off change made at the top of the tab without writing it anywhere.
+session_delete_config: bool | None = None
 #: An addon id to the picture of it this machine has, and the ids still waiting
 #: for theirs. The pictures are only ever fetched once each and kept under
 #: ``icons``, so a catalog with fifty addons in it costs fifty downloads once.
@@ -190,6 +200,7 @@ SOURCE_HINTS = {"owner": "", "repo": "", "ref": "main",
 DEFAULTS = {
     "sources": [dict(MAIN_SOURCE)],
     "token": "",
+    "delete_config": True,
 }
 
 FIELDS = [
@@ -197,9 +208,15 @@ FIELDS = [
      "hint": "Used for every source. Only needed for a private repository, or "
              "when anonymous requests are refused",
      "placeholder": "blank for a public repository"},
+    {"key": "delete_config", "label": "Delete takes an addon's settings too",
+     "kind": "bool",
+     "hint": "On removes addons/_data/<id>/ with the program, so nothing the "
+             "addon was asked is left behind. Off leaves it, and an addon "
+             "installed again later finds its answers where it left them"},
 ]
 
-GROUPS = [("How the store reaches GitHub", ["token"])]
+GROUPS = [("How the store reaches GitHub", ["token"]),
+          ("What Delete takes back", ["delete_config"])]
 
 BUTTONS = (("refresh", "Refresh"), ("install", "Install"),
            ("update", "Update"), ("delete", "Delete"),
@@ -436,9 +453,10 @@ TAB_ICON = (
     '</svg>'
 )
 
-#: The picture the tab wears if the assets folder has one, under the name it was
-#: shipped with before the ``<id>icon.png`` rule.
-TAB_ICON_FILE = "storeicon.png"
+#: The picture the tab wears when the assets folder carries one: this addon's id
+#: and then ``icon.png``, the name every addon's picture is looked up under, so
+#: putting the file in is enough and there is no older name to keep trying.
+TAB_ICON_FILE = "addon_storeicon.png"
 
 #: This addon's own id, which is what its picture is named from.
 OWN_ID = "addon_store"
@@ -447,18 +465,16 @@ OWN_ID = "addon_store"
 def tab_icon() -> str:
     """The shipped picture if the assets folder has one, else the drawn mark.
 
-    ``addon_storeicon.png`` is the standard name and is tried first, so the
-    picture can be renamed without touching this; ``storeicon.png`` is what is
-    shipped today, and a plain ``icon.png`` answers for either.
+    ``addon_storeicon.png`` is the one name the lookup is made under, so the file
+    in ``assets`` decides what the tab wears and this file names nothing it has to
+    keep in step with.
     """
-    folder = None
+    paths = None
     try:
-        folder = api.paths.assets
+        paths = api.paths
     except (AddonError, AttributeError, TypeError):    # no api on a bare import
-        folder = None
-    if folder is None:
-        return TAB_ICON
-    return find_icon(folder, OWN_ID, TAB_ICON_FILE) or TAB_ICON
+        paths = None
+    return find_addon_picture(paths, OWN_ID) or TAB_ICON
 
 
 def tab_spec() -> dict:
@@ -483,6 +499,13 @@ def tab_spec() -> dict:
             {"kind": "label", "id": "source", "text": "",
              "tooltip": "The repository, or the first of them, the catalog is "
                         "read from", "style": _STATUS_STYLE},
+            {"kind": "check", "id": "delcfg", "text": "delete settings",
+             "checked": True,
+             "tooltip": "Whether Delete takes an addon's own settings under "
+                        "addons/_data/<id>/ with its program. Unticked here it "
+                        "holds for this session only; the switch in the store's "
+                        "Settings page is the answer kept for every one",
+             "on": ["toggled"]},
         ]},
         {"kind": "row", "children": [
             {"kind": "label", "text": "Find", "style": _FILTER_LABEL},
@@ -600,6 +623,77 @@ def _buttons(usable: bool) -> None:
             api.tabs.set_widget(TAB, identifier, "enabled", bool(usable))
         except AddonError:
             pass
+
+
+# --- what Delete takes back ---
+
+def delete_config_wanted() -> bool:
+    """Whether an addon's settings folder is to go with its program.
+
+    The check box at the top of the tab answers first once it has been touched -
+    a one-off clear should not have to be written to the config and undone
+    afterwards - and until then the value the config file carries does, which is
+    the shipped default of taking them until the Settings page says otherwise.
+    """
+    if session_delete_config is not None:
+        return bool(session_delete_config)
+    if api is None:
+        return bool(DEFAULTS["delete_config"])
+    try:
+        return bool(config_get(api.config.all(), "delete_config",
+                               DEFAULTS["delete_config"]))
+    except AddonError:
+        return bool(DEFAULTS["delete_config"])
+
+
+def show_delete_toggle() -> None:
+    """Put the header's check box in step with what Delete is going to do."""
+    if api is None:
+        return
+    try:
+        api.tabs.set_widget(TAB, "delcfg", "checked", delete_config_wanted())
+    except AddonError:
+        pass
+
+
+def set_delete_config_session(payload: dict) -> None:
+    """The header's check box: change what Delete takes back, for this session.
+
+    Nothing is written to the config, so the store's Settings page keeps saying
+    the same thing it did, and the next start is back under its answer; the log
+    records which of the two the tick was moved to, since a delete that follows
+    reads differently from one that would have happened on its own.
+    """
+    global session_delete_config
+    session_delete_config = bool((payload or {}).get("checked"))
+    if session_delete_config:
+        say("Delete will take an addon's settings with it, this session")
+        note("the header's check box now has Delete take addons/_data/<id> too, "
+             "for this session only")
+    else:
+        say("Delete will leave an addon's settings alone, this session")
+        note("the header's check box now has Delete leave addons/_data/<id> "
+             "where it is, for this session only")
+
+
+def _data_removable(id_value: str) -> Path | None:
+    """The settings folder Delete may take, or nothing when it is to be left.
+
+    Three things have to hold: the toggle above says the settings go with the
+    program, the install is one a store made - a folder an addon wrote for
+    itself, or a program built by the Addon Dev tab, is not the store's to
+    erase - and it is not this store's own folder, whose settings are the
+    sources, taken off by a delete this very copy is running.
+    """
+    if not delete_config_wanted():
+        return None
+    ident = clean_id(id_value)
+    if not ident or ident == OWN_ID:
+        return None
+    if addon_origin(addons_dir(), id_value) != STORE_ORIGIN:
+        return None
+    keeps = addon_data_folder(id_value)
+    return keeps if keeps.exists() else None
 
 
 # --- network: standard library only ---
@@ -2235,7 +2329,10 @@ def _delete_paths(id_value: str) -> list[Path]:
 
     The program, and the manifest the store wrote beside it: that one only, since
     a ``<id>.json`` made by the Addon Dev tab or by hand is not the store's to
-    remove. The addon's own ``_data`` settings are left where they are either way.
+    remove. Beside them the addon's own ``_data`` settings folder, when
+    :func:`_data_removable` says it is this delete's business - which the store's
+    Settings page decides for every session and the check box at the top of the
+    tab decides for this one.
     """
     folder = addons_dir()
     found = [candidate for candidate in
@@ -2244,11 +2341,20 @@ def _delete_paths(id_value: str) -> list[Path]:
     sidecar = folder / f"{clean_id(id_value)}.json"
     if sidecar.is_file() and addon_origin(folder, id_value) == STORE_ORIGIN:
         found.append(sidecar)
+    keeps = _data_removable(id_value)
+    if keeps is not None:
+        found.append(keeps)
     return found
 
 
 def delete_selected(_checked: bool = False) -> None:
-    """Take the compiled addon back out of ``addons/`` and rescan."""
+    """Take the compiled addon back out of ``addons/``, its settings with it, and rescan.
+
+    The program going is what the button was pressed for, so that happens on its
+    own word. The settings are only taken when the toggle says so, and are asked
+    about first, since they are the one thing a delete cannot undo and an addon
+    that is coming back would otherwise have to be filled in again.
+    """
     if api is None or working:
         return
     id_value = selected_id()
@@ -2258,6 +2364,17 @@ def delete_selected(_checked: bool = False) -> None:
     removed = _delete_paths(id_value)
     if not removed:
         say(f"{id_value} is not installed", bad=True)
+        return
+    keeps = _data_removable(id_value)
+    if keeps is not None and not api.ui.question(
+            "Delete addon",
+            f"Delete {id_value} and the settings it saved in addons/_data/"
+            f"{clean_id(id_value)}/ too?\n\n"
+            "An addon installed again later will ask for everything from the "
+            "start. Untick 'delete settings' beside the source at the top of "
+            "the tab, or the switch on the store's Settings page, to leave "
+            "them where they are."):
+        say("the delete was declined")
         return
     try:
         for path in removed:
@@ -2270,8 +2387,13 @@ def delete_selected(_checked: bool = False) -> None:
         return
     _tidy(id_value)
     show_entries()
-    say(f"deleted {id_value} from the addons folder")
-    note(f"deleted {id_value}")
+    words = f"deleted {id_value} from the addons folder"
+    if keeps is None:
+        words += f"; its settings were left in addons/_data/{clean_id(id_value)}/"
+    else:
+        words += " with its settings"
+    say(words)
+    note(words)
     _reload()
 
 
@@ -2313,13 +2435,15 @@ HANDLERS: dict = {
 
 def init(plugin_api: Any) -> None:
     """Build the tab from the saved config and read the catalog once."""
-    global api
+    global api, session_delete_config
     api = plugin_api
+    session_delete_config = None
     api.config.declare(
         FIELDS, DEFAULTS,
         title="Berry addon store - addons/_data/addon_store/config.json")
     build_tab()
     show_sources(current_sources())
+    show_delete_toggle()
     api.ui.menu_item("Berry addon store", focus_tab, menu="Tools")
     api.schedule.after(0.2, refresh)
 
@@ -2331,13 +2455,14 @@ def start() -> None:
 
 def shutdown() -> None:
     """Let go of everything this copy held: the connections, the job, the pane."""
-    global api, working, job, shown, picked, filter_text
+    global api, working, job, shown, picked, filter_text, session_delete_config
     _drop_http()
     working = False
     job = None
     shown = []
     picked = ""
     filter_text = ""
+    session_delete_config = None
     del icon_queue[:]
     api = None
 
@@ -2346,9 +2471,11 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     """Everything the tab reports back, in one place.
 
     ``clicked`` runs the button its id names; a line ``changed`` on the filter box
-    narrows the list as it is typed; and a row picked - or right-clicked - is what
-    fills in the pane beside the list. Nothing here waits on the network except the
-    one request a right-click's menu and a commit lookup each make for themselves.
+    narrows the list as it is typed; the check box beside the source says what
+    Delete is to do with an addon's settings for this session; and a row picked -
+    or right-clicked - is what fills in the pane beside the list. Nothing here
+    waits on the network except the one request a right-click's menu and a commit
+    lookup each make for themselves.
     """
     if str(tab) != TAB:
         return
@@ -2359,6 +2486,9 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         handler = HANDLERS.get(ident)
         if handler is not None:
             handler()
+        return
+    if ident == "delcfg" and name in ("toggled", "changed"):
+        set_delete_config_session(data)
         return
     if ident == "filter" and name in ("changed", "returned"):
         apply_filter(data.get("text", ""))
@@ -2372,10 +2502,18 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
 
 
 def on_config(payload: dict) -> None:
-    """The user changed the config in Settings: point the header and reload."""
+    """The user changed the config in Settings: point the header and reload.
+
+    An answer written on the Settings page is newer than whatever the check box
+    at the top of the tab was moved to, so the session's override is dropped and
+    the box is put back under the file before the catalog is read again.
+    """
+    global session_delete_config
     if api is None or str(payload.get("addon") or "") != api.id:
         return
+    session_delete_config = None
     show_sources(current_sources())
+    show_delete_toggle()
     if not working:
         refresh()
 

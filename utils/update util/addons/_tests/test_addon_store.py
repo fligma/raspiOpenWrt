@@ -41,8 +41,10 @@ Three things get looked at:
   than a worker left holding the dying copy's unpacked folder;
 * what an install says about itself afterwards: the manifest beside the program
   that marks it as installed and names the transports it may use, the settings
-  form left in its ``_data`` folder for Settings to show, and the two files
-  Delete is allowed to take back.
+  form left in its ``_data`` folder for Settings to show, and the program, the
+  manifest and - when the two toggles say so - the settings folder that Delete
+  is allowed to take back, and the two things it is not: an addon the store did
+  not install, and this store's own folder.
 
 No internet, no compiler and no device are needed. Run it from the Test panel,
 or::
@@ -266,8 +268,8 @@ def test_the_layout(store: Any) -> None:
     try:
         import addon_api
         from PyQt6.QtCore import Qt
-        from PyQt6.QtWidgets import (QApplication, QLabel, QLineEdit, QPlainTextEdit,
-                                     QSplitter, QTreeWidget)
+        from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QLineEdit,
+                                     QPlainTextEdit, QSplitter, QTreeWidget)
 
         _QT_APP = QApplication.instance() or QApplication([])
     except Exception as error:                      # noqa: BLE001 - Qt is optional
@@ -304,6 +306,14 @@ def test_the_layout(store: Any) -> None:
     check(header is not None and len(header.findChildren(QLabel)) == 3,
           f"the header is not just title, status and chip: "
           f"{header.findChildren(QLabel) if header is not None else None}")
+    # The delete-settings box is in the header too, beside the chip, and it is
+    # the one thing up there the addon has to hear about when it is moved.
+    box = registry.get("delcfg")
+    check(isinstance(box, QCheckBox) and header is not None
+          and box is header.findChild(QCheckBox),
+          f"the header carries no check box beside the source: {box!r}")
+    check((spec_of(store.tab_spec(), "delcfg") or {}).get("on") == ["toggled"],
+          "the check box does not report the tick being moved")
     # It has to claim the width the other two leave over, or a spacer would take
     # the slack and a long report would be squeezed into a narrow column.
     check(status is not None and status.sizePolicy().horizontalPolicy()
@@ -1740,9 +1750,16 @@ def test_the_install(store: Any) -> None:
             check(json.loads((keeps / "config.json").read_text(encoding="utf-8"))
                   == {"size": 10},
                   "the addon's config file was not started from its defaults")
-            gone = sorted(path.name for path in store._delete_paths("widget"))
-            check(gone == ["widget.exe", "widget.json"],
+            gone = sorted(path.relative_to(addons).as_posix()
+                          for path in store._delete_paths("widget"))
+            check(gone == ["_data/widget", "widget.exe", "widget.json"],
                   f"delete does not take an install back whole: {gone}")
+            store.session_delete_config = False     # the box at the top, this session
+            check(sorted(path.relative_to(addons).as_posix()
+                         for path in store._delete_paths("widget"))
+                  == ["widget.exe", "widget.json"],
+                  "the session's check box did not leave the settings where they are")
+            store.session_delete_config = None
             (addons / "hand.exe").write_text("x", encoding="utf-8")
             (addons / "hand.json").write_text('{"name": "Hand"}', encoding="utf-8")
             check([path.name for path in store._delete_paths("hand")] == ["hand.exe"],
@@ -1761,6 +1778,113 @@ def test_the_install(store: Any) -> None:
         store._stream = real_stream
         store.job = real_job
         store.addons_dir = real_addons
+
+
+def test_delete_toggle(store: Any) -> None:
+    """What the two toggles do to a delete, and what a delete never takes.
+
+    The switch on the store's Settings page is the answer kept for every start,
+    the check box beside the source is the answer for this one, and a delete
+    still asks before it erases the settings an addon cannot be un-asked for -
+    while an addon the store did not install, and this store's own folder, are
+    out of it either way.
+    """
+    print("\n11b. what Delete does with an addon's settings, and who decides")
+    api = fresh(store)
+    real_dir = store.addons_dir
+    real_work = (store.selected_id, store._tidy, store.show_entries, store._reload)
+    try:
+        with tempfile.TemporaryDirectory() as where:
+            folder = Path(where)
+            store.addons_dir = lambda: folder
+            store._tidy = lambda ident: None
+            store.show_entries = lambda: None
+            store._reload = lambda: None
+            store.selected_id = lambda: "widget"
+
+            def lay_out() -> None:
+                """One store install on disk: program, manifest, settings."""
+                for item in (folder / "_data" / "widget",
+                             folder / "_data" / "addon_store",
+                             folder / "_data" / "hand"):
+                    item.mkdir(parents=True, exist_ok=True)
+                (folder / "widget.exe").write_text("x", encoding="utf-8")
+                (folder / "widget.json").write_text(json.dumps(
+                    {"id": "widget", store.ORIGIN_KEY: store.STORE_ORIGIN}),
+                    encoding="utf-8")
+                (folder / "_data" / "widget" / "config.json").write_text(
+                    '{"size": 10}', encoding="utf-8")
+                (folder / "_data" / "addon_store" / "config.json").write_text(
+                    '{"sources": []}', encoding="utf-8")
+                (folder / "hand.exe").write_text("x", encoding="utf-8")
+                (folder / "hand.json").write_text('{"name": "Hand"}',
+                                                  encoding="utf-8")
+
+            def gone(ident: str) -> list[str]:
+                return sorted(path.relative_to(folder).as_posix()
+                              for path in store._delete_paths(ident))
+
+            # the shipped answer, and the box that overrides it for one session
+            lay_out()
+            check(store.delete_config_wanted() is True,
+                  "Delete was not set to take an addon's settings out of the box")
+            check(gone("widget"), "nothing was offered for deletion at all")
+            api.calls.clear()
+            store.delete_selected()
+            asks = [arguments for name, arguments, _n in api.calls
+                    if name == "ui.question"]
+            check(bool(asks) and "addons/_data/widget/" in str(asks[-1][1]),
+                  f"settings were taken without a word first: {asks}")
+            check(not (folder / "_data" / "widget").exists()
+                  and not (folder / "widget.exe").exists(),
+                  "a default delete left the program or its settings behind")
+            check("with its settings" in last_status(api),
+                  f"the delete did not say what it took: {last_status(api)!r}")
+
+            lay_out()
+            store.on_widget(store.TAB, "delcfg", "toggled", {"checked": False})
+            check(store.delete_config_wanted() is False,
+                  "the check box did not change what Delete is set to do")
+            api.calls.clear()
+            store.delete_selected()
+            check(not [name for name, _a, _n in api.calls if name == "ui.question"],
+                  "a delete that touches no settings still asked")
+            check((folder / "_data" / "widget" / "config.json").is_file()
+                  and not (folder / "widget.exe").exists(),
+                  "leaving the settings did not hold them, or the program went too")
+            check("left in addons/_data/widget/" in last_status(api),
+                  f"the delete did not say what it left: {last_status(api)!r}")
+
+            # the Settings page's own switch, which holds until the box is touched
+            lay_out()
+            store.session_delete_config = None
+            api = fresh(store, {"delete_config": False})
+            check(store.delete_config_wanted() is False,
+                  "the store's config file does not answer for Delete")
+            store.on_widget(store.TAB, "delcfg", "toggled", {"checked": True})
+            check(store.delete_config_wanted() is True,
+                  "the check box did not overrule the file for this session")
+            store.session_delete_config = None
+            check(store.delete_config_wanted() is False,
+                  "the file's answer did not come back when the box was left alone")
+            store.on_config({"addon": "addon_store"})
+            check(store.delete_config_wanted() is False,
+                  "a config change did not leave the session's override behind")
+
+            # and the two things a store delete has no business touching
+            check(gone("addon_store") == [],
+                  f"the store's own folder was offered for its own delete: "
+                  f"{gone('addon_store')}")
+            check(gone("hand") == ["hand.exe"],
+                  f"an addon built elsewhere had more than its program offered: "
+                  f"{gone('hand')}")
+    finally:
+        (store.selected_id, store._tidy, store.show_entries,
+         store._reload) = real_work
+        store.addons_dir = real_dir
+        store.session_delete_config = None
+        api.timers.cancel_all()
+        store.shutdown()
 
 
 # --- nine: what an install says about an addon it cannot ask ---
@@ -1923,6 +2047,7 @@ def main() -> int:
     test_the_interpreter(store)
     test_the_pip_fallback(store)
     test_the_install(store)
+    test_delete_toggle(store)
     test_the_manifest(store)
     test_the_child_env()
 

@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path, PurePosixPath
+from string import Template
 
 
 # --- where things live (checkout vs frozen build) ---
@@ -47,7 +49,7 @@ def find_asset(filename: str) -> Path | None:
 #: The program's own version, the one the About dialog shows and the update
 #: addon compares against the tags published on GitHub (``berry`` + this).
 #: One line to change per release, everything else reads it from here.
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.2"
 UPDATE_TAG_PREFIX = "berry"
 
 # --- file names and fixed identifiers ---
@@ -72,6 +74,16 @@ MAX_COMMAND_HISTORY = 200
 # Made the first time the addon list is read, beside the exe.
 ADDONS_DIR = BASE_DIR / "addons"
 
+# Themes: one ``<name>.theme`` file each, written by the app on first
+# boot and edited by the Theme Manager addon. See ``manager_theme``.
+# The environment may point elsewhere - a test's own folder, or an install
+# that keeps its themes with its user - and it is the same variable a
+# process addon is handed, so both sides of the pipe read one folder.
+THEMES_DIR = Path(str(os.environ.get("RASCONF_THEMES", "")).strip()
+                  or BASE_DIR / "themes")
+THEME_SUFFIX = ".theme"
+DEFAULT_THEME_NAME = "default"
+
 # Addons that ship inside the program: the build copies them
 # into the archive so a packaged program carries its own. A
 # checkout keeps the two folders as one.
@@ -92,7 +104,8 @@ HARNESS_DIR = RESOURCE_DIR / "harness" if IS_COMPILED else BASE_DIR
 # An addon the store installs marks its own manifest instead,
 # so nothing here may claim it: these ids name the files in
 # ``addons`` and nothing published in ``addon.store``.
-SHIPPED_ADDON_IDS = {"berry", "web_installer", "addon_store", "manager_update"}
+SHIPPED_ADDON_IDS = {"berry", "web_installer", "addon_store",
+                     "manager_update", "theme_manager"}
 
 # Per-addon folder addons/_data/<id>/ holds its config.json
 # and fields.json. The underscore makes the scanner skip it,
@@ -113,6 +126,11 @@ ADDON_EXECUTABLE_SUFFIX = ".exe" if sys.platform == "win32" else ""
 
 PROJECT_GITHUB_URL = "https://github.com/fligma/raspiOpenWrt"
 PROJECT_LICENSE_URL = PROJECT_GITHUB_URL + "/blob/main/LICENSE"
+
+#: Where one release of this program is published: the tag is the version with
+#: ``UPDATE_TAG_PREFIX`` in front of it, so ``PROJECT_RELEASE_URL + "berry1.6.2"``
+#: is the page carrying that build's notes. The About box links it.
+PROJECT_RELEASE_URL = PROJECT_GITHUB_URL + "/releases/tag/"
 
 # --- defaults (when a key or profile is missing) ---
 
@@ -159,6 +177,10 @@ DEFAULT_APP_CONFIG = {
     # switch opens it at startup. See manager_gui.
     "auto_connect": False,
     "use_alt_icon": False,
+    # The ``.theme`` file the interface is drawn from, by name (without the
+    # suffix). ``manager_theme`` reads it; View > Theme and Settings >
+    # Appearance both write it, and a missing name falls back to "default".
+    "theme": DEFAULT_THEME_NAME,
     # Notices worth seeing without looking at the window: an addon's
     # api.ui.popup, and this program's own news such as "an update is
     # available", come up as a tray toast over the status line. Off,
@@ -223,32 +245,162 @@ DEFAULT_APP_CONFIG = {
 }
 
 
-# --- application stylesheet (dark theme, crimson accent) ---
+# --- the application theme: the colours, the tab chrome, and the sheet ---
 
-APP_STYLESHEET = """
+#: Every colour the interface is drawn from, in the order the Theme Manager
+#: lists them. A ``.theme`` file may name any of them; one that leaves a token
+#: out keeps the value written here, so a theme is a handful of lines rather
+#: than a copy of the whole set.
+THEME_COLORS = {
+    # what things are filled with
+    "base": "#121212",
+    "surface": "#212121",
+    "sunken": "#1a1a1a",
+    "soft": "#2e2e2e",
+    "menu": "#1e1e1e",
+    "header": "#2a2a2a",
+    "raise": "#333333",
+    "hover": "#414141",
+    "row_hover": "#2c2c2c",
+    "tab": "#262626",
+    "tab_hover": "#3a3a3a",
+    "disabled_fill": "#292929",
+    "toggle_off": "#2b2b2b",
+    # the lines drawn round them
+    "border": "#3c3c3c",
+    "raise_edge": "#4a4a4a",
+    "handle": "#555555",
+    "faint": "#666666",
+    "disabled_edge": "#383838",
+    # what is written on them
+    "text": "#e0e0e0",
+    "bright": "#ffffff",
+    "muted": "#aaaaaa",
+    "menu_text": "#cfcfcf",
+    "note": "#8f8f8f",
+    "disabled_text": "#777777",
+    # the berry in it
+    "accent": "#c51a4a",
+    "accent_deep": "#a0153c",
+    "accent_edge": "#8f1236",
+    "selection": "#6b1730",
+    # states a colour means something for
+    "ok": "#23d18b",
+    "warn": "#ffb020",
+    "danger_fill": "#6e1a1a",
+    "danger_edge": "#8a2a2a",
+    "danger_text": "#ffe4e4",
+    "close_ink": "#9a9a9a",
+    "close_hot": "#ff6b6b",
+    # the pictures this program paints itself
+    "icon_alt": "#9db4c8",
+    "icon_tint": "#d6d6d6",
+    "toggle_handle": "#f5f5f5",
+    "toggle_handle_off": "#888888",
+}
+
+#: The same tokens in the blocks a person editing a theme reads them in.
+THEME_COLOR_GROUPS: dict[str, tuple[str, ...]] = {
+    "Fills": ("base", "surface", "sunken", "soft", "menu", "header",
+              "raise", "hover", "row_hover", "tab", "tab_hover",
+              "disabled_fill", "toggle_off"),
+    "Edges": ("border", "raise_edge", "handle", "faint", "disabled_edge"),
+    "Text": ("text", "bright", "muted", "menu_text", "note", "disabled_text"),
+    "Accent": ("accent", "accent_deep", "accent_edge", "selection"),
+    "States": ("ok", "warn", "danger_fill", "danger_edge", "danger_text",
+               "close_ink", "close_hot"),
+    "Painted marks": ("icon_alt", "icon_tint", "toggle_handle",
+                      "toggle_handle_off"),
+}
+
+#: What a tab spends on its shape, in pixels at 100% zoom - the interface
+#: zoom multiplies these like every other size in the sheet. The two words
+#: that are not sizes say whether a tab may wear a caption at all, and
+#: whether the transport dots are drawn beside it.
+THEME_TABS = {
+    "icon_px": 24,          # the smallest a tab's picture is drawn at
+    "radius_px": 6,         # the capsule's rounded top, and a group's box
+    "pad_y_px": 8,          # tab padding, up and down
+    "pad_x_px": 14,         # tab padding, left and right
+    "gap_px": 3,            # air between two tabs
+    "underline_px": 3,      # the bar under a tab, and under the chosen one
+    "min_width_px": 24,     # how narrow a squeezed tab may get
+    "nest_pad_y_px": 5,     # the same shape on a tab bar inside a tab
+    "nest_pad_x_px": 10,
+    "nest_gap_px": 2,
+    "nest_min_width_px": 16,
+    "captions": True,       # False keeps every tab icon-only
+    "dots": True,           # False hides the SSH/SFTP dots
+}
+
+#: A colour is a hex, or one plain name: nothing that could carry a ``;`` or a
+#: brace into the stylesheet is accepted, so a hand-written theme cannot close
+#: the rule it sits in and start another.
+_HEX_COLOR = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\Z")
+_NAMED_COLOR = re.compile(r"[A-Za-z][A-Za-z0-9 ]*\Z")
+
+
+def is_theme_color(value: object) -> bool:
+    """Whether this could be painted: a #hex of 3, 4, 6 or 8 digits, or a plain colour name."""
+    text = str(value or "").strip()
+    return bool(_HEX_COLOR.match(text) or _NAMED_COLOR.match(text))
+
+
+def theme_colors(value: object) -> dict:
+    """One theme's colours: every token, with what was given over the shipped value."""
+    colors = dict(THEME_COLORS)
+    if isinstance(value, dict):
+        for token, given in value.items():
+            if token in colors and is_theme_color(given):
+                colors[str(token)] = str(given).strip()
+    return colors
+
+
+def theme_tabs(value: object) -> dict:
+    """One theme's tab chrome: every knob, clamped to something drawable."""
+    tabs = dict(THEME_TABS)
+    if not isinstance(value, dict):
+        return tabs
+    for token, given in value.items():
+        if token not in tabs:
+            continue
+        if isinstance(tabs[token], bool):
+            tabs[token] = bool(given)
+            continue
+        try:
+            number = int(round(float(given)))
+        except (TypeError, ValueError):
+            continue
+        tabs[token] = max(0, min(200, number))
+    return tabs
+
+
+# --- the stylesheet, as the shape a theme is poured into ---
+
+_SHEET_BODY = Template("""
 /* Base colours and font for everything */
 QWidget {
-    background-color: #121212;
-    color: #e0e0e0;
+    background-color: $base;
+    color: $text;
     font-family: "Segoe UI", sans-serif;
     font-size: 10pt;
     /* Selected text everywhere - including the selectable labels - uses the
        accent, not the near-black the palette falls back to on a dark theme. */
-    selection-background-color: #c51a4a;
-    selection-color: #ffffff;
+    selection-background-color: $accent;
+    selection-color: $bright;
 }
-/* Labels carry no box of their own: without this the base #121212 above is
-   painted behind every QLabel, showing as black blocks around form text. */
+/* Labels carry no box of their own: without this the base fill above is
+   painted behind every QLabel, showing as dark blocks around form text. */
 QLabel {
     background-color: transparent;
 }
 QMainWindow, QTabWidget::pane, QGroupBox, QPlainTextEdit, QTextEdit,
 QTreeWidget, QLineEdit, QSpinBox, QComboBox, QListWidget {
-    background-color: #212121;
+    background-color: $surface;
 }
 QGroupBox {
-    border: 1px solid #3c3c3c;
-    border-radius: 6px;
+    border: 1px solid $border;
+    border-radius: ${radius_px}px;
     margin-top: 12px;
     padding: 12px 10px 10px 10px;
     font-weight: 600;
@@ -258,62 +410,62 @@ QGroupBox::title {
     subcontrol-position: top left;
     left: 12px;
     padding: 0 6px;
-    color: #c51a4a;
+    color: $accent;
 }
 /* Text inputs and list-like widgets */
 QLineEdit, QSpinBox, QPlainTextEdit, QTextEdit, QTreeWidget,
 QComboBox, QListWidget {
-    border: 1px solid #3c3c3c;
+    border: 1px solid $border;
     border-radius: 4px;
-    selection-background-color: #c51a4a;
+    selection-background-color: $accent;
     padding: 5px;
 }
 QTreeView, QListView {
-    background-color: #212121;
-    alternate-background-color: #1a1a1a;
-    color: #e0e0e0;
+    background-color: $surface;
+    alternate-background-color: $sunken;
+    color: $text;
 }
 QLineEdit:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus,
 QTreeWidget:focus, QComboBox:focus, QListWidget:focus {
-    border: 1px solid #c51a4a;
+    border: 1px solid $accent;
 }
 /* Buttons - #primaryAction and #dangerAction are set via setObjectName() */
 QPushButton, QToolButton, QComboBox::drop-down {
-    background-color: #333333;
-    border: 1px solid #4a4a4a;
+    background-color: $raise;
+    border: 1px solid $raise_edge;
     border-radius: 4px;
     padding: 6px 12px;
 }
 QPushButton:hover, QToolButton:hover {
-    background-color: #414141;
-    border-color: #c51a4a;
+    background-color: $hover;
+    border-color: $accent;
 }
 QPushButton:pressed, QToolButton:checked {
-    background-color: #a0153c;
-    border-color: #c51a4a;
+    background-color: $accent_deep;
+    border-color: $accent;
 }
 QPushButton:disabled, QToolButton:disabled {
-    color: #777777;
-    background-color: #292929;
-    border-color: #383838;
+    color: $disabled_text;
+    background-color: $disabled_fill;
+    border-color: $disabled_edge;
 }
 QPushButton#primaryAction {
-    background-color: #c51a4a;
-    border-color: #c51a4a;
-    color: #ffffff;
+    background-color: $accent;
+    border-color: $accent;
+    color: $bright;
     font-weight: 600;
 }
 QPushButton#primaryAction:hover {
-    background-color: #a0153c;
-    border-color: #a0153c;
+    background-color: $accent_deep;
+    border-color: $accent_deep;
 }
 QPushButton#dangerAction {
-    background-color: #6e1a1a;
-    border-color: #8a2a2a;
-    color: #ffe4e4;
+    background-color: $danger_fill;
+    border-color: $danger_edge;
+    color: $danger_text;
 }
 QPushButton#dangerAction:hover {
-    background-color: #8a2a2a;
+    background-color: $danger_edge;
 }
 /* Tab bar: every tab is a bordered capsule with a rounded top, so tabs
    separation reads clearly even when a lot of them are open; the active one
@@ -321,26 +473,26 @@ QPushButton#dangerAction:hover {
    a crowded bar drops captions to icons (see RightPinnedTabBar.refit) and an
    icon tab must be allowed to come out compact. */
 QTabBar::tab {
-    background-color: #262626;
-    color: #aaaaaa;
-    border: 1px solid #3c3c3c;
-    border-bottom: 3px solid #3c3c3c;
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
-    margin-right: 3px;
-    padding: 8px 14px;
-    min-width: 24px;
+    background-color: $tab;
+    color: $muted;
+    border: 1px solid $border;
+    border-bottom: ${underline_px}px solid $border;
+    border-top-left-radius: ${radius_px}px;
+    border-top-right-radius: ${radius_px}px;
+    margin-right: ${gap_px}px;
+    padding: ${pad_y_px}px ${pad_x_px}px;
+    min-width: ${min_width_px}px;
 }
 QTabBar::tab:selected {
-    color: #e0e0e0;
-    background-color: #333333;
-    border: 1px solid #c51a4a;
-    border-bottom: 3px solid #c51a4a;
+    color: $text;
+    background-color: $raise;
+    border: 1px solid $accent;
+    border-bottom: ${underline_px}px solid $accent;
 }
 QTabBar::tab:hover:!selected {
-    color: #ffffff;
-    background-color: #3a3a3a;
-    border-color: #555555;
+    color: $bright;
+    background-color: $tab_hover;
+    border-color: $handle;
 }
 /* The elastic gap tab that pins Settings right draws nothing at all: it is
    the only disabled tab, so it sheds the capsule, the border and the margin. */
@@ -355,60 +507,60 @@ QTabBar::tab:disabled {
    its capsules are drawn smaller: the same shapes and colours, less padding,
    and the two bars still read as one above the other. */
 QTabWidget#settingsTabs > QTabBar::tab {
-    padding: 5px 10px;
-    margin-right: 2px;
-    min-width: 16px;
+    padding: ${nest_pad_y_px}px ${nest_pad_x_px}px;
+    margin-right: ${nest_gap_px}px;
+    min-width: ${nest_min_width_px}px;
 }
 /* Tree rows: alternating shades, and selected rows keep the accent colour */
 QTreeWidget::item, QListWidget::item {
     padding: 4px;
-    color: #e0e0e0;
+    color: $text;
 }
 QTreeWidget::item:alternate, QListWidget::item:alternate {
-    background-color: #1a1a1a;
+    background-color: $sunken;
 }
 QTreeWidget::item:selected:!alternate, QListWidget::item:selected:!alternate {
-    background-color: #6b1730;
-    color: #ffffff;
+    background-color: $selection;
+    color: $bright;
 }
 QTreeWidget::item:selected:alternate, QListWidget::item:selected:alternate {
-    background-color: #6b1730;
-    color: #ffffff;
+    background-color: $selection;
+    color: $bright;
 }
 QTreeWidget::item:hover:!selected, QListWidget::item:hover:!selected {
-    background-color: #2c2c2c;
+    background-color: $row_hover;
 }
 /* Table rows, the same shades as a tree. QTableView is spelled here and it
    covers a QTableWidget too, because a sheet matches base classes - and Qt's
    own AlternateBase is white, which leaves dark text on a white row. */
 QTableView {
-    background-color: #212121;
-    alternate-background-color: #1a1a1a;
-    gridline-color: #3c3c3c;
-    border: 1px solid #3c3c3c;
+    background-color: $surface;
+    alternate-background-color: $sunken;
+    gridline-color: $border;
+    border: 1px solid $border;
     border-radius: 4px;
     outline: 0;
 }
 QTableView::item {
     padding: 4px;
-    color: #e0e0e0;
+    color: $text;
 }
 QTableView::item:alternate {
-    background-color: #1a1a1a;
+    background-color: $sunken;
 }
 QTableView::item:selected {
-    background-color: #6b1730;
-    color: #ffffff;
+    background-color: $selection;
+    color: $bright;
 }
 QTableView::item:hover:!selected {
-    background-color: #2c2c2c;
+    background-color: $row_hover;
 }
 /* Column headers */
 QHeaderView::section {
-    background-color: #2a2a2a;
-    color: #aaaaaa;
+    background-color: $header;
+    color: $muted;
     border: 0;
-    border-bottom: 1px solid #3c3c3c;
+    border-bottom: 1px solid $border;
     padding: 6px;
 }
 /* Check boxes */
@@ -417,55 +569,55 @@ QCheckBox::indicator {
     height: 15px;
 }
 QCheckBox::indicator:unchecked {
-    background-color: #1a1a1a;
-    border: 1px solid #666666;
+    background-color: $sunken;
+    border: 1px solid $faint;
     border-radius: 3px;
 }
 QCheckBox::indicator:checked {
-    background-color: #c51a4a;
-    border: 1px solid #c51a4a;
+    background-color: $accent;
+    border: 1px solid $accent;
     border-radius: 3px;
 }
 /* Progress bar, status bar and tooltips */
 QProgressBar {
-    background-color: #2e2e2e;
-    border: 1px solid #3c3c3c;
+    background-color: $soft;
+    border: 1px solid $border;
     border-radius: 3px;
     text-align: center;
-    color: #e0e0e0;
+    color: $text;
     min-height: 18px;
 }
 QProgressBar::chunk {
-    background-color: #c51a4a;
+    background-color: $accent;
 }
 QStatusBar {
-    background-color: #1a1a1a;
-    color: #aaaaaa;
+    background-color: $sunken;
+    color: $muted;
 }
 QStatusBar::item { border: 0; }
 QToolTip {
-    background-color: #2e2e2e;
-    color: #e0e0e0;
-    border: 1px solid #c51a4a;
+    background-color: $soft;
+    color: $text;
+    border: 1px solid $accent;
     padding: 5px;
 }
 /* Menus and toolbars */
 QMenu {
-    background-color: #1e1e1e;
-    border: 1px solid #3c3c3c;
+    background-color: $menu;
+    border: 1px solid $border;
 }
 QMenu::item:selected {
-    background-color: #6b1730;
+    background-color: $selection;
 }
 QMenuBar {
-    background-color: #1a1a1a;
-    color: #cfcfcf;
+    background-color: $sunken;
+    color: $menu_text;
 }
 QMenuBar::item:selected {
-    background-color: #6b1730;
+    background-color: $selection;
 }
 QToolBar {
-    background-color: #1a1a1a;
+    background-color: $sunken;
     border: 0;
     spacing: 4px;
     padding: 4px;
@@ -473,15 +625,15 @@ QToolBar {
 /* Scrollbars, drawn thin with no arrow buttons */
 QScrollBar:vertical {
     width: 12px;
-    background-color: #1a1a1a;
+    background-color: $sunken;
 }
 QScrollBar::handle:vertical {
     min-height: 24px;
-    background-color: #555555;
+    background-color: $handle;
     border-radius: 5px;
 }
 QScrollBar::handle:vertical:hover {
-    background-color: #c51a4a;
+    background-color: $accent;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
@@ -492,13 +644,50 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
    whole connection story: green while a transport is usable now, amber while
    every switch is on but nothing stands connected, red while a switch refuses. */
 QLabel#statusDot {
-    color: #ffb020;
+    color: $warn;
     font-size: 14pt;
 }
-QLabel#statusDotOnline { color: #23d18b; }
-QLabel#statusDotReady { color: #ffb020; }
-QLabel#statusDotOffline { color: #c51a4a; }
-"""
+QLabel#statusDotOnline { color: $ok; }
+QLabel#statusDotReady { color: $warn; }
+QLabel#statusDotOffline { color: $accent; }
+$styles
+""")
+
+
+#: The theme as shipped, and the fallback for every theme that leaves a token
+#: out: the dark base with the berry accent, and the tab bar drawn at the sizes
+#: the interface was measured with.
+DEFAULT_THEME = {
+    "name": "Berry Dark",
+    "author": "Berry Manager",
+    "colors": dict(THEME_COLORS),
+    "tabs": dict(THEME_TABS),
+    "styles": "",
+}
+
+
+def render_theme(theme: object) -> str:
+    """The application stylesheet one theme asks for, as Qt text.
+
+    Colours and tab sizes go through the shape above, so a theme cannot say
+    anything the interface did not already have a place for; ``styles`` is the
+    one part poured in whole, for a rule the shape has no token for. Anything
+    missing falls back to :data:`DEFAULT_THEME`, and a value that is not a
+    colour is ignored rather than trusted.
+    """
+    data = theme if isinstance(theme, dict) else {}
+    colors = theme_colors(data.get("colors"))
+    tabs = theme_tabs(data.get("tabs"))
+    values: dict[str, object] = {**colors, **tabs}
+    extra = str(data.get("styles") or "")
+    values["styles"] = f"\n/* from the theme itself */\n{extra}\n" if extra.strip() else ""
+    return _SHEET_BODY.safe_substitute(**values)
+
+
+#: The sheet the app boots with before a profile's theme has been read. Every
+#: part of the program that needs the look asks ``manager_theme.stylesheet()``,
+#: which renders this for the theme in force.
+APP_STYLESHEET = render_theme(DEFAULT_THEME)
 
 
 # --- interface zoom: the sizes above, multiplied ---

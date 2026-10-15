@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
-from addon_common import AddonError, find_icon
+from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "OpenWrt Log Viewer",
@@ -43,29 +43,25 @@ TAB_ICON = (
     '</svg>'
 )
 
-#: The user-supplied tab picture in the assets folder, named by the standard
-#: rule: this addon's id and then ``icon.png``.
+#: The picture this addon's own assets folder is expected to hold: its id and
+#: then ``icon.png``, the rule every addon follows.
 TAB_ICON_FILE = "openwrt_logsicon.png"
-
-#: The name the picture was shipped under before that rule existed.
-OLD_ICON_FILE = "openwrtlogsicon.png"
 
 
 def tab_icon() -> str:
     """What to mark the tab with: the shipped picture, else the drawing.
 
-    ``find_icon`` looks for the standard name first, so a picture dropped in the
-    assets folder is worn without a code change; the older name is tried after
-    it, for a build that still carries the file this addon used to ship.
+    ``openwrt_logsicon.png`` is the only name looked for, in this addon's own
+    ``addon.store/assets/openwrt_logs`` folder and then in the program's, so a
+    picture dropped into either is worn without a code change.
     """
-    folder = None
+    paths = None
     try:
-        folder = api.paths.assets
+        paths = api.paths
     except (AddonError, AttributeError, TypeError):    # no api in a bare import
-        folder = None
-    if folder is None:
-        return TAB_ICON
-    return find_icon(folder, "openwrt_logs", OLD_ICON_FILE) or TAB_ICON
+        paths = None
+    return find_addon_picture(paths, "openwrt_logs") or TAB_ICON
+
 
 #: What each device is asked for unless the config names another command.
 LOG_COMMAND = "logread"

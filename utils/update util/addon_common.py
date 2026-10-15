@@ -254,6 +254,49 @@ def find_icon(folder: Any, addon_id: str, *extra: str) -> str:
     return ""
 
 
+def picture_folders(paths: Any, addon_id: str) -> list:
+    """Every folder this addon's picture may live in, the likeliest first.
+
+    Two layouts are worth looking at, and both hold the same file name. A store
+    addon keeps its pictures beside its own source, in
+    ``addon.store/assets/<id>/`` - the folder the catalog is built from and the
+    one a person drops artwork into without rebuilding anything. The program's
+    ``assets`` folder is the other: a shipped addon's picture lives there, and so
+    does an installed one's, since a build made by the store packs the addon's
+    assets flat into the executable that ``paths.assets`` points at. A folder
+    that is not there is not a place to look, so a shipped addon - whose own
+    folder has no ``assets`` of it - simply goes on to the program's.
+    """
+    found: list[Path] = []
+    for read in (lambda: Path(str(paths.addon)) / "assets" / config_name(addon_id),
+                 lambda: Path(str(paths.assets))):
+        try:
+            folder = read()
+        except (AttributeError, KeyError, OSError, TypeError, ValueError):
+            continue                    # this api knows no such folder
+        if folder.is_dir():
+            found.append(folder)
+    return found
+
+
+def find_addon_picture(paths: Any, addon_id: str, *extra: str) -> str:
+    """The addon's own picture, in whichever layout this addon is running in.
+
+    The same name everywhere - the addon's id and then ``icon.png`` - searched
+    through :func:`picture_folders`, so an addon needs no code that knows whether
+    it is being read out of ``addon.store`` or out of the program's ``assets``.
+    Nothing when no folder holds it: the caller draws its own mark, or the store
+    shows the default.
+    """
+    if paths is None:
+        return ""
+    for folder in picture_folders(paths, addon_id):
+        found = find_icon(folder, addon_id, *extra)
+        if found:
+            return found
+    return ""
+
+
 def default_icon_path(folder: Any) -> str:
     """The picture an addon with none of its own is shown with."""
     return find_icon(folder, "", DEFAULT_ADDON_ICON)

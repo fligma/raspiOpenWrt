@@ -26,7 +26,7 @@ import re
 # Qt-free half: runs compiled alone and in a windowless test.
 from typing import Any
 
-from addon_common import AddonError, config_get, find_icon, merge_config
+from addon_common import AddonError, config_get, find_addon_picture, merge_config
 
 ADDON = {
     "name": "Certificate manager",
@@ -207,6 +207,11 @@ TAB_ICON = (
     '</svg>'
 )
 
+#: The picture this addon's own assets folder is expected to hold: its id and
+#: then ``icon.png``, the rule every addon follows, so a picture dropped in is
+#: worn with nothing here changed.
+TAB_ICON_FILE = "cert_managericon.png"
+
 
 # --- small helpers ---
 
@@ -334,24 +339,33 @@ def tab_spec(values: dict) -> dict:
 
 
 def tab_icon() -> str:
-    """The shipped picture if the assets folder has one, else the drawn mark.
+    """The shipped picture if a folder this addon is read from has one, else the
+    drawn mark.
 
     An addon's own picture is looked for by the standard rule - the id and then
-    ``icon.png``, so here ``cert_managericon.png`` - which is why there is no
-    file name to keep in step here: dropping the picture in is enough.
+    ``icon.png``, so here ``cert_managericon.png`` - in this addon's own
+    ``addon.store/assets/cert_manager`` folder first and then in the program's
+    ``assets``, which is why there is no file name to keep in step here: dropping
+    the picture in either place is enough.
     """
-    folder = None
+    paths = None
     try:
-        folder = api.paths.assets
+        paths = api.paths
     except (AddonError, AttributeError, TypeError):    # no api on a bare import
-        folder = None
-    return find_icon(folder, "cert_manager") or TAB_ICON
+        paths = None
+    return find_addon_picture(paths, "cert_manager") or TAB_ICON
 
 
 def build_tab() -> None:
-    """The tab as a spec; buttons report through ``on_widget``, so compiled and source match."""
+    """The tab as a spec; buttons report through ``on_widget``, so compiled and source match.
+
+    It is window furniture, like Settings, the store and the updater: pinned to
+    the right of the bar and shown as its mark alone, so the certificate page is
+    reached by its icon and never dragged about.
+    """
     values = with_clean_subject(api.config.all())
-    api.tabs.add_tab(TAB, spec=tab_spec(values), style=TAB_STYLE)
+    api.tabs.add_tab(TAB, spec=tab_spec(values), style=TAB_STYLE,
+                     pinned=True, icon_only=True)
     api.tabs.set_icon(TAB, tab_icon())
 
 
