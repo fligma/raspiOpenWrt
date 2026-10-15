@@ -77,6 +77,14 @@ it actually drew - because the same Qt lays out with another font, another row
 height and another rasteriser elsewhere, and a build should not stop over that.
 So the step says what it is answering from before it runs anything: the system
 and Python, the Qt and PyQt in it, and how wide one word is in a default font.
+The other way a test goes green on one runner and red on the other is a record
+that names only one system: the update addon's fake releases held a Windows file
+alone, so a Linux runner - where the addon honestly answers that the release has
+nothing for this system - failed a dozen checks that were really asking about the
+fixture. Those records now carry one file per system, as a published release does,
+and the run says which system it is telling the story from instead of reading it
+off the machine; a check beside them asks each system to find its own file in
+every record, so a one-sided fixture is named as the failure it is.
 The step after that
 stages the addons
 out of `addons` into `_addon_bundle`, which is what gets packed inside the

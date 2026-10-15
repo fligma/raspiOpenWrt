@@ -215,10 +215,14 @@ jobs:
         # offscreen, so no device and no window are involved. A failing test fails
         # the build. The tests themselves never reach the executable - the staging
         # step below skips _folders.
-        # Say what machine these answers came off, and with what: a test that
-        # passes on one system and not the other is nearly always Qt laying out
-        # or painting to that platform's font, so the version and the system are
-        # the first two lines to compare between the two logs.
+        # Say what machine these answers came off, and with what. When one of
+        # these tests passes on a runner and fails on the other, it is either Qt
+        # laying out or painting to that platform's font, or a record inside the
+        # test that names one system only - and these three lines are what tells
+        # the two apart. The same Qt and Python on both sides means the
+        # difference is in the test's own data rather than in a measurement, and
+        # a test that has to measure something is written against what the addon
+        # promised instead of what one machine made of it.
         python -c "import platform, sys; print(sys.platform, platform.release(), platform.machine(), sys.version.split()[0])"
         python -c "from PyQt6.QtCore import QT_VERSION_STR, PYQT_VERSION_STR; print('Qt', QT_VERSION_STR, 'PyQt', PYQT_VERSION_STR)"
         # ... and how much room its fonts take: the addon tests lay tabs out

@@ -18,7 +18,13 @@ What gets looked at:
   keep a download's one-time signature;
 * what a release offers: assets named for one system or the other, the fallback
   to plain links in the description, and the refusal of an artifact page that
-  would only answer with a sign-in;
+  would only answer with a sign-in. The addon asks the machine it runs on which
+  of a release's two files to take, so the records below carry both - as a real
+  release does - and ``main`` pins that answer to ``THE_SYSTEM`` for everything
+  past the two sections that are handed a system to look at. Which side happens
+  to be running the test cannot then change what a check reads: a fixture
+  naming one system only passes on that runner and fails on the other, and the
+  failure looks like the addon having no download at all;
 * the tab on a stub api: init declares and builds it, and a check reads the tags
   and the releases in two requests whatever their number, sorting them newest
   first and chaining each one to the version before it for the comparison;
@@ -68,8 +74,39 @@ import addon_client                                          # noqa: E402
 SOURCE = ROOT / "addons" / "manager_update.py"
 FAILURES: list[str] = []
 
-#: A body big enough to pass for this program when bytes get sniffed.
-PROGRAM_BYTES = b"MZ" + b"\x90" * (200_000)
+#: The head each system's program file starts with, and the name it goes by -
+#: what ``extract_from_zip`` looks for inside a shipped archive.
+SYSTEM_HEAD = {"windows": b"MZ", "linux": b"\x7fELF"}
+SYSTEM_FILE = {"windows": "berry_manager.exe", "linux": "berry_manager"}
+
+#: The name each system's release file goes by, as the workflow publishes them.
+SYSTEM_PROGRAM = {"windows": "berry_manager-windows.exe",
+                  "linux": "berry_manager-linux"}
+
+
+def program_bytes(system: str, filler: bytes = b"\x90") -> bytes:
+    """Bytes big enough to pass for a program, wearing ``system``'s own head."""
+    return SYSTEM_HEAD[system] + filler * 200_000
+
+
+#: A body big enough to pass for this program when bytes get sniffed, one per
+#: side and the one these records tell the story from.
+PROGRAM_BYTES = program_bytes("windows")
+ELF_BYTES = program_bytes("linux", b"\x00")
+
+#: Which system the records below are a story about, and so which of a release's
+#: two files this copy takes: see the note at the top of the file.
+THE_SYSTEM = "windows"
+THE_PROGRAM = SYSTEM_PROGRAM[THE_SYSTEM]
+THE_FILE = SYSTEM_FILE[THE_SYSTEM]
+THE_BYTES = program_bytes(THE_SYSTEM)
+
+
+def offer(where: str) -> list[dict]:
+    """The two files a published release carries, each at ``where`` it lives."""
+    return [{"name": name, "browser_download_url": f"{where}/{system}"}
+            for system, name in SYSTEM_PROGRAM.items()]
+
 
 #: Every tag the repository is pretending to publish, oldest last, one of them
 #: not a version at all. The order is GitHub's, not the list's: the check has to
@@ -81,21 +118,21 @@ TAG_ROWS = [{"name": "berry1.6.1", "commit": {"sha": "aaa1111aaa"}},
 
 #: The releases made for those tags. 1.6.1 has a file and a written account,
 #: 1.6.0 has a file and no words, and 1.5.9 is a bare tag - the three states a
-#: version can be in as far as installing it is concerned.
+#: version can be in as far as installing it is concerned. The two that carry a
+#: file carry it for both systems, because that is what a release holds and a
+#: one-sided record would leave the other runner with nothing to find.
 RELEASES: dict[str, dict] = {
     "berry1.6.1": {
         "tag_name": "berry1.6.1", "name": "Berry 1.6.1",
         "published_at": "2026-10-12T10:00:00Z",
         "body": "The store got a pane to read a listing in.",
         "author": {"login": "fligma"},
-        "assets": [{"name": "berry_manager-windows.exe",
-                    "browser_download_url": "https://x/win"}],
+        "assets": offer("https://x/1.6.1"),
     },
     "berry1.6.0": {
         "tag_name": "berry1.6.0", "name": "berry1.6.0",
         "published_at": "2026-10-01T09:00:00Z", "body": "",
-        "assets": [{"name": "berry_manager-windows.exe",
-                    "browser_download_url": "https://x/older"}],
+        "assets": offer("https://x/older"),
     },
 }
 
@@ -318,12 +355,12 @@ def test_the_release(upd: Any) -> None:
                 "see also https://example.com/other.",
     }
     win = upd.pick_asset(release, "windows")
-    check(win and win["name"] == "berry_manager-windows.exe",
+    check(win and win["name"] == SYSTEM_PROGRAM["windows"],
           f"windows did not pick its own asset: {win!r}")
     lin = upd.pick_asset(release, "linux")
-    check(lin and lin["name"] == "berry_manager-linux",
+    check(lin and lin["name"] == SYSTEM_PROGRAM["linux"],
           f"linux picked the wrong side's asset: {lin!r}")
-    check(upd.pick_asset({"assets": [{"name": "berry_manager-windows.exe",
+    check(upd.pick_asset({"assets": [{"name": SYSTEM_PROGRAM["windows"],
                                       "browser_download_url": "https://x/win"}]},
                          "linux") is None,
           "linux was about to download a windows program")
@@ -342,7 +379,7 @@ def test_the_release(upd: Any) -> None:
           "linux accepted a link that names the other system")
 
     src = upd.download_source(release, "windows")
-    check(src == ("berry_manager-windows.exe", "https://x/win", "release asset"),
+    check(src == (SYSTEM_PROGRAM["windows"], "https://x/win", "release asset"),
           f"an asset did not win over the description: {src!r}")
     only_link = {"body": "get https://dl.example/berry-linux.tar " }
     src = upd.download_source(only_link, "linux")
@@ -351,6 +388,16 @@ def test_the_release(upd: Any) -> None:
           f"a link in the description was not used as the fallback: {src!r}")
     check(upd.download_source({}, "windows") is None,
           "an empty release offered a download anyway")
+
+    # And the records the rest of this file is written from: each system has to
+    # find a file of its own in them, or a runner on the other side reads a
+    # release that offers it nothing - the mistake this guard is here to keep
+    # from coming back.
+    for tag, record in RELEASES.items():
+        for side, name in SYSTEM_PROGRAM.items():
+            got = upd.download_source(record, side)
+            check(got and got[0] == name and got[2] == "release asset",
+                  f"{tag} offers {side} {got!r} instead of its own {name!r}")
 
 
 # --- three: the tab, the check and the two panes, on a stub api ---
@@ -465,7 +512,7 @@ def test_the_list_and_the_pane(upd: Any) -> None:
           f"{last_set(api, 'vtitle', 'text')!r}")
     meta = str(last_set(api, "vmeta", "text"))
     check("fligma" in meta and "2026-10-12" in meta and "commit aaa1111" in meta
-          and "release asset: berry_manager-windows.exe" in meta
+          and f"release asset: {THE_PROGRAM}" in meta
           and "3 file(s) moved" in meta,
           f"the line of facts is not the facts: {meta!r}")
     state = str(last_set(api, "vstate", "text"))
@@ -675,20 +722,26 @@ def test_the_bytes(upd: Any) -> None:
           "a stub too small to be the program passed as one")
     check(upd.looks_like_program(PROGRAM_BYTES, "windows"),
           "a proper windows program head was not recognised")
-    check(upd.looks_like_program(b"\x7fELF" + b"\x00" * 200_000, "linux"),
+    check(upd.looks_like_program(ELF_BYTES, "linux"),
           "a proper linux program head was not recognised")
 
     data, how = upd.check_bytes(PROGRAM_BYTES, "windows")
     check(data == PROGRAM_BYTES and how == "as it came",
           "a raw program was not taken as it stood")
 
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr("utils/update util/dist/berry_manager.exe", PROGRAM_BYTES)
-        archive.writestr("utils/update util/dist/addons/README.txt", b"note")
-    data, how = upd.check_bytes(buffer.getvalue(), "windows")
-    check(data == PROGRAM_BYTES and "unpacked" in how,
-          f"the program inside an artifact-shaped zip was not found: {how!r}")
+    # The release's file is a zip holding the program under a folder of its
+    # own, and it is a zip for either system: both have to be unpacked.
+    for side in ("windows", "linux"):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(f"utils/update util/dist/{SYSTEM_FILE[side]}",
+                             program_bytes(side))
+            archive.writestr("utils/update util/dist/addons/README.txt",
+                             b"note")
+        data, how = upd.check_bytes(buffer.getvalue(), side)
+        check(data == program_bytes(side) and "unpacked" in how,
+              f"the {side} program inside an artifact-shaped zip was not "
+              f"found: {how!r}")
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -727,18 +780,18 @@ def test_the_swap(upd: Any) -> None:
     print("\n15. the new program takes the old one's place")
     with tempfile.TemporaryDirectory() as raw:
         folder = Path(raw)
-        target = folder / "berry_manager.exe"
+        target = folder / THE_FILE
         target.write_bytes(b"the old program")
-        staged = folder / "berry_manager.exe.new"
-        staged.write_bytes(PROGRAM_BYTES)
+        staged = folder / f"{THE_FILE}.new"
+        staged.write_bytes(THE_BYTES)
         words = upd.swap_program(target, staged)
-        check(target.read_bytes() == PROGRAM_BYTES,
+        check(target.read_bytes() == THE_BYTES,
               "the new program did not land where the old one ran")
         check(not staged.exists(), "the staged download was left behind")
-        check(not (folder / "berry_manager.exe.old").exists(),
+        check(not (folder / f"{THE_FILE}.old").exists(),
               f"the moved-aside leftover was not taken back ({words!r})")
         left = sorted(p.name for p in folder.iterdir())
-        check(left == ["berry_manager.exe"],
+        check(left == [THE_FILE],
               f"the swap moved more than the one program file: {left}")
         try:
             upd.swap_program(target, folder / "nowhere.new")
@@ -785,14 +838,14 @@ def test_the_job(upd: Any) -> None:
 
     with tempfile.TemporaryDirectory() as raw:
         folder = Path(raw)
-        target = folder / "berry_manager.exe"
+        target = folder / THE_FILE
         target.write_bytes(b"the old program")
         stage = folder / "stage"
         stage.mkdir()
         api.answer("ui.question", False)
         with patched(upd, program_path=lambda: target,
                      staging_target=lambda name: stage / name,
-                     system_name=lambda: "windows"):
+                     system_name=lambda: THE_SYSTEM):
             upd.update_selected()
         check("declined" in last_status(api),
               f"a declined update did not say so: {last_status(api)!r}")
@@ -803,7 +856,7 @@ def test_the_job(upd: Any) -> None:
 
         print("\n17. the job: redirects, bytes, the swap, the offer to restart")
         api.answer("ui.question", True)
-        body = b"MZ" + b"\xAA" * 200_000
+        body = program_bytes(THE_SYSTEM, b"\xAA")
         fetcher = FakeFetcher([
             FakeResp(302, b"", {"Location": "https://objects.example/f/berry.exe?sig=1"}),
             FakeResp(200, body, {"Content-Length": str(len(body))}),
@@ -814,7 +867,7 @@ def test_the_job(upd: Any) -> None:
         tails_before = len(TAILS)
         with patched(upd, program_path=lambda: target,
                      staging_target=lambda name: stage / name,
-                     system_name=lambda: "windows",
+                     system_name=lambda: THE_SYSTEM,
                      _http=lambda values: fetcher,
                      _later=lambda seconds, callback: steps.append(callback),
                      restart_app=lambda: restarts.append(1)):
@@ -827,9 +880,9 @@ def test_the_job(upd: Any) -> None:
                   "the finished job is still working or still holding itself")
             check(target.read_bytes() == body,
                   "the downloaded program is not what landed in its place")
-            check(not (stage / "berry_manager.exe.new").exists(),
+            check(not (stage / f"{THE_FILE}.new").exists(),
                   "the staged file survived the swap")
-            check(not (folder / "berry_manager.exe.old").exists(),
+            check(not (folder / f"{THE_FILE}.old").exists(),
                   "the moved-aside leftover survived the swap")
             check(upd.found is None, "a done update still holds the version it used")
             status = last_status(api)
@@ -857,11 +910,11 @@ def test_the_job(upd: Any) -> None:
         api2.answer("ui.question", True)
         upd.check_now()
         upd.pick_row(1)
-        body2 = b"MZ" + b"\xBB" * 200_000
+        body2 = program_bytes(THE_SYSTEM, b"\xBB")
         restarts2: list[int] = []
         with patched(upd, program_path=lambda: target,
                      staging_target=lambda name: stage / name,
-                     system_name=lambda: "windows",
+                     system_name=lambda: THE_SYSTEM,
                      _http=lambda values: FakeFetcher(
                          [FakeResp(200, body2, {"Content-Length": str(len(body2))})]),
                      _later=lambda seconds, callback: callback(),
@@ -895,7 +948,7 @@ def test_the_job(upd: Any) -> None:
         page = b"<!doctype html>\n<html>" + b" " * 200_000
         with patched(upd, program_path=lambda: target,
                      staging_target=lambda name: stage / name,
-                     system_name=lambda: "windows",
+                     system_name=lambda: THE_SYSTEM,
                      _http=lambda values: FakeFetcher([FakeResp(200, page)]),
                      _later=lambda seconds, callback: callback(),
                      restart_app=lambda: None):
@@ -913,10 +966,10 @@ def test_the_job(upd: Any) -> None:
         api4 = fresh(upd, version="1.6.0")
         upd.check_now()
         upd.pick_row(0)
-        short = b"MZ" + b"\x00" * 500
+        short = SYSTEM_HEAD[THE_SYSTEM] + b"\x00" * 500
         with patched(upd, program_path=lambda: target,
                      staging_target=lambda name: stage / name,
-                     system_name=lambda: "windows",
+                     system_name=lambda: THE_SYSTEM,
                      _http=lambda values: FakeFetcher(
                          [FakeResp(200, short, {"Content-Length": "999999"})]),
                      _later=lambda seconds, callback: callback(),
@@ -934,7 +987,7 @@ def test_the_job(upd: Any) -> None:
                 for n in range(upd.MAX_REDIRECTS + 2)]
         with patched(upd, program_path=lambda: target,
                      staging_target=lambda name: stage / name,
-                     system_name=lambda: "windows",
+                     system_name=lambda: THE_SYSTEM,
                      _http=lambda values: FakeFetcher(hops),
                      _later=lambda seconds, callback: callback(),
                      restart_app=lambda: None):
@@ -965,18 +1018,25 @@ def main() -> int:
         return 2
     upd = addon_client.load_addon(SOURCE)
     print(f"manager_update: the addon at {SOURCE.name}")
+    print(f"       told from the {THE_SYSTEM} side: {THE_PROGRAM}, "
+          f"{THE_FILE}, {len(THE_BYTES)} bytes")
 
+    # These two ask about either system by name, so they read the machine as it
+    # is; the records past them are one story about one system, and the addon
+    # asks its own platform which file to take, so that answer is pinned here
+    # rather than left to whichever runner got the job.
     test_the_helpers(upd)
     test_the_release(upd)
-    test_the_tab(upd)
-    test_the_list_and_the_pane(upd)
-    test_the_way_back(upd)
-    test_the_notice(upd)
-    test_the_buttons(upd)
-    test_the_schedule(upd)
-    test_the_bytes(upd)
-    test_the_swap(upd)
-    test_the_job(upd)
+    with patched(upd, system_name=lambda: THE_SYSTEM):
+        test_the_tab(upd)
+        test_the_list_and_the_pane(upd)
+        test_the_way_back(upd)
+        test_the_notice(upd)
+        test_the_buttons(upd)
+        test_the_schedule(upd)
+        test_the_bytes(upd)
+        test_the_swap(upd)
+        test_the_job(upd)
 
     if FAILURES:
         print()
