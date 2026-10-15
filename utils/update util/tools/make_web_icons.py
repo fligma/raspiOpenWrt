@@ -49,6 +49,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# The picture is read, cut and re-encoded through Qt, and a workflow runner has
+# no display to open a GUI bar on. Forcing the offscreen platform before any Qt
+# import lets the check run where a window could not be drawn, the same way the
+# other icon tools do; a person running it by hand still gets it from their own
+# desktop, since this only sets the default when nothing has said otherwise.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 #: ``utils/update util``, which the app's icon sits in.
 ROOT = Path(__file__).resolve().parents[1]
 
