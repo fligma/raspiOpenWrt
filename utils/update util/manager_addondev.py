@@ -1347,7 +1347,12 @@ def build_command(launcher: Path, addon_id: str, options: dict,
     where, _why = build_interpreter()
     command = [
         where or sys.executable, "-m", "PyInstaller",
-        "--noconfirm", "--clean",
+        # No --clean here on purpose: it throws away PyInstaller's own
+        # analysis cache, so every build - the dev tab's and the store's -
+        # starts cold and re-reads every module it has already worked out.
+        # Nothing stale can ride into a new program: each build stages in
+        # its own ``<root>/<id>`` folder, which the caller empties first.
+        "--noconfirm",
         "--distpath", str(work / "dist"),
         "--workpath", str(work / "build"),
         "--specpath", str(work),

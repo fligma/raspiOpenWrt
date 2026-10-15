@@ -114,9 +114,20 @@ PyQt6-WebEngine is optional. If it is not installed, the Web Interface and
 LuCI tabs show the URL and an "Open in browser" button instead of an embedded
 page, and the rest of the tool works normally.
 
-Every module is imported statically at the top of its user, which is what lets
-PyInstaller collect them. Commit a new module with the rest of
-`utils/update util`, or the build fails on the missing import.
+Every app module is imported statically at the top of its user, which is what
+lets PyInstaller collect them. Commit a new module with the rest of
+`utils/update util`, or the build fails on the missing import. The two
+third-party libraries with real import weight behind them are the exception,
+and they are read on use rather than on the way up: `manager_net` brings in
+paramiko inside the one call that opens an SSH connection, and `manager_gui`
+brings in keyring inside the three calls that touch the credential store -
+together near a second of boot time that the window no longer pays before it
+appears, and paid anyway the moment a connection is asked for (auto-connect
+reads paramiko on a worker thread, so it lands off the GUI's path either way).
+PyInstaller still collects both, because its scanner follows plain imports
+inside functions as readily as ones at the top; only imports that sit behind a
+condition - the QtWebEngine pair, tried and fallen back on - need the
+`--hidden-import` list.
 
 ### Assets
 
@@ -388,7 +399,7 @@ bug report name the copy they came from. That one value is also what
 never disagrees with itself about which version it is. The box also links that
 number to the release built from it - `manager_const.PROJECT_RELEASE_URL` with
 `UPDATE_TAG_PREFIX` in front of the version, which is the tag the workflow
-pushes, so 1.6.3 opens `.../releases/tag/berry1.6.3` - making the About box a
+pushes, so 1.6.4 opens `.../releases/tag/berry1.6.4` - making the About box a
 door to the build it names rather than a caption about it.
 
 The bar holds two things at once: the row of tabs the user arranges, and a short
@@ -1368,7 +1379,13 @@ and clears it as soon as the program is installed. Every build is also given
 `--paths` for the folder holding `addon_common.py` and `addon_client.py`, since
 the launcher it compiles imports both - `build_command` takes a `paths=` for a
 caller that keeps its own copy, which is how the addon store builds with the two
-files it fetched when the program it runs inside has none on disk. PyInstaller
+files it fetched when the program it runs inside has none on disk. The
+command no longer passes `--clean`: that flag throws away PyInstaller's own
+analysis cache, so every build would start cold and re-read every module the
+last build already worked out - and nothing stale can ride in, because each
+build stages inside the one folder named for it - the dev tab's
+`addons/_build/<id>`, the store's same-shaped folder under its `root=` - and
+the caller empties that folder before it starts. PyInstaller
 is **not** needed to run the app - only to build an addon, and it has to be
 installed in the interpreter the source runs from
 (`python -m pip install pyinstaller`); the Compile pane says so, with the exact
@@ -1445,14 +1462,17 @@ a store never shows a blank box, and an addon that shipped no picture is still
 found by eye.
 
 An update is only offered when the catalog's version is ahead of the one
-recorded beside the install in `addons/<id>.json`; dotted versions are compared
-as numbers so `1.10` beats `1.9`, and an install with no recorded version is
-taken for behind whatever the catalog names. A row in that state is marked
-*update available* in amber. Choosing **Update** asks first, then runs the same
-steps as an install - the version in `addons/` is replaced as the new program is
-copied in - but leaves the addon's `addons/_data/<id>/` settings and its switch
-in Settings > Addons exactly as they were, so an addon that was on stays on. A
-fresh install still lands switched off; an update does not switch anything.
+recorded beside the install in its manifest - `addons/<id>.json` next to a
+loose program, `addons/<id>/<id>.json` inside a folder install; dotted
+versions are compared as numbers so `1.10` beats `1.9`, and an install with no
+recorded version is taken for behind whatever the catalog names. A row in that
+state is marked *update available* in amber. Choosing **Update** asks first,
+then runs the same steps as an install - the program in `addons/` is replaced
+as the new one is copied in, and an install the store made as a one-file gives
+up its loose `.exe` to make room for the folder - but leaves the addon's
+`addons/_data/<id>/` settings and its switch in Settings > Addons exactly as
+they were, so an addon that was on stays on. A fresh install still lands
+switched off; an update does not switch anything.
 
 An install is one job at a time, and the tab says what it is doing the whole
 way through:
@@ -1466,9 +1486,16 @@ way through:
    on the search path. What the addon itself failed stops the install; a run
    that never got past importing Qt, or the app's own modules, is this machine's
    doing and is only said out loud;
-3. PyInstaller builds a one-file program for it, with the
-   `addon_client.serve` launcher behind it and its assets packed inside. The
-   program is told to wear the addon's own picture, which on Windows means an
+3. PyInstaller builds a folder program for it - the `.exe` and its
+   `_internal` support files - with the `addon_client.serve` launcher behind it
+   and its assets packed inside. A folder rather than a one-file on purpose:
+   a one-file carries its whole runtime in a single archive and unpacks all
+   ~200 MB of it to a temp folder on *every* start - measured at twenty seconds
+   on Windows, longer with Defender and several addons launching at once, which
+   is what made an enabled addon look dead - and the second bootloader it
+   spawns can outlive being killed. A folder boots straight off disk, compiles
+   faster, and is one process to manage. The program is told to wear the
+   addon's own picture, which on Windows means an
    `.ico`: PyInstaller converts a PNG only when Pillow happens to be installed,
    and it is in no requirement of this project, so the PNG is rewrapped here -
    its own bytes inside an icon directory when it is small enough to count, or
@@ -1476,8 +1503,8 @@ way through:
    all rather than stopping the build. When
    PyInstaller is not installed the store puts it in with `pip` rather than
    asking you to;
-4. the program lands in `addons/<id>.exe` (an extension-less `addons/<id>.bin`
-   on Linux), the downloads and the build are thrown away, and the addon is
+4. the program lands in `addons/<id>/` (`<id>.exe` on Windows, `addon.bin` on
+   Linux), the downloads and the build are thrown away, and the addon is
    written into the active profile as **switched off**, so nothing of it runs
    until you turn it on;
 5. Settings is rescanned and its row appears on the **Installed addons**
@@ -1486,8 +1513,9 @@ way through:
    option, like any other addon's, waiting to be turned on.
 
 Step 4 also writes down what the addon's own source declared, which is what
-makes that row a full one before the program has ever run: an `addons/<id>.json`
-manifest beside it - `name`, `version`, `author`, `description`, `api`, the
+makes that row a full one before the program has ever run: a `<id>.json`
+manifest inside the program's folder - `name`, `version`, `author`,
+`description`, `api`, the
 `ssh`/`sftp` transports `api.device` is allowed to hand it, the `connection`
 declaration saying whose connection it may use, and an `origin` mark
 saying the store put it there - and its `fields.json` form, with a `config.json`

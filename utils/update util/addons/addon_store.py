@@ -690,7 +690,7 @@ def _data_removable(id_value: str) -> Path | None:
     ident = clean_id(id_value)
     if not ident or ident == OWN_ID:
         return None
-    if addon_origin(addons_dir(), id_value) != STORE_ORIGIN:
+    if install_origin(id_value) != STORE_ORIGIN:
         return None
     keeps = addon_data_folder(id_value)
     return keeps if keeps.exists() else None
@@ -884,14 +884,37 @@ def installed(id_value: str) -> bool:
 
 
 def installed_version(id_value: str) -> str:
-    """The version written down beside an install when it was put there."""
+    """The version written down beside an install when it was put there.
+
+    A loose program keeps its manifest out where the addons folder can see it;
+    a folder program carries it inside the folder, under the same name.
+    """
     name = clean_id(id_value)
     if not name:
         return ""
-    path = addon_manifest_path(addons_dir(), name)
-    if path is None:
+    folder = addons_dir()
+    for home in (folder / name, folder):
+        path = addon_manifest_path(home, name)
+        if path is not None:
+            return one_line(read_config_json(path).get("version"))
+    return ""
+
+
+def install_origin(id_value: str) -> str:
+    """Where an install came from, in whichever shape it sits in ``addons``.
+
+    The folder is read first because it is where a store install lands now;
+    a loose program's manifest, one level up, is the older shape.
+    """
+    name = clean_id(id_value)
+    if not name:
         return ""
-    return one_line(read_config_json(path).get("version"))
+    folder = addons_dir()
+    for home in (folder / name, folder):
+        origin = addon_origin(home, name)
+        if origin:
+            return origin
+    return ""
 
 
 def staging() -> Path:
@@ -995,7 +1018,7 @@ def _tidy(id_value: str) -> None:
     """Throw the downloads and the build away once the program is in ``addons``.
 
     The source, its assets, its test and everything PyInstaller made on the way
-    were only a means to the one file that got installed, so they are cleared;
+    were only a means to the program that got installed, so they are cleared;
     what the addon itself keeps in its ``_data`` folder is left alone.
     """
     try:
@@ -2063,9 +2086,14 @@ def _build(id_value: str, source: Path) -> None:
         return
     entry = entry_for(id_value) or {}
     assets = staging() / "assets"
-    options = {"onefile": True, "console": True, "icon": True, "hidden": ""}
+    # A folder program, deliberately, not a one-file: a one-file carries its
+    # whole runtime inside one archive and unpacks all of it to a temp folder
+    # on every single start - twenty seconds and 200 MB on Windows - and the
+    # second bootloader it spawns can outlive being killed. A folder boots
+    # straight off disk, compiles faster, and is one process to manage.
+    options = {"onefile": False, "console": True, "icon": True, "hidden": ""}
     if assets.is_dir() and any(assets.iterdir()):
-        options["add_data"] = [(assets, "assets")]       # packed to the exe's assets folder
+        options["add_data"] = [(assets, "assets")]       # packed to the program's assets folder
         icon_name = entry.get("icon") or ""
         icon = assets / icon_name if icon_name else None
         options["icon"] = str(icon) if (icon is not None and icon.is_file()) else True
@@ -2169,8 +2197,30 @@ def _describe(id_value: str, program: Path, details: dict, entry: dict) -> None:
         note(f"{id_value}'s settings could not be prepared: {error}")
 
 
+def _clear_old_flat(id_value: str) -> None:
+    """Take out a one-file install of ours before the folder takes its place.
+
+    A store build before this one left ``addons/<id>.exe`` and its manifest
+    loose in the addons folder. An update now copies a folder program into
+    ``addons/<id>/``, and two same-id programs leave the app guessing, so the
+    old pair goes first - only when the loose manifest says the store wrote
+    it, since anything else of that name is somebody else's.
+    """
+    folder = addons_dir()
+    name = clean_id(id_value)
+    if not name or addon_origin(folder, id_value) != STORE_ORIGIN:
+        return
+    for stale in (folder / f"{name}.exe", folder / f"{name}.bin",
+                  folder / f"{name}.json"):
+        try:
+            if stale.is_file():
+                stale.unlink()
+        except OSError as error:
+            note(f"the old {stale.name} could not be cleared: {error}")
+
+
 def _install_step(id_value: str) -> None:
-    """Move the fresh program into ``addons/``, say what it is, leave it off.
+    """Move the fresh program into ``addons/<id>/``, say what it is, leave it off.
 
     The rescan that lets the app see the new file re-loads this addon as well,
     which takes the module this code runs in out of the app: the api is gone the
@@ -2181,13 +2231,14 @@ def _install_step(id_value: str) -> None:
     if job is None:
         return
     dev = _dev()
-    staged = dev.staged_name(id_value, True, root=work_dir())
+    staged = dev.staged_name(id_value, False, root=work_dir())
     if not staged.is_file():
         _tidy(id_value)
         _finish("no program was produced; see the log above", bad=True)
         return
+    _clear_old_flat(id_value)
     try:
-        target = dev.install_build(staged, id_value, True)
+        target = dev.install_build(staged, id_value, False)
     except OSError as error:
         _tidy(id_value)
         _finish(f"it could not be put in the addons folder: {error}", bad=True)
@@ -2207,11 +2258,11 @@ def _install_step(id_value: str) -> None:
         now = one_line((job.get("details") or {}).get("manifest", {})
                        .get("version")) \
             or one_line((entry_for(id_value) or {}).get("version"))
-        _finish(f"updated {target.name}"
+        _finish(f"updated addons/{id_value}"
                 + (f" from {had} to {now}" if had and now else ""))
     else:
-        _finish(f"installed {target.name}, switched off until you turn it on in "
-                "Settings > Addons")
+        _finish(f"installed addons/{id_value}/, switched off until you turn it "
+                "on in Settings > Addons")
     _reload()
 
 

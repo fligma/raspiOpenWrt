@@ -47,7 +47,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-import keyring
 
 from manager_addons import AddonManager, connection_choice
 from manager_addondev import AddonDevWidget
@@ -2345,6 +2344,10 @@ class BerryManager(
     def load_saved_password(self) -> None:
         if not self.remember_password_checkbox.isChecked():
             return
+        # keyring reads the OS credential store and costs a good slice of a
+        # second to come in; it is only wanted when a saved password is
+        # actually asked for, so it is not imported on the way up.
+        import keyring
         try:
             password = keyring.get_password(KEYRING_SERVICE, self.current_credential_id())
         except Exception as error:
@@ -2355,6 +2358,7 @@ class BerryManager(
 
     def remember_password_changed(self, remember: bool) -> None:
         self.save_current_profile_edits()
+        import keyring          # read in on use, not at boot; see load_saved_password
         if remember:
             self.store_password()
             return
@@ -2369,6 +2373,7 @@ class BerryManager(
         password = self.password_input.text()
         if not self.remember_password_checkbox.isChecked() or not password:
             return
+        import keyring          # read in on use, not at boot; see load_saved_password
         try:
             keyring.set_password(KEYRING_SERVICE, self.current_credential_id(), password)
         except Exception as error:

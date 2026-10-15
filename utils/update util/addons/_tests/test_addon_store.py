@@ -613,6 +613,16 @@ def test_the_updates(store: Any) -> None:
                   == {"installed": "0.9", "available": "1.0"},
                   f"the update did not say from and to: {found.get('hello_store')}")
 
+            # the newer shape: a folder program carrying its own manifest
+            (folder / "hello_folder").mkdir()
+            (folder / "hello_folder" / "hello_folder.json").write_text(
+                '{"version": "0.9"}', encoding="utf-8")
+            check(store.installed("hello_folder"),
+                  "a folder install was not noticed")
+            check(store.installed_version("hello_folder") == "0.9",
+                  f"the version inside a folder install was not read: "
+                  f"{store.installed_version('hello_folder')!r}")
+
             # the table marks the behind addon, and only it, as an update waiting
             store.updates = found
             api.calls.clear()
@@ -1585,18 +1595,26 @@ class _BuildDev:
     def staged_name(self, addon_id: str, onefile: bool,
                     root: Path | None = None) -> Path:
         self.seen["staged root"] = root
-        return self.dist / f"{addon_id}.exe"
+        if onefile:
+            return self.dist / f"{addon_id}.exe"
+        return self.dist / addon_id / f"{addon_id}.exe"
 
     def install_build(self, staged: Path, addon_id: str, onefile: bool) -> Path:
         """Pretend the program was copied, and say where it now sits.
 
         The real one writes into ``addons``, and the store speaks about that copy
         afterwards - so the stand-in puts its pretend file in the folder the test
-        is using, never somewhere relative to whoever runs it.
+        is using, never somewhere relative to whoever runs it. A one-file build
+        lands loose in that folder; a folder build lands inside a folder of the
+        addon's own name, the way the store installs programs now.
         """
         self.seen["copied"] = Path(staged)
         self.installs.mkdir(parents=True, exist_ok=True)
-        target = self.installs / f"{addon_id}.exe"
+        if onefile:
+            target = self.installs / f"{addon_id}.exe"
+        else:
+            target = self.installs / addon_id / staged.name
+            target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("x", encoding="utf-8")
         return target
 
@@ -1676,7 +1694,8 @@ def test_the_install(store: Any) -> None:
             dist.mkdir(parents=True)
             (stage / "assets").mkdir(parents=True)
             (stage / "assets" / "pic.png").write_text("x", encoding="utf-8")
-            (dist / "widget.exe").write_text("x", encoding="utf-8")
+            (dist / "widget").mkdir()
+            (dist / "widget" / "widget.exe").write_text("x", encoding="utf-8")
             order: list[str] = []
             seen_calls: dict = {}
 
@@ -1702,7 +1721,7 @@ def test_the_install(store: Any) -> None:
                 broken.append(f"{type(error).__name__}: {error}")
             check(not broken, f"the install could not finish itself: {broken}")
             check(dev.seen.get("staged root") == build
-                  and dev.seen.get("copied") == dist / "widget.exe",
+                  and dev.seen.get("copied") == dist / "widget" / "widget.exe",
                   f"the program was looked for outside the store's build: {dev.seen}")
             check(order == ["reload"] and manager.rescans == 1,
                   f"the app was not asked to rescan, or was twice: {order} / "
@@ -1729,7 +1748,8 @@ def test_the_install(store: Any) -> None:
             check(keeps == addons / "_data" / "widget",
                   f"the settings were not prepared in the addon's own folder: "
                   f"{keeps}")
-            sidecar = json.loads((addons / "widget.json").read_text(encoding="utf-8"))
+            sidecar = json.loads((addons / "widget" / "widget.json")
+                                 .read_text(encoding="utf-8"))
             check(sidecar.get(store.ORIGIN_KEY) == store.STORE_ORIGIN,
                   f"the manifest did not say where the addon came from: {sidecar}")
             check(sidecar.get("requires") == ["ssh"],
@@ -1752,12 +1772,12 @@ def test_the_install(store: Any) -> None:
                   "the addon's config file was not started from its defaults")
             gone = sorted(path.relative_to(addons).as_posix()
                           for path in store._delete_paths("widget"))
-            check(gone == ["_data/widget", "widget.exe", "widget.json"],
+            check(gone == ["_data/widget", "widget"],
                   f"delete does not take an install back whole: {gone}")
             store.session_delete_config = False     # the box at the top, this session
             check(sorted(path.relative_to(addons).as_posix()
                          for path in store._delete_paths("widget"))
-                  == ["widget.exe", "widget.json"],
+                  == ["widget"],
                   "the session's check box did not leave the settings where they are")
             store.session_delete_config = None
             (addons / "hand.exe").write_text("x", encoding="utf-8")

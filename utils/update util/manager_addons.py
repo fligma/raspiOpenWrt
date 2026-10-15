@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from typing import Any, Callable
 
 from PyQt6.QtCore import (QCoreApplication, QEventLoop, QObject, Qt, QTimer, QUrl,
@@ -99,28 +100,54 @@ class _Bus(QObject):
 
     _invoke = pyqtSignal(object)
 
-    def __init__(self) -> None:
+    def __init__(self, logger: Callable[[str], None] | None = None) -> None:
         super().__init__()
         # Set once the window is fully closed: jobs still in flight would
         # only reach deleted Qt objects, and PyQt aborts on a slot that
         # raises, so they are dropped quietly from here on.
         self.dead = False
+        # Where a job that raised gets said; the manager wires its own log.
+        self._logger = logger
         self._invoke.connect(self._run)
 
     def _run(self, job: Callable[[], Any]) -> None:
         if self.dead:
             return
+        self._guarded(job)
+
+    def _guarded(self, job: Callable[[], Any]) -> None:
+        """Run one job so nothing it raises can reach a Qt slot.
+
+        A slot that lets an exception escape takes the whole process down
+        with it, and one addon's broken job is not the app's: it is
+        swallowed here and said in the log instead.
+        """
         try:
             job()
         except (RuntimeError, AddonError):
             pass            # a widget went away mid-delivery while closing
+        except Exception as error:
+            self._note(error)
+
+    def _note(self, error: BaseException) -> None:
+        """Say what a failing job raised, without ever raising again."""
+        if self._logger is None:
+            return
+        try:
+            last = traceback.format_exc().strip().splitlines()[-1]
+            self._logger(f"gui job failed: {type(error).__name__}: {error}; "
+                         f"{last.strip()}")
+        except Exception:
+            pass
 
     def post(self, job: Callable[[], Any]) -> None:
         """Run `job` on the GUI thread soon, without waiting for it."""
         if self.dead:
             return
         if on_gui_thread():
-            QTimer.singleShot(0, job)
+            # singleShot hands the job to a slot of its own, so it needs
+            # the same guard the signal path gets through _run.
+            QTimer.singleShot(0, lambda: self._guarded(job))
         else:
             self._invoke.emit(job)
 
@@ -687,7 +714,7 @@ class AddonManager:
 
     def __init__(self, window: Any) -> None:
         self.win = window
-        self.bus = _Bus()
+        self.bus = _Bus(lambda text: self.log("", text, warning=True))
         self.addons: list[Addon] = []
         self.shadowed: dict[str, list[Addon]] = {}   # lost same-id copies
         self.listeners: dict[str, list[tuple[str, object]]] = {}

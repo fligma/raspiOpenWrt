@@ -49,7 +49,7 @@ def find_asset(filename: str) -> Path | None:
 #: The program's own version, the one the About dialog shows and the update
 #: addon compares against the tags published on GitHub (``berry`` + this).
 #: One line to change per release, everything else reads it from here.
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.6.4"
 UPDATE_TAG_PREFIX = "berry"
 
 # --- file names and fixed identifiers ---
@@ -128,7 +128,7 @@ PROJECT_GITHUB_URL = "https://github.com/fligma/raspiOpenWrt"
 PROJECT_LICENSE_URL = PROJECT_GITHUB_URL + "/blob/main/LICENSE"
 
 #: Where one release of this program is published: the tag is the version with
-#: ``UPDATE_TAG_PREFIX`` in front of it, so ``PROJECT_RELEASE_URL + "berry1.6.3"``
+#: ``UPDATE_TAG_PREFIX`` in front of it, so ``PROJECT_RELEASE_URL + "berry1.6.4"``
 #: is the page carrying that build's notes. The About box links it.
 PROJECT_RELEASE_URL = PROJECT_GITHUB_URL + "/releases/tag/"
 

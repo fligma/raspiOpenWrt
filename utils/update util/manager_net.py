@@ -9,12 +9,19 @@ import posixpath
 import queue
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
-import paramiko
 
 from manager_config import _coerce_int
 from manager_const import KNOWN_HOSTS_FILE
+
+if TYPE_CHECKING:
+    # paramiko is half a second of imports and it is only needed the one time
+    # a connection is actually opened - inside ``create_ssh_client``, which
+    # reads it itself. Named here only for the annotations below, which a
+    # module-wide ``from __future__ import annotations`` keeps from running.
+    import paramiko
 
 # --- path helpers ---
 # Paths sit under the remote root; ../.. can't escape it.
@@ -57,6 +64,7 @@ def credential_id(username: str, host: str, port: int) -> str:
 
 def create_ssh_client(settings: dict) -> paramiko.SSHClient:
     """Open and authenticate a connection from the profile settings; host-key policy follows 'trust unknown host'."""
+    import paramiko     # read on use, not at boot; see the note at the top
     client = paramiko.SSHClient()
     client.load_system_host_keys()
     if KNOWN_HOSTS_FILE.exists():
