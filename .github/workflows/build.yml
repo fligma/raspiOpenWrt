@@ -201,6 +201,13 @@ jobs:
         # marks their tabs wear (● ○ ✓), which would abort the print itself.
         # With this, every child python writes UTF-8 whatever the console is.
         PYTHONIOENCODING: utf-8
+        # One test asks the real repository: the web installer's GitHub route is
+        # the half that cannot be checked from the source alone. Anonymous
+        # requests are capped at sixty an hour for a machine, and a runner spends
+        # that with every job on it - the catalog job of this very push among
+        # them - so the ask is made with this run's own token. Without one the
+        # test says so and skips that half rather than failing on a refusal.
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         # Every addon's test lives beside it: the shipped addons in addons/_tests,
         # the store's in addon.store/_tests, each as test_<id>.py. Run them here,

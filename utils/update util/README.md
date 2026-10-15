@@ -63,7 +63,14 @@ list would say about each addon, and each entry the published catalog holds
 nothing and simply tells the user about a connection the addon never opens - and
 one runs every `test_*.py` in
 `addons/_tests` against the stubbed app - a failing test fails the build, and
-the tests themselves are never packaged. The step after that stages the addons
+the tests themselves are never packaged. The one test that asks the real
+repository - the web installer's GitHub route, the half that cannot be checked
+from the source alone - is handed this run's own token, because sixty anonymous
+GitHub requests an hour are shared by everything a runner does, the catalog job
+of the same push among them; when GitHub still refuses, or no token is there, that
+half says so in the log and is skipped rather than failing the build, and the
+local-folder route - which needs no internet - is still run. The step after that
+stages the addons
 out of `addons` into `_addon_bundle`, which is what gets packed inside the
 executable: top-level `.py` addons, compiled addons (a loose `.exe` or `.bin`
 with its `<name>.json` manifest, or a folder whose program is `addon.exe`,

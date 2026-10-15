@@ -16,8 +16,11 @@ So three things get looked at that nothing else here can reach:
   folder, and whether ``cgi-bin/hash.file`` survived the lot.
 
 The GitHub part asks the real repository, because that is the half of this addon
-that cannot be reasoned about from the source: it is skipped, and said, when
-this machine cannot reach GitHub. The local-folder route needs no internet.
+that cannot be reasoned about from the source: it is skipped, and said, when this
+machine cannot reach GitHub *or* when GitHub refuses to answer it - a runner with
+no token gets sixty anonymous requests an hour, shared with every other job on
+that machine, and a refused ask says nothing about the addon. The local-folder
+route needs no internet.
 
 Run it from the Test panel, or on the command line::
 
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import json
 import os
 import re
 import sys
@@ -312,18 +316,46 @@ def fresh(installer: Any, defaults: dict, no_open: bool = False) -> Api:
     return api
 
 
-def github_is_there(installer: Any) -> bool:
-    """Whether this machine can ask GitHub anything at all."""
-    fetcher = installer.Fetcher()
+def github_token() -> str:
+    """The token to ask GitHub with, when this machine names one.
+
+    A workflow hands its own down, so a runner asks as the app would with a token
+    on its form instead of burning sixty anonymous requests an hour.
+    """
+    for name in ("WEB_INSTALLER_TEST_TOKEN", "GITHUB_TOKEN"):
+        text = str(os.environ.get(name) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def github_is_there(installer: Any, token: str = "") -> bool:
+    """Whether this machine can ask GitHub anything, and have it answered.
+
+    No route and a refused request are the same thing to the sections below: both
+    leave them testing what GitHub says rather than what the addon does.
+    """
+    fetcher = installer.Fetcher(token)
     try:
-        fetcher.get("api.github.com", "/repos/fligma/raspiOpenWrt",
-                    accept="application/json")
+        status, body = fetcher.get("api.github.com", "/repos/fligma/raspiOpenWrt",
+                                   accept="application/json")
     except (http.client.HTTPException, OSError) as error:
         look(f"GitHub cannot be reached from here: {error}")
         return False
     finally:
         fetcher.close()
-    return True
+    if status == 200:
+        return True
+    try:
+        why = str(json.loads(body.decode("utf-8", errors="replace")).get("message") or "")
+    except (ValueError, AttributeError, TypeError):
+        why = ""
+    print(f"\n2-5. GitHub answered {status} for a request from here"
+          + (f" - {why}" if why else "")
+          + (" - the token named here is not accepted" if status == 401 else
+             " (anonymous requests are capped per hour, per machine)"
+             if status in (403, 429) else ""))
+    return status not in (401, 403, 429)
 
 
 def test_look_around(installer: Any, app: Any, defaults: dict) -> list:
@@ -561,12 +593,16 @@ def main() -> int:
     if app is not None:
         test_the_tab(installer, app)
     defaults = dict(installer.DEFAULTS)
-    if github_is_there(installer):
+    token = github_token()
+    if token:
+        defaults["token"] = token
+        look("the GitHub half asks with a token from the environment")
+    if github_is_there(installer, token):
         plan = test_look_around(installer, app, defaults)
         test_install(installer, app, defaults, plan)
         test_wrong_ref(installer, app, defaults)
     else:
-        print("\n2-5. skipped: GitHub cannot be reached from here")
+        print("\n2-5. skipped: nothing to ask GitHub about here")
     test_local_folder(installer, app, defaults)
     test_the_bar(installer, app, defaults)
 
