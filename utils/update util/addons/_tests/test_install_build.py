@@ -1,4 +1,4 @@
-"""A test for manager_addondev.install_build - replacing an old shape, not dying on it.
+"""A test for core.addon.install_build - replacing an old shape, not dying on it.
 
 A Linux user's store log ended with the batch refusing to install at all:
 
@@ -175,11 +175,11 @@ def main() -> int:
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
                                errors="replace")
     try:
-        import manager_addondev as dev
+        import core.addon as dev
     except Exception as error:                       # noqa: BLE001 - the app modules are optional
-        print(f"manager_addondev could not be imported here: {error}")
+        print(f"core.addon could not be imported here: {error}")
         return 2
-    print("manager_addondev: install_build replaces the old shape of an id")
+    print("core.addon: install_build replaces the old shape of an id")
     test_flat_blocks_folder(dev)
     test_folder_over_folder(dev)
     test_windows_shapes(dev)

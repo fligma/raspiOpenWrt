@@ -5,7 +5,7 @@ Three of these marks are drawn by the interface at run time when no file is
 beside it - the four tiles any unnamed tab wears, the shell the terminal tab
 wears, the cog the pinned Settings tab wears - and this writes those same
 drawings out as files, so what ships and what stands in for it cannot disagree:
-the painters come out of :mod:`manager_widgets` itself, in the 32-unit space the
+the painters come out of :mod:`core.ui` itself, in the 32-unit space the
 bar paints them into. The fourth is the store's own default - the tile an addon
 with no picture of its own is shown with - drawn here in the program's colours
 because no run-time code has any need to draw it.
@@ -157,7 +157,7 @@ def draw_packages(size: int = SIDE) -> QImage:
 def draw_interface_mark(paint: Any, size: int = 128) -> QImage:
     """One of the bar's own paintings, written out as a file of ``size`` a side.
 
-    The painter is the very function ``manager_widgets`` falls back to when no
+    The painter is the very function ``core.ui`` falls back to when no
     asset is beside it, called in the 32-unit space it was written for and scaled
     up from there - so the shipped picture and the stand-in are one drawing seen
     at two sizes rather than two drawings that have to be kept alike. The colours
@@ -186,15 +186,15 @@ def _interface_targets(size: int) -> list:
     """
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    import manager_widgets
+    import core.ui
 
     return [
         (ROOT / "assets" / "defaulttabicon.png",
-         lambda: draw_interface_mark(manager_widgets.paint_default_tab, size)),
+         lambda: draw_interface_mark(core.ui.paint_default_tab, size)),
         (ROOT / "assets" / "terminalicon.png",
-         lambda: draw_interface_mark(manager_widgets.paint_terminal_tab, size)),
+         lambda: draw_interface_mark(core.ui.paint_terminal_tab, size)),
         (ROOT / "assets" / "settingsicon.png",
-         lambda: draw_interface_mark(manager_widgets.paint_settings_tab, size)),
+         lambda: draw_interface_mark(core.ui.paint_settings_tab, size)),
     ]
 
 

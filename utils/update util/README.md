@@ -17,14 +17,14 @@ On Windows use `;` between the parts of every `--add-data` pair
 `secretstorage` and `jeepney` are the Linux credential-store backends that
 `keyring` imports lazily, and a build fails on a hidden import it cannot find.
 `--add-data="assets:assets"` keeps the folder name, which is what
-`manager_const.ASSETS_DIR` expects, so the icons are found in the unpacked
+`core.const.ASSETS_DIR` expects, so the icons are found in the unpacked
 one-file build exactly as they are in a source checkout.
 `--add-data="_addon_bundle:addons"` does the same for the addons that ship with
 the program: the folder is staged by the workflow out of `addons` and lands
-inside the archive under the name `manager_const.BUILTIN_ADDONS_DIR` reads.
+inside the archive under the name `core.const.BUILTIN_ADDONS_DIR` reads.
 `--add-data="_addon_harness:harness"` packs a plain copy of `addon_common.py`
 and `addon_client.py` - the two modules an addon imports to reach the app -
-where `manager_const.HARNESS_DIR` points at it. They have to lie on disk: the
+where `core.const.HARNESS_DIR` points at it. They have to lie on disk: the
 Python that compiles or tests an addon is a process of its own, outside this
 archive, and cannot read what is packed inside it. A program built before that
 copy existed fetches the two files from the repository the addons come from, so
@@ -118,8 +118,8 @@ Every app module is imported statically at the top of its user, which is what
 lets PyInstaller collect them. Commit a new module with the rest of
 `utils/update util`, or the build fails on the missing import. The two
 third-party libraries with real import weight behind them are the exception,
-and they are read on use rather than on the way up: `manager_net` brings in
-paramiko inside the one call that opens an SSH connection, and `manager_gui`
+and they are read on use rather than on the way up: `core.net` brings in
+paramiko inside the one call that opens an SSH connection, and `core.window`
 brings in keyring inside the three calls that touch the credential store -
 together near a second of boot time that the window no longer pays before it
 appears, and paid anyway the moment a connection is asked for (auto-connect
@@ -164,11 +164,11 @@ tab with neither wears `defaulttabicon.png`. The files themselves are written by
 two tools rather than edited in a bitmap, so either can be remade bigger or
 nudged in one run: `tools/make_addon_icons.py` draws each addon's out of its
 `TAB_ICON`, and `tools/make_store_icons.py` the program's own out of the painters
-in `manager_widgets`. Both take `--force` to rewrite a file that is already there
+in `core.ui`. Both take `--force` to rewrite a file that is already there
 and `--check` to name what is missing, and the workflow runs both checks, so a
 picture that was never made stops the build instead of quietly never arriving.
 
-Nothing hard-codes the folder: `manager_const.find_asset(name)` looks in `assets`
+Nothing hard-codes the folder: `core.const.find_asset(name)` looks in `assets`
 beside the resources, then the old top-level location, then beside the
 executable, so an existing `icon.png` next to the `.exe` still overrides the
 built-in one. Add a new image to `assets/`, ask for it with `find_asset`, and the
@@ -177,37 +177,34 @@ the bundle). An addon reaches the same folder through `api.paths.assets`.
 
 ## Modules
 
-Fifteen files, each holding one area of the app, and a sixteenth holding the look:
+Ten files hold the app: one is the entry point, three are the contract an addon
+imports and keep their names because a compiled addon reads them by name, and
+the six that make the window itself live in the `core/` package, one per layer.
 
 | Module | Holds |
 | --- | --- |
 | `berry_manager.py` | Entry point: Qt application, window icon, startup |
-| `manager_gui.py` | `BerryManager` - menu, tab shell, connection panel, Settings tab, profiles and credentials, dialog-driven menu actions, log, shutdown |
-| `manager_widgets.py` | Reusable pieces: `RightPinnedTabBar` and `RightPinnedTabWidget` (the main bar, its pinned run and its own measuring), `ToggleSwitch`, `ToggleGroup`, `CollapseGroup`, `TabTransportDots`, `TabCloseButton`, the shared file tree and the popup dialogs |
-| `manager_browser.py` | Embedded web tabs and the HTTPS certificate switch |
-| `manager_files.py` | The app's one main connection - the Connect/Disconnect pair, the `main_connected` flag, both status dots and the connected/disconnected events (Berry owns the file views) |
-| `manager_terminal.py` | SSH tab - wiring of the terminal, quick commands, reboot watch |
-| `manager_term.py` | `TerminalScreen` - the xterm-style emulator the SSH tab shows: escape-sequence parser, cell grid, key encoding |
-| `manager_net.py` | `SharedConnection` - the app's one SSH session with its SFTP channel and the shell channels opened on it - plus path safety and the background worker threads |
-| `manager_config.py` | Reading, normalising and writing `config.json` |
-| `manager_addons.py` | The addon runtime - discovery, loading, enable/disable, events, the Settings pages with each addon's config panel, the executable-addon bridge and its callback tokens |
-| `manager_addondev.py` | The Addon Dev tab - details, compile, test script, docs, log and processes; shown by a Settings switch and read-only for the addons that ship inside the program |
 | `addon_api.py` | The `api` object every addon receives and the declarative widget builder; the plain helpers are re-exported from `addon_common` |
-| `addon_common.py` | The Qt-free half of the contract: errors, JSON results, the config and build-mark files. Imported by an addon, by a test and by the app |
+| `addon_common.py` | The Qt-free half of the contract: errors, JSON results, the config and build-mark files. Imported by an addon, by a test and by the app; reads only `core.const` of the app's own modules |
 | `addon_client.py` | The addon side of the pipe - the `api` a process addon uses, `serve()` for its own process, and the recording stub a test runs against |
-| `manager_theme.py` | The look of the window, Qt-free: reading, checking, writing and rendering the `themes/<name>.theme` files, and the templates a new one is begun from |
-| `manager_const.py` | Paths, defaults, the colour tokens and tab knobs a theme is made of, and the app stylesheet built from them |
+| `core/const.py` | Paths, defaults, the colour tokens and tab knobs a theme is made of, and the app stylesheet built from them. Carries no Qt at all, which is what lets `addon_common` read it |
+| `core/ui.py` | The look of the window, read from the `themes/<name>.theme` files - reading, checking, writing and rendering them, and the templates a new one is begun from; the reading, normalising and writing of `config.json`; the reusable pieces - `RightPinnedTabBar` and `RightPinnedTabWidget` (the main bar, its pinned run and its own measuring), `ToggleSwitch`, `ToggleGroup`, `CollapseGroup`, `TabTransportDots`, `TabCloseButton`, the shared file tree and the popup dialogs; and the startup splash card |
+| `core/net.py` | `SharedConnection` - the app's one SSH session with its SFTP channel and the shell channels opened on it - plus path safety and the background worker threads, and `TerminalScreen`, the xterm-style emulator the SSH tab shows (escape-sequence parser, cell grid, key encoding) |
+| `core/views.py` | The three device tabs: `BrowserMixin` (embedded web tabs and the HTTPS certificate switch), `MainConnectionMixin` (the app's one main connection - the Connect/Disconnect pair, the `main_connected` flag, both status dots and the connected/disconnected events, Berry owning the file views) and `TerminalMixin` (wiring of the terminal, quick commands, reboot watch) |
+| `core/addon.py` | The addon runtime - discovery, loading, enable/disable, events, the Settings pages with each addon's config panel, the executable-addon bridge and its callback tokens - and the Addon Dev tab, the templates, the build, the install and the metadata reader |
+| `core/window.py` | `BerryManager` - menu, tab shell, connection panel, Settings tab, profiles and credentials, dialog-driven menu actions, log, shutdown |
 
 The three device tabs are mixins (`BrowserMixin`, `MainConnectionMixin`,
 `TerminalMixin`) that `BerryManager` inherits alongside `QMainWindow`, so the
-code of each tab stays in its own file while the window keeps the shared state.
-What the window itself owns - the menu, the Settings tab, the profiles and the
-actions that open a dialog - is in `manager_gui.py`.
+code of each tab stays in its own half of `core/views.py` while the window keeps
+the shared state and never has to be imported by it - the tabs name it only for
+the type checker. What the window itself owns - the menu, the Settings tab, the
+profiles and the actions that open a dialog - is in `core/window.py`.
 
 ## Configuration file
 
 The manager keeps everything it writes in one `config` folder beside the script
-(`manager_const.CONFIG_DIR`): `config.json` - the profile index - one
+(`core.const.CONFIG_DIR`): `config.json` - the profile index - one
 `{profile}.json` holding each profile's complete settings,
 `command_history.json`, `berry_manager.log` and the shared addon build record
 `config/_build.json`. The folder is created on the way up, and a loose file
@@ -394,12 +391,12 @@ The pages of the Settings bar, and what each holds:
 
 ### The tab bar
 
-The window is titled `Berry Manager V` plus `manager_const.APP_VERSION`: the
+The window is titled `Berry Manager V` plus `core.const.APP_VERSION`: the
 version is said in the title bar as well as in Help > About, so a screenshot and a
 bug report name the copy they came from. That one value is also what
 `api.session.version()` answers with and what the release job tags, so a build
 never disagrees with itself about which version it is. The box also links that
-number to the release built from it - `manager_const.PROJECT_RELEASE_URL` with
+number to the release built from it - `core.const.PROJECT_RELEASE_URL` with
 `UPDATE_TAG_PREFIX` in front of the version, which is the tag the workflow
 pushes, so 1.6.4 opens `.../releases/tag/berry1.6.4` - making the About box a
 door to the build it names rather than a caption about it.
@@ -411,7 +408,7 @@ tab that asked to be pinned beside it - detached from the movable row instead of
 drifting at its end. Those tabs are window furniture: never dragged into the
 order, never written to `tab_order`, keeping their place while the tabs beside them
 come and go. Settings wears no caption, only the gear drawn for it
-(`manager_widgets.settings_tab_icon`), and an addon's tab does the same when it
+(`core.ui.settings_tab_icon`), and an addon's tab does the same when it
 asks to be icon-only - the store's, the manager updater's and the certificate
 manager's all do (see
 [Tabs an addon owns](#tabs-an-addon-owns)). A tab that shows no name has not lost
@@ -433,7 +430,7 @@ for a bar that stopped having that width several drags ago.
 ### Themes: the look of the window
 
 The window is drawn from one file: `themes/<name>.theme`, a small JSON object, and
-`manager_theme.py` is the whole of reading, checking, writing and rendering those
+`core/ui.py` is the whole of reading, checking, writing and rendering those
 files. It holds no Qt at all, which is why the app and an addon running as its own
 process see the same look. The folder is made the first time the program runs, with
 `default.theme` written into it - the shipped look spelled out, so there is always
@@ -445,7 +442,7 @@ A theme says six things. `name`, `author` and `blurb` are for people, and are th
 words the list shows. `colors`, `tabs` and `styles` are what the window is built
 from, and anything a file leaves out is taken from the shipped look, so two colours
 in a file is a complete theme. `colors` names the tokens of
-`manager_const.THEME_COLORS` - surfaces, lines, words, accents, state - grouped for
+`core.const.THEME_COLORS` - surfaces, lines, words, accents, state - grouped for
 editors by `THEME_COLOR_GROUPS`; `tabs` holds the thirteen values of `THEME_TABS`,
 which are the shape of the tab bar: `icon_px`, `radius_px`, the paddings, gaps and
 underline, the widths a tab may not go under, and the two switches `captions` and
@@ -571,7 +568,7 @@ is applied when the window opens; nothing needs a restart.
 | `ssh_enabled` | App-wide SSH gate and SSH tab visibility: off, the terminal tab is gone and addons are refused SSH work, whatever their own switch says |
 | `addon_dev_enabled` | Show the Addon Dev tab and its Tools menu entry |
 | `system_notifications` | Allow notices in the system's notification area - an addon's `api.ui.popup` and this program's own news, such as an update being available. Off, those words reach the status line and the log only |
-| `splash_enabled` | Show the startup splash while the window is built - the frameless, themed card with the logo, the boot step being loaded and a percentage (see `manager_splash`). Off, the program opens with nothing on screen until the window appears |
+| `splash_enabled` | Show the startup splash while the window is built - the frameless, themed card with the logo, the boot step being loaded and a percentage (see `core.ui`). Off, the program opens with nothing on screen until the window appears |
 | `reboot_wait_seconds` | Downtime allowed for a reboot before the first reconnect attempt (0-600) |
 | `reboot_retry_interval` | Seconds between reconnect attempts until the device answers (1-300) |
 | `reboot_auto_watch` | Offer to watch for the device when a reboot command is sent |
@@ -1065,7 +1062,7 @@ A tab that never names a mark is not left bare either: it wears the program's
 default tab picture (`assets/defaulttabicon.png`), the SSH tab wears
 `assets/terminalicon.png` and the pinned Settings tab wears
 `assets/settingsicon.png` - each of the three falling back on the same drawing
-in `manager_widgets` when the file is absent, so the shipped picture and the
+in `core.ui` when the file is absent, so the shipped picture and the
 painted one can never drift apart. Every tab mark is drawn larger than the bar
 measures it at, so the pictures read clearly without the tabs growing.
 
@@ -1429,7 +1426,7 @@ and a build is stopped when one of those links names something the pane has not
 (`tools/check_guide_links.py`), while a link to this README opens the local copy
 when there is one and the published page when there is not. The whole thing is
 generated from
-`manager_addondev.py` and `addon_api.py`, so the day the API changes is the day the
+`core/addon.py` and `addon_api.py`, so the day the API changes is the day the
 documentation changes with it.
 
 ### The Berry addon store
@@ -1565,7 +1562,7 @@ two happened, naming the folder it left behind when it left one. A reinstall
 after a delete that kept the folder therefore comes home to the settings it had.
 
 That manifest is also why an install is never filed among the bundled addons:
-`manager_const.SHIPPED_ADDON_IDS` names the only five that came inside the
+`core.const.SHIPPED_ADDON_IDS` names the only five that came inside the
 program, and anything else is treated as the user's own.
 
 Where the addons come from is a list rather than one repository, and **Sources...**
@@ -1936,7 +1933,7 @@ entry, and keeps the program itself up to date. It reads this repository's
 tags off GitHub's API, takes the ones whose names are the prefix `berry` plus
 a version - `berry1.6.0` is version 1.6.0, anything else the tags name is
 ignored - and compares the newest against the version this copy carries. That
-version has exactly one source now, `manager_const.APP_VERSION`: the About
+version has exactly one source now, `core.const.APP_VERSION`: the About
 dialog shows it, `api.session.version()` answers with it, and the update
 check compares against it, so one line changes per release. A repository with
 no `berry` tag yet - the state before the first release is ever published -
@@ -2168,7 +2165,7 @@ app reads that copy as a set of *shipped* addons:
   `_addon_bundle`, minus any `__pycache__` or tests folder inside one, and
   hands it to PyInstaller as `--add-data="_addon_bundle:addons"`,
   so the files arrive in the archive that is unpacked when the program starts.
-  `manager_const.BUILTIN_ADDONS_DIR` is where it looks, and
+  `core.const.BUILTIN_ADDONS_DIR` is where it looks, and
   `HAS_BUILTIN_ADDONS` says whether a build has such a folder at all - in a
   source checkout the two folders are the same one directory.
 - A shipped addon is an addon in every other respect: same manifest, same `api`,
@@ -2180,7 +2177,7 @@ app reads that copy as a set of *shipped* addons:
   choice stays per profile in `addons -> <id> -> enabled`. Its own settings are
   still written beside the `.exe`, in the writable `addons/_data/<id>/config.json`, so
   a shipped addon is configured per installation exactly like a dropped-in one.
-- "Shipped" is decided by a stable list, `manager_const.SHIPPED_ADDON_IDS`
+- "Shipped" is decided by a stable list, `core.const.SHIPPED_ADDON_IDS`
   (`berry`, `addon_store`, `manager_update`, `theme_manager`),
   on top of the
   `builtin` flag, so a
@@ -2243,12 +2240,12 @@ build, but everything the *user's* side of the program wrote about it stays:
 
 A new version that simply drops the addon would leave all four behind, and the
 user would meet a stale row in Settings and a folder nothing reads. So a retired
-addon is named rather than forgotten. `manager_const.RETIRED_SHIPPED_ADDON_IDS`
+addon is named rather than forgotten. `core.const.RETIRED_SHIPPED_ADDON_IDS`
 lists the ids that used to ship, and `ADDON_ID_TRANSLATIONS` says which addon
 replaces each one - `web_installer` is answered by the store's `berry_web`. Two
 things read those tables:
 
-- `manager_addons.prune_retired_addons(log)` runs once at startup, from
+- `core.addon.prune_retired_addons(log)` runs once at startup, from
   `berry_manager.py` after the addon manager is built and before the tabs are
   populated, so it lands on the first launch of a new version rather than on
   somebody hunting for a cleanup. It removes the leftover program files and the
@@ -2258,7 +2255,7 @@ things read those tables:
   successor's folder already exists the user has run the new addon, and the old
   folder goes. It returns the lines it acted on, which are logged as they are
   found, and touches nothing whose id it was not given.
-- `manager_config._normalize_addons` folds the profile's record the same way as
+- `core.ui._normalize_addons` folds the profile's record the same way as
   it is read: the retired id's switch and transports move onto the successor,
   the successor's own record wins wherever both exist, and the retired key goes.
   `_translate_remote_root` follows it, rewriting only the folder that was the

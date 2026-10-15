@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A test for the SSH terminal widget, manager_term.py.
+"""A test for the SSH terminal widget, core/net.py.
 
 The screen is a small xterm emulator the shell drives byte by byte, so the
 things that went wrong in 1.6.7 are exactly the things no reading of the source
@@ -218,11 +218,11 @@ def main() -> int:
         return 2
     app = QApplication.instance() or QApplication([])
     try:
-        import manager_term as term
+        import core.net as term
     except Exception as error:                       # noqa: BLE001
-        print(f"manager_term could not be imported: {error}")
+        print(f"core.net could not be imported: {error}")
         return 2
-    print("manager_term: the SSH terminal screen")
+    print("core.net: the SSH terminal screen")
     look(f"palette of {len(term.PALETTE16)} colours, ground {term.DEFAULT_BG}")
     test_cursor_returns(term)
     test_scrollbar_reserved(term)

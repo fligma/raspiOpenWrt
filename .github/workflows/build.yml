@@ -366,7 +366,7 @@ jobs:
         # the archive, and read addon_client and addon_common off disk: a built
         # program that kept them only inside itself could never build an addon
         # that talks to it. So a plain copy travels with the build, and the
-        # program points at it as manager_const.HARNESS_DIR. The app's other
+        # program points at it as core.const.HARNESS_DIR. The app's other
         # modules go along for the same reason: a published addon test imports
         # addon_api to build real widgets, and without it the test says nothing
         # either way - the store notes that and compiles anyway.
@@ -379,6 +379,11 @@ jobs:
           }
         }
         Copy-Item -Path *.py -Destination $harness -Force
+        # ... and the package the loose files now belong to. A copy of the root's
+        # .py files alone would leave every ``core.*`` import of the harness out
+        # of the archive, and a published addon test that reads the window's own
+        # modules would fail on a folder that was never packed.
+        Copy-Item -Recurse core -Destination $harness -Force
         Write-Output "modules packed for a build and a test to read:"
         Get-ChildItem -Path $harness -Recurse -Name
 
@@ -472,13 +477,13 @@ jobs:
       id: pack
       run: |
         # The version is read from the one place it lives, so a release is made
-        # by editing manager_const.APP_VERSION and pushing: no tag to type,
+        # by editing core.const.APP_VERSION and pushing: no tag to type,
         # no button to press. Each archive is named for the system it holds -
         # the update addon tells the two apart by exactly that word.
         version=$(sed -n 's/^APP_VERSION *= *"\([^"]*\)".*/\1/p' \
-                  'utils/update util/manager_const.py')
+                  'utils/update util/core/const.py')
         if [ -z "$version" ]; then
-          echo "APP_VERSION could not be read from manager_const.py"; exit 1
+          echo "APP_VERSION could not be read from core/const.py"; exit 1
         fi
         echo "version=$version" >> "$GITHUB_OUTPUT"
         echo "tag=berry$version" >> "$GITHUB_OUTPUT"

@@ -3,7 +3,7 @@
 
 An executable addon - a compiled ``.py``, a Go binary, a shell script, anything
 - talks to Berry Manager over its stdin and stdout. The app's side of that
-conversation is ``ProcessBridge`` in :mod:`manager_addons`. This module is the
+conversation is ``ProcessBridge`` in :mod:`core.addon`. This module is the
 other side, written once so a Python addon needs no code change to run as its
 own program:
 
@@ -725,10 +725,10 @@ def serve(target: str | Path, addon_id: str = "") -> int:
 
 # --- Testing one addon without the app ---
 
-def _stub_rename(name: str, target: str, manager_theme: Any) -> str:
+def _stub_rename(name: str, target: str, theme: Any) -> str:
     """``theme.rename`` as the app does it: copy first, then drop the old file."""
-    fresh = manager_theme.copy(name, target)
-    manager_theme.remove(name)
+    fresh = theme.copy(name, target)
+    theme.remove(name)
     return fresh
 
 
@@ -826,7 +826,7 @@ class StubAPI:
     # --- the look, answered from the real files where they can be read ---
 
     def theme_answer(self, method: str, ask: Callable[[str, Any], Any]) -> Any:
-        """A ``theme.*`` call, answered by :mod:`manager_theme` if it is importable.
+        """A ``theme.*`` call, answered by :mod:`core.ui` if it is importable.
 
         The module needs no window and no Qt, so a test sees the same palettes,
         knobs and files the app would answer with - in the folder the
@@ -836,54 +836,54 @@ class StubAPI:
         reply without touching a file.
         """
         try:
-            import manager_theme
+            from core import ui as theme
         except ImportError:
-            manager_theme = None
+            theme = None
         wanted = ask("name", "")
-        if manager_theme is not None:
+        if theme is not None:
             answers = {
-                "theme.name": lambda: manager_theme.current_name(),
-                "theme.names": manager_theme.names,
-                "theme.exists": lambda: manager_theme.exists(wanted),
-                "theme.folder": lambda: str(manager_theme.folder()),
-                "theme.read": lambda: manager_theme.theme(wanted or None),
-                "theme.raw": lambda: manager_theme.raw(wanted),
-                "theme.colors": lambda: manager_theme.colors(wanted or None),
-                "theme.color": lambda: manager_theme.color(
+                "theme.name": lambda: theme.current_name(),
+                "theme.names": theme.names,
+                "theme.exists": lambda: theme.exists(wanted),
+                "theme.folder": lambda: str(theme.folder()),
+                "theme.read": lambda: theme.theme(wanted or None),
+                "theme.raw": lambda: theme.raw(wanted),
+                "theme.colors": lambda: theme.colors(wanted or None),
+                "theme.color": lambda: theme.color(
                     ask("token", ""), wanted or None, ask("default", "")),
-                "theme.tabs": lambda: manager_theme.tabs(wanted or None),
-                "theme.metric": lambda: manager_theme.tab_metric(
+                "theme.tabs": lambda: theme.tabs(wanted or None),
+                "theme.metric": lambda: theme.tab_metric(
                     ask("knob", ""), wanted or None),
-                "theme.icon_px": manager_theme.icon_px,
-                "theme.chrome_px": manager_theme.chrome_px,
-                "theme.shows_captions": manager_theme.shows_captions,
-                "theme.shows_dots": manager_theme.shows_dots,
-                "theme.stylesheet": lambda: manager_theme.stylesheet(wanted or None),
-                "theme.sheet_of": lambda: manager_theme.sheet_of(ask("theme", {})),
-                "theme.validate": lambda: manager_theme.validate(ask("theme", {})),
+                "theme.icon_px": theme.icon_px,
+                "theme.chrome_px": theme.chrome_px,
+                "theme.shows_captions": theme.shows_captions,
+                "theme.shows_dots": theme.shows_dots,
+                "theme.stylesheet": lambda: theme.stylesheet(wanted or None),
+                "theme.sheet_of": lambda: theme.sheet_of(ask("theme", {})),
+                "theme.validate": lambda: theme.validate(ask("theme", {})),
                 "theme.groups": lambda: [
                     {"title": title,
                      "tokens": [{"name": token,
-                                 "color": manager_theme.color(token),
-                                 "hint": manager_theme.token_hint(token)}
+                                 "color": theme.color(token),
+                                 "hint": theme.token_hint(token)}
                                  for token in tokens]}
-                    for title, tokens in manager_theme.groups()],
+                    for title, tokens in theme.groups()],
                 "theme.token_knobs": lambda: [
                     {"name": knob, "value": value, "kind": "switch"
                      if isinstance(value, bool) else "pixels", "hint": hint}
-                    for knob, value, hint in manager_theme.knobs()],
+                    for knob, value, hint in theme.knobs()],
                 "theme.reference": _stub_reference,
-                "theme.templates": manager_theme.templates,
-                "theme.template_text": lambda: manager_theme.template_text(wanted),
-                "theme.use": lambda: manager_theme.use(wanted),
-                "theme.save": lambda: str(manager_theme.write(
+                "theme.templates": theme.templates,
+                "theme.template_text": lambda: theme.template_text(wanted),
+                "theme.use": lambda: theme.use(wanted),
+                "theme.save": lambda: str(theme.write(
                     ask("name", ""), ask("theme", {}) or {},
                     force=bool(ask("force", False))).stem),
-                "theme.copy": lambda: manager_theme.copy(ask("name", ""),
-                                                         ask("target", "")),
+                "theme.copy": lambda: theme.copy(ask("name", ""),
+                                                  ask("target", "")),
                 "theme.rename": lambda: _stub_rename(
-                    ask("name", ""), ask("target", ""), manager_theme),
-                "theme.remove": lambda: manager_theme.remove(wanted),
+                    ask("name", ""), ask("target", ""), theme),
+                "theme.remove": lambda: theme.remove(wanted),
             }
             answer = answers.get(method)
             if answer is not None:

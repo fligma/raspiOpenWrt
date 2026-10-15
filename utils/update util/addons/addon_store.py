@@ -176,11 +176,12 @@ HARNESS_FILES = ("addon_common.py", "addon_client.py")
 
 #: The app's other modules, by the name a test imports them under. A published
 #: test reaches for the Qt half of them to build real widgets, and only a
-#: checkout, or a build that packed its source, can answer for these.
-_APP = ("addon_api", "berry_manager", "manager_addondev", "manager_addons",
-        "manager_browser", "manager_config", "manager_const", "manager_files",
-        "manager_gui", "manager_net", "manager_term", "manager_terminal",
-        "manager_widgets")
+#: checkout, or a build that packed its source, can answer for these. The
+#: package these names start with needs no file fetched of its own: a folder of
+#: modules beside the harness is a package to Python already, and this one's
+#: ``__init__`` holds nothing but words about the layers inside it.
+_APP = ("addon_api", "berry_manager", "core.addon", "core.const", "core.net",
+        "core.ui", "core.views", "core.window")
 
 #: A test that cannot import one of these got nowhere, and that is this
 #: machine's doing rather than the addon's: the harness above, the app's own
@@ -1015,19 +1016,21 @@ def _widen_harness(values: dict) -> bool:
 
     A published test imports the app's Qt half to build real widgets, and the two
     files an addon needs to talk to the app are only its Qt-free half. What the
-    repository does not have is said and left out: a harness of one file more is
-    still worth running the test over.
+    repository does not have is said and left out: a harness of one module more is
+    still worth running the test over. A dotted module name is the file under the
+    folder of the package it belongs to, which is made on the way there.
     """
     if job is None or job.get("harness") is None:
         return False
     folder = Path(str(job["harness"]))
     got = False
     for name in _APP:
-        target = folder / f"{name}.py"
+        relative = name.replace(".", "/") + ".py"
+        target = folder / relative
         if target.is_file():
             continue
-        if _fetch_file(values, target.name, target, app_folder(values)):
-            note(f"{target.name} was not there to fetch")
+        if _fetch_file(values, relative, target, app_folder(values)):
+            note(f"{relative} was not there to fetch")
         else:
             got = True
     return got
@@ -1886,9 +1889,9 @@ def edit_sources(_checked: bool = False) -> None:
 
 def _dev() -> Any:
     """The Addon Dev machinery, imported only when a real build is asked for."""
-    import manager_addondev
+    import core.addon
 
-    return manager_addondev
+    return core.addon
 
 
 def _point_job_at(entry: dict | None) -> None:
@@ -2291,7 +2294,7 @@ def _test_said_nothing(id_value: str, source: Path,
         _finish("the addon's own test did not pass, so it was not compiled",
                 bad=True)
         return
-    if (missing in _APP and test_path is not None
+    if (_is_app(missing) and test_path is not None
             and not job.get("widened") and _harness_was_fetched()):
         note(f"the test wants {missing}, which a fetched harness does not hold: "
              "asking for the app's other modules and running it again")
@@ -2306,6 +2309,17 @@ def _test_said_nothing(id_value: str, source: Path,
     _build(id_value, source)
 
 
+def _is_app(name: str) -> bool:
+    """Whether a module name is the app's own - a module of it, or a package.
+
+    ``core.ui`` is a module here and ``core`` is the folder it sits in, and a
+    run that could not reach either one stopped on the app rather than on the
+    addon, which is what the widening below is for.
+    """
+    return name in _APP or any(whole == name or whole.startswith(name + ".")
+                               for whole in _APP)
+
+
 def _machine_missing() -> str:
     """The module a run could not import, when its own tail says it was one of
     the test's rather than the addon's; nothing when it says something else.
@@ -2313,22 +2327,33 @@ def _machine_missing() -> str:
     What counts as the test's own is the app and its dependencies: the names
     above, and every module the harness folder holds - a checkout's answer is
     the whole app, a fetched folder is only the two files an addon imports.
+    A whole dotted name is answered with when the app holds it, since that is
+    the file a widening has to fetch; otherwise the package or third-party name
+    it starts with is the one that is really missing.
     """
     if job is None:
         return ""
-    own = set(_MACHINE) | set(_APP)
+    packages = {whole.split(".")[0] for whole in _APP}
+    own = set(_MACHINE) | set(_APP) | packages
     harness = job.get("harness")
     if harness is not None:
         try:
-            own |= {path.stem for path in Path(harness).glob("*.py")}
+            folder = Path(str(harness))
+            own |= {path.stem for path in folder.glob("*.py")}
+            for package in packages:
+                own |= {f"{package}.{path.stem}"
+                        for path in (folder / package).glob("*.py")}
         except OSError as error:                  # a folder that cannot be read
             note(f"the harness folder could not be listed: {error}")
     for line in reversed(list(job.get("lines") or [])):
         found = _MISSING.search(str(line))
         if not found:
             continue
-        name = found.group(1).split(".")[0]
-        return name if name in own else ""
+        whole = found.group(1)
+        for name in (whole, whole.split(".")[0]):
+            if name in own:
+                return name
+        return ""
     return ""
 
 

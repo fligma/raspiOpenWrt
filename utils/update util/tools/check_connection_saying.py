@@ -31,7 +31,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")     # widgets, no window
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import manager_addons                                          # noqa: E402
+import core.addon                                  # noqa: E402
 
 CATALOG = ROOT / "addon.store" / "index.json"
 
@@ -166,7 +166,7 @@ def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
                                errors="replace")
-    manager = manager_addons
+    manager = core.addon
     look_rows(manager)
     look_manifests(manager)
     look_catalog(manager)

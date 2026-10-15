@@ -502,10 +502,10 @@ def test_the_theme() -> None:
             # lets a folder copied across by hand look like the program rather
             # than like nothing at all. An install overwrites it with the theme
             # actually being worn, so this file only has to agree with the app.
-            import manager_const
+            import core.const
 
             wanted = berry_web.theme_css(
-                {token: str(manager_const.THEME_COLORS.get(token) or "")
+                {token: str(core.const.THEME_COLORS.get(token) or "")
                  for token, _variable in berry_web.THEME_VARS}).strip()
             wrote = committed.read_text(encoding="utf-8",
                                         errors="replace").strip()

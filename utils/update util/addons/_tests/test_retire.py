@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""A test for the retirement of a shipped addon: ``manager_addons.prune_retired_addons``
-and the two places in ``manager_config`` that read the same tables.
+"""A test for the retirement of a shipped addon: ``core.addon.prune_retired_addons``
+and the two places in ``core.ui`` that read the same tables.
 
 ``web_installer`` used to ship inside the program and is now the store's
 ``berry_web``. That leaves three jobs undone on any machine that had it, and this
@@ -49,11 +49,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-import manager_addons                                        # noqa: E402
-import manager_config                                        # noqa: E402
-from manager_const import (ADDON_ID_TRANSLATIONS,             # noqa: E402
-                           DEFAULT_APP_CONFIG, DEFAULT_PROFILE,
-                           RETIRED_SHIPPED_ADDON_IDS, SHIPPED_ADDON_IDS)
+import core.addon                                # noqa: E402
+import core.ui                                   # noqa: E402
+from core.const import (ADDON_ID_TRANSLATIONS,             # noqa: E402
+                        DEFAULT_APP_CONFIG, DEFAULT_PROFILE,
+                        RETIRED_SHIPPED_ADDON_IDS, SHIPPED_ADDON_IDS)
 
 #: The retired name this version introduced, and the addon that took its place.
 RETIRED = "web_installer"
@@ -89,7 +89,7 @@ def build(files: dict) -> Path:
 def sweep(home: Path) -> tuple[list[str], list[str]]:
     """The startup sweep over that install, and what it said as it went."""
     said: list[str] = []
-    lines = manager_addons.prune_retired_addons(
+    lines = core.addon.prune_retired_addons(
         said.append, addons=home / "addons", data=home / "addons" / "_data")
     return list(lines), said
 
@@ -104,7 +104,7 @@ def kept(home: Path, name: str) -> str:
 
 def retired_shapes() -> list[str]:
     """Every file name an install may hold this addon's id under."""
-    suffix = manager_addons.ADDON_EXECUTABLE_SUFFIX
+    suffix = core.addon.ADDON_EXECUTABLE_SUFFIX
     return [f"{RETIRED}.py", f"{RETIRED}{suffix}", f"{RETIRED}.bin",
             f"{RETIRED}.json"]
 
@@ -242,7 +242,7 @@ def test_every_shape() -> None:
     home = build(files)
     try:
         named = [path.name for path in
-                 manager_addons.retired_addon_files(home / "addons", RETIRED)]
+                 core.addon.retired_addon_files(home / "addons", RETIRED)]
         missing = [name for name in shapes if name not in named]
         check(not missing,
               f"the sweep does not look for {missing}; an install writes them "
@@ -264,7 +264,7 @@ def test_every_shape() -> None:
     })
     try:
         named = [path.name for path in
-                 manager_addons.retired_addon_files(folder_home / "addons",
+                 core.addon.retired_addon_files(folder_home / "addons",
                                                     RETIRED)]
         check(RETIRED in named,
               f"a folder install under {RETIRED} is not looked for: {named}")
@@ -297,11 +297,11 @@ def test_an_addon_with_no_heir() -> None:
     print("\n6. a retired name nobody replaced")
     home = build({"addons/_data/old_thing/config.json": "gone by now",
                   "addons/old_thing.py": "# nothing took this over\n"})
-    retired = manager_addons.RETIRED_SHIPPED_ADDON_IDS
-    translated = manager_addons.ADDON_ID_TRANSLATIONS
+    retired = core.addon.RETIRED_SHIPPED_ADDON_IDS
+    translated = core.addon.ADDON_ID_TRANSLATIONS
     try:
-        manager_addons.RETIRED_SHIPPED_ADDON_IDS = ("old_thing",)
-        manager_addons.ADDON_ID_TRANSLATIONS = {}
+        core.addon.RETIRED_SHIPPED_ADDON_IDS = ("old_thing",)
+        core.addon.ADDON_ID_TRANSLATIONS = {}
         said, _logged = sweep(home)
         check(kept(home, "addons/old_thing.py") == "<gone>",
               "a retired addon with no successor kept its source")
@@ -310,8 +310,8 @@ def test_an_addon_with_no_heir() -> None:
         check(any("removed" in line for line in said),
               f"the sweep was silent about deleting them: {said}")
     finally:
-        manager_addons.RETIRED_SHIPPED_ADDON_IDS = retired
-        manager_addons.ADDON_ID_TRANSLATIONS = translated
+        core.addon.RETIRED_SHIPPED_ADDON_IDS = retired
+        core.addon.ADDON_ID_TRANSLATIONS = translated
         shutil.rmtree(home, ignore_errors=True)
 
 
@@ -322,7 +322,7 @@ def test_the_record() -> None:
     only_old = {"addons": {RETIRED: {"enabled": True, "own_connection": False,
                                      "ssh_enabled": True, "sftp_enabled": False,
                                      "settings": {"web_port": 8989}}}}
-    done = manager_config._normalize_addons(json.loads(json.dumps(only_old)))
+    done = core.ui._normalize_addons(json.loads(json.dumps(only_old)))
     record = done["addons"].get(HEIR) or {}
     check(RETIRED not in done["addons"], "the retired id is still in the profile")
     check(bool(record.get("enabled")),
@@ -339,7 +339,7 @@ def test_the_record() -> None:
         HEIR: {"enabled": True, "own_connection": False, "ssh_enabled": True,
                "sftp_enabled": True, "settings": {"repo": "new name"}},
     }}
-    merged = manager_config._normalize_addons(json.loads(json.dumps(both)))["addons"]
+    merged = core.ui._normalize_addons(json.loads(json.dumps(both)))["addons"]
     check(RETIRED not in merged, "both ids are kept when one is the other's old name")
     check(merged[HEIR]["enabled"] and merged[HEIR]["ssh_enabled"],
           "the retired record overruled what the new addon's record says")
@@ -348,7 +348,7 @@ def test_the_record() -> None:
     check(merged[HEIR]["settings"].get("web_port") == 8989,
           f"a value only the old record had was dropped: {merged[HEIR]['settings']}")
 
-    plain = manager_config._normalize_addons({"addons": {
+    plain = core.ui._normalize_addons({"addons": {
         RETIRED: True, "other_addon": {"enabled": True}}})["addons"]
     check(isinstance(plain.get(HEIR), dict) and not plain[HEIR]["enabled"],
           f"a record that is not a record at all did not come across clean: {plain}")
@@ -364,14 +364,14 @@ def test_the_folder() -> None:
           "folder the dashboard is installed into now")
     check(DEFAULT_APP_CONFIG["remote_root"] == DEFAULT_PROFILE["remote_root"],
           "the app default and the profile default name two different folders")
-    move = manager_config._translate_remote_root
+    move = core.ui._translate_remote_root
     check(move("/www_rasconf") == "/www_berry",
           f"the retired default did not follow the addon: {move('/www_rasconf')!r}")
     check(move("/www_rasconf/dash") == "/www_rasconf/dash",
           "a folder inside the old one was rewritten by a rule about the default")
     check(move("/srv/site") == "/srv/site",
           "a path somebody set by hand was moved under the new default")
-    check(manager_config.LEGACY_REMOTE_ROOTS.get("/www_rasconf")
+    check(core.ui.LEGACY_REMOTE_ROOTS.get("/www_rasconf")
           == DEFAULT_PROFILE["remote_root"],
           "the rule and the shipped default disagree about where the dashboard lives")
     check(move(None) == DEFAULT_PROFILE["remote_root"],
@@ -405,7 +405,7 @@ def main() -> int:
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
                                errors="replace")
     print("the retirement of a shipped addon: what an upgrade has to finish")
-    look(f"addons folder of the program itself: {manager_addons.ADDONS_DIR}")
+    look(f"addons folder of the program itself: {core.addon.ADDONS_DIR}")
     try:
         test_the_tables()
         test_the_move()

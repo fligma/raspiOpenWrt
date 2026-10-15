@@ -170,7 +170,7 @@ The namespaces on ``api``
     ``list()``, ``info(id)``, ``send(id, data)`` -> the target's
     ``on_message(sender, data)``.
 
-SPEC FORMAT (for non-Qt addons, see ``manager_addons``)
+SPEC FORMAT (for non-Qt addons, see ``core.addon``)
 ------------------------------------------------------
 A JSON object describing one widget, recursively:
 
@@ -325,18 +325,18 @@ from addon_common import (
     take_config_value,
     write_config_json,
 )
-from manager_config import web_tab_url
-from manager_const import (
+from core.ui import web_tab_url
+from core.const import (
     APP_VERSION,
     LOG_FILE,
     current_zoom,
     scaled_sheet,
     zoom_size,
 )
-from manager_net import (create_ssh_client, exec_remote, remote_join,
-                         safe_relative_path, OwnShellWorker)
-import manager_theme
-from manager_widgets import tab_caption
+from core.net import (create_ssh_client, exec_remote, remote_join,
+                      safe_relative_path, OwnShellWorker)
+import core.ui
+from core.ui import tab_caption
 
 try:  # the web kinds are inert when QtWebEngine is not installed
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -406,9 +406,9 @@ _row_cache: tuple[int, dict[str, QColor]] | None = None
 def row_colours() -> dict[str, QColor]:
     """The table's row shades, from the theme in force; rebuilt when the look moves."""
     global _row_cache
-    revision = manager_theme.revision()
+    revision = core.ui.revision()
     if _row_cache is None or _row_cache[0] != revision:
-        _row_cache = (revision, {key: QColor(manager_theme.color(token, default=""))
+        _row_cache = (revision, {key: QColor(core.ui.color(token, default=""))
                                  for key, token in _ROW_TOKENS.items()})
     return _row_cache[1]
 
@@ -1038,7 +1038,7 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         def open_wheel() -> None:
             picked = ""
             try:
-                from manager_widgets import ColorWheelDialog
+                from core.ui import ColorWheelDialog
 
                 picked = ColorWheelDialog.get_colour(line.text(), line,
                                                      "Choose a colour")
@@ -1147,7 +1147,7 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         # harness can build specs without the terminal module in sight, and an
         # addon that never asks for a shell should not be the reason it fails.
         try:
-            from manager_term import TerminalScreen
+            from core.net import TerminalScreen
         except Exception as error:            # a terminal-less app is still an app
             return QLabel(f"No terminal available here: {error}")
         screen = TerminalScreen()
@@ -1799,12 +1799,12 @@ class SessionAPI:
         return tab_caption(bar, index)
 
     def version(self) -> str:
-        """The program's own version, as ``manager_const.APP_VERSION`` names it."""
+        """The program's own version, as ``core.const.APP_VERSION`` names it."""
         return APP_VERSION
 
     def app_stylesheet(self) -> str:
         """The theme the window is drawn from, already scaled to the interface zoom."""
-        return scaled_sheet(manager_theme.stylesheet())
+        return scaled_sheet(core.ui.stylesheet())
 
     def zoom(self) -> int:
         """The interface density in percent; 100 is as shipped."""
@@ -2496,7 +2496,7 @@ class DeviceAPI:
 
 def _make_dirs(sftp: Any, path: str) -> None:
     """mkdir -p on the device, ignoring the root itself."""
-    from manager_net import make_remote_directories
+    from core.net import make_remote_directories
 
     if path and path != "/":
         make_remote_directories(sftp, path)
@@ -2568,7 +2568,7 @@ class UIAPI:
     def pick_color(self, title: str = "Choose a colour", initial: str = "") -> str:
         """The app's colour wheel; ``#rrggbb`` or ``""`` when nothing was picked."""
         try:
-            from manager_widgets import ColorWheelDialog
+            from core.ui import ColorWheelDialog
 
             return ColorWheelDialog.get_colour(initial, self._win,
                                                self._titled(title))
@@ -3715,28 +3715,28 @@ class PathsAPI:
     @property
     def base(self) -> Path:
         """The folder Berry Manager runs from."""
-        from manager_const import BASE_DIR
+        from core.const import BASE_DIR
 
         return BASE_DIR
 
     @property
     def addons(self) -> Path:
         """The addons folder, where a drop-in file is picked up on the next scan."""
-        from manager_const import ADDONS_DIR
+        from core.const import ADDONS_DIR
 
         return ADDONS_DIR
 
     @property
     def assets(self) -> Path:
         """The pictures shipped inside the program; read-only in spirit."""
-        from manager_const import ASSETS_DIR
+        from core.const import ASSETS_DIR
 
         return ASSETS_DIR
 
     @property
     def themes(self) -> Path:
         """The themes folder beside the program, where every ``.theme`` file lives."""
-        return manager_theme.folder()
+        return core.ui.folder()
 
     @property
     def log(self) -> Path:
@@ -3770,84 +3770,84 @@ class ThemeAPI:
 
     def name(self) -> str:
         """The theme the window is drawn from, by its file's name."""
-        return manager_theme.current_name()
+        return core.ui.current_name()
 
     def names(self) -> list[str]:
         """Every theme on disk, ``default`` first and the rest in order."""
-        return manager_theme.names()
+        return core.ui.names()
 
     def exists(self, name: str) -> bool:
         """Whether a theme of that name has a file behind it."""
-        return manager_theme.exists(str(name))
+        return core.ui.exists(str(name))
 
     def folder(self) -> str:
         """The themes folder, made on the way so it is always there to write in."""
-        return str(manager_theme.folder())
+        return str(core.ui.folder())
 
     def read(self, name: str = "") -> dict:
         """One theme complete - every colour and every knob, the ones in force
         when no name is given - as the dict its file stands for."""
-        return jsonable(manager_theme.theme(name or None))
+        return jsonable(core.ui.theme(name or None))
 
     def raw(self, name: str) -> dict:
         """One theme file exactly as written, with nothing filled in; ``{}`` when
         it is missing or cannot be read."""
-        return jsonable(manager_theme.raw(name))
+        return jsonable(core.ui.raw(name))
 
     def colors(self, name: str = "") -> dict:
         """Every colour token and the hex it currently means."""
-        return manager_theme.colors(name or None)
+        return core.ui.colors(name or None)
 
     def color(self, token: str, name: str = "", default: str = "") -> str:
         """One colour token as a hex; ``default`` when the interface has no such token."""
-        return manager_theme.color(str(token), name or None, default)
+        return core.ui.color(str(token), name or None, default)
 
     def tabs(self, name: str = "") -> dict:
         """Every tab knob and the size it currently means, in pixels at 100% zoom."""
-        return manager_theme.tabs(name or None)
+        return core.ui.tabs(name or None)
 
     def metric(self, knob: str, name: str = "") -> Any:
         """One tab knob by itself; ``None`` when no such knob is drawn."""
-        return manager_theme.tab_metric(str(knob), name or None)
+        return core.ui.tab_metric(str(knob), name or None)
 
     def icon_px(self) -> int:
         """The smallest a tab's picture is drawn, at 100% zoom."""
-        return manager_theme.icon_px()
+        return core.ui.icon_px()
 
     def chrome_px(self) -> int:
         """What a tab spends on itself besides its text, at 100% zoom."""
-        return manager_theme.chrome_px()
+        return core.ui.chrome_px()
 
     def shows_captions(self) -> bool:
         """Whether a tab may show its name at all; off leaves the bar icon-only."""
-        return manager_theme.shows_captions()
+        return core.ui.shows_captions()
 
     def shows_dots(self) -> bool:
         """Whether the SSH/SFTP dots are worn beside a tab's name."""
-        return manager_theme.shows_dots()
+        return core.ui.shows_dots()
 
     def stylesheet(self, name: str = "") -> str:
         """The whole application sheet for one theme, at 100% zoom."""
-        return manager_theme.stylesheet(name or None)
+        return core.ui.stylesheet(name or None)
 
     def sheet_of(self, theme: dict) -> str:
         """The sheet a theme that is still being edited would produce."""
-        return manager_theme.sheet_of(theme)
+        return core.ui.sheet_of(theme)
 
     def validate(self, theme: dict) -> list[str]:
         """What is wrong with a candidate theme, one line each; empty when it is
         usable. Unknown tokens are reported because they will be ignored."""
-        return manager_theme.validate(theme)
+        return core.ui.validate(theme)
 
     def groups(self) -> list[dict]:
         """The colour tokens in the blocks an editor shows them in: ``{title,
         tokens: [{name, color, hint}]}`` for the theme in force."""
         return jsonable([
             {"title": title,
-             "tokens": [{"name": token, "color": manager_theme.color(token),
-                        "hint": manager_theme.token_hint(token)}
+             "tokens": [{"name": token, "color": core.ui.color(token),
+                        "hint": core.ui.token_hint(token)}
                         for token in tokens]}
-            for title, tokens in manager_theme.groups()])
+            for title, tokens in core.ui.groups()])
 
     def token_knobs(self) -> list[dict]:
         """Every tab knob the bar answers to, with what it means and the size it
@@ -3856,10 +3856,10 @@ class ThemeAPI:
         ``kind`` says whether the knob is a number of pixels or a switch, so an
         editor can put the right control beside it without being told.
         """
-        from manager_const import THEME_TABS
-        from manager_theme import TAB_HINTS
+        from core.const import THEME_TABS
+        from core.ui import TAB_HINTS
 
-        live = manager_theme.tabs()
+        live = core.ui.tabs()
         return jsonable([
             {"name": knob, "value": live.get(knob), "kind": "switch"
              if isinstance(THEME_TABS[knob], bool) else "pixels",
@@ -3868,11 +3868,11 @@ class ThemeAPI:
 
     def templates(self) -> list[dict]:
         """The looks a new theme may be begun from: ``{name, blurb, theme}``."""
-        return jsonable(manager_theme.templates())
+        return jsonable(core.ui.templates())
 
     def template_text(self, name: str) -> str:
         """One template as the text of a ``.theme`` file, ready for an editor."""
-        return manager_theme.template_text(str(name))
+        return core.ui.template_text(str(name))
 
     def use(self, name: str) -> str:
         """Draw the window from one theme and keep the choice for this profile;
@@ -3882,7 +3882,7 @@ class ThemeAPI:
         apply = getattr(win, "apply_theme", None)
         if callable(apply):
             return str(apply(str(name)))
-        return manager_theme.use(str(name))
+        return core.ui.use(str(name))
 
     def open_appearance(self) -> bool:
         """Show the app's Settings > Appearance page, where the theme in force
@@ -3904,23 +3904,23 @@ class ThemeAPI:
         Saving the look already in force redraws the window from it, which is
         what an editor wants: the change shows as soon as the file lands.
         """
-        wanted = manager_theme.safe_name(name) or manager_theme.current_name()
-        manager_theme.write(wanted, theme, force=bool(force))
-        if manager_theme.current_name() == wanted:
+        wanted = core.ui.safe_name(name) or core.ui.current_name()
+        core.ui.write(wanted, theme, force=bool(force))
+        if core.ui.current_name() == wanted:
             self._repaint(wanted)
         return wanted
 
     def copy(self, name: str, target: str) -> str:
         """Duplicate a theme under a new name; the name, or a refusal when that
         name is already taken."""
-        return manager_theme.copy(str(name), str(target))
+        return core.ui.copy(str(name), str(target))
 
     def remove(self, name: str) -> bool:
         """Delete one theme file; ``False`` for the shipped default, which stays."""
         wanted = str(name)
-        was = manager_theme.current_name()
-        gone = manager_theme.remove(wanted)
-        if gone and was == manager_theme.current_name() and wanted != was:
+        was = core.ui.current_name()
+        gone = core.ui.remove(wanted)
+        if gone and was == core.ui.current_name() and wanted != was:
             self._repaint(was)
         return bool(gone)
 
@@ -3965,7 +3965,7 @@ class ThemeAPI:
         """
         fresh = self.copy(name, target)
         self.remove(name)
-        if manager_theme.current_name() == str(name):
+        if core.ui.current_name() == str(name):
             self.use(fresh)
         return fresh
 
@@ -3999,7 +3999,7 @@ class AddonAPI:
     """The object every addon receives: ``def init(api)``."""
 
     def __init__(self, manager: Any, addon: Any) -> None:
-        from manager_const import BASE_DIR
+        from core.const import BASE_DIR
 
         self._manager = manager
         self._addon = addon

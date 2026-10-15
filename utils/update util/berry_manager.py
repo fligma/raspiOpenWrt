@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Entry point: start the Qt application and show the Berry Manager window.
 
-This is the one module that runs as a program. Every other file holds a piece
-of the app - the window, its tabs, the addon runtime - and is imported; here
-the event loop is started, the window is shown and the two things that must
-happen before it exists are done: the WebEngine OpenGL attribute, which Qt
-only accepts before the application object, and the saved certificate switch,
-which Chromium reads when its process starts on the first embedded tab.
+This is the one module that runs as a program: here the event loop is started
+and the window is shown. Everything else is imported - ``core/*.py`` holds the
+window's own parts, the addon runtime and the look of the app, while
+``addon_api``, ``addon_client`` and ``addon_common`` stay beside this file as
+the contract an addon reads. Here too are the two things that must happen
+before the window exists: the WebEngine OpenGL attribute, which Qt only
+accepts before the application object, and the saved certificate switch, which
+Chromium reads when its process starts on the first embedded tab.
 """
 
 from __future__ import annotations
@@ -19,15 +21,13 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from addon_common import kill_all_trees
-from manager_browser import (clear_replaced_program, relaunch_process,
-                             set_cert_bypass, take_restart_request)
-from manager_config import load_app_config
-from manager_const import ICON_FILES, find_asset
-import manager_splash
-import manager_theme
-from manager_addons import prune_retired_addons
-from manager_gui import BerryManager
-from manager_widgets import install_smart_tooltips
+from core.views import (clear_replaced_program, relaunch_process,
+                        set_cert_bypass, take_restart_request)
+import core.ui
+from core.ui import install_smart_tooltips, load_app_config
+from core.const import ICON_FILES, find_asset
+from core.addon import prune_retired_addons
+from core.window import BerryManager
 
 
 def main() -> int:
@@ -61,13 +61,13 @@ def main() -> int:
     # card, not a blank screen. The theme is resolved here for it to be
     # painted from; the window runs the same two calls again on its way in,
     # which changes nothing but the revision count.
-    manager_theme.ensure_installed()
-    manager_theme.use(boot_config.get("theme", "default"))
+    core.ui.ensure_installed()
+    core.ui.use(boot_config.get("theme", "default"))
     # The cursor-following, fading tool-tip is the whole window's business, so
     # it goes on the application object once, before any window is built; the
     # bubble then wears the theme that was just resolved.
     install_smart_tooltips(app)
-    manager_splash.show(boot_config)
+    core.ui.show(boot_config)
 
     window = BerryManager()
     for line in cleared:
@@ -75,7 +75,7 @@ def main() -> int:
     window.fit_window_to_screen()
     window.show()
     # The window is on screen: the card has said everything it had to say.
-    manager_splash.finish()
+    core.ui.finish()
     return app.exec()
 
 

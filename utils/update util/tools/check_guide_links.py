@@ -34,7 +34,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")     # widgets, no window
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import manager_addondev                     # noqa: E402
+import core.addon               # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -109,13 +109,13 @@ def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
                                errors="replace")
-    if not manager_addondev.api_reference():
+    if not core.addon.api_reference():
         print("addon_api could not be imported, so the reference is empty "
               "and every api: link would be reported missing")
         return 1
-    keys = look_guides(manager_addondev)
-    look_links(manager_addondev, keys)
-    look_templates(manager_addondev)
+    keys = look_guides(core.addon)
+    look_links(core.addon, keys)
+    look_templates(core.addon)
 
     if FAILURES:
         print()

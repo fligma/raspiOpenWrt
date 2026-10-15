@@ -16,7 +16,7 @@ is the same contract stripped down to plain Python, so it can also be used:
 Where things live:
 A helper looks for its folder in this order: an environment variable the app
 set for the addon process (``RASCONF_ADDON_CONFIG`` and friends, see
-``manager_addons.ProcessBridge._environment``), then ``manager_const`` when it
+``core.addon.ProcessBridge._environment``), then ``core.const`` when it
 is importable because the app is running around it, then the same folder beside
 the program that is running - ``config`` for the shared build record and
 ``addons/_data/<id>`` for an addon's own config. That is why the same call works
@@ -32,6 +32,13 @@ import signal
 import subprocess
 import sys
 from typing import Any, Callable
+
+# The one module of the app's own that this file may name: :mod:`core.const`
+# carries no Qt, which is what keeps the promise this module is built on - an
+# addon process or a bare test can read it with no screen. Nothing below may
+# reach into :mod:`core.ui`, :mod:`core.net`, :mod:`core.views`,
+# :mod:`core.addon` or :mod:`core.window`, and the two places that do ask for
+# ``core.const`` sit inside a ``try`` so a compiled addon on its own still works.
 
 API_VERSION = 1
 
@@ -143,25 +150,25 @@ def _from_environment(variable: str) -> Path | None:
 
 
 def _app_or_sibling(attribute: str, tail: str) -> Path:
-    """The app's own layout through manager_const, or beside this file for a compiled addon with no app to ask."""
+    """The app's own layout through core.const, or beside this file for a compiled addon with no app to ask."""
     try:
-        import manager_const
+        import core.const
     except ImportError:
         home = Path(sys.executable).parent if getattr(sys, "frozen", False) \
             else Path(__file__).resolve().parent
         return home / "addons" / tail
-    return Path(getattr(manager_const, attribute))
+    return Path(getattr(core.const, attribute))
 
 
 def _top_or_sibling(attribute: str, tail: str) -> Path:
-    """A folder at the program's own root through manager_const, or beside it; the _app_or_sibling shape for folders not under addons."""
+    """A folder at the program's own root through core.const, or beside it; the _app_or_sibling shape for folders not under addons."""
     try:
-        import manager_const
+        import core.const
     except ImportError:
         home = Path(sys.executable).parent if getattr(sys, "frozen", False) \
             else Path(__file__).resolve().parent
         return home / tail
-    return Path(getattr(manager_const, attribute))
+    return Path(getattr(core.const, attribute))
 
 
 def app_config_dir() -> Path:
@@ -181,7 +188,7 @@ def addon_data_root() -> Path:
 
 
 def addon_data_dir(addon_id: str) -> Path:
-    """The addon's own working folder, addons/_data/<id>; from RASCONF_ADDON_DATA, or resolved from manager_const."""
+    """The addon's own working folder, addons/_data/<id>; from RASCONF_ADDON_DATA, or resolved from core.const."""
     raw = str(os.environ.get("RASCONF_ADDON_DATA", "")).strip()
     if raw:
         return Path(raw)
@@ -308,7 +315,7 @@ def default_icon_path(folder: Any) -> str:
 #: addon names one of these in its manifest as ``"connection"``; the app and the
 #: store both read it the same way, so a person can see before installing
 #: whether the addon works on the machine in front of them or reaches a router.
-#: The two extra spellings are the ones ``manager_addons`` already accepts, so a
+#: The two extra spellings are the ones ``core.addon`` already accepts, so a
 #: fork's own wording still lands on the same sentence.
 CONNECTION_MEANINGS = {
     "": "needs no device",

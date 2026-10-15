@@ -38,7 +38,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-#: The folder this run's themes live in, named before ``manager_const`` is read:
+#: The folder this run's themes live in, named before ``core.const`` is read:
 #: the themes directory is taken from the environment once, at import.
 THEMES = Path(tempfile.mkdtemp(prefix="rasconf-theme-test-"))
 os.environ["RASCONF_THEMES"] = str(THEMES)
@@ -49,14 +49,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 import addon_client                                          # noqa: E402
-import manager_theme                                         # noqa: E402
+import core.ui                                   # noqa: E402
 
 SOURCE = ROOT / "addons" / "theme_manager.py"
 FAILURES: list[str] = []
 
 #: The one colour the shipped sheet is anchored on, checked against the file
 #: written at boot rather than against a number written down twice.
-from manager_const import APP_STYLESHEET, THEME_COLORS       # noqa: E402
+from core.const import APP_STYLESHEET, THEME_COLORS        # noqa: E402
 
 
 def check(condition: object, text: str) -> None:
@@ -352,33 +352,33 @@ def test_the_tab(mgr: Any, app: Any) -> None:
 def test_boot() -> None:
     """The themes folder and its default, made by the app rather than by here."""
     print("\n2. the themes folder at boot")
-    made = Path(manager_theme.ensure_installed()) / "default.theme"
+    made = Path(core.ui.ensure_installed()) / "default.theme"
     check(made.parent == THEMES, f"the folder made was {made.parent}, not {THEMES}")
     check(made.is_file(), f"no theme was written at {made}")
     check(made.name == "default.theme",
           f"the boot call wrote {made.name}, not default.theme")
-    check(manager_theme.current_name() == DEFAULT,
-          f"the look in force is {manager_theme.current_name()!r}")
-    check(manager_theme.names()[:1] == [DEFAULT],
-          f"the list does not begin with the shipped look: {manager_theme.names()}")
+    check(core.ui.current_name() == DEFAULT,
+          f"the look in force is {core.ui.current_name()!r}")
+    check(core.ui.names()[:1] == [DEFAULT],
+          f"the list does not begin with the shipped look: {core.ui.names()}")
     written = json.loads(made.read_text(encoding="utf-8"))
     check(written.get("name") == DEFAULT,
           f"the file calls itself {written.get('name')!r}")
     check(set(written.get("colors") or {}) <= set(THEME_COLORS),
           "the file names a colour token the interface does not have")
-    check(manager_theme.validate(written) == [],
-          f"the shipped theme does not validate: {manager_theme.validate(written)}")
+    check(core.ui.validate(written) == [],
+          f"the shipped theme does not validate: {core.ui.validate(written)}")
     # The look the window is painted from and the look in the folder are one
     # thing: the sheet the app carries is the sheet the file renders to.
-    check(manager_theme.stylesheet(DEFAULT) == APP_STYLESHEET,
+    check(core.ui.stylesheet(DEFAULT) == APP_STYLESHEET,
           "themes/default.theme does not render the sheet the app ships")
-    accent = manager_theme.color("accent")
+    accent = core.ui.color("accent")
     check(accent == THEME_COLORS["accent"],
           f"the accent read from disk is {accent}, not {THEME_COLORS['accent']}")
     check(json.loads(made.read_text(encoding="utf-8"))["tabs"]["captions"] is True,
           "a fresh install hides its tab captions")
     text = made.read_text(encoding="utf-8")
-    again = Path(manager_theme.ensure_installed()) / "default.theme"
+    again = Path(core.ui.ensure_installed()) / "default.theme"
     check(again == made and made.read_text(encoding="utf-8") == text,
           "the boot check wrote a second file, or overwrote somebody's work")
 
@@ -403,7 +403,7 @@ def test_init(mgr: Any) -> Api:
           "the tab came with no spec, so it is an empty widget")
     style = str(api.asked("tabs.add_tab", "style") or "")
     check("background-color" in style
-          and manager_theme.color("accent").lstrip("#").lower() in style.lower(),
+          and core.ui.color("accent").lstrip("#").lower() in style.lower(),
           f"the page sheet does not carry the look in force: {style[:70]!r}")
     check(api.called("tabs.set_icon"), "the tab wears no mark")
     check(api.declared.get("defaults") == mgr.DEFAULTS,
@@ -419,12 +419,12 @@ def test_init(mgr: Any) -> Api:
     check(api.rows_of("themes"), "the list was never filled in")
     check(not api.went_bad(), f"init said it on the warning colour: {api.said()}")
     names = [one["cells"][0] for one in api.rows_of("themes")]
-    check(names == manager_theme.names(),
-          f"the list reads {names}, the folder holds {manager_theme.names()}")
+    check(names == core.ui.names(),
+          f"the list reads {names}, the folder holds {core.ui.names()}")
     live = [one["cells"][1] for one in api.rows_of("themes")]
     check(live[0] == "*" and "*" not in live[1:],
           f"the star is not on the one theme in force: {live}")
-    check(api.sent("draft", "items") == manager_theme.names(),
+    check(api.sent("draft", "items") == core.ui.names(),
           "the editor's combo does not offer every theme on disk")
     check(str(api.sent("where", "text") or "").startswith("folder:"),
           f"the tab does not say where the files are: {api.sent('where', 'text')!r}")
@@ -471,10 +471,10 @@ def test_picking(mgr: Any, api: Api) -> None:
     # Nothing picked at all is not nothing said: the command works on the look in
     # force rather than on an empty selection.
     api.picks["themes"] = []
-    check(mgr.picked_theme() == manager_theme.current_name(),
+    check(mgr.picked_theme() == core.ui.current_name(),
           "with no row picked a command would have nothing to work on")
     # The template combo explains itself, because a name alone says little.
-    names = [str(one.get("name")) for one in manager_theme.templates()]
+    names = [str(one.get("name")) for one in core.ui.templates()]
     api.form["tpl"] = names[-1]
     mgr.on_widget(mgr.TAB, "tpl", "changed", {"text": names[-1]})
     check(str(api.form.get("tplnote") or "") and names[-1] in api.said(),
@@ -488,7 +488,7 @@ def test_picking(mgr: Any, api: Api) -> None:
 def test_create(mgr: Any, api: Api) -> None:
     """'Create' writes a file, opens it, and puts the editor in front."""
     print("\n5. a theme from a template")
-    starting = next(str(one.get("name")) for one in manager_theme.templates()
+    starting = next(str(one.get("name")) for one in core.ui.templates()
                     if str(one.get("name")) != DEFAULT)
     api.form["tpl"] = starting
     api.form["newname"] = SECOND
@@ -501,7 +501,7 @@ def test_create(mgr: Any, api: Api) -> None:
     check(SECOND in api.said(), f"making one said {api.said()!r}")
     check(api.form.get("newname") == "",
           "the name line still holds it, so a second press would only refuse")
-    hand = manager_theme.raw(SECOND)
+    hand = core.ui.raw(SECOND)
     check(hand.get("name") == SECOND, f"the file calls itself {hand.get('name')!r}")
     check(starting in str(hand.get("blurb") or "") or
           hand.get("colors") != THEME_COLORS,
@@ -523,7 +523,7 @@ def test_create(mgr: Any, api: Api) -> None:
     check(not (THEMES / "sys").exists(), "a slash became a folder")
     check(mgr.draft_name == "sys_admin",
           f"the editor is named for {mgr.draft_name!r}, not for the file made")
-    manager_theme.remove("sys_admin")
+    core.ui.remove("sys_admin")
 
 
 # --- six: colours ---
@@ -643,7 +643,7 @@ def test_knobs(mgr: Any, api: Api) -> None:
                 if str(one["cells"][0]).startswith("Switches")]
     check(len(sizes) == 1 and len(switches) == 1,
           f"the knobs are not in two branches: {sorted(branches)}")
-    counts = manager_theme.tabs()
+    counts = core.ui.tabs()
     drawn = len(sizes[0].get("children") or []) + len(switches[0].get("children") or [])
     check(drawn == len(counts), f"the trees hold {drawn} of the {len(counts)} knobs")
     mgr.on_widget(mgr.TAB, "knobs", "selected", {"text": "icon_px"})
@@ -690,12 +690,12 @@ def test_save(mgr: Any, api: Api) -> None:
     print("\n8. save, apply, discard")
     api.form["applylive"] = False
     check(mgr.save_draft(False), f"Save said no: {api.said()!r}")
-    on_disk = manager_theme.raw(SECOND)
+    on_disk = core.ui.raw(SECOND)
     check((on_disk.get("colors") or {}).get("text") == "#fefefe",
           "the colour never reached the file")
     check((on_disk.get("tabs") or {}).get("icon_px") == 30,
           "the knob never reached the file")
-    check(manager_theme.current_name() == DEFAULT,
+    check(core.ui.current_name() == DEFAULT,
           "saving redrew the window with 'redraw on save' off")
     check("saved" in api.said() and "drawn from" not in api.said(),
           f"saving said {api.said()!r}")
@@ -704,8 +704,8 @@ def test_save(mgr: Any, api: Api) -> None:
     check(mgr.save_draft(True), f"Save and apply said no: {api.said()!r}")
     check((THEMES / f"{FOURTH}.theme").is_file(), "no file for the applied look")
     check(mgr.draft_name == FOURTH, f"the editor is named for {mgr.draft_name!r}")
-    check(manager_theme.current_name() == FOURTH,
-          f"the window is still drawn from {manager_theme.current_name()!r}")
+    check(core.ui.current_name() == FOURTH,
+          f"the window is still drawn from {core.ui.current_name()!r}")
     check(api.form.get("draftas") == "", "the 'new name' line is still filled in")
     # Saving the theme in force, with the switch on, applies it by itself.
     api.form["applylive"] = True
@@ -731,11 +731,11 @@ def test_save(mgr: Any, api: Api) -> None:
     mgr.draft_name = "no such look"
     mgr.discard_draft()
     check("started again" in api.said(), f"it said {api.said()!r}")
-    check(mgr.draft_name == manager_theme.current_name(),
+    check(mgr.draft_name == core.ui.current_name(),
           f"it opened {mgr.draft_name!r} instead of the look in force")
     # 'Blank from default' is a draft nothing has written yet.
     mgr.on_widget(mgr.TAB, "newdraft", "clicked", {})
-    check(mgr.draft is not None and not manager_theme.exists(mgr.draft_name),
+    check(mgr.draft is not None and not core.ui.exists(mgr.draft_name),
           f"'Blank from default' holds {mgr.draft_name!r}, which is on disk")
     check(len((mgr.draft or {}).get("colors") or {}) == len(THEME_COLORS),
           "a blank draft does not start from the whole shipped palette")
@@ -794,8 +794,8 @@ def test_files(mgr: Any, api: Api) -> None:
     api.form["newname"] = THIRD
     mgr.on_widget(mgr.TAB, "dup", "clicked", {})
     check((THEMES / f"{THIRD}.theme").is_file(), f"no {THIRD}.theme was made")
-    check(manager_theme.raw(THIRD).get("colors") ==
-          manager_theme.raw(SECOND).get("colors"),
+    check(core.ui.raw(THIRD).get("colors") ==
+          core.ui.raw(SECOND).get("colors"),
           "the copy is not the theme it was copied")
     check("copied" in api.said(), f"duplicating said {api.said()!r}")
     api.form["newname"] = THIRD
@@ -838,14 +838,14 @@ def test_files(mgr: Any, api: Api) -> None:
     # Apply through the list, and the star moves with it.
     api.picks["themes"] = ["menu copy"]
     mgr.on_widget(mgr.TAB, "use", "clicked", {})
-    check(manager_theme.current_name() == "menu copy",
-          f"the window is drawn from {manager_theme.current_name()!r}")
+    check(core.ui.current_name() == "menu copy",
+          f"the window is drawn from {core.ui.current_name()!r}")
     starred = [one["cells"][0] for one in api.rows_of("themes") if one["cells"][1] == "*"]
     check(starred == ["menu copy"], f"the list stars {starred}")
     # A theme with no file is not an error: the default is used, and said.
     api.picks["themes"] = ["a look with no file"]
     mgr.apply_picked()
-    check(manager_theme.current_name() == DEFAULT,
+    check(core.ui.current_name() == DEFAULT,
           "asking for a theme with no file left the window somewhere else")
     check("no file" in api.said(), f"it said {api.said()!r}")
     # Delete: asked first, and the shipped look never goes.
@@ -1175,7 +1175,7 @@ def main() -> int:
         print(f"theme_manager: the addon at {SOURCE.name}")
         look(f"themes in {THEMES}")
         # The tab's caption is how the app finds its way to the editor.
-        gui = (ROOT / "manager_gui.py").read_text(encoding="utf-8")
+        gui = (ROOT / "core/window.py").read_text(encoding="utf-8")
         wanted = re.search(r'THEME_MANAGER_TAB\s*=\s*"([^"]+)"', gui)
         check(wanted is not None and wanted.group(1) == mgr.TAB,
               f"the app looks for a tab called {wanted and wanted.group(1)!r}, "

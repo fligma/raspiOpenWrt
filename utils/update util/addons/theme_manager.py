@@ -81,7 +81,7 @@ ADDON = {
 
 #: The caption of the tab. The app looks for these words to jump from
 #: Settings > Appearance and View > Theme to the editor, so a change here has
-#: to be made in ``manager_gui.THEME_MANAGER_TAB`` as well.
+#: to be made in ``core.window.THEME_MANAGER_TAB`` as well.
 TAB = "Theme Manager"
 
 #: This addon's own id: what the icon rule and its data folder are named for.

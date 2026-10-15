@@ -5,7 +5,7 @@ Adds a ``Manager update`` tab. The program's own releases are the tags of this
 repository whose names start with ``berry`` - ``berry1.5.9`` is version 1.5.9 -
 and the addon reads them from GitHub's API, picks the newest, and compares it
 with the version this copy carries (``api.session.version()``, which is
-``manager_const.APP_VERSION``). No ``berry`` tag existing yet is the normal
+``core.const.APP_VERSION``). No ``berry`` tag existing yet is the normal
 state of a fresh repository: the check then says so plainly and calls it
 nothing, no error.
 
@@ -1346,7 +1346,7 @@ def restart_app() -> None:
     if api is None:
         return
     try:
-        from manager_browser import cancel_restart_request, restart_process
+        from core.views import cancel_restart_request, restart_process
     except Exception as error:                      # noqa: BLE001 - no app here
         say(f"the new program is in place; start it yourself when ready ({error})",
             bad=True)

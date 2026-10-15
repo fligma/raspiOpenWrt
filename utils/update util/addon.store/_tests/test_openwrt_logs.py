@@ -562,10 +562,10 @@ def test_rows_paint(app: Any) -> None:
     # the app's own stylesheet names QTreeWidget::item colours, which used to
     # swallow every per-row brush whole. Only the delegate paints past it, so
     # count real pixels with the real sheet on.
-    import manager_const
+    import core.const
     from PyQt6.QtGui import QColor, QImage, QPainter
     sheet = app.styleSheet()
-    app.setStyleSheet(manager_const.APP_STYLESHEET)
+    app.setStyleSheet(core.const.APP_STYLESHEET)
     try:
         _root, registry = addon_api.build_spec(
             {"kind": "table", "id": "t", "columns": ["A", "B"]})

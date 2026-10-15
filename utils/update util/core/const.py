@@ -20,7 +20,8 @@ if getattr(sys, "frozen", False):
     REPOSITORY_ROOT = BASE_DIR
     IS_COMPILED = True
 else:
-    BASE_DIR = Path(__file__).resolve().parent
+    # This file sits in core/, one down from the program's own folder.
+    BASE_DIR = Path(__file__).resolve().parent.parent
     RESOURCE_DIR = BASE_DIR
     # Walk up out of the util folder to the repo root.
     REPOSITORY_ROOT = BASE_DIR.parents[2] if len(BASE_DIR.parents) >= 2 else BASE_DIR
@@ -62,7 +63,7 @@ KEYRING_SERVICE = "rasconf-sftp-manager"
 
 # The manager's own folder, made on first boot. Holds what it
 # writes, not ships: config, history, log, addon build record.
-# See ``manager_config._prepare_config_dir``.
+# See ``core.ui._prepare_config_dir``.
 CONFIG_DIR = BASE_DIR / "config"
 APP_CONFIG_FILE = CONFIG_DIR / "config.json"
 APP_CONFIG_EXAMPLE_FILE = RESOURCE_DIR / "config.example.json"
@@ -75,7 +76,7 @@ MAX_COMMAND_HISTORY = 200
 ADDONS_DIR = BASE_DIR / "addons"
 
 # Themes: one ``<name>.theme`` file each, written by the app on first
-# boot and edited by the Theme Manager addon. See ``manager_theme``.
+# boot and edited by the Theme Manager addon. See ``core.ui``.
 # The environment may point elsewhere - a test's own folder, or an install
 # that keeps its themes with its user - and it is the same variable a
 # process addon is handed, so both sides of the pipe read one folder.
@@ -114,7 +115,7 @@ SHIPPED_ADDON_IDS = {"berry", "addon_store",
 ADDON_ID_TRANSLATIONS = {"web_installer": "berry_web"}
 
 #: Retired names whose leftovers in ``addons`` and ``addons/_data`` are swept on
-#: startup, by ``manager_addons.prune_retired_addons``. Anything still listed
+#: startup, by ``core.addon.prune_retired_addons``. Anything still listed
 #: under ``ADDON_ID_TRANSLATIONS`` has its settings folder carried over rather
 #: than thrown away; a name only listed here is deleted outright.
 RETIRED_SHIPPED_ADDON_IDS = ("web_installer",)
@@ -168,7 +169,7 @@ DEFAULT_PROFILE = {
 
 # All one profile holds: connection defaults, what Settings
 # can change. A record is this dict with the user's own
-# values; see manager_config for the store.
+# values; see core.ui for the store.
 DEFAULT_APP_CONFIG = {
     "host": DEFAULT_PROFILE["host"],
     "port": DEFAULT_PROFILE["port"],
@@ -186,22 +187,22 @@ DEFAULT_APP_CONFIG = {
     # lets the Connect button and the addons work again.
     "master_connection": True,
     # One main connection carries SSH and SFTP together; this
-    # switch opens it at startup. See manager_gui.
+    # switch opens it at startup. See core.window.
     "auto_connect": False,
     "use_alt_icon": False,
     # The ``.theme`` file the interface is drawn from, by name (without the
-    # suffix). ``manager_theme`` reads it; View > Theme and Settings >
+    # suffix). ``core.ui`` reads it; View > Theme and Settings >
     # Appearance both write it, and a missing name falls back to "default".
     "theme": DEFAULT_THEME_NAME,
     # Notices worth seeing without looking at the window: an addon's
     # api.ui.popup, and this program's own news such as "an update is
     # available", come up as a tray toast over the status line. Off,
-    # nothing leaves the window. See manager_gui.notify_popup.
+    # nothing leaves the window. See core.window.notify_popup.
     "system_notifications": True,
     # The boot card that names what the window is loading while it is being
     # built: logo, the step in hand, and a bar with a percentage, painted from
     # the theme in force. Off, the program opens with nothing on screen until
-    # the window itself appears. See manager_splash.
+    # the window itself appears. See core.ui.
     "splash_enabled": True,
     # Per-transport gates, each with its own switch in Settings >
     # Connection. Off, the transport's controls go away and
@@ -228,7 +229,7 @@ DEFAULT_APP_CONFIG = {
     "reboot_auto_watch": True,
     "default_tab": "Berry",
     # Tab arrangement: whether the dragged order is kept between
-    # launches, and that order. See manager_gui.
+    # launches, and that order. See core.window.
     "remember_tab_order": True,
     "tab_order": [],
     "terminal_font_size": 10,
@@ -702,7 +703,7 @@ def render_theme(theme: object) -> str:
 
 
 #: The sheet the app boots with before a profile's theme has been read. Every
-#: part of the program that needs the look asks ``manager_theme.stylesheet()``,
+#: part of the program that needs the look asks ``core.ui.stylesheet()``,
 #: which renders this for the theme in force.
 APP_STYLESHEET = render_theme(DEFAULT_THEME)
 
@@ -713,7 +714,7 @@ APP_STYLESHEET = render_theme(DEFAULT_THEME)
 #: weights, zero lengths and every other declaration value has no px/pt in it.
 _QSS_SIZE = re.compile(r"(\d+(?:\.\d+)?)(px|pt)")
 
-#: The zoom in force. ``manager_gui`` sets it from the profile's ``ui_zoom``;
+#: The zoom in force. ``core.window`` sets it from the profile's ``ui_zoom``;
 #: widgets built afterwards read it so they are drawn at the same size as the
 #: ones already on screen.
 _zoom_state = {"percent": UI_ZOOM_DEFAULT}

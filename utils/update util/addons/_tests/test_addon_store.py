@@ -1357,7 +1357,7 @@ def test_the_generator(store: Any) -> None:
 # --- six: the compile gate: an addon's test runs before its build ---
 
 class _FakeDev:
-    """Just enough of manager_addondev for the gate, with no real interpreter."""
+    """Just enough of core.addon for the gate, with no real interpreter."""
 
     BASE_DIR = ROOT
 
@@ -1491,7 +1491,15 @@ def test_the_gate(store: Any) -> None:
                                  "paramiko"),
                                 (["ModuleNotFoundError: No module named 'PyQt6.QtWidgets'"],
                                  "PyQt6"),
-                                (["ModuleNotFoundError: No module named 'widget'"], "")):
+                                # a module of the app's package is named whole, and
+                                # is fetched whole - not collapsed onto its folder
+                                (["ModuleNotFoundError: No module named 'core.ui'"],
+                                 "core.ui"),
+                                (["ModuleNotFoundError: "
+                                  "No module named 'core.ui.things'"], "core"),
+                                (["ModuleNotFoundError: No module named 'widget'"], ""),
+                                (["ModuleNotFoundError: "
+                                  "No module named 'requests.packages'"], "")):
                 store.job = {"values": {}, "lines": list(lines)}
                 check(store._machine_missing() == want,
                       f"{lines} was read as {store._machine_missing()!r}, not {want!r}")
@@ -1624,6 +1632,15 @@ def test_the_harness(store: Any) -> None:
                   f"{[name for name, _f in fetched]}")
             check((narrow / "addon_api.py").is_file(),
                   "the widened harness holds no addon_api")
+            # a module of a package is the file under that package's folder: the
+            # widening asks for the path, and GitHub hands it back the same way
+            check("core/ui.py" in [name for name, _folder in fetched],
+                  f"a module of the app's package was not asked for by its path: "
+                  f"{[name for name, _f in fetched]}")
+            check((narrow / "core" / "ui.py").is_file(),
+                  "the widened harness holds no core/ui.py in a core folder")
+            check(not (narrow / "core.py").exists(),
+                  "a package was fetched as one file of its own name")
             check(built == [str(src)] and not stopped,
                   f"a test that passed after the widening did not compile: "
                   f"{built} {stopped}")
@@ -1677,9 +1694,9 @@ def test_the_harness(store: Any) -> None:
             os.environ.pop("RASCONF_ADDON_DATA", None)
 
     try:
-        import manager_addondev as dev
+        import core.addon as dev
     except Exception as error:                      # noqa: BLE001 - app modules
-        look(f"manager_addondev is not importable here: {error}")
+        look(f"core.addon is not importable here: {error}")
         return
     ready = dev.harness_dir()
     check(ready is not None and all((ready / name).is_file()
@@ -1720,7 +1737,7 @@ def test_the_harness(store: Any) -> None:
 def test_the_interpreter(store: Any) -> None:
     """A python3 that is the Windows Store stand-in is passed over for a real one.
 
-    The store asks :mod:`manager_addondev` which Python to build with, and on
+    The store asks :mod:`core.addon` which Python to build with, and on
     Windows the first name on the path is often a zero-length alias that answers
     "Python was not found" and stops with code 9009 - which reads as a broken
     build unless the search refuses it. Needs the app's own modules, so it is
@@ -1728,9 +1745,9 @@ def test_the_interpreter(store: Any) -> None:
     """
     print("\n9. the interpreter search takes a Python that actually starts")
     try:
-        import manager_addondev as dev
+        import core.addon as dev
     except Exception as error:                      # noqa: BLE001 - app modules
-        look(f"manager_addondev is not importable here: {error}")
+        look(f"core.addon is not importable here: {error}")
         return
     check("python3" in dev.PYTHON_NAMES and "python" in dev.PYTHON_NAMES,
           f"both usual names are not tried: {dev.PYTHON_NAMES}")
@@ -2240,7 +2257,7 @@ def test_the_child_env() -> None:
     """
     print("\n13. a child of a built app unpacks itself instead of reusing another's")
     import addon_common
-    import manager_browser
+    import core.views
 
     started: list = []
     real_popen = addon_common.subprocess.Popen
@@ -2294,7 +2311,7 @@ def test_the_child_env() -> None:
         addon_common.release_process_tree(proc)
 
         started.clear()
-        check(manager_browser.relaunch_process(),
+        check(core.views.relaunch_process(),
               "the restart gave up on starting a fresh copy")
         check(bool(started) and started[0].command[:1] == [sys.executable],
               f"the restart did not start this program again: {started[:1]}")
@@ -2400,9 +2417,9 @@ def test_the_pictures(store: Any) -> None:
     try:
         import struct
 
-        import manager_addondev as dev
+        import core.addon as dev
     except Exception as error:                      # noqa: BLE001 - app modules
-        look(f"manager_addondev is not importable here: {error}")
+        look(f"core.addon is not importable here: {error}")
         return
     png_bytes = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
                  + struct.pack(">II", 128, 128) + b"\x08\x02\x00\x00\x00"

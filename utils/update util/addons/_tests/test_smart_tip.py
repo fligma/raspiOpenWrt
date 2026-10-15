@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A test for the cursor-following, fading tool-tip in manager_widgets.py.
+"""A test for the cursor-following, fading tool-tip in core/ui.py.
 
 The old behaviour was Qt's own ``QToolTip``: it pops on at a fixed spot after a
 pause, does not move with the pointer, and is inconsistent about appearing. The
@@ -58,7 +58,7 @@ def _tooltip_event(x: int = 4, y: int = 4):
 
 def test_installed(app: Any) -> None:
     print("\n1. the window gets one cursor-following keeper")
-    from manager_widgets import install_smart_tooltips, smart_tip
+    from core.ui import install_smart_tooltips, smart_tip
 
     engine = install_smart_tooltips(app)
     check(smart_tip() is engine, "smart_tip() does not report the keeper it made")
@@ -73,7 +73,7 @@ def test_text_widget(app: Any) -> None:
     print("\n2. a widget with a note gets the bubble")
     from PyQt6.QtWidgets import QLabel
 
-    from manager_widgets import smart_tip
+    from core.ui import smart_tip
 
     engine = smart_tip()
     label = QLabel("hover me")
@@ -94,7 +94,7 @@ def test_no_text(app: Any) -> None:
     print("\n3. a widget without a note is not intercepted")
     from PyQt6.QtWidgets import QLabel
 
-    from manager_widgets import smart_tip
+    from core.ui import smart_tip
 
     engine = smart_tip()
     plain = QLabel("no tooltip here")
@@ -111,7 +111,7 @@ def test_group_title(app: Any) -> None:
     print("\n4. a group box shows its title note through the bubble")
     from PyQt6.QtWidgets import QGroupBox
 
-    from manager_widgets import smart_tip, tip_on_title
+    from core.ui import smart_tip, tip_on_title
 
     engine = smart_tip()
     box = QGroupBox("Options")
@@ -132,7 +132,7 @@ def test_group_title(app: Any) -> None:
 
     # The pure geometry agrees with what the bubble showed.
     from PyQt6.QtCore import QPoint
-    from manager_widgets import _TitleTip
+    from core.ui import _TitleTip
 
     check(_TitleTip._over_title(box, QPoint(14, 2)) is True,
           "_over_title says the title point is not over the title")
@@ -151,7 +151,7 @@ def main() -> int:
         print(f"no Qt here, so the keeper cannot be built: {error}")
         return 2
     app = QApplication.instance() or QApplication([])
-    print("manager_widgets: the cursor-following, fading tool-tip")
+    print("core.ui: the cursor-following, fading tool-tip")
     test_installed(app)
     test_text_widget(app)
     test_no_text(app)

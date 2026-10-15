@@ -47,10 +47,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from manager_addons import AddonManager, connection_choice
-from manager_addondev import AddonDevWidget
-from manager_browser import BrowserMixin, cert_bypass_active, set_cert_bypass
-from manager_config import (
+from core.addon import AddonManager, connection_choice
+from core.addon import AddonDevWidget
+from core.views import BrowserMixin, cert_bypass_active, set_cert_bypass
+from core.ui import (
     active_profile_name,
     create_profile,
     delete_profile,
@@ -63,7 +63,7 @@ from manager_config import (
     save_app_config_static,
     set_active_profile,
 )
-from manager_const import (
+from core.const import (
     APP_VERSION,
     BASE_DIR,
     DEFAULT_PROFILE,
@@ -81,8 +81,8 @@ from manager_const import (
     step_zoom,
     zoom_size,
 )
-from manager_files import MainConnectionMixin
-from manager_net import (
+from core.views import MainConnectionMixin
+from core.net import (
     RebootWaitWorker,
     RemoteExecWorker,
     SSHShellWorker,
@@ -90,10 +90,9 @@ from manager_net import (
     SharedSessionWorker,
     credential_id,
 )
-import manager_splash
-import manager_theme
-from manager_terminal import TerminalMixin
-from manager_widgets import (
+import core.ui
+from core.views import TerminalMixin
+from core.ui import (
     CollapseGroup,
     RightPinnedTabBar,
     RightPinnedTabWidget,
@@ -147,13 +146,13 @@ class BerryManager(
 ):
     """The application window: menu, tab shell, connection panel, log and shutdown.
 
-    The device tabs live in their own modules - manager_browser and
-    manager_terminal - and are mixed in here, along with the one main SSH/SFTP
-    connection in manager_files (Berry, a bundled addon, provides the file tab).
+    The device tabs live in their own modules - core.views and
+    core.views - and are mixed in here, along with the one main SSH/SFTP
+    connection in core.views (Berry, a bundled addon, provides the file tab).
     Everything the window itself owns stays in this file: the menu, the Settings
     tab, the profiles and the actions that open a dialog. The reusable widgets
-    and popups are in manager_widgets, and the addons a profile runs are handled
-    by the AddonManager in manager_addons.
+    and popups are in core.ui, and the addons a profile runs are handled
+    by the AddonManager in core.addon.
     """
 
     def __init__(self) -> None:
@@ -166,7 +165,7 @@ class BerryManager(
         self.tray: QSystemTrayIcon | None = None
         self.tray_menu: QMenu | None = None
         self.app_config = load_app_config()
-        manager_splash.progress(0.10, "Reading your settings")
+        core.ui.progress(0.10, "Reading your settings")
         self.addons = AddonManager(self)
         self._cert_bypass_session = cert_bypass_active()
         self.current_term_color = "#e0e0e0"
@@ -187,30 +186,30 @@ class BerryManager(
         # The look is decided before anything is drawn: the themes folder is
         # made if it is not there, and the profile's theme is read from it so
         # the first stylesheet the window ever sets is already the right one.
-        manager_theme.ensure_installed()
-        manager_theme.use(self.app_config.get("theme", "default"))
-        manager_splash.progress(0.25, "Fitting the look")
+        core.ui.ensure_installed()
+        core.ui.use(self.app_config.get("theme", "default"))
+        core.ui.progress(0.25, "Fitting the look")
 
         self.build_menu()
-        manager_splash.progress(0.40, "Building the menu")
+        core.ui.progress(0.40, "Building the menu")
         self.build_ui()
-        manager_splash.progress(0.60, "Building the window")
+        core.ui.progress(0.60, "Building the window")
         self.apply_runtime_settings()
         self.apply_window_icon()
-        manager_splash.progress(0.70, "Polishing the panels")
+        core.ui.progress(0.70, "Polishing the panels")
         self.build_tray()
 
         # The addon phase reports itself: reload() and start_done() name every
         # addon as they read it in and tell it to begin, across their own band
-        # of the bar (see manager_splash.addon_step).
-        manager_splash.progress(0.72, "Looking for addons")
+        # of the bar (see core.ui.addon_step).
+        core.ui.progress(0.72, "Looking for addons")
         self.addons.reload()
         self.addons.start_done()
         self.sync_tab_transport_dots()
         self._natural_tab_order = self.capture_tab_order()
         self._apply_remembered_order()
         self._select_default_tab()
-        manager_splash.progress(0.95, "Arranging the tabs")
+        core.ui.progress(0.95, "Arranging the tabs")
 
         # One main connection carries both transports, so one switch brings it
         # up at startup; the terminal attaches to it from there. It comes up for
@@ -990,7 +989,7 @@ class BerryManager(
         notice = notices.get(name)
         try:
             if notice is None:
-                from manager_widgets import ProgressNotice
+                from core.ui import ProgressNotice
 
                 notice = ProgressNotice(self)
                 notices[name] = notice
@@ -1042,7 +1041,7 @@ class BerryManager(
     def apply_zoom(self) -> None:
         """Draw every part of the window at the saved zoom, from the theme in force."""
         percent = set_zoom(self.ui_zoom())
-        self.setStyleSheet(scaled_sheet(manager_theme.stylesheet(), percent))
+        self.setStyleSheet(scaled_sheet(core.ui.stylesheet(), percent))
         # A few pieces are painted or styled outside the app sheet - a group
         # heading, the dots in a tab - and are re-poured from the theme here.
         refresh_theme_styles()
@@ -1067,7 +1066,7 @@ class BerryManager(
             base = max(1, bar.iconSize().width())
             self._tab_icon_base = base
         asked = zoom_size(base, percent)
-        from_theme = manager_theme.icon_px()
+        from_theme = core.ui.icon_px()
         if from_theme:
             asked = max(asked, zoom_size(from_theme, percent))
         bar.setIconSize(QSize(asked, asked))
@@ -1079,7 +1078,7 @@ class BerryManager(
 
     def theme_names(self) -> list[str]:
         """Every theme on disk, the one in force named first for a reader."""
-        return manager_theme.names()
+        return core.ui.names()
 
     def refresh_theme_menu(self) -> None:
         """Fill View > Theme from the folder, marking the theme in force.
@@ -1098,8 +1097,8 @@ class BerryManager(
         group.setExclusive(True)
         group.triggered.connect(self._theme_chosen)
         self.theme_group = group           # the window holds it, or Qt drops it
-        chosen = manager_theme.current_name()
-        for name in manager_theme.names():
+        chosen = core.ui.current_name()
+        for name in core.ui.names():
             action = QAction(name, self)
             action.setCheckable(True)
             action.setChecked(name == chosen)
@@ -1133,8 +1132,8 @@ class BerryManager(
         back to the default, and the status line says so rather than quietly
         showing something else.
         """
-        wanted = manager_theme.safe_name(name) or "default"
-        used = manager_theme.use(wanted)
+        wanted = core.ui.safe_name(name) or "default"
+        used = core.ui.use(wanted)
         self.app_config["theme"] = used
         self.apply_zoom()
         self.save_app_config()
@@ -1147,7 +1146,7 @@ class BerryManager(
 
     def open_themes_folder(self) -> None:
         """Show the themes folder in the system's file viewer."""
-        manager_theme.ensure_installed()
+        core.ui.ensure_installed()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(THEMES_DIR)))
 
     def show_theme_manager(self) -> None:
@@ -1181,13 +1180,13 @@ class BerryManager(
             return
         combo.blockSignals(True)
         combo.clear()
-        combo.addItems(manager_theme.names())
-        index = combo.findText(manager_theme.current_name())
+        combo.addItems(core.ui.names())
+        index = combo.findText(core.ui.current_name())
         combo.setCurrentIndex(index if index >= 0 else 0)
         combo.blockSignals(False)
         note = getattr(self, "theme_note", None)
         if note is not None:
-            data = manager_theme.theme()
+            data = core.ui.theme()
             blurb = str(data.get("blurb") or "").strip()
             who = str(data.get("author") or "").strip()
             tail = f" - {who}" if who else ""
