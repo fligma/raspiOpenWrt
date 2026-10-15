@@ -35,9 +35,12 @@ A file already in place is left alone unless ``--force``. ``--check`` writes
 nothing and exits 1 when a file is missing, is the wrong size, or shows a
 different picture than the app's icon would produce - which is how a workflow can
 hold the page to the program without redrawing anything. It compares what a
-browser sees (the decoded pixels, and for an ICO each frame inside it) rather
-than the bytes one Qt version happens to write, so artwork drawn on Windows and
-artwork drawn on a runner are the same artwork.
+browser sees (the decoded pixels, premultiplied, and for an ICO each frame inside
+it) rather than the bytes one Qt version happens to write, and it allows a small
+mean leeway per pixel, because one platform's smooth downscale rounds the edge of
+a stroke a unit or two off another's: artwork drawn on Windows and artwork drawn
+on a headless runner are the same artwork even when they are not the same bytes,
+and only a genuinely different picture is failed.
 """
 
 from __future__ import annotations
@@ -142,14 +145,43 @@ def png_of(image: Any) -> bytes:
 
 
 def pixels(image: Any) -> bytes:
-    """The picture's own bytes, whatever format it was held in.
+    """The picture's own bytes, as premultiplied ARGB, whatever format it held.
 
     Rows go in whole, padding and all: two images of one width have one row
     length, so the padding cannot make the same drawing read as a different one.
+    Premultiplied rather than straight, because a transparent pixel is then zero
+    on every channel no matter what colour was stored under it - so the empty
+    corners of a mark cannot drift for the wrong reason when two platforms read
+    the same file.
     """
-    flat = image.convertToFormat(image.Format.Format_ARGB32)
+    flat = image.convertToFormat(image.Format.Format_ARGB32_Premultiplied)
     total = flat.bytesPerLine() * flat.height()
     return bytes(flat.constBits().asstring(total))
+
+
+#: How far apart two rasters may be, per byte on average, and still be called
+#: one picture. A smooth downscale lands a unit or two off between one Qt build
+#: and another on the edge of a stroke; a genuinely different icon is worth tens.
+SLACK = 8.0
+
+
+def _close(first: Any, second: Any) -> bool:
+    """Whether two images are the same picture, give or take a platform's rounding.
+
+    The check is a mean distance per byte over the whole premultiplied raster,
+    not an equality of bytes: this tool's own output is held to, but a runner's
+    Qt is allowed to round a scaled edge differently than the machine that drew
+    the file did. Two faithful downscales of one source are nowhere near
+    ``SLACK`` apart; the program's icon and any other picture are far above it.
+    """
+    a = pixels(first)
+    b = pixels(second)
+    if len(a) != len(b):
+        return False
+    if not a:
+        return True
+    total = sum(x - y if x >= y else y - x for x, y in zip(a, b))
+    return total / len(a) <= SLACK
 
 
 def ico_of(pictures: list) -> bytes:
@@ -197,8 +229,7 @@ def same_png(path: Path, base: Any, size: int) -> str:
     if have.width() != size or have.height() != size:
         return f"is {have.width()}x{have.height()}, not {size}x{size}"
     want = cut(base, size)
-    have = have.convertToFormat(have.Format.Format_ARGB32)
-    if pixels(want) != pixels(have):
+    if not _close(want, have):
         return "is not the program's icon"
     return ""
 
@@ -235,7 +266,7 @@ def same_ico(path: Path, base: Any) -> str:
         if not image.loadFromData(frame, "PNG"):
             return f"frame {index + 1} holds no PNG Qt can read"
         want = cut(base, side)
-        if pixels(want) != pixels(image):
+        if not _close(want, image):
             return f"frame {index + 1} is not the program's icon"
     return ""
 
