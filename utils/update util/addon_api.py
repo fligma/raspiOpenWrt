@@ -444,7 +444,7 @@ class _RowStyleDelegate(QStyledItemDelegate):
             # hand, so Qt's own check indicator never shows unless it is drawn
             # here too - a box at the cell's left, and the text after it.
             from PyQt6.QtCore import QRect
-            from PyQt6.QtWidgets import QStyleOptionButton
+            from PyQt6.QtWidgets import QApplication, QStyleOptionButton
 
             side = max(zoom_size(14), rect.height() - zoom_size(6))
             opt = QStyleOptionButton()
@@ -454,7 +454,11 @@ class _RowStyleDelegate(QStyledItemDelegate):
                             else QStyle.StateFlag.State_Off))
             opt.rect = QRect(rect.left() + zoom_size(4),
                              rect.center().y() - side // 2, side, side)
-            style = self.style()
+            # A delegate has no style() of its own to ask - it is not a widget -
+            # so the view wearing this row answers, and the app's own style is
+            # the fallback for a paint that came from no widget at all.
+            style = (option.widget.style() if option.widget is not None
+                     else QApplication.style())
             if style is not None:
                 style.drawPrimitive(
                     QStyle.PrimitiveElement.PE_IndicatorCheckBox, opt, painter)
