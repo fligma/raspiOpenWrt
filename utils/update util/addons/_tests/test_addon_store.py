@@ -2154,8 +2154,12 @@ def test_the_pictures(store: Any) -> None:
               f"the program's own mark was handed over in a shape to fail on: {app!r}")
         if app is not None:
             worn = Path(str(app)).read_bytes()
-            check(struct.unpack("<HHH", worn[:6]) == (0, 1, 1),
-                  f"what a build is told to wear is not an icon: {worn[:6]!r}")
+            if Path(str(app)).suffix.lower() == ".ico":
+                # Only a rewrapped icon owes an ICO header; a platform that
+                # reads a PNG or ICNS straight hands that over unchanged, and
+                # the shape check above already said it is wearable here.
+                check(struct.unpack("<HHH", worn[:6]) == (0, 1, 1),
+                      f"what a build is told to wear is not an icon: {worn[:6]!r}")
             own = dev.find_asset(dev.ICON_FILES[0])
             look(f"{own.name if own is not None else 'no shipped mark'} "
                  f"{dev.png_size(own.read_bytes()) if own is not None else ''} "
