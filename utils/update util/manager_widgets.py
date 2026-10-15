@@ -17,6 +17,7 @@ from PyQt6.QtCore import (
     QPoint,
     QPropertyAnimation,
     QPointF,
+    QRect,
     QRectF,
     QSize,
     QTimer,
@@ -816,12 +817,26 @@ class ToggleSwitch(QCheckBox):
 
 
 class _TipBubble(QLabel):
-    """One frameless label that fades in near the cursor and holds a tool-tip.
+    """One frameless panel that fades in near the cursor and holds a tool-tip.
 
     Qt's own tool-tip pops on at a spot it never leaves, and only if the pointer
     rests still long enough; this is a plain top-level label whose opacity is
     animated, so a tip arrives softly and a timer can then walk it along.
+
+    The card paints itself - the theme's panel colour under an accent edge, the
+    same pair the progress notice wears - because a translucent frameless window
+    leans on nothing else for its ground. The words come in flat: runs of
+    whitespace are one space, the wrap never passes four lines, and what does
+    not fit is dropped whole-word with an ellipsis, so a paragraph-length tip
+    cannot follow the cursor around as a wall of text.
     """
+
+    MAX_LINES = 4         # the most the bubble will ever say
+    MAX_WIDTH = 360       # at this width (100% zoom)...
+    MIN_WIDTH = 120       # ... and never narrower than a readable chip
+    SIDE_PAD = 10         # the words' margin inside the panel
+    TOP_PAD = 7
+    RADIUS = 6
 
     def __init__(self) -> None:
         super().__init__(None, Qt.WindowType.ToolTip
@@ -830,22 +845,72 @@ class _TipBubble(QLabel):
                          | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.setMargin(zoom_size(5))
-        self.setWordWrap(True)
-        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.setMaximumWidth(zoom_size(360))
-        self.setMinimumWidth(zoom_size(120))
-        theme_style(self, "QLabel { background-color: $soft; color: $text; "
-                          "border: 1px solid $accent; border-radius: 4px; }")
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade.setDuration(130)
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def show_tip(self, text: str) -> None:
-        self.setText(text)
-        self.adjustSize()
+        words = " ".join(str(text or "").split())
+        fm = self.fontMetrics()
+        room = zoom_size(self.MAX_WIDTH) - 2 * zoom_size(self.SIDE_PAD)
+        bound = self._bound(fm, words, room)
+        if self._lines(fm, bound.height()) > self.MAX_LINES:
+            words = self._trim(fm, words, room)
+            bound = self._bound(fm, words, room)
+        lines = min(self.MAX_LINES,
+                    max(1, self._lines(fm, bound.height())))
+        self.setText(words)
+        self.setFixedSize(
+            max(zoom_size(self.MIN_WIDTH),
+                min(zoom_size(self.MAX_WIDTH),
+                    bound.width() + 2 * zoom_size(self.SIDE_PAD))),
+            lines * fm.lineSpacing() + 2 * zoom_size(self.TOP_PAD))
         self._fade_to(1.0)
         self.show()
+
+    @staticmethod
+    def _bound(fm: QFontMetrics, words: str, room: int) -> QRect:
+        """The box the words need when wrapped inside ``room``."""
+        return fm.boundingRect(
+            QRect(0, 0, room, 100 * fm.lineSpacing()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                | Qt.TextFlag.TextWordWrap), words)
+
+    @staticmethod
+    def _lines(fm: QFontMetrics, height: int) -> int:
+        """How many wrapped lines a measured box holds; the measurement lands
+        a pixel or two off an exact multiple, which rounds back here."""
+        step = max(1, fm.lineSpacing())
+        return max(1, int(round(height / step)))
+
+    @classmethod
+    def _trim(cls, fm: QFontMetrics, words: str, room: int) -> str:
+        """Drop whole words from the end until the rest fits the line budget,
+        and mark the cut with an ellipsis."""
+        said = words.split()
+        while said:
+            said.pop()
+            trial = " ".join(said) + " \u2026"
+            if cls._lines(fm, cls._bound(fm, trial, room).height()) \
+                    <= cls.MAX_LINES:
+                return trial
+        return "\u2026"                    # one word longer than four lines
+
+    def paintEvent(self, _event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(manager_theme.color("accent")), 1))
+        painter.setBrush(QColor(manager_theme.color("surface")))
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1),
+                                zoom_size(self.RADIUS),
+                                zoom_size(self.RADIUS))
+        painter.setPen(QColor(manager_theme.color("text")))
+        pad_x, pad_y = zoom_size(self.SIDE_PAD), zoom_size(self.TOP_PAD)
+        painter.drawText(self.rect().adjusted(pad_x, pad_y, -pad_x, -pad_y),
+                         int(Qt.AlignmentFlag.AlignLeft
+                             | Qt.AlignmentFlag.AlignTop
+                             | Qt.TextFlag.TextWordWrap), self.text())
+        painter.end()
 
     def hide_tip(self) -> None:
         if not self.isVisible():
