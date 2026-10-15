@@ -238,7 +238,12 @@ def main(argv: list[str] | None = None) -> int:
     target = args.store / "index.json"
     index = build_index(args.store, load_previous(target))
     text = render(index)
-    current = target.read_text(encoding="utf-8") if target.is_file() else None
+    try:
+        # A file nothing can read is not the new one; ``load_previous`` already
+        # treats it as nothing, and a check says the same thing out loud.
+        current = target.read_text(encoding="utf-8") if target.is_file() else None
+    except (OSError, UnicodeDecodeError):
+        current = None
     if args.check:
         if text == current:
             print(f"{target.name} is up to date ({len(index['addons'])} addon(s))")

@@ -225,7 +225,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"the program's own {len(targets)} picture(s) are all in assets")
         return 0
 
-    QApplication.instance() or QApplication([])   # a GUI bar, no window
+    # Held in a name that lives as long as the drawing does: Qt destroys a
+    # ``QApplication`` the moment Python drops its last reference, exactly the
+    # way ``make_addon_icons`` keeps its own in ``_APP``.
+    app = QApplication.instance() or QApplication([])   # a GUI bar, no window
     made = 0
     kept = 0
     for path, drawer in targets:

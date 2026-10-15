@@ -231,14 +231,19 @@ def test_the_successor_wins() -> None:
 def test_every_shape() -> None:
     print("\n4. every shape a retired program comes in")
     shapes = retired_shapes()
+    # A loose program and a folder install are the same path on a Unix build,
+    # where a compiled addon carries no extension: there, "web_installer" is
+    # both the program file and the folder, and no filesystem can hold the two
+    # at once. So the loose shapes are proved together and the folder install
+    # on its own, which is how an install actually leaves them - one or the
+    # other, never both.
     files = {f"addons/{name}": f"# {name}\n" for name in shapes}
-    files[f"addons/{RETIRED}/addon.json"] = "an addon laid out as a folder"
     files[f"addons/_data/{RETIRED}/config.json"] = "{}"
     home = build(files)
     try:
         named = [path.name for path in
                  manager_addons.retired_addon_files(home / "addons", RETIRED)]
-        missing = [name for name in shapes + [RETIRED] if name not in named]
+        missing = [name for name in shapes if name not in named]
         check(not missing,
               f"the sweep does not look for {missing}; an install writes them "
               f"under {RETIRED}")
@@ -246,14 +251,32 @@ def test_every_shape() -> None:
         for name in shapes:
             check(kept(home, f"addons/{name}") == "<gone>",
                   f"{name} was left in addons/")
-        check(kept(home, f"addons/{RETIRED}") == "<gone>",
-              "an addon foldered under the retired id is still there")
         check(kept(home, f"addons/_data/{HEIR}/config.json") == "{}",
-              "the settings of a foldered addon did not reach the successor")
+              "the settings of a loose install did not reach the successor")
         check(len([line for line in said if "could not" in line]) == 0,
               f"the sweep could not do something it tried: {said}")
     finally:
         shutil.rmtree(home, ignore_errors=True)
+
+    folder_home = build({
+        f"addons/{RETIRED}/addon.json": "an addon laid out as a folder",
+        f"addons/_data/{RETIRED}/config.json": "{}",
+    })
+    try:
+        named = [path.name for path in
+                 manager_addons.retired_addon_files(folder_home / "addons",
+                                                    RETIRED)]
+        check(RETIRED in named,
+              f"a folder install under {RETIRED} is not looked for: {named}")
+        said, _logged = sweep(folder_home)
+        check(kept(folder_home, f"addons/{RETIRED}") == "<gone>",
+              "an addon foldered under the retired id is still there")
+        check(kept(folder_home, f"addons/_data/{HEIR}/config.json") == "{}",
+              "the settings of a foldered addon did not reach the successor")
+        check(len([line for line in said if "could not" in line]) == 0,
+              f"the sweep could not remove a folder install: {said}")
+    finally:
+        shutil.rmtree(folder_home, ignore_errors=True)
 
 
 def test_a_clean_install() -> None:

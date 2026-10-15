@@ -299,7 +299,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from PyQt6.QtWidgets import QApplication
 
-    QApplication.instance() or QApplication([])     # a GUI bar, no window
+    # Held in a name that lives as long as the reading and re-encoding does:
+    # Qt destroys a ``QApplication`` the moment Python drops its last reference,
+    # exactly the way ``make_addon_icons`` keeps its own in ``_APP``.
+    app = QApplication.instance() or QApplication([])     # a GUI bar, no window
     base = app_icon()
     if base is None:
         print(f"{SOURCE} cannot be read as a picture")
