@@ -124,7 +124,7 @@ from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_manifest_p
 
 ADDON = {
     "name": "Berry addon store",
-    "version": "1.3",
+    "version": "1.4",
     "author": "fligma",
     "description": "Lists the addons published in the repository's addon.store "
                    "folder, downloads a chosen one into a staging folder and "
@@ -805,6 +805,18 @@ def _refused(status: int, path: str) -> str:
 
 # --- reading the catalog ---
 
+def _search_haystack(entry: dict) -> str:
+    """The lowercased words one catalog row is matched against by the filter.
+
+    Building it once, when the row is read, saves re-lowering every field and
+    recomputing the connection words for every row on every keystroke.
+    """
+    parts = [entry.get("name"), entry.get("id"), entry.get("author"),
+             entry.get("description"), entry.get("source"),
+             connection_words(entry), " ".join(entry.get("requires") or [])]
+    return " ".join(one_line(part).lower() for part in parts)
+
+
 def parse_catalog(body: Any) -> list[dict]:
     """index.json as a tidy list of entries; a bare list is accepted too.
 
@@ -831,7 +843,7 @@ def parse_catalog(body: Any) -> list[dict]:
         listed = raw.get("assets") or []
         assets = [one_line(name) for name in listed if one_line(name)] \
             if isinstance(listed, list) else []
-        out.append({
+        entry = {
             "id": ident,
             "name": one_line(raw.get("name") or ident),
             "version": one_line(raw.get("version") or ""),
@@ -844,7 +856,11 @@ def parse_catalog(body: Any) -> list[dict]:
             "status": one_line(raw.get("status") or ""),
             "requires": requires_list(raw),
             "connection": connection_kind(raw),
-        })
+        }
+        # The search haystack is filled in again in merge_catalogs, once the
+        # publishing source is known; here it covers everything the row carries.
+        entry["search"] = _search_haystack(entry)
+        out.append(entry)
     return out
 
 
@@ -1308,16 +1324,12 @@ def matches(entry: dict, needle: str) -> bool:
 
     Every word a person might type at a store is searched - the name, the id, who
     wrote it, what the listing says it does, how it reaches a device and which
-    repository published it - and none of it reaches GitHub to do it.
+    repository published it - and none of it reaches GitHub to do it. The row's
+    haystack is built once when the catalog is read, so a keystroke is one test.
     """
     if not needle:
         return True
-    for value in (entry.get("name"), entry.get("id"), entry.get("author"),
-                  entry.get("description"), entry.get("source"),
-                  connection_words(entry), " ".join(entry.get("requires") or [])):
-        if needle in one_line(value).lower():
-            return True
-    return False
+    return needle in (entry.get("search") or _search_haystack(entry))
 
 
 def show_entries() -> None:
@@ -1565,6 +1577,7 @@ def merge_catalogs(sources: list[dict], token: str = "") -> tuple[list[dict], li
                 continue
             entry["source"] = label
             entry["src"] = source
+            entry["search"] = _search_haystack(entry)
             seen[entry["id"]] = label
             found.append(entry)
             kept += 1
@@ -2309,7 +2322,6 @@ def _after_pip(where: str) -> None:
 
 def install_selected(_checked: bool = False) -> None:
     """Download and compile the chosen addon, installing PyInstaller first if needed."""
-    global working
     if api is None or working:
         return
     id_value = selected_id()
@@ -2345,7 +2357,6 @@ def update_selected(_checked: bool = False) -> None:
     so its config keeps the answers already given to it, and the switch in
     Settings > Addons is not written to, so an addon that was on stays on.
     """
-    global working
     if api is None or working:
         return
     id_value = selected_id()

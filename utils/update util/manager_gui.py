@@ -35,7 +35,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSpinBox,
     QStatusBar,
     QStyle,
@@ -116,6 +115,28 @@ from manager_widgets import (
 #: it by this name so the menu can jump straight to the editor. The addon spells
 #: the same words out in its own file.
 THEME_MANAGER_TAB = "Theme Manager"
+
+
+#: The two logos read off disk, kept by file so a zoom step or an icon toggle
+#: does not fetch and decode the picture again. QPixmap copies by reference and
+#: Qt decodes small PNGs on its own cache anyway; what this saves is the disk
+#: read, and it holds only the handful of shipped marks, never a growing set.
+_LOGO_PIXMAPS: dict[str, QPixmap | bool] = {}
+
+
+def logo_pixmap(path: Path) -> QPixmap | None:
+    """The full-resolution picture at `path`, read once and remembered;
+    ``None`` when the file cannot be decoded."""
+    key = str(path)
+    if key in _LOGO_PIXMAPS:
+        # ``False`` is remembered as "no picture here", so a bad file is
+        # probed once rather than on every call.
+        held = _LOGO_PIXMAPS[key]
+        return held if isinstance(held, QPixmap) else None
+    made = QPixmap(key)
+    image: QPixmap | bool = False if made.isNull() else made
+    _LOGO_PIXMAPS[key] = image
+    return None if image is False else image
 
 
 class BerryManager(
@@ -836,7 +857,10 @@ class BerryManager(
         if path is None:
             return
         side = zoom_size(22)
-        icon.setPixmap(QPixmap(str(path)).scaled(
+        image = logo_pixmap(path)
+        if image is None:
+            return
+        icon.setPixmap(image.scaled(
             side, side,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
@@ -854,7 +878,8 @@ class BerryManager(
         path = self.current_icon_path()
         if path is None:
             return
-        icon = QIcon(str(path))
+        image = logo_pixmap(path)
+        icon = QIcon(image) if image is not None else QIcon(str(path))
         self.setWindowIcon(icon)
         QApplication.setWindowIcon(icon)
         self.paint_header_logo()
@@ -898,7 +923,8 @@ class BerryManager(
         if self.tray is None:
             return
         path = self.current_icon_path()
-        icon = QIcon(str(path)) if path is not None else self.windowIcon()
+        image = logo_pixmap(path) if path is not None else None
+        icon = QIcon(image) if image is not None else self.windowIcon()
         if icon.isNull():               # a logo-less build still needs a mark
             icon = QApplication.style().standardIcon(
                 QStyle.StandardPixmap.SP_ComputerIcon)
@@ -1095,6 +1121,20 @@ class BerryManager(
                 return
         self.notify_popup("Themes", "The Theme Manager addon is not running: "
                                     "switch it on under Settings > Addons.")
+
+    def show_appearance_settings(self) -> bool:
+        """Open Settings and stand on its Appearance page, where the theme in
+        force is picked; whether such a page was there to reach."""
+        page = getattr(self, "settings_page", None)
+        bar = getattr(self, "settings_tabs", None)
+        if page is None or bar is None:
+            return False
+        for index in range(bar.count()):
+            if bar.tabText(index) == "Appearance":
+                self.tabs.setCurrentWidget(page)
+                bar.setCurrentIndex(index)
+                return True
+        return False
 
     def _reload_theme_combo(self) -> None:
         """Keep the Settings > Appearance picker in step with the folder."""

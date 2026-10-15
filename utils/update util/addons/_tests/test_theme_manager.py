@@ -13,7 +13,10 @@ things have to be true and none of them can be read off the source alone:
 * the editor's own route is true end to end - make a theme from a template,
   change a colour and a knob, refuse the ones that are not colours, save,
   apply, duplicate, rename, delete - and what lands in ``themes`` is what the
-  window would be drawn from.
+  window would be drawn from;
+* the Store sub-tab works offline: sources clean and dedupe, the bundled
+  catalog paints without a network, the preview takes the theme's own sheet,
+  and the catalog generator writes a stable ``index.json`` with the marks.
 
 ``RASCONF_THEMES`` is pointed at a folder of its own before anything is
 imported, so the run makes and breaks as many looks as it likes beside the
@@ -208,19 +211,24 @@ def test_the_tab(mgr: Any, app: Any) -> None:
     captions = [book.tabText(index) for index in range(book.count())]
     check(captions == list(mgr.SUB_PAGES),
           f"the notebook's pages are {captions}, not {list(mgr.SUB_PAGES)}")
-    check(book.count() == 3, f"the editor has {book.count()} sub-tabs, not 3")
+    check(book.count() == 4, f"the editor has {book.count()} sub-tabs, not 4")
 
     table = registry["themes"]
     check(table.columnCount() == 4,
           f"the theme list has {table.columnCount()} columns, not 4")
     check(table.rootIsDecorated() is False,
           "the theme list draws branches: it is a table, not a tree")
+    store = registry["slist"]
+    check(store.columnCount() == 5,
+          f"the store list has {store.columnCount()} columns, not 5")
+    check(store.rootIsDecorated() is False,
+          "the store list draws branches: it is a table, not a tree")
     for identifier in ("tokens", "knobs", "docs"):
         check(registry[identifier].columnCount() == (2 if identifier != "docs" else 1),
               f"{identifier} has the wrong number of columns")
 
-    check(registry["tinfo"].isReadOnly() and registry["docpage"].isReadOnly(),
-          "the read-only text panes can be typed into")
+    check(registry["docpage"].isReadOnly(),
+          "the read-only docs page can be typed into")
     check(not registry["source"].isReadOnly(),
           "the JSON box cannot be typed into, so 'Use the JSON' has no use")
     check(registry["knobnum"].maximum() >= 200 and registry["knobnum"].minimum() == 0,
@@ -240,11 +248,12 @@ def test_the_tab(mgr: Any, app: Any) -> None:
              and not str(getattr(registry[identifier], "placeholderText", lambda: "")())]
     check(not blind, f"these text panes start empty and say nothing: {blind or 'none'}")
 
+    captioned = (mgr.THEME_BUTTONS + mgr.THEME_MANAGE_BUTTONS +
+                 mgr.STORE_BUTTONS + mgr.EDIT_BUTTONS)
     captions_on = {identifier: str(registry[identifier].text())
-                   for identifier, _text, _tip in
-                   mgr.THEME_BUTTONS + mgr.EDIT_BUTTONS}
+                   for identifier, _text, _tip in captioned}
     check(all(captions_on[identifier] == text
-              for identifier, text, _tip in mgr.THEME_BUTTONS + mgr.EDIT_BUTTONS),
+              for identifier, text, _tip in captioned),
           f"a button does not wear the caption its handler is named for: {captions_on}")
 
     def applies(identifier: str, prop: str, value: Any) -> str:
@@ -270,7 +279,18 @@ def test_the_tab(mgr: Any, app: Any) -> None:
                   ("tpl", "items", ["default", "deep sea"]),
                   ("tplnote", "value", "dark blues"),
                   ("tplnote", "text", "dark blues"),
-                  ("tinfo", "value", "{\n  \"name\": \"x\"\n}"),
+                  ("slist", "rows", [{"cells": ["x", "new", "-",
+                                                "this program", "abcdef1 2025-01-01"],
+                                      "color": "#ffb020"}]),
+                  ("scount", "text", "1 of 4"),
+                  ("sfilter", "value", "sea"),
+                  ("tpreview", "style", "QWidget { background-color: #123456; }"),
+                  ("tprevnote", "text", "previewing x"),
+                  ("tprevtokens", "rows", [{"cells": ["base", "#0f172a"]}]),
+                  ("spreview", "style", "QWidget { background-color: #123456; }"),
+                  ("sprevtokens", "rows", [{"cells": ["base", "#0f172a"]}]),
+                  ("mpreview", "style", "QWidget { background-color: #123456; }"),
+                  ("mprevnote", "text", "previewing x"),
                   ("draft", "items", [DEFAULT]), ("draft", "value", DEFAULT),
                   ("draftas", "value", "a new name"),
                   ("newname", "value", ""),
@@ -359,6 +379,9 @@ def test_init(mgr: Any) -> Api:
           f"the tab was added as {api.asked('tabs.add_tab', 'name')!r}")
     check(bool(api.asked("tabs.add_tab", "pinned")),
           "the editor's tab is not pinned, so it can be closed by accident")
+    check(bool(api.asked("tabs.add_tab", "icon_only")),
+          "the tab still wears its caption in the bar, so it is not icon-only "
+          "like Settings")
     check(isinstance(api.asked("tabs.add_tab", "spec"), dict),
           "the tab came with no spec, so it is an empty widget")
     style = str(api.asked("tabs.add_tab", "style") or "")
@@ -393,6 +416,12 @@ def test_init(mgr: Any) -> Api:
     check(len(mgr.draft.get("colors") or {}) == len(THEME_COLORS),
           "the draft holds only part of the palette, so a saved file would lose tokens")
     check(api.rows_of("docs"), "the Docs tree is empty")
+    store_rows = api.rows_of("slist")
+    check(store_rows,
+          "the Store list shows nothing, so the bundled catalog was not read")
+    check(any(str(one["cells"][0]).startswith(DEFAULT) for one in store_rows),
+          f"the built-in look is not in the store list: "
+          f"{[one['cells'][0] for one in store_rows]}")
     return api
 
 
@@ -412,15 +441,16 @@ def test_picking(mgr: Any, api: Api) -> None:
     api.picks["themes"] = [DEFAULT]
     check(mgr.picked_theme() == DEFAULT, f"the picked row reads as {mgr.picked_theme()!r}")
     check(mgr.context_name == "", "a right-click's row outlived the click it belonged to")
+    # Picking a row now previews the theme instead of showing its raw file:
+    # the frame beside the list is painted, and the line names the look.
     mgr.on_widget(mgr.TAB, "themes", "selected", {"text": DEFAULT})
-    shown = str(api.form.get("tinfo") or "")
-    try:
-        whole = json.loads(shown)
-    except ValueError:
-        whole = {}
-    check(whole.get("name") == DEFAULT,
-          f"the pane under the list is not the picked theme's own file: {shown[:60]!r}")
-    check(DEFAULT in api.said(), f"picking a row said {api.said()!r}")
+    check(DEFAULT in api.said() and "previewing" in api.said(),
+          f"picking a row said {api.said()!r}")
+    check(api.sets("tpreview", "style"),
+          "picking a row never touched the preview beside the list")
+    check(DEFAULT in str(api.sent("tprevnote", "text") or ""),
+          f"the preview line does not name what it shows: "
+          f"{api.sent('tprevnote', 'text')!r}")
     # Nothing picked at all is not nothing said: the command works on the look in
     # force rather than on an empty selection.
     api.picks["themes"] = []
@@ -449,8 +479,8 @@ def test_create(mgr: Any, api: Api) -> None:
     made = THEMES / f"{SECOND}.theme"
     check(made.is_file(), f"no {made.name} was written")
     check(mgr.draft_name == SECOND, f"the editor holds {mgr.draft_name!r}")
-    check(api.sent("subtabs", "current") == 1,
-          "the tab did not move to the Edit page after making one")
+    check(api.sent("subtabs", "current") == mgr.PAGE_MAKER,
+          "the tab did not move to the Theme Maker page after making one")
     check(SECOND in api.said(), f"making one said {api.said()!r}")
     check(api.form.get("newname") == "",
           "the name line still holds it, so a second press would only refuse")
@@ -852,11 +882,12 @@ def test_hooks(mgr: Any, api: Api) -> None:
           "an unknown control id raised")
     check(mgr.on_widget(mgr.TAB, "save", "unknown_event", {}) is None,
           "an unknown interaction raised")
-    # The menu and the app's links both land on the Edit page.
+    # The menu and the app's links both land on the Theme Maker page.
     mgr.focus_editor()
     check(api.asked("tabs.activate", "name") == mgr.TAB,
           f"the menu opened {api.asked('tabs.activate', 'name')!r}")
-    check(api.sent("subtabs", "current") == 1, "the menu did not move to the editor")
+    check(api.sent("subtabs", "current") == mgr.PAGE_MAKER,
+          "the menu did not move to the maker")
     # The look changing elsewhere is noticed, and said.
     reads = api.times("theme.names")
     mgr.on_event("ssh_connected", {"host": "elsewhere"})
@@ -896,8 +927,12 @@ def test_hooks(mgr: Any, api: Api) -> None:
                lambda: mgr.pick_from("doc", {"text": "name"}),
                lambda: mgr.theme_menu({"text": DEFAULT}),
                lambda: mgr.save_draft(True), lambda: mgr.show_page(2),
-               lambda: mgr.show_info(DEFAULT), mgr.tab_icon, mgr.page_style,
-               mgr.tab_spec]
+               lambda: mgr.preview_current(),
+               lambda: mgr.open_appearance_settings(),
+               lambda: mgr.store_pick({"text": "nothing"}),
+               lambda: mgr.refresh_store(), lambda: mgr.edit_sources(),
+               lambda: mgr.details_picked(), lambda: mgr.filter_store("x"),
+               mgr.tab_icon, mgr.page_style, mgr.tab_spec]
     for action in actions:
         try:
             action()
@@ -907,6 +942,136 @@ def test_hooks(mgr: Any, api: Api) -> None:
             look(f"raised {type(error).__name__}: {error}")
         check(good, f"{getattr(action, '__name__', 'one hook')} works with no api")
     check(mgr.tab_icon().startswith("<svg"), "the fallback mark is not a mark")
+
+
+# --- thirteen: the store, asked to do everything offline ---
+
+def test_store(mgr: Any) -> None:
+    """Sources, addresses, the bundled catalog and the preview - no network.
+
+    Every fetch the store would make has a door in this program's own folder,
+    so the whole route from a catalog row to a painted preview runs here on the
+    bundled ``themes.store`` alone; what needs GitHub is checked as text, by the
+    shape of the address it would ask for.
+    """
+    print("\n13. the store, offline")
+    api = Api()
+    mgr.init(api)
+    try:
+        names = [str(one["cells"][0]) for one in api.rows_of("slist")]
+        check(len(names) >= 4, f"the bundled catalog lists {names}")
+        # Sources: what a typed answer becomes, and what a list of them is.
+        made = mgr.normalize_source({"owner": " some!one ", "repo": "else",
+                                     "ref": "", "store_path": "/x/y/"})
+        check(made["owner"] == "someone" and made["repo"] == "else",
+              f"a typed source came out as {made}")
+        check(made["ref"] == "main"
+              and made["store_path"] == "x/y",
+              f"blank answers did not fall back: {made}")
+        rows = mgr.read_sources({"sources": [
+            {"owner": "a", "repo": "b"}, {"owner": "a", "repo": "b"},
+            {"owner": "", "repo": ""}, {"owner": "c", "repo": "d", "ref": "dev"}]})
+        check([(one["owner"], one["repo"]) for one in rows] == [("a", "b"), ("c", "d")],
+              f"the list did not come out deduped and clean: {rows}")
+        check(mgr.read_sources({}) == [mgr.normalize_source(mgr.MAIN_SOURCE)],
+              "a config that names no list should fall back to the program's own")
+        check(mgr.read_sources({"sources": []}) == [],
+              "an emptied source list fell back instead of staying asked-for")
+        # Addresses: the two doors every fetch and every commit lookup walks.
+        values = mgr.source_values(mgr.MAIN_SOURCE)
+        raw = mgr.raw_address(values, "deep sea.theme")
+        check(raw.startswith("/fligma/raspiOpenWrt/main/utils/update%20util/"
+                             "themes.store/") and raw.endswith("deep%20sea.theme"),
+              f"the raw address is shaped wrong: {raw!r}")
+        commit = mgr.commit_address(values, "deep sea.theme")
+        check(commit.startswith("/repos/fligma/raspiOpenWrt/commits?sha=main&path=")
+              and "themes.store" in commit and "deep%20sea.theme" in commit
+              and commit.endswith("&per_page=1"),
+              f"the commits query is shaped wrong: {commit!r}")
+        # The preview: one theme's own sheet on the sample frame, or nothing.
+        mgr.preview_theme({}, "x", "tpreview", "tprevnote", "tprevtokens")
+        check(api.sent("tpreview", "style") == ""
+              and "reading x" in str(api.sent("tprevnote", "text") or ""),
+              f"an unreadable theme left the preview saying "
+              f"{api.sent('tprevnote', 'text')!r}")
+        mgr.preview_theme({"colors": {"base": "#010203", "accent": "#0f0f0f"}},
+                          "x", "tpreview", "tprevnote", "tprevtokens")
+        painted = str(api.sent("tpreview", "style") or "")
+        check(painted and "#010203" in painted,
+              f"the frame was not painted with the theme's own sheet: "
+              f"{painted[:60]!r}")
+        note = str(api.sent("tprevnote", "text") or "")
+        check("previewing x" in note and "Appearance" in note,
+              f"the preview line does not say where themes are set: {note!r}")
+        tokens = api.sent("tprevtokens", "rows") or []
+        check([str(one["cells"][0]) for one in tokens] == ["base", "accent"],
+              f"the token rows read {tokens}")
+        # The banner's link: either way it goes, it names the same place.
+        mgr.on_widget(mgr.TAB, "appearance", "clicked", {})
+        check("Appearance" in api.said(), f"the Appearance link said {api.said()!r}")
+        # Pointing at a store row previews it; the filter narrows without a fetch.
+        mgr.on_widget(mgr.TAB, "slist", "selected", {"text": DEFAULT})
+        check(mgr.picked_store == DEFAULT,
+              f"pointing at the row left the store holding {mgr.picked_store!r}")
+        before = len(api.rows_of("slist"))
+        mgr.on_widget(mgr.TAB, "sfilter", "changed", {"text": "nomatch-nothing"})
+        check(api.rows_of("slist") == [], "the filter let rows through that fit nothing")
+        mgr.on_widget(mgr.TAB, "sfilter", "changed", {"text": ""})
+        check(len(api.rows_of("slist")) == before,
+              "the cleared filter did not repaint the whole catalog")
+    finally:
+        mgr.shutdown()
+    check(not mgr.entries and not mgr.shown, "shutdown left the catalog in hand")
+
+
+# --- fourteen: the catalog generator, on a folder of its own ---
+
+def test_theme_store_generator() -> None:
+    """tools/gen_theme_store_index.py: one row per file, stable, checkable."""
+    print("\n14. the theme store's catalog generator")
+    import importlib.util
+
+    where = ROOT / "tools" / "gen_theme_store_index.py"
+    spec = importlib.util.spec_from_file_location("gen_theme_store_index", where)
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    home = Path(tempfile.mkdtemp(prefix="themes-store-test-"))
+    try:
+        store = home / "themes.store"
+        store.mkdir()
+        one = {"name": "sea look", "colors": {"base": "#0b1220"}}
+        (store / "sea look.theme").write_text(
+            json.dumps(one, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        row = gen.build_index(store)["themes"][0]
+        check(row["id"] == "sea_look" and row["filename"] == "sea look.theme"
+              and row["version"] == "1" and row.get("status") == "new",
+              f"the row a file with no version says is: {row}")
+        check(gen.main(["--store", str(store), "--check"]) == 1,
+              "--check passed with no index on disk at all")
+        check(gen.main(["--store", str(store)]) == 0, "writing the index failed")
+        settled = json.loads((store / "index.json").read_text(encoding="utf-8"))
+        check(settled["themes"][0].get("status") == "new",
+              "the first write lost the new mark")
+        check(gen.main(["--store", str(store)]) == 0, "rewriting failed")
+        second = (store / "index.json").read_text(encoding="utf-8")
+        check(gen.main(["--store", str(store)]) == 0
+              and (store / "index.json").read_text(encoding="utf-8") == second,
+              "the settled output moved between runs: a build could not tell "
+              "what changed")
+        check(gen.main(["--store", str(store), "--check"]) == 0,
+              "--check refused the file it had just written itself")
+        # A raised version in the file is the one thing that marks a row updated.
+        one["version"] = "2"
+        (store / "sea look.theme").write_text(json.dumps(one), encoding="utf-8")
+        again = gen.build_index(store, gen.load_previous(store / "index.json"))
+        check(again["themes"][0].get("status") == "updated",
+              f"a raised version did not mark the row: {again['themes'][0]}")
+        # And the catalog the shipped folder really carries.
+        shipped = gen.build_index(gen.STORE_DIR, None)["themes"]
+        check(len(shipped) >= 4,
+              f"the shipped themes.store lists {len(shipped)} themes")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def main() -> int:
@@ -951,6 +1116,8 @@ def main() -> int:
         test_files(mgr, api)
         test_docs(mgr, api)
         test_hooks(mgr, api)
+        test_store(mgr)
+        test_theme_store_generator()
     finally:
         shutil.rmtree(THEMES, ignore_errors=True)
 

@@ -638,7 +638,7 @@ def test_the_notice(upd: Any) -> None:
 
 def test_the_buttons(upd: Any) -> None:
     print("\n11. the buttons and the config change route through")
-    api = fresh(upd)
+    fresh(upd)                    # the addon's api hand, for the clicks below
     seen: list[str] = []
     with patched(upd, check_now=lambda c=False: seen.append("check"),
                  update_selected=lambda c=False: seen.append("update"),

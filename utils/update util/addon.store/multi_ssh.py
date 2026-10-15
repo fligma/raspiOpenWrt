@@ -34,7 +34,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "Multi SSH",
-    "version": "1.0",
+    "version": "1.1",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],
@@ -368,7 +368,7 @@ def reload_entries() -> list:
 def write_entries(items: list) -> None:
     """Save the quickstart list, so the next Berry Manager sees what this one
     added - and the file stays the plain JSON an editor can change."""
-    global entries
+    global entries, current
     entries = [entry for entry in (items or []) if entry]
     if api is not None:
         api.config.set("quickstart", [dict(entry) for entry in entries])

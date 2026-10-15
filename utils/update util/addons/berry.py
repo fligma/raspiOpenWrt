@@ -27,7 +27,7 @@ from addon_common import AddonError, find_addon_picture      # the Qt-free half 
 
 ADDON = {
     "name": "Berry file manager",
-    "version": "1.3",
+    "version": "1.4",
     "author": "fligma",
     "description": "A device-and-local file manager with a notepad-style editor: "
                    "browse both sides in one tab, edit files with syntax "

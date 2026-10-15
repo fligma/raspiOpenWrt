@@ -884,7 +884,6 @@ class TerminalScreen(QWidget):
         mods = event.modifiers()
         ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
-        alt = bool(mods & Qt.KeyboardModifier.AltModifier)
 
         # Clipboard keys carry the shift so they cannot eat ^C and ^V.
         if ctrl and shift and key == Qt.Key.Key_C:

@@ -1,0 +1,36 @@
+{
+  "themes": [
+    {
+      "id": "deep_sea",
+      "name": "deep sea",
+      "version": "1",
+      "author": "",
+      "blurb": "Blue-black surfaces, cyan accent.",
+      "filename": "deep sea.theme"
+    },
+    {
+      "id": "default",
+      "name": "default",
+      "version": "1",
+      "author": "",
+      "blurb": "The shipped look: near-black surfaces, the berry accent.",
+      "filename": "default.theme"
+    },
+    {
+      "id": "ember",
+      "name": "ember",
+      "version": "1",
+      "author": "",
+      "blurb": "Warm brown surfaces, burnt-orange accent.",
+      "filename": "ember.theme"
+    },
+    {
+      "id": "light",
+      "name": "light",
+      "version": "1",
+      "author": "",
+      "blurb": "Light surfaces with the same berry accent.",
+      "filename": "light.theme"
+    }
+  ]
+}

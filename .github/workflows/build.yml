@@ -52,6 +52,10 @@ jobs:
                 # their tests, and the tool that writes index.json from them.
                 "utils/update util/addon.store/"*) store=true ;;
                 "utils/update util/tools/gen_addon_store_index.py") store=true ;;
+                # The theme store is cut from the same cloth: its folder of
+                # .theme files and the tool that writes its index.json.
+                "utils/update util/themes.store/"*) store=true ;;
+                "utils/update util/tools/gen_theme_store_index.py") store=true ;;
                 # The program is made of everything else under it - the app,
                 # the addons that ship inside it, its assets, its
                 # requirements - and of this workflow, so a change to the
@@ -85,7 +89,7 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
 
-    - name: Regenerate the addon store catalog
+    - name: Regenerate the store catalogs
       working-directory: "utils/update util"
       run: |
         # index.json is the catalog the store reads off GitHub at runtime, so it
@@ -96,12 +100,26 @@ jobs:
         python tools/gen_addon_store_index.py
         git config user.name "github-actions[bot]"
         git config user.email "4198681+github-actions[bot]@users.noreply.github.com"
+        wrote=false
         if [ -n "$(git status --porcelain -- addon.store/index.json)" ]; then
           git add addon.store/index.json
           git commit -m "Update addon store catalog [skip ci]"
-          git push
+          wrote=true
         else
           echo "addon.store/index.json was already up to date"
+        fi
+        # The theme store's catalog is made the same way, from the .theme files
+        # in themes.store; both push back together, or not at all.
+        python tools/gen_theme_store_index.py
+        if [ -n "$(git status --porcelain -- themes.store/index.json)" ]; then
+          git add themes.store/index.json
+          git commit -m "Update theme store catalog [skip ci]"
+          wrote=true
+        else
+          echo "themes.store/index.json was already up to date"
+        fi
+        if [ "$wrote" = true ]; then
+          git push
         fi
 
   build:
@@ -209,6 +227,16 @@ jobs:
         # tools/make_addon_icons.py and tools/make_store_icons.py.
         python tools/make_addon_icons.py --check
         python tools/make_store_icons.py --check
+
+    - name: Check the theme store catalog is up to date
+      working-directory: "utils/update util"
+      run: |
+        # The Theme Store reads themes.store/index.json off GitHub, and the
+        # program bundles the same file, so a committed index that drifted from
+        # the .theme files beside it would be what every install sees. The
+        # catalog job rewrites it when the folder moves; this proves the copy in
+        # the tree is that copy. See tools/gen_theme_store_index.py.
+        python tools/gen_theme_store_index.py --check
 
     - name: Run the addon test scripts
       shell: pwsh

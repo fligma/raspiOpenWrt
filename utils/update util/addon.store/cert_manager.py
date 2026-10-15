@@ -30,7 +30,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Certificate manager",
-    "version": "1.2",
+    "version": "1.3",
     "author": "fligma",
     "description": "Shows the certificate on the device and reissues the .crt and "
                    ".key over SSH, with the subject, paths and follow-up commands "
@@ -624,9 +624,9 @@ def reissue_script(values: dict) -> str:
         f'DIR={quoted(where["dir"])}',
         f'CERT={quoted(where["cert"])}',
         f'KEY={quoted(where["key"])}',
-        f'CNF="$DIR/.rasconf_cert.cnf"',
-        f'TCRT="$DIR/.rasconf_cert.crt"',
-        f'TKEY="$DIR/.rasconf_cert.key"',
+        'CNF="$DIR/.rasconf_cert.cnf"',
+        'TCRT="$DIR/.rasconf_cert.crt"',
+        'TKEY="$DIR/.rasconf_cert.key"',
         f'OPENSSL={quoted(where["openssl"])}',
         'echo "== prepare =="',
         'mkdir -p "$DIR"',

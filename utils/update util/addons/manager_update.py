@@ -80,7 +80,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Berry Manager update",
-    "version": "1.1",
+    "version": "1.2",
     "author": "fligma",
     "description": "Lists the berry tags published on GitHub newest first, says "
                    "which one this copy is, and puts any of them - a newer "
@@ -1696,7 +1696,7 @@ def start() -> None:
 
 
 def shutdown() -> None:
-    global api, working, job, found, published, picked, ticker, announced
+    global api, working, job, found, published, picked, ticker
     _drop_http()
     _stop_timer(ticker)
     ticker = None

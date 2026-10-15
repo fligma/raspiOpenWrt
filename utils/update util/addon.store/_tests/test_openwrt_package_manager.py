@@ -149,8 +149,8 @@ def test_manifest_and_config(addon: Any, api: Api) -> None:
     check(addon.ADDON.get("requires") == ["ssh", "sftp"],
           f"requires ssh and sftp services: {addon.ADDON.get('requires')!r}")
     check(str(addon.ADDON.get("api")) == "1", "addon api version is 1")
-    check(str(addon.ADDON.get("version") or "") == "1.3",
-          f"the published version is 1.3: {addon.ADDON.get('version')!r}")
+    check(str(addon.ADDON.get("version") or "") == "1.4",
+          f"the published version is 1.4: {addon.ADDON.get('version')!r}")
     check("icon" not in addon.ADDON,
           "the manifest names no picture, so the store picks one by the rule")
     check(addon.TAB_ICON_FILE == "openwrt_package_managericon.png",
@@ -336,7 +336,7 @@ def fresh_addon(api: Api) -> None:
 
 
 def main() -> int:
-    global api_module, FAILURES
+    global api_module
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         # The Test pane wants it live; and a Windows console often speaks
         # cp1252, which has no room for the marks these tabs paint (● ○ ✓),

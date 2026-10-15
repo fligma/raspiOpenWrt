@@ -21,7 +21,7 @@ SHQ = shlex.quote
 
 ADDON = {
     "name": "OpenWrt Package Manager",
-    "version": "1.3",
+    "version": "1.4",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh", "sftp"],
@@ -257,10 +257,22 @@ def installed_rows(query: str = "") -> list:
     return rows
 
 def show_installed() -> None:
-    """Redraw the installed table and say what it holds."""
-    api.tabs.set_widget("Package Manager", "inst_table", "rows",
-                        installed_rows(_filter))
-    have = sum(1 for name, _ver in _installed_cache if description_of(name))
+    """Redraw the installed table and say what it holds.
+
+    The rows and the described-count are gathered in one pass over the cache,
+    and each package's description is read once, rather than scanning the list
+    twice (once for the table, once for the tally).
+    """
+    needle = str(_filter or "").lower()
+    rows = []
+    have = 0
+    for name, ver in _installed_cache:
+        desc = description_of(name)
+        if desc:
+            have += 1
+        if not needle or needle in name.lower():
+            rows.append([name, ver, desc])
+    api.tabs.set_widget("Package Manager", "inst_table", "rows", rows)
     api.tabs.set_widget(
         "Package Manager", "inst_status", "text",
         f"Loaded {len(_installed_cache)} installed packages ({_pm_backend()}); "

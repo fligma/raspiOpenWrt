@@ -122,7 +122,9 @@ The namespaces on ``api``
     ``template_text``, ``validate``. Changing: ``use(name)`` applies one and
     keeps the choice in the profile, ``save(name, theme)`` writes a file (and
     redraws when it is the one in force), ``copy``, ``rename`` and ``remove``
-    look after the rest. A theme never breaks the window: an unknown token or a
+    look after the rest, and ``open_appearance()`` stands the app on
+    Settings > Appearance, where the theme in force is picked. A theme never
+    breaks the window: an unknown token or a
     colour that is not a colour is reported by ``validate`` and the shipped
     value is kept for it.
 
@@ -314,12 +316,9 @@ from addon_common import (
     addon_config_path,
     addon_data_dir,
     addon_schema_path,
-    build_mark,
     config_get,
-    config_name,
     guard,
     jsonable,
-    manifest_from,
     merge_config,
     put_config_value,
     read_config_json,
@@ -481,6 +480,17 @@ def _swatch_icon(colour: QColor) -> QIcon:
     return icon
 
 
+#: Pictures read off disk or parsed out of an SVG, kept by the source that made
+#: them: a table redrawn every couple of seconds asks for the same marks over
+#: and over, and one read answers them all. A QPixmap copies by reference, so a
+#: caller scaling or wearing one never touches what sits here; the cap keeps a
+#: long session with many different pictures from growing the memory unawares.
+#: Nothing is kept when the picture could not be read: a plain miss costs no
+#: parse, and a file that turns up later is noticed the moment it does.
+_PICTURE_CACHE: dict[str, QPixmap] = {}
+_PICTURE_CACHE_MAX = 128
+
+
 def load_picture(source: Any) -> QPixmap | None:
     """A picture out of an SVG document (as text) or an image file at a path;
     nothing readable is ``None``, so a missing file leaves a blank, not a
@@ -490,16 +500,27 @@ def load_picture(source: Any) -> QPixmap | None:
     text = str("" if source is None else source).strip()
     if not text:
         return None
+    held = _PICTURE_CACHE.get(text)
+    if held is not None:
+        return held
+    image: QPixmap | None = None
     if text.startswith(("<svg", "<?xml")):
-        image = QPixmap()
-        if not image.loadFromData(QByteArray(text.encode("utf-8")), "SVG"):
+        made = QPixmap()
+        if not made.loadFromData(QByteArray(text.encode("utf-8")), "SVG"):
             return None
-        return None if image.isNull() else image
-    path = Path(text)
-    if not path.is_file():
-        return None
-    image = QPixmap(str(path))
-    return None if image.isNull() else image
+        image = None if made.isNull() else made
+    else:
+        path = Path(text)
+        if not path.is_file():
+            return None
+        made = QPixmap(str(path))
+        image = None if made.isNull() else made
+    if image is not None:
+        if len(_PICTURE_CACHE) >= _PICTURE_CACHE_MAX:
+            # The oldest answer goes; insertion order is good enough as age.
+            _PICTURE_CACHE.pop(next(iter(_PICTURE_CACHE)), None)
+        _PICTURE_CACHE[text] = image
+    return image
 
 
 def widget_pixmap(source: Any, side: int) -> QPixmap | None:
@@ -3639,6 +3660,20 @@ class ThemeAPI:
         if callable(apply):
             return str(apply(str(name)))
         return manager_theme.use(str(name))
+
+    def open_appearance(self) -> bool:
+        """Show the app's Settings > Appearance page, where the theme in force
+        is picked; whether the window could be talked into opening it.
+
+        Themes are chosen in the app rather than in an addon, so an addon that
+        edits them hands the person to that page instead of duplicating the
+        picker; a window with no Settings to show answers False.
+        """
+        win = self._window()
+        show = getattr(win, "show_appearance_settings", None)
+        if callable(show):
+            return bool(show())
+        return False
 
     def save(self, name: str, theme: dict, force: bool = False) -> str:
         """Write one theme to its file; raises with what is wrong unless ``force``.

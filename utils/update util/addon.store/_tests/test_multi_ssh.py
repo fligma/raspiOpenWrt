@@ -182,8 +182,8 @@ def test_manifest(addon: Any, api: Api) -> None:
     check(str(addon.ADDON.get("connection")) == "own",
           "every shell is a connection of its own, and the manifest says so")
     check(str(addon.ADDON.get("api")) == "1", "the api version is 1")
-    check(str(addon.ADDON.get("version") or "") == "1.0",
-          f"the published version is 1.0: {addon.ADDON.get('version')!r}")
+    check(str(addon.ADDON.get("version") or "") == "1.1",
+          f"the published version is 1.1: {addon.ADDON.get('version')!r}")
     check("icon" not in addon.ADDON,
           "the manifest names no picture, so the store picks one by the rule")
     check(addon.TAB_ICON_FILE == "multi_sshicon.png",

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
@@ -15,7 +14,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "OpenWrt Log Viewer",
-    "version": "2.9",
+    "version": "2.10",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],
@@ -695,7 +694,6 @@ def fetch_all() -> None:
 
 
 def _check_poll() -> None:
-    global _poll
     if _poll is None:
         return
     _poll["tries"] += 1
@@ -796,11 +794,11 @@ def _matches(entry: dict, chosen: dict, apply_search: bool = True) -> bool:
     if apply_search and chosen["matcher"] is not None:
         if not chosen["matcher"](entry["line"]):
             return False
+    pats = chosen["pats"]
     for key in ("iface", "mac", "ip"):
-        want = chosen[key]
-        if want and want != "All":
-            if not re.search(rf"\b{re.escape(want)}\b", entry["line"],
-                             re.IGNORECASE):
+        pat = pats[key]
+        if pat is not None:
+            if not pat.search(entry["line"]):
                 return False
     if chosen["proc"] and chosen["proc"] != "All":
         if entry["proc"] != chosen["proc"] and \
@@ -814,7 +812,7 @@ def _matches(entry: dict, chosen: dict, apply_search: bool = True) -> bool:
 
 def _chosen(tab: str, prefix: str, with_device: bool) -> dict:
     term = str(_read(tab, prefix + "search", "text", "")).strip()
-    return {
+    chosen = {
         "search": term,
         "matcher": _search_matcher(term),
         "iface": str(_read(tab, prefix + "iface", default="All")),
@@ -825,6 +823,14 @@ def _chosen(tab: str, prefix: str, with_device: bool) -> dict:
         if with_device else "All",
         "order": str(_read(tab, prefix + "order", default="Newest first")),
     }
+    # The iface/mac/ip whole-word patterns are compiled once per render here,
+    # so _matches reuses them instead of rebuilding a regex for every line.
+    chosen["pats"] = {
+        key: re.compile(rf"\b{re.escape(chosen[key])}\b", re.IGNORECASE)
+        if chosen[key] and chosen[key] != "All" else None
+        for key in ("iface", "mac", "ip")
+    }
+    return chosen
 
 
 def sort_entries(entries: list[dict], newest_first: bool) -> list[dict]:

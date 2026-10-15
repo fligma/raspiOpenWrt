@@ -2362,11 +2362,12 @@ class AddonDevWidget(QWidget):
         outer.addWidget(self.scroll)
 
         # One short timer for the child processes, one longer for the tables:
-        # a build's output should feel live, a table list does not.
+        # a build's output should feel live, a table list does not. The short
+        # one only earns its keep while a child is actually running (see
+        # _watch_streams), so a tab that builds nothing ticks for nothing.
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(400)
         self.poll_timer.timeout.connect(self._poll_streams)
-        self.poll_timer.start()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(REFRESH_MS)
         self.refresh_timer.timeout.connect(self.refresh)
@@ -3206,6 +3207,9 @@ class AddonDevWidget(QWidget):
             field.setEnabled(can_build and not busy)
         self.compile_button.setEnabled(can_build and not busy)
         self.cancel_button.setEnabled(busy)
+        # One interpreter answer for both panels below: asking costs a call
+        # and the two notes want the same words.
+        where, why_python = build_interpreter()
         if busy:
             self.build_note.setText("building...")
             self.build_note.setStyleSheet("color: #8f8f8f;")
@@ -3213,7 +3217,6 @@ class AddonDevWidget(QWidget):
             self.build_note.setText(why_build)
             self.build_note.setStyleSheet("color: #ffb020;")
         else:
-            where, _why = build_interpreter()
             self.build_note.setText(f"PyInstaller from {where or sys.executable}")
             self.build_note.setStyleSheet("color: #8f8f8f;")
 
@@ -3224,7 +3227,6 @@ class AddonDevWidget(QWidget):
                                         else "Write test script")
         testing = self.test is not None and self.test.running()
         modules, why_modules = app_modules_ready()
-        where, why_python = build_interpreter()
         if not modules:
             why_run = why_modules
         elif where is None:
@@ -3446,6 +3448,11 @@ class AddonDevWidget(QWidget):
         self.test_note.setText(f"wrote {path.name}")
         self.test_note.setStyleSheet("color: #23d18b;")
 
+    def _watch_streams(self) -> None:
+        """Keep the short poll alive while a build or a test child is running."""
+        if not self.poll_timer.isActive():
+            self.poll_timer.start()
+
     def run_test(self) -> None:
         addon = self.current()
         if addon is None:
@@ -3463,6 +3470,7 @@ class AddonDevWidget(QWidget):
         self.test_log.setPlainText("")
         self.test = _Stream([where, str(path)])
         self.test.start()
+        self._watch_streams()
         self.run_test_button.setEnabled(False)
         self.test_note.setText("running...")
         self.test_note.setStyleSheet("color: #8f8f8f;")
@@ -3520,6 +3528,7 @@ class AddonDevWidget(QWidget):
         self.build_log.setPlainText("$ " + " ".join(command) + "\n\n")
         self.build = _Stream(command, cwd=work)
         self.build.start()
+        self._watch_streams()
         self.compile_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.build_note.setText("building...")
@@ -3558,6 +3567,10 @@ class AddonDevWidget(QWidget):
             if addon is not None:
                 # Buttons and notes follow what the run just ended with.
                 self._load_run_panels(self.mgr.describe(addon), addon)
+        if self.build is None and self.test is None:
+            # Nothing is in flight any more: the poll rests until the next
+            # launch asks for it (_watch_streams).
+            self.poll_timer.stop()
 
     def build_done(self, stream: _Stream) -> None:
         addon = self.current()

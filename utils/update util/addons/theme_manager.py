@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
-"""Theme Manager: make, edit and try the looks this program is drawn from.
+"""Theme Manager: make, edit, try and download the looks this program is drawn from.
 
-Adds a ``Theme Manager`` tab with three sub-tabs - **Themes**, **Edit** and
-**Docs** - and is the program's own way of doing what a ``.theme`` file is for:
+Adds a ``Theme Manager`` tab - pinned icon-only in the task bar, beside
+Settings - with four sub-tabs: **Themes**, **Store**, **Theme Maker** and
+**Docs**. It is the program's own way of doing what a ``.theme`` file is for:
 a look is one small JSON file in the ``themes`` folder next to the program, and
 this addon reads, writes and applies it through ``api.theme`` rather than
 touching the disk or the window itself, so the same file works whether the addon
 runs inside the app or as its own process.
+
+The **Store** sub-tab is to themes what the addon store is to addons: it reads
+``themes.store/index.json`` from GitHub - this program's own repository first
+and any other source a person adds - and installs a chosen theme with one
+click. The catalog's own copy is bundled with the program as well, so the
+built-in looks show even with the network away, and each published row says
+which commit its file last changed in, the same way the addon store does.
+
+Both the Themes list and the store wear a **preview**: a small sample of the
+interface - a note, a heading, a line, two buttons and the theme's own
+colours - drawn with ``api.theme.sheet_of`` from whatever theme is pointed
+at, so a look can be seen before it is worn. Themes themselves are set in
+Settings > Appearance, and the tab's banner carries the link to that page.
 
 ``themes/default.theme`` is written by the app when it starts, so there is
 always a file to copy from and always something to fall back on. A theme holds
@@ -30,22 +44,31 @@ it cannot disagree with the program it describes.
 
 from __future__ import annotations
 
+import http.client
 import json
+import re
+import ssl
+import time
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from addon_common import AddonError, config_get, find_addon_picture, merge_config, one_line
+from addon_common import (AddonError, config_get, find_addon_picture, jsonable,
+                          merge_config, one_line)
 
 ADDON = {
     "name": "Theme Manager",
-    "version": "1.0",
+    "version": "1.2",
     "author": "fligma",
-    "description": "Makes and edits the .theme files the program is drawn from: "
-                   "a list of every look on disk with its author and what it is, "
-                   "an editor that works on one theme at a time - colours by "
-                   "their groups, the tab bar by its knobs, or the JSON direct - "
-                   "and a reference of every api.theme call, read off the running "
-                   "app. Saving writes themes/<name>.theme; applying draws the "
-                   "window from it.",
+    "description": "Makes, edits and downloads the .theme files the program is "
+                   "drawn from: every look on disk with a live preview beside "
+                   "the list, a store that reads themes.store on GitHub (the "
+                   "bundled catalog included, with the commit each published "
+                   "theme came from), an editor that works on one theme at a "
+                   "time - colours by their groups, the tab bar by its knobs, "
+                   "or the JSON direct - and a reference of every api.theme "
+                   "call. Themes are set in Settings > Appearance, which the "
+                   "tab links to.",
     "requires": [],
     # A look is a file beside this program; no device is involved.
     "connection": "none",
@@ -78,10 +101,30 @@ TAB_ICON = (
 
 # --- what can be configured, and what it starts out as ---
 
+#: The repository the theme store was written against, and the one it offers
+#: back when a source is added by name or every source has been removed.
+MAIN_SOURCE = {
+    "owner": "fligma",
+    "repo": "raspiOpenWrt",
+    "ref": "main",
+    "store_path": "utils/update util/themes.store",
+}
+
+#: What one source holds: the four pieces of a GitHub address, nothing else.
+SOURCE_KEYS = ("owner", "repo", "ref", "store_path")
+
+#: The answer a source field starts out with when it has none of its own.
+SOURCE_HINTS = {"owner": "", "repo": "", "ref": "main",
+                "store_path": MAIN_SOURCE["store_path"]}
+
 DEFAULTS = {
     "confirm_delete": True,
     "save_applies": True,
     "expand_groups": True,
+    # The store: which repositories the catalog is read from, and how GitHub
+    # is reached. The same shape the addon store keeps.
+    "sources": [dict(MAIN_SOURCE)],
+    "token": "",
 }
 
 FIELDS = [
@@ -98,10 +141,15 @@ FIELDS = [
      "kind": "bool",
      "hint": "The editor's trees list every token, grouped by what it is used "
              "for. Closed, only the first group of each is opened for you."},
+    {"key": "token", "label": "GitHub token", "kind": "text",
+     "hint": "Used for every store source. Only needed for a private "
+             "repository, or when anonymous requests are refused",
+     "placeholder": "blank for a public repository"},
 ]
 
 GROUPS = (("The editor", ["save_applies", "expand_groups"]),
-          ("Files", ["confirm_delete"]))
+          ("Files", ["confirm_delete"]),
+          ("The store", ["token"]))
 
 # --- the tab's own look ---
 
@@ -147,21 +195,48 @@ _STATUS_BAD = "color: #ffb020; padding: 2px 4px;"
 #: The sub-tabs, in order. The app owns the outer tab bar; these belong to the
 #: addon's page and are what the editor switches between.
 SUB = "subtabs"
-SUB_PAGES = ("Themes", "Edit", "Docs")
+SUB_PAGES = ("Themes", "Store", "Theme Maker", "Docs")
 
-#: The buttons under the theme list and under the editor's JSON box, each with
-#: the words on it and the words that explain it.
+#: The sub-tab each jump lands on, by the order of ``SUB_PAGES``.
+PAGE_THEMES, PAGE_STORE, PAGE_MAKER, PAGE_DOCS = range(4)
+
+#: The buttons under the theme list, split the way a person works with it: the
+#: three things done every day, and the three done occasionally - the odd ones
+#: out of the way but never hidden. Each carries the words on it and the words
+#: that explain it.
 THEME_BUTTONS = (
     ("use", "Apply", "Draw the whole window from the picked theme, and "
                      "remember the choice for this profile"),
-    ("edit", "Edit it", "Open the picked theme in the editor"),
+    ("edit", "Edit it", "Open the picked theme in the Theme Maker"),
+    ("folder", "Themes folder", "Open the folder the .theme files live in, to "
+                                "copy one in or out"),
+)
+
+THEME_MANAGE_BUTTONS = (
     ("dup", "Duplicate", "Copy the picked theme to a new name"),
     ("rename", "Rename", "The picked theme under a new name, the old file gone"),
     ("del", "Delete", "Take the picked theme's file away; the shipped default "
                       "cannot be deleted"),
-    ("folder", "Themes folder", "Open the folder the .theme files live in, to "
-                                "copy one in or out"),
 )
+
+#: The buttons under the store list. The store never deletes anything from the
+#: themes folder - Install writes a file, and the Themes list looks after it
+#: from then on.
+STORE_BUTTONS = (
+    ("srefresh", "Refresh", "Read the bundled catalog and every source's "
+                            "again from GitHub"),
+    ("sinstall", "Install", "Fetch the picked theme into the themes folder"),
+    ("sapply", "Install & Apply", "Fetch it if you have not yet, and draw the "
+                                  "window from it now"),
+    ("sdetails", "Details...", "Everything the listing says about the picked "
+                               "theme, including the commit its file came from"),
+    ("ssources", "Sources...", "Which repositories the store reads"),
+)
+
+#: The colour tokens a preview row shows: the surfaces, the accent, the words
+#: and the two states a person reads a look by.
+PREVIEW_TOKENS = ("base", "surface", "raise", "accent", "text", "ok", "warn",
+                  "danger_fill")
 
 EDIT_BUTTONS = (
     ("getsource", "Show the JSON", "Put the draft back into the box below, the "
@@ -188,8 +263,8 @@ def buttons(entries: tuple) -> list:
 
 api = None                  # filled in by init()
 
-#: The theme in the editor's hand: the dict its file stands for, complete, and
-#: the name of the file it came from (or would be written to).
+#: The draft theme in the editor's hand: the dict its file stands for,
+#: complete, and the name of the file it came from (or would be written to).
 draft: dict | None = None
 draft_name = ""
 
@@ -203,6 +278,14 @@ doc_branches: dict[str, list[str]] = {}
 #: at the pointer is about the row under the pointer, which is not necessarily
 #: the row the list is still pointing at.
 context_name = ""
+
+#: The store's own state: the catalog read last time, the rows the filter
+#: leaves showing, the entry the preview and the buttons are about, the filter
+#: line as it stands, and the words picked from a right-click menu.
+entries: list[dict] = []
+shown: list[dict] = []
+picked_store = ""
+filter_text = ""
 
 # --- small helpers over the api ---
 
@@ -297,6 +380,1016 @@ def guarded(action: Any, doing: str) -> Any:
         return None
 
 
+# --- the store: the small text rules its addresses are made of ---
+
+#: A catalog id is a name a table and a download can both use.
+_SAFE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def clean_id(value: Any) -> str:
+    """A catalog id made safe, the way the generator and the store both do it."""
+    return _SAFE.sub("_", one_line(value))
+
+
+def safe_segment(value: Any) -> str:
+    """A repository name or path piece with the shell-junk and traversal gone."""
+    text = one_line(value).replace("..", "")
+    return re.sub(r"[^A-Za-z0-9._/ -]", "", text).strip(" /")
+
+
+def clean_token(value: Any) -> str:
+    """A token stripped of the spaces a copy-paste tends to add."""
+    return one_line(value).replace(" ", "")
+
+
+# --- the sources: which repositories the theme catalog is read from ---
+
+def normalize_source(raw: Any) -> dict:
+    """One source, cleaned: what a person typed, turned into the parts of an
+    address.
+
+    A branch that was left blank is ``main``, and a store folder left blank is
+    this program's own, since that is the layout a published theme store uses.
+    """
+    data = raw if isinstance(raw, dict) else {}
+    out: dict[str, str] = {}
+    for key in SOURCE_KEYS:
+        text = (one_line(data.get(key)) if key != "store_path" else
+                one_line(data.get(key)).strip("/"))
+        if not text:
+            text = str(SOURCE_HINTS.get(key) or "")
+        out[key] = (safe_segment(text) if key in ("owner", "repo", "store_path")
+                    else text.strip("/"))
+    return out
+
+
+def source_label(source: dict) -> str:
+    """One source as a person names it: ``owner/repo @ ref``."""
+    data = source if isinstance(source, dict) else {}
+    return (f"{one_line(data.get('owner'))}/{one_line(data.get('repo'))}"
+            f" @ {one_line(data.get('ref') or 'main')}")
+
+
+def source_values(source: dict, token: str = "") -> dict:
+    """One source as the flat values dict every address builder reads."""
+    data = source if isinstance(source, dict) else {}
+    return {"owner": one_line(data.get("owner")),
+            "repo": one_line(data.get("repo")),
+            "ref": one_line(data.get("ref")) or "main",
+            "store_path": one_line(data.get("store_path")).strip("/")
+                         or MAIN_SOURCE["store_path"],
+            "token": clean_token(token)}
+
+
+def _source_key(source: dict) -> tuple:
+    return tuple(str(source.get(key) or "") for key in SOURCE_KEYS)
+
+
+def read_sources(config: dict) -> list[dict]:
+    """Every source the config names, in the order they are read.
+
+    An empty ``sources`` list is what the person asked for - they removed every
+    source - and stays empty; only a config that names no list at all falls back
+    to this program's own. A source missing its owner or repository is a
+    half-typed line, not a source, and is dropped rather than fetched badly.
+    """
+    data = config if isinstance(config, dict) else {}
+    raw = config_get(data, "sources", None)
+    if not isinstance(raw, list):
+        raw = [dict(MAIN_SOURCE)]
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for item in raw:
+        source = normalize_source(item)
+        if not source["owner"] or not source["repo"]:
+            continue
+        key = _source_key(source)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(source)
+    return out
+
+
+def current_sources(config: dict | None = None) -> list[dict]:
+    """What the config names now, read from the file when nothing is to hand."""
+    return read_sources(values() if config is None else config)
+
+
+def write_sources(sources: list[dict]) -> list[dict]:
+    """Put the list in the config, cleaned, so the next read uses it."""
+    kept = read_sources({"sources": list(sources or [])})
+    if api is None:
+        return kept
+    api.config.update({"sources": jsonable(kept)})
+    return kept
+
+
+# --- network: standard library only, like the addon store ---
+
+class Fetcher:
+    """A few HTTPS connections, kept open and reused for one job."""
+
+    def __init__(self, token: str = "") -> None:
+        self.token = str(token or "")
+        self.connections: dict[str, http.client.HTTPSConnection] = {}
+
+    def _connection(self, host: str) -> http.client.HTTPSConnection:
+        connection = self.connections.get(host)
+        if connection is None:
+            connection = http.client.HTTPSConnection(
+                host, timeout=25, context=ssl.create_default_context())
+            self.connections[host] = connection
+        return connection
+
+    def get(self, host: str, path: str,
+            accept: str = "application/octet-stream") -> tuple[int, bytes]:
+        """``(status, body)`` for one GET, retried once on a dropped connection."""
+        status, body = 0, b""
+        for attempt in (0, 1):
+            headers = {"User-Agent": "berry-manager", "Accept": accept}
+            if self.token:
+                headers["Authorization"] = f"token {self.token}"
+            connection = self._connection(host)
+            try:
+                connection.request("GET", path, headers=headers)
+                answer = connection.getresponse()
+                body = answer.read()
+                status = int(answer.status)
+                if status < 500:
+                    return status, body
+            except (http.client.HTTPException, OSError):
+                self.close(host)
+                if attempt:
+                    raise
+                time.sleep(0.4)
+        return status, body
+
+    def close(self, host: str = "") -> None:
+        for name in ([host] if host else list(self.connections)):
+            connection = self.connections.pop(name, None)
+            if connection is not None:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
+
+
+_fetchers: dict[str, Fetcher] = {}
+
+
+def _http(config: dict) -> Fetcher:
+    key = clean_token(config_get(config, "token", ""))
+    fetcher = _fetchers.get(key)
+    if fetcher is None:
+        fetcher = Fetcher(token=key)
+        _fetchers[key] = fetcher
+    return fetcher
+
+
+def _drop_http() -> None:
+    for fetcher in _fetchers.values():
+        fetcher.close()
+    _fetchers.clear()
+
+
+def raw_address(config: dict, filename: str) -> str:
+    """The raw.githubusercontent path for one file in a source's store folder.
+
+    A theme's whole identity in the catalog is its file name, so this is the
+    one door every download and every preview walk through.
+    """
+    owner = quote(safe_segment(config_get(config, "owner", MAIN_SOURCE["owner"])))
+    repo = quote(safe_segment(config_get(config, "repo", MAIN_SOURCE["repo"])))
+    ref = quote(one_line(config_get(config, "ref", "main")).strip("/"), safe="-./_")
+    where = "/".join(part for part in (
+        safe_segment(config_get(config, "store_path",
+                                MAIN_SOURCE["store_path"])).strip("/"),
+        safe_segment(filename)) if part)
+    return f"/{owner}/{repo}/{ref}/{quote(where)}"
+
+
+def _refused(status: int, path: str) -> str:
+    if status == 404:
+        return (f"GitHub has no such file at {path}: check the owner, repository, "
+                "branch and store folder in the sources")
+    if status == 403:
+        return (f"GitHub refused the request for {path} (403). Anonymous requests "
+                "are limited, so add a token under Settings or try again later")
+    return f"GitHub answered {status} for {path}"
+
+
+# --- reading the catalog ---
+
+def parse_catalog(body: Any) -> list[dict]:
+    """index.json as a tidy list of theme entries; a bare list is accepted too.
+
+    The fields are the ones the generator writes from a ``.theme`` file's own
+    JSON: name, version, author, blurb and file name. The search line is built
+    once here so a keystroke at the filter is one test, not a re-lowering of
+    every field of every row.
+    """
+    if isinstance(body, dict):
+        rows = body.get("themes") or body.get("entries") or []
+    elif isinstance(body, list):
+        rows = body
+    else:
+        rows = []
+    out: list[dict] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        ident = clean_id(raw.get("id") or raw.get("name") or "")
+        if not ident:
+            continue
+        entry = {
+            "id": ident,
+            "name": one_line(raw.get("name") or ident),
+            "version": one_line(raw.get("version") or ""),
+            "author": one_line(raw.get("author") or ""),
+            "blurb": one_line(raw.get("blurb") or raw.get("description") or ""),
+            "filename": one_line(raw.get("filename") or f"{ident}.theme"),
+            "status": one_line(raw.get("status") or ""),
+        }
+        entry["search"] = " ".join(one_line(entry.get(part)).lower() for part in
+                                   ("name", "id", "author", "blurb"))
+        out.append(entry)
+    return out
+
+
+def load_catalog(config: dict) -> list[dict]:
+    """Fetch and read ``index.json`` from one source's store folder."""
+    path = raw_address(config, "index.json")
+    try:
+        status, body = _http(config).get(
+            "raw.githubusercontent.com", path, accept="application/json")
+    except (http.client.HTTPException, OSError) as error:
+        raise AddonError(f"the catalog could not be reached: {error}")
+    if status != 200:
+        raise AddonError(_refused(status, path))
+    try:
+        data = json.loads(body.decode("utf-8", errors="replace"))
+    except ValueError as error:
+        raise AddonError(f"index.json was not the JSON expected: {error}")
+    return parse_catalog(data)
+
+
+def local_folder() -> Path | None:
+    """The ``themes.store`` folder bundled with this program, when it is there.
+
+    A checkout has it beside the app; a built program has it only if the pack
+    carried it along. Either way the built-in looks can be listed and installed
+    without a single request leaving the machine.
+    """
+    homes: list[Path] = []
+    try:
+        if api is not None:
+            homes.append(Path(str(api.paths.base)))
+    except (AddonError, AttributeError, TypeError, OSError):
+        pass
+    homes.append(Path(__file__).resolve().parents[1])
+    for home in homes:
+        try:
+            folder = home / "themes.store"
+            if (folder / "index.json").is_file():
+                return folder
+        except OSError:
+            continue
+    return None
+
+
+def local_entries() -> list[dict]:
+    """The bundled catalog, read off disk; its rows say where each file is."""
+    folder = local_folder()
+    if folder is None:
+        return []
+    try:
+        data = json.loads((folder / "index.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out: list[dict] = []
+    for row in parse_catalog(data):
+        entry = dict(row)
+        entry["source"] = "this program"
+        entry["local"] = str(folder / entry["filename"])
+        entry["search"] = f"{entry['search']} this program"
+        out.append(entry)
+    return out
+
+
+def merge_catalogs(sources: list[dict], token: str = "") -> tuple[list[dict], list[str]]:
+    """The bundled catalog, then each source's, with the clashes said out loud.
+
+    A theme two publishers both list is taken from the first - the bundled
+    folder is read before any source, and the order of the list is the priority
+    after it - and the row says where the copy kept came from, so the download
+    that follows is looked for in the same place. A source that will not answer
+    is reported and passed over, because the rest of them are still worth
+    reading.
+    """
+    found: list[dict] = []
+    failed: list[str] = []
+    seen: dict[str, str] = {}
+    for row in local_entries():
+        if row["id"] in seen:
+            continue
+        seen[row["id"]] = row["source"]
+        found.append(row)
+    for source in sources:
+        label = source_label(source)
+        try:
+            rows = load_catalog(source_values(source, token))
+        except AddonError as error:
+            failed.append(f"{label}: {error}")
+            note(f"catalog {label}: {error}")
+            continue
+        kept = 0
+        for row in rows:
+            entry = dict(row)
+            clash = seen.get(entry["id"])
+            if clash is not None:
+                note(f"{entry['id']} is published by {label} as well; the copy "
+                     f"from {clash} is the one that will be installed")
+                continue
+            entry["source"] = label
+            entry["src"] = source
+            entry["search"] = f"{entry['search']} {label.lower()}"
+            seen[entry["id"]] = label
+            found.append(entry)
+            kept += 1
+        note(f"{label}: {kept} theme(s)")
+    return found, failed
+
+
+# --- what the store says about each theme ---
+
+#: What the generator leaves in the catalog to point at a row nobody has taken.
+_MARKS = {"new": "  \u25cf new", "updated": "  \u21bb updated"}
+
+
+def theme_state(entry: dict) -> tuple[str, str]:
+    """How one store theme stands here, and the colour its row is drawn in.
+
+    The store never takes anything away, so the states only ever grow warmer:
+    not installed, on disk from an earlier install, and the one the window is
+    actually wearing.
+    """
+    name = one_line(entry.get("name"))
+    if api is not None and name and api.theme.exists(name):
+        if name == in_force():
+            return ("in use", "#23d18b")
+        return ("on disk", "#7fb3d5")
+    status = one_line(entry.get("status"))
+    if status == "new":
+        return ("new", "#ffb020")
+    if status == "updated":
+        return ("updated", "#ffb020")
+    return ("not installed", "#9a9a9a")
+
+
+def show_store_entries() -> None:
+    """The catalog as rows: the name, how it stands here, who made it, where it
+    came from and - once GitHub has answered - which commit it came in."""
+    global shown
+    if api is None:
+        return
+    needle = filter_text.strip().lower()
+    shown = [entry for entry in entries
+             if not needle or needle in (entry.get("search") or "")]
+    rows = []
+    for entry in shown:
+        state, tint = theme_state(entry)
+        name = one_line(entry.get("name")) or one_line(entry.get("id"))
+        commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
+        whence = " ".join(part for part in (
+            str(one_line(commit.get("sha")))[:7], one_line(commit.get("date")))
+            if part)
+        rows.append({
+            "cells": [name + _MARKS.get(one_line(entry.get("status")), ""),
+                      state, one_line(entry.get("author")) or "-",
+                      one_line(entry.get("source")),
+                      whence or ("bundled" if entry.get("local") else "")],
+            "color": tint})
+    put("slist", rows, "rows")
+    total = len(entries)
+    put("scount", (f"{len(shown)} of {total}" if needle else
+                   (f"{total} listed" if total else
+                    "nothing read yet - press Refresh")), "text")
+
+
+def store_find(text: str) -> dict | None:
+    """The row a person means, whether they named it by id or by the name the
+    list shows.
+
+    The first column carries a name with any mark beside it, while every command
+    takes an id, so both are tried - the shown rows first, then the whole
+    catalog - before a row is given up on.
+    """
+    wanted = one_line(text)
+    if not wanted:
+        return None
+    ident = clean_id(wanted)
+    for pool in (shown, entries):
+        for entry in pool:
+            if entry["id"] == ident or one_line(entry.get("name")) == wanted:
+                return entry
+    lowered = wanted.lower()
+    for pool in (shown, entries):
+        for entry in pool:
+            name = one_line(entry.get("name")).lower()
+            if name and (name in lowered or lowered.startswith(name)):
+                return entry
+    return None
+
+
+def store_target() -> dict | None:
+    """The row the store's buttons are about: the selection, then the theme the
+    preview is showing.
+
+    A repaint drops Qt's selection without dropping what the preview is
+    holding, so a button then still means the theme the person is looking at
+    rather than nothing at all.
+    """
+    rows = get("slist", "selected", [])
+    text = one_line(rows[0]) if isinstance(rows, (list, tuple)) and rows else ""
+    entry = store_find(text) if text else None
+    if entry is None and picked_store:
+        for one in entries:
+            if one["id"] == picked_store:
+                return one
+    if entry is None:
+        say("no store theme is picked", bad=True)
+    return entry
+
+
+def filter_store(needle: Any = "") -> None:
+    """Repaint the list with only the rows the filter fits; nothing is fetched."""
+    global filter_text
+    filter_text = one_line(needle)
+    show_store_entries()
+
+
+# --- the commit each published theme came from ---
+
+#: The catalog is regenerated whenever the store folder changes and CI commits
+#: the result, so nothing baked into it could honestly name a commit - the
+#: store asks for the last one that touched the theme's own file, once per
+#: theme, and never for the bundled half, which has no commit to name.
+_API_HOST = "api.github.com"
+
+
+def commit_address(config: dict, filename: str) -> str:
+    """The commits query for one file, held to the ref the source names."""
+    owner = quote(safe_segment(config_get(config, "owner", MAIN_SOURCE["owner"])))
+    repo = quote(safe_segment(config_get(config, "repo", MAIN_SOURCE["repo"])))
+    ref = quote(one_line(config_get(config, "ref")) or "main", safe="-./_")
+    where = "/".join(part for part in (
+        safe_segment(config_get(config, "store_path",
+                                MAIN_SOURCE["store_path"])).strip("/"),
+        safe_segment(filename)) if part)
+    return (f"/repos/{owner}/{repo}/commits?sha={ref}"
+            f"&path={quote(where, safe='/-._')}&per_page=1")
+
+
+def _commit_words(record: dict) -> dict:
+    """One commit as the few parts a listing shows: what, who, when."""
+    data = record if isinstance(record, dict) else {}
+    inner = data.get("commit") if isinstance(data.get("commit"), dict) else {}
+    lines = [line.strip() for line in str(inner.get("message") or "").splitlines()
+             if line.strip()]
+    author = data.get("author") if isinstance(data.get("author"), dict) else {}
+    writer = inner.get("author") if isinstance(inner.get("author"), dict) else {}
+    return {"sha": one_line(data.get("sha")),
+            "title": lines[0] if lines else "",
+            "date": str(writer.get("date") or "")[:10],
+            "who": one_line(author.get("login") or writer.get("name"))}
+
+
+def _ask_commit(entry: dict) -> None:
+    """Queue the lookup of one theme's commit; the answer comes on a later tick.
+
+    Asking on the spot would make reading the store wait on GitHub once per
+    row, so it is put off a moment. A theme whose commit is already in hand, or
+    already being asked about, is never asked twice.
+    """
+    if api is None or entry.get("asking") or isinstance(entry.get("commit"), dict):
+        return
+    if not isinstance(entry.get("src"), dict):
+        return                      # the bundled half has no commit to ask for
+    entry["asking"] = True
+    try:
+        api.schedule.after(0.05, lambda: _read_commit(entry))
+    except (AddonError, AttributeError, TypeError):
+        entry["asking"] = False
+
+
+def _read_commit(entry: dict) -> None:
+    """Fill in the commit one theme's file last changed in; quiet when it cannot.
+
+    Rate limits, a private repository with no token and an unreachable network
+    all leave the row without a commit line rather than a wall of text,
+    because provenance is a nicety the store works perfectly well without.
+    """
+    if api is None:
+        return
+    source = entry.get("src")
+    if not isinstance(source, dict):
+        return
+    entry["asking"] = False
+    config = source_values(source, clean_token(config_get(values(), "token", "")))
+    path = commit_address(config, one_line(entry.get("filename")))
+    try:
+        status, body = _http(config).get(_API_HOST, path, accept="application/json")
+    except (http.client.HTTPException, OSError):
+        return
+    if status != 200:
+        return
+    try:
+        records = json.loads(body.decode("utf-8", errors="replace"))
+    except ValueError:
+        return
+    first = records[0] if isinstance(records, list) and records else None
+    if isinstance(first, dict):
+        entry["commit"] = _commit_words(first)
+        show_store_entries()        # the From column fills itself in
+
+
+# --- fetching one theme's own file ---
+
+def _entry_config(entry: dict) -> dict:
+    """The flat address parts the fetchers want for one store row."""
+    config = values()
+    source = entry.get("src")
+    if not isinstance(source, dict):
+        source = (read_sources(config) or [dict(MAIN_SOURCE)])[0]
+    return source_values(source, clean_token(config_get(config, "token", "")))
+
+
+def fetch_theme_text(entry: dict) -> str:
+    """The ``.theme`` file of one store row, from the bundled folder or GitHub."""
+    held = one_line(entry.get("local"))
+    if held:
+        try:
+            return Path(held).read_text(encoding="utf-8")
+        except OSError as error:
+            raise AddonError(f"the bundled theme file could not be read: {error}")
+    config = _entry_config(entry)
+    path = raw_address(config, one_line(entry.get("filename")))
+    try:
+        status, body = _http(config).get("raw.githubusercontent.com", path,
+                                         accept="application/json")
+    except (http.client.HTTPException, OSError) as error:
+        raise AddonError(f"the theme could not be fetched: {error}")
+    if status != 200:
+        raise AddonError(_refused(status, path))
+    return body.decode("utf-8", errors="replace")
+
+
+def _ask_theme(entry: dict) -> None:
+    """Queue the read of one store theme's own file, for the preview only.
+
+    The preview wants the actual colours, and only the file has them; a row
+    whose file is already in hand previews from the cache and asks nothing.
+    """
+    if api is None or entry.get("asking_theme"):
+        return
+    if isinstance(entry.get("theme"), dict):
+        return
+    entry["asking_theme"] = True
+    try:
+        api.schedule.after(0.05, lambda: _read_theme(entry))
+    except (AddonError, AttributeError, TypeError):
+        entry["asking_theme"] = False
+
+
+def _read_theme(entry: dict) -> None:
+    """Fetch one store theme's file into the row, and preview it if it is still
+    the one the person is looking at."""
+    entry["asking_theme"] = False
+    if api is None:
+        return
+    try:
+        text = fetch_theme_text(entry)
+    except AddonError:
+        note(f"{one_line(entry.get('id'))}: its file could not be read "
+             "for the preview")
+        return
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return
+    if isinstance(data, dict):
+        entry["theme"] = data
+        if picked_store == one_line(entry.get("id")):
+            preview_theme(data, one_line(entry.get("name")),
+                          "spreview", "sprevnote", "sprevtokens")
+
+
+# --- what the store's buttons do ---
+
+def install_entry(entry: dict, apply_after: bool = False) -> bool:
+    """Fetch one store theme and write it to the themes folder; whether it landed.
+
+    The file is checked the way the app checks every save, so a catalog row
+    that turns out to hold a broken theme is refused with the app's own words
+    rather than half-installed.
+    """
+    if api is None or not isinstance(entry, dict):
+        return False
+    name = one_line(entry.get("name")) or clean_id(entry.get("id"))
+    text = guarded(lambda: fetch_theme_text(entry), f"fetch {name}")
+    if text is None:
+        return False
+    try:
+        data = json.loads(text)
+    except ValueError as error:
+        say(f"{name} is not a readable theme file: {error}", bad=True)
+        return False
+    if not isinstance(data, dict):
+        say(f"{name} is not one JSON object", bad=True)
+        return False
+    data["name"] = name
+    problems = api.theme.validate(data)
+    if problems:
+        say("; ".join(str(one) for one in problems), bad=True)
+        return False
+    if api.theme.exists(name) and not api.ui.question(
+            "Install a theme", f"themes/{name}.theme is already here. Replace "
+            "it with the store's copy?", False):
+        say(f"{name} left as it was")
+        return False
+    saved = guarded(lambda: api.theme.save(name, data), f"save {name}")
+    if saved is None:
+        return False
+    entry["theme"] = data
+    refresh_themes()
+    if apply_after:
+        used = guarded(lambda: api.theme.use(str(saved)), f"apply {saved}")
+        say(f"{saved} installed and the window is drawn from {used or saved}; "
+            "it is set in Settings > Appearance")
+    else:
+        say(f"{saved} installed into the themes folder")
+    return True
+
+
+def install_picked(_checked: bool = False) -> None:
+    """Fetch the picked store theme into the themes folder."""
+    entry = store_target()
+    if entry is not None:
+        install_entry(entry)
+
+
+def apply_picked_store(_checked: bool = False) -> None:
+    """Draw the window from the picked store theme, installing it first if the
+    themes folder does not have it yet."""
+    if api is None:
+        return
+    entry = store_target()
+    if entry is None:
+        return
+    name = one_line(entry.get("name"))
+    if name and api.theme.exists(name):
+        used = guarded(lambda: api.theme.use(name), f"apply {name}")
+        if used is not None:
+            refresh_themes()
+            say(f"the window is drawn from {used}")
+        return
+    install_entry(entry, apply_after=True)
+
+
+def details_picked(_checked: bool = False) -> None:
+    """Everything the listing says about one store theme, commit included."""
+    if api is None:
+        return
+    entry = store_target()
+    if entry is None:
+        return
+    _ask_commit(entry)
+    state, _tint = theme_state(entry)
+    commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
+    lines = [["Author", one_line(entry.get("author")) or "not stated"],
+             ["Version", one_line(entry.get("version")) or "not stated"],
+             ["Published by", one_line(entry.get("source")) or "not stated"],
+             ["Here", state],
+             ["File", one_line(entry.get("filename"))]]
+    if commit.get("sha"):
+        lines.append(["Commit", f"{str(commit['sha'])[:7]} "
+                               f"{one_line(commit.get('title'))}".strip()])
+        when = " ".join(part for part in (one_line(commit.get("date")),
+                                          one_line(commit.get("who"))) if part)
+        if when:
+            lines.append(["Committed", when])
+    body = "\n".join(f"{label}: {value}" for label, value in lines)
+    blurb = one_line(entry.get("blurb"))
+    api.ui.information(f"Theme: {one_line(entry.get('name'))}",
+                       (f"{blurb}\n\n{body}" if blurb else body))
+
+
+def refresh_store(_checked: bool = False) -> None:
+    """Read the bundled catalog and each source's, then repaint.
+
+    The bundled half costs no network, so the built-in looks are listed even
+    when GitHub cannot be reached; a commit already looked up is carried across
+    the reload with it, so reading the store again is not a reason to ask the
+    same question twice.
+    """
+    global entries
+    if api is None:
+        return
+    config = values()
+    sources = read_sources(config)
+    say(f"reading {len(sources) or 'the bundled'} catalog(s)...")
+    known = {one_line(entry.get("id")): entry["commit"] for entry in entries
+             if isinstance(entry.get("commit"), dict)}
+    held = {one_line(entry.get("id")): entry["theme"] for entry in entries
+            if isinstance(entry.get("theme"), dict)}
+    entries, failed = merge_catalogs(sources,
+                                     clean_token(config_get(config, "token", "")))
+    for entry in entries:
+        ident = one_line(entry.get("id"))
+        if known.get(ident) is not None:
+            entry["commit"] = known[ident]
+        if held.get(ident) is not None:
+            entry["theme"] = held[ident]
+        _ask_commit(entry)
+    show_store_entries()
+    word = (f"{len(entries)} theme(s) in the store" if entries
+            else "no themes are published here yet")
+    if failed and entries:
+        say(f"store read: {word}; {len(failed)} source(s) could not be read "
+            f"({failed[0]})", bad=True)
+    elif failed:
+        say("; ".join(failed), bad=True)
+    else:
+        say(f"store read: {word}")
+
+
+def load_local_store() -> None:
+    """The bundled catalog only - no network - so the store opens with the
+    built-in looks showing before anybody presses Refresh."""
+    global entries
+    if api is None or entries:
+        return
+    entries, _failed = merge_catalogs([], "")
+    show_store_entries()
+
+
+def store_pick(payload: dict) -> None:
+    """A store row was pointed at: preview the theme it stands for.
+
+    The file itself is fetched on a later tick - the row previews as soon as
+    the answer lands, and until then the frame says it is reading rather than
+    freezing the tab on the network.
+    """
+    global picked_store
+    entry = store_find(one_line((payload or {}).get("text")))
+    if entry is None:
+        return
+    picked_store = one_line(entry.get("id"))
+    held = entry.get("theme") if isinstance(entry.get("theme"), dict) else None
+    preview_theme(held, one_line(entry.get("name")) or picked_store,
+                  "spreview", "sprevnote", "sprevtokens")
+    _ask_theme(entry)
+    _ask_commit(entry)
+
+
+def store_menu(payload: dict) -> None:
+    """Right-click on a store row: the actions that fit it, as a small menu."""
+    if api is None:
+        return
+    entry = store_find(one_line((payload or {}).get("text")))
+    if entry is None:
+        return
+    store_pick(payload or {})
+    offered = (("Install it", install_picked),
+               ("Install and apply", apply_picked_store),
+               ("See its details", details_picked),
+               ("Refresh the catalog", refresh_store))
+    line = api.ui.choose([words for words, _fn in offered] + ["Nothing"])
+    for words, function in offered:
+        if line == words:
+            function()
+            return
+
+
+# --- the sources editor: what the store's Sources button does ---
+
+_ADD = "Add a GitHub repository"
+_DONE = "Done"
+_MAIN = "Add this program's own source"
+
+#: What can be done to the source picked from the list, and the key each one
+#: writes when it is a field rather than a move.
+_SOURCE_ACTIONS = ("Change owner", "Change repository",
+                   "Change branch, tag or commit", "Change store folder",
+                   "Move first", "Remove")
+
+_SOURCE_FIELDS = {"Change owner": "owner",
+                  "Change repository": "repo",
+                  "Change branch, tag or commit": "ref",
+                  "Change store folder": "store_path"}
+
+_SOURCE_LABELS = {"owner": "GitHub owner - the account or organisation",
+                  "repo": "Repository name",
+                  "ref": "Branch, tag or commit",
+                  "store_path": "Store folder inside the repository"}
+
+
+def _source_menu(sources: list[dict]) -> tuple[list[str], list[tuple]]:
+    """The menu's lines and what each of them means, kept in step.
+
+    Every line is numbered or worded so it cannot be mistaken for one of the
+    actions, and the program's own repository is only offered again when it is
+    not already in the list.
+    """
+    items: list[str] = []
+    actions: list[tuple] = []
+    for index, source in enumerate(sources, 1):
+        items.append(f"{index}. {source_label(source)}")
+        actions.append(("source", index - 1))
+    items.append(_ADD)
+    actions.append(("add", None))
+    main = normalize_source(MAIN_SOURCE)
+    if not any(_source_key(source) == _source_key(main) for source in sources):
+        items.append(f"{_MAIN} ({source_label(main)})")
+        actions.append(("main", None))
+    items.append(_DONE)
+    actions.append(("done", None))
+    return items, actions
+
+
+def _ask_source(title: str) -> dict | None:
+    """Owner, repository, ref and store folder, one box at a time; nothing on cancel.
+
+    ``api.ui.dialog`` is modal and builds its spec without an events callback, so
+    it can host no live button of its own; a short run of single-line boxes asks
+    the same four questions and needs nothing extra of the app.
+    """
+    answers: dict[str, str] = {}
+    for key in SOURCE_KEYS:
+        text = api.ui.input(title, _SOURCE_LABELS[key],
+                            str(SOURCE_HINTS.get(key) or ""))
+        if text is None:                      # given up on
+            return None
+        answers[key] = text
+    made = normalize_source(answers)
+    if not made["owner"] or not made["repo"]:
+        api.ui.warning(title, "A source needs an owner and a repository.")
+        return None
+    return made
+
+
+def _ask_field(source: dict, key: str) -> dict | None:
+    """One part of a source changed, or the source as it was when the box was cancelled."""
+    label = _SOURCE_LABELS[key]
+    start = one_line(source.get(key)) or str(SOURCE_HINTS.get(key) or "")
+    text = api.ui.input(f"{source_label(source)}: {label}", label, start)
+    if text is None:
+        return None
+    updated = dict(source)
+    updated[key] = text
+    made = normalize_source(updated)
+    if not made["owner"] or not made["repo"]:
+        api.ui.warning("Change a store source",
+                       "A source needs an owner and a repository.")
+        return None
+    return made
+
+
+def edit_sources(_checked: bool = False) -> None:
+    """The Sources button: add a repository, change one, put it first or drop it.
+
+    Each change is written to the config as it is accepted, so closing the app
+    cannot lose it, and the catalog is re-read once, when the menu is done - a
+    repository added is a catalog fetched, and there is no sense in doing that
+    for every keystroke on the way.
+    """
+    global entries
+    if api is None:
+        return
+    sources = current_sources()
+    changed = False
+    while True:
+        items, actions = _source_menu(sources)
+        picked = api.ui.choose(items)
+        if picked is None or picked == _DONE:
+            break
+        kind, which = actions[items.index(picked)]
+        if kind in ("add", "main"):
+            made = (normalize_source(MAIN_SOURCE) if kind == "main"
+                    else _ask_source("Add a theme store source"))
+            if made is None or any(_source_key(one) == _source_key(made)
+                                   for one in sources):
+                if made is not None:
+                    say(f"{source_label(made)} is already a source")
+                continue
+            sources.append(made)
+            changed = True
+            note(f"{source_label(made)} was added as a source")
+            continue
+        source = sources[which]
+        action = api.ui.choose(list(_SOURCE_ACTIONS))
+        if action is None:
+            continue
+        if action in _SOURCE_FIELDS:
+            made = _ask_field(source, _SOURCE_FIELDS[action])
+            if made is None or _source_key(made) == _source_key(source):
+                continue
+            sources[which] = made
+            changed = True
+            note(f"a source is now {source_label(made)}")
+        elif action == "Move first":
+            if which:
+                sources.insert(0, sources.pop(which))
+                changed = True
+                note(f"{source_label(source)} is read first, so its themes win")
+        elif action == "Remove":
+            if not api.ui.question(
+                    "Remove a theme store source",
+                    f"Stop reading themes from {source_label(source)}?\n\n"
+                    "Nothing already installed is touched, and the repository "
+                    "can be added back."):
+                continue
+            sources.pop(which)
+            changed = True
+            note(f"{source_label(source)} was removed as a source")
+    if not changed:
+        return
+    write_sources(sources)
+    entries = []
+    show_store_entries()
+    refresh_store()
+
+
+# --- the preview: a theme drawn small, next to you the whole time ---
+
+def preview_spec(frame: str, note_id: str, tokens_id: str) -> dict:
+    """A sample of the interface the picked theme's sheet is painted onto."""
+    return {"kind": "group", "id": frame, "text": "What it looks like",
+            "children": [
+                {"kind": "label", "id": note_id,
+                 "text": "Pick a theme to see it here.", "word_wrap": True},
+                {"kind": "label", "text": "The berry in a heading, the text "
+                                           "beside it",
+                 "style": _HEAD_STYLE},
+                {"kind": "line", "value": "a line to read"},
+                {"kind": "row", "children": [
+                    {"kind": "button", "text": "A button"},
+                    {"kind": "button", "text": "Another"},
+                ]},
+                {"kind": "table", "id": tokens_id, "columns": ["Colour", "Hex"],
+                 "stretch": 1, "col_widths": [110],
+                 "tooltip": "The theme's own colour tokens, and the colour "
+                            "each one is where this sample is drawn"},
+            ]}
+
+
+def preview_theme(data: Any, label: str, frame: str, note_id: str,
+                  tokens_id: str) -> None:
+    """Draw one sample with one theme's colours, and name it in the note.
+
+    ``api.theme.sheet_of`` builds the very sheet the window would wear, so the
+    sample cannot disagree with the look it previews; and only the sample frame
+    is styled, so the program keeps wearing what it wore while you browse.
+    """
+    if api is None:
+        return
+    if not isinstance(data, dict) or not data:
+        put(frame, "", "style")
+        put(tokens_id, [], "rows")
+        put(note_id, f"reading {label}'s file..." if label
+            else "Pick a theme to see it here.", "text")
+        return
+    sheet = guarded(lambda: api.theme.sheet_of(data), "build the preview")
+    if sheet is None:
+        return
+    colors = data.get("colors") if isinstance(data.get("colors"), dict) else {}
+    put(frame, str(sheet), "style")
+    put(tokens_id, [{"cells": [token, str(colors.get(token))]} for token
+                    in PREVIEW_TOKENS if colors.get(token)], "rows")
+    put(note_id, f"previewing {label} - themes are set in Settings > "
+                 "Appearance", "text")
+
+
+def preview_current() -> None:
+    """The Themes page opens on the look the window already wears."""
+    if api is None:
+        return
+    name = in_force()
+    preview_theme(guarded(lambda: api.theme.read(name), f"read {name}"),
+                  name, "tpreview", "tprevnote", "tprevtokens")
+
+
+def open_appearance_settings(_checked: bool = False) -> None:
+    """The banner's link: stand the app on Settings > Appearance."""
+    if api is None:
+        return
+    if api.theme.open_appearance():
+        say("the look is set here, in Settings > Appearance")
+    else:
+        say("themes are set in Settings > Appearance", bad=True)
+
+
 # --- the tab itself ---
 
 def tab_icon() -> str:
@@ -320,44 +1413,88 @@ def tab_icon() -> str:
 
 
 def themes_page() -> dict:
-    """Every look on disk, what each one is, and the ways to make a new one."""
-    return {"kind": "column", "children": [
-        {"kind": "table", "id": "themes",
-         "columns": ["Theme", "In use", "Author", "What it is"],
-         "stretch": 3, "col_widths": [140, 60, 110],
-         "on": ["selected", "context"],
-         "tooltip": "Every themes/<name>.theme on disk. Pick one to read its "
-                    "file; right-click it for what can be done to it."},
-        {"kind": "row", "children": buttons(THEME_BUTTONS)},
-        {"kind": "group", "text": "A look that does not exist yet", "children": [
-            {"kind": "row", "children": [
-                {"kind": "label", "text": "from"},
-                {"kind": "combo", "id": "tpl", "expand": True,
-                 "on": ["changed"],
-                 "tooltip": "The starting point: each is a whole theme, ready "
-                            "to edit, and none of them is on disk until you "
-                            "create it"},
-                {"kind": "label", "text": "named"},
-                {"kind": "line", "id": "newname", "expand": True,
-                 "placeholder": "my look",
-                 "tooltip": "A file name, so no / \\ : * ? or quotes; spaces are "
-                            "allowed and become part of the theme's name"},
-                {"kind": "button", "id": "create", "text": "Create",
-                 "on": ["clicked"], "tooltip": "Write the new theme and open it "
-                                               "in the editor"},
-            ]},
-            {"kind": "label", "id": "tplnote", "text": "", "word_wrap": True,
-             "style": _HEAD_STYLE},
+    """Every look on disk, and a sample of the one you are pointing at."""
+    return {"kind": "splitter", "sizes": [3, 2], "children": [
+        {"kind": "column", "children": [
+            {"kind": "table", "id": "themes",
+             "columns": ["Theme", "In use", "Author", "What it is"],
+             "stretch": 3, "col_widths": [140, 60, 110],
+             "on": ["selected", "context"],
+             "tooltip": "Every themes/<name>.theme on disk. Pick one to see it "
+                        "in the preview beside the list; right-click it for "
+                        "what can be done to it."},
+            {"kind": "row", "children": buttons(THEME_BUTTONS)},
+            {"kind": "row", "children": buttons(THEME_MANAGE_BUTTONS)},
         ]},
-        {"kind": "multi", "id": "tinfo", "readonly": True, "expand": True,
-         "highlight": "json",
-         "placeholder": "pick a theme to read its file as it stands on disk"},
+        preview_spec("tpreview", "tprevnote", "tprevtokens"),
+    ]}
+
+
+def store_page() -> dict:
+    """The catalog: the bundled looks and every source's, preview beside the
+    row you are pointing at.
+
+    The store never takes anything away: Install writes a file into the themes
+    folder, and the Themes list looks after it from then on.
+    """
+    return {"kind": "column", "children": [
+        {"kind": "row", "children": [
+            {"kind": "label", "text": "Find", "style": _HEAD_STYLE},
+            {"kind": "line", "id": "sfilter", "expand": True,
+             "placeholder": "Filter by name, author or where it came from",
+             "tooltip": "Nothing is looked for until you type; the store on "
+                        "GitHub is not touched",
+             "on": ["changed", "returned"]},
+            {"kind": "label", "id": "scount", "text": "", "style": _HEAD_STYLE,
+             "tooltip": "How many of the catalog's themes are showing"},
+        ]},
+        {"kind": "splitter", "sizes": [3, 2], "children": [
+            {"kind": "column", "children": [
+                {"kind": "table", "id": "slist",
+                 "columns": ["Theme", "Here", "Author", "Source", "From"],
+                 "stretch": 4, "col_widths": [150, 80, 100, 130],
+                 "on": ["selected", "context"],
+                 "tooltip": "Every theme the bundled catalog and the sources "
+                            "list. Pick one to preview it; right-click it for "
+                            "what can be done. The From column names the commit "
+                            "its file came in, once GitHub has answered."},
+                {"kind": "row", "children": buttons(STORE_BUTTONS)},
+            ]},
+            preview_spec("spreview", "sprevnote", "sprevtokens"),
+        ]},
     ]}
 
 
 def edit_page() -> dict:
-    """One theme in the editor's hand: colours, tab knobs, and the JSON itself."""
+    """The Theme Maker: start a look from a template, then change it token by
+    token, knob by knob, or as JSON."""
     return {"kind": "column", "children": [
+        {"kind": "splitter", "sizes": [3, 2], "children": [
+            {"kind": "group", "text": "A look that does not exist yet",
+             "children": [
+                 {"kind": "row", "children": [
+                     {"kind": "label", "text": "from"},
+                     {"kind": "combo", "id": "tpl", "expand": True,
+                      "on": ["changed"],
+                      "tooltip": "The starting point: each is a whole theme, "
+                                 "ready to edit, and none of them is on disk "
+                                 "until you create it"},
+                     {"kind": "label", "text": "named"},
+                     {"kind": "line", "id": "newname", "expand": True,
+                      "placeholder": "my look",
+                      "tooltip": "A file name, so no / \\ : * ? or quotes; "
+                                 "spaces are allowed and become part of the "
+                                 "theme's name"},
+                     {"kind": "button", "id": "create", "text": "Create",
+                      "on": ["clicked"], "tooltip": "Write the new theme and "
+                                                    "open it in the editor "
+                                                    "below"},
+                 ]},
+                 {"kind": "label", "id": "tplnote", "text": "", "word_wrap": True,
+                  "style": _HEAD_STYLE},
+             ]},
+            preview_spec("mpreview", "mprevnote", "mprevtokens"),
+        ]},
         {"kind": "row", "children": [
             {"kind": "label", "text": "Editing", "style": _HEAD_STYLE},
             {"kind": "combo", "id": "draft", "expand": True, "on": ["changed"],
@@ -438,10 +1575,12 @@ def docs_page() -> dict:
 
 
 def tab_spec() -> dict:
-    """The whole tab: a banner over the three sub-tabs.
+    """The whole tab: a banner over the four sub-tabs.
 
     Declarative, so the same file runs in the app's process or outside it, and
-    every widget is reached by name through ``set_widget`` afterwards.
+    every widget is reached by name through ``set_widget`` afterwards. The
+    banner's Appearance button is the one link out: themes are worn on the
+    whole window, and where they are picked is Settings > Appearance.
     """
     return {"kind": "column", "children": [
         {"kind": "row", "children": [
@@ -449,18 +1588,28 @@ def tab_spec() -> dict:
             {"kind": "label", "id": "status", "text": "Ready.", "word_wrap": True,
              "expand": True, "style": _STATUS_STYLE},
             {"kind": "label", "id": "where", "text": "", "style": _HEAD_STYLE},
+            {"kind": "button", "id": "appearance", "text": "Appearance...",
+             "on": ["clicked"],
+             "tooltip": "Themes are worn on the whole window and are picked "
+                        "in Settings > Appearance - this takes you there"},
         ]},
         {"kind": "tabs", "id": SUB, "children": [
             dict(themes_page(), label=SUB_PAGES[0]),
-            dict(edit_page(), label=SUB_PAGES[1]),
-            dict(docs_page(), label=SUB_PAGES[2]),
+            dict(store_page(), label=SUB_PAGES[1]),
+            dict(edit_page(), label=SUB_PAGES[2]),
+            dict(docs_page(), label=SUB_PAGES[3]),
         ]},
     ]}
 
 
 def build_tab() -> None:
-    """One tab, pinned, wearing its caption - the theme decides whether it shows."""
-    api.tabs.add_tab(TAB, spec=tab_spec(), style=page_style(), pinned=True)
+    """One tab, pinned icon-only beside Settings, like the addon store.
+
+    The mark is the whole caption by design: the tab is furniture, not a page
+    somebody arranged, and what it opens is decided by the theme in force.
+    """
+    api.tabs.add_tab(TAB, spec=tab_spec(), style=page_style(),
+                     pinned=True, icon_only=True)
     api.tabs.set_icon(TAB, tab_icon())
     api.tabs.set_widget(TAB, SUB, "current", 0)
 
@@ -512,6 +1661,7 @@ def refresh_themes() -> None:
     chosen = str(get("tpl", "value", ""))
     put("tplnote", next((one_line(one.get("blurb")) for one in templates
                          if str(one.get("name")) == chosen), ""))
+    preview_current()
 
 
 def picked_theme() -> str:
@@ -527,24 +1677,15 @@ def picked_theme() -> str:
     return in_force()
 
 
-def show_info(name: str) -> None:
-    """The picked theme's own file, as it stands on disk."""
-    if api is None or not name:
-        return
-    written = api.theme.raw(name)
-    text = json.dumps(written, indent=2, ensure_ascii=False) if written \
-        else "(nothing readable in that file)"
-    put("tinfo", text)
-    put("tplnote", "", "text")
-
-
 def note_template(_changed: Any = None) -> None:
-    """Say what the template in the combo is, when the pick moves."""
+    """Say what the template in the combo is, and draw it in the maker's preview."""
     chosen = one_line(get("tpl", "value", ""))
     for one in (api.theme.templates() if api is not None else []):
         if str(one.get("name")) == chosen:
             say(f"{chosen}: {one_line(one.get('blurb'))}")
             put("tplnote", one_line(one.get("blurb")))
+            preview_theme(one.get("theme"), chosen,
+                          "mpreview", "mprevnote", "mprevtokens")
             return
 
 
@@ -673,12 +1814,16 @@ def show_knob(name: str) -> None:
     """Point the knob half of the editor at one knob, and its control at its kind."""
     global picked_knob
     picked_knob = str(name)
-    kind = knob_kind(picked_knob)
-    now = dict((draft or {}).get("tabs") or {}).get(picked_knob)
+    # One read of the knob list gives both the kind and the hint, rather than
+    # calling token_knobs() twice (once via knob_kind, once for the hint).
+    kind = ""
     hint = ""
     for one in (api.theme.token_knobs() if api is not None else []):
         if str(one.get("name")) == picked_knob:
+            kind = str(one.get("kind") or "")
             hint = str(one.get("hint") or "")
+            break
+    now = dict((draft or {}).get("tabs") or {}).get(picked_knob)
     put("tokennote", f"{picked_knob} \u00b7 {hint or 'a knob of the tab bar'}"
                      f" \u2014 {'a switch' if kind == 'switch' else 'pixels'}")
     if kind == "switch":
@@ -935,7 +2080,7 @@ def create_from_template(_checked: bool = False) -> None:
         return
     put("newname", "")
     refresh_themes()
-    show_page(1)
+    show_page(PAGE_MAKER)
     open_draft(str(saved))
     say(f"{saved} made from {chosen or 'the theme in use'}")
 
@@ -964,7 +2109,7 @@ def rename_picked(_checked: bool = False) -> None:
     fresh = guarded(lambda: api.theme.rename(name, wanted), f"rename {name}")
     if fresh is None:
         return
-    global draft, draft_name
+    global draft_name
     if draft is not None and draft_name == name:
         draft_name = str(fresh)
         draft["name"] = str(fresh)
@@ -1203,7 +2348,8 @@ DOC_HEADINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
                            "groups", "token_knobs")),
     ("What it would look like", ("stylesheet", "sheet_of", "validate",
                                  "templates", "template_text", "reference")),
-    ("Changing them", ("use", "save", "copy", "rename", "remove")),
+    ("Changing them", ("use", "save", "copy", "rename", "remove",
+                       "open_appearance")),
 )
 
 DOC_FALLBACK = "Other"
@@ -1301,11 +2447,11 @@ def wrap(text: str) -> str:
 # --- the hooks the app calls ---
 
 def focus_editor(_checked: bool = False) -> None:
-    """The Tools menu entry: the tab, on the editor."""
+    """The Tools menu entry: the tab, on the maker."""
     if api is None:
         return
     api.tabs.activate(TAB)
-    show_page(1)
+    show_page(PAGE_MAKER)
 
 
 def refresh_all(_ignored: Any = None) -> None:
@@ -1317,6 +2463,7 @@ def refresh_all(_ignored: Any = None) -> None:
         open_draft(in_force())
     show_draft()
     fill_docs()
+    show_store_entries()
 
 
 def apply_schedule(config: dict | None = None) -> None:
@@ -1343,16 +2490,20 @@ def on_event(name: str, payload: dict) -> None:
 COMMANDS = {
     "use": apply_picked, "edit": edit_picked, "dup": duplicate_picked,
     "rename": rename_picked, "del": delete_picked, "folder": open_folder,
-    "create": create_from_template,
+    "create": create_from_template, "appearance": open_appearance_settings,
+    "srefresh": refresh_store, "sinstall": install_picked,
+    "sapply": apply_picked_store, "sdetails": details_picked,
+    "ssources": edit_sources,
     "newdraft": blank_draft, "setcolor": set_colour, "wheel": pick_colour,
     "setknob": set_knob, "getsource": show_source, "putsource": use_source,
     "save": lambda: save_draft(False),
     "saveapply": lambda: save_draft(True), "discard": discard_draft,
 }
 
-#: The picks that are not buttons: a row of one of the three trees, or another
-#: theme in the editor's combo.
-PICKS = {"themes": "theme", "tokens": "token", "knobs": "knob", "docs": "doc"}
+#: The picks that are not buttons: a row of one of the trees, another theme in
+#: the editor's combo, or a row of the store list.
+PICKS = {"themes": "theme", "tokens": "token", "knobs": "knob", "docs": "doc",
+         "slist": "store"}
 
 
 def pick_from(kind: str, payload: dict) -> None:
@@ -1363,8 +2514,13 @@ def pick_from(kind: str, payload: dict) -> None:
             rows = get("themes", "selected", [])
             text = one_line(rows[0]) if isinstance(rows, (list, tuple)) and rows else ""
         if text:
-            show_info(text)
-            say(f"{text} - {theme_blurb(text)[1] or 'no description given'}")
+            preview_theme(guarded(lambda: api.theme.read(text), f"read {text}"),
+                          text, "tpreview", "tprevnote", "tprevtokens")
+            say(f"previewing {text} - "
+                f"{theme_blurb(text)[1] or 'no description given'}")
+        return
+    if kind == "store":
+        store_pick(payload or {})
         return
     if not text:
         return
@@ -1396,8 +2552,9 @@ def theme_menu(payload: dict) -> None:
     name = one_line((payload or {}).get("text"))
     if not name:
         return
-    chosen = api.ui.choose([text for _id, text, _tip in THEME_BUTTONS])
-    wanted = next((one for one in THEME_BUTTONS if one[1] == chosen), None)
+    offered = THEME_BUTTONS + THEME_MANAGE_BUTTONS
+    chosen = api.ui.choose([text for _id, text, _tip in offered])
+    wanted = next((one for one in offered if one[1] == chosen), None)
     if wanted is None:
         return
     context_name = name
@@ -1422,6 +2579,15 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         return
     if kind == "context" and name == "themes":
         theme_menu(payload or {})
+        return
+    if kind == "context" and name == "slist":
+        store_menu(payload or {})
+        return
+    if kind == "changed" and name == "sfilter":
+        filter_store(one_line((payload or {}).get("text")))
+        return
+    if kind == "returned" and name == "sfilter":
+        filter_store(one_line((payload or {}).get("text")))
         return
     if kind == "changed" and name == "tpl":
         note_template()
@@ -1454,22 +2620,29 @@ def edit_picked_by_name(name: str) -> None:
             put("draft", draft_name, "value")
             say("still editing " + str(draft_name))
             return
-    show_page(1)
+    show_page(PAGE_MAKER)
     open_draft(name)
 
 
 def init(plugin_api: Any) -> None:
     """Build the tab from the theme folder as it stands."""
-    global api
+    global api, filter_text, picked_store
     api = plugin_api
+    # The tab is built fresh, so its filter line and selection start empty:
+    # clear the store's view state with them, or a filter left over from an
+    # earlier hand would hide rows the freshly built box does not ask for.
+    filter_text = ""
+    picked_store = ""
     config = api.config.declare(
         FIELDS, DEFAULTS,
         title="Theme Manager - addons/_data/theme_manager/config.json")
     build_tab()
     put("applylive", bool(config_get(config, "save_applies", True)), "checked")
-    api.ui.menu_item("Edit the themes", focus_editor, menu="Tools")
+    api.ui.menu_item("Theme Manager (make and edit themes)", focus_editor,
+                     menu="Tools")
     api.events.on("theme_changed", lambda data: on_event("theme_changed", data))
     refresh_all()
+    load_local_store()
     say(f"{len(api.theme.names())} themes, the window drawn from {in_force()}")
     return None
 
@@ -1480,15 +2653,21 @@ def start() -> None:
 
 
 def shutdown() -> None:
-    """Forget the draft in hand and the api it was read through."""
+    """Forget the draft in hand, the catalog read and the api it was read through."""
     global api, draft, draft_name, picked_token, picked_knob
     global doc_branches, context_name
+    global entries, shown, picked_store, filter_text
     draft = None
     draft_name = ""
     picked_token = ""
     picked_knob = ""
     doc_branches = {}
     context_name = ""
+    entries = []
+    shown = []
+    picked_store = ""
+    filter_text = ""
+    _drop_http()
     api = None
 
 

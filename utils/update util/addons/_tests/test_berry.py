@@ -31,7 +31,6 @@ No internet and no device are needed. Run it from the Test panel, or::
 from __future__ import annotations
 
 import os
-import posixpath
 import shlex
 import shutil
 import sys
@@ -705,7 +704,7 @@ def test_the_tabs(app: Any) -> None:
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QTabWidget, QPlainTextEdit
 
-    api = fresh()
+    fresh()                    # the addon's api hand, for the specs below
 
     view, reg = addon_api.build_spec(berry.berry_spec())
     check(isinstance(view, QTabWidget) and view.count() == 2,

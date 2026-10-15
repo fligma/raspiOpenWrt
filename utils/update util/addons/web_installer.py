@@ -49,7 +49,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Rasconf web installer",
-    "version": "1.1",
+    "version": "1.2",
     "author": "fligma",
     "description": "Downloads src/www_rasconf from GitHub and writes it into the "
                    "profile's remote folder over SFTP, with a backup, the exec "
@@ -460,10 +460,15 @@ def refresh_totals(items: list[dict] | None = None) -> None:
     if not items:
         reset_totals()
         return
-    pending = len([item for item in items if str(item.get("action") or "queued")
-                   in ("queued", "new", "replaced", "written again")])
-    written = len([item for item in items if item.get("action") == "written"])
-    same = len([item for item in items if item.get("action") == "already there"])
+    pending = written = same = 0
+    for item in items:
+        action = str(item.get("action") or "queued")
+        if action in ("queued", "new", "replaced", "written again"):
+            pending += 1
+        elif action == "written":
+            written += 1
+        elif action == "already there":
+            same += 1
     words = f"{pending} to write" + (f" \u00b7 {written} written" if written else "")
     _chip("sum_write", words, "crimson" if pending else "green")
     _chip("sum_same", f"{same} already there", "gray")
