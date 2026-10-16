@@ -16,8 +16,7 @@
         "berry_webicon.png"
       ],
       "icon": "berry_webicon.png",
-      "test": "test_berry_web.py",
-      "status": "updated"
+      "test": "test_berry_web.py"
     },
     {
       "id": "cert_manager",
