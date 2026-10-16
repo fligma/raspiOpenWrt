@@ -35,7 +35,6 @@ from core.const import ICON_FILES, find_asset
 from core.addon import prune_retired_addons
 from core.window import BerryManager
 
-
 def main() -> int:
     """Build the application, open the window and run it. Returns the exit code."""
     # An update swaps the new program in while the old one still runs, and
