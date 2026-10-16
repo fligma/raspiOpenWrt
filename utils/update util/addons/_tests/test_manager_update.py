@@ -28,12 +28,17 @@ What gets looked at:
 * the tab on a stub api: init declares and builds it, and a check reads the tags
   and the releases in two requests whatever their number, sorting them newest
   first and chaining each one to the version before it for the comparison;
-* the list and the pane that goes with it: what each row says beside a version,
-  and what the picked version's title, its line of facts, its state, its account
-  and its file table come out as - including the commit's words standing in for
-  a release whose author wrote nothing;
+* the lines and the pane that goes with them: how the published versions group
+  into their major lines and in which order, what a line says in its heading, what
+  its dropdown is handed, what the picked version's title, its chip, its commit,
+  its line of facts, its state, its account and its file table come out as -
+  including the commit's words standing in for a release whose author wrote
+  nothing; a line below this copy starting shut and only laying its versions down
+  when it is opened, and the pane refusing to read a version's story twice;
 * going back: the same offer down as up, the floor refusing anything older, and
-  a moved floor moving the line rather than the code;
+  a moved floor moving the line rather than the code; the three answers a way back
+  asks for doing exactly what each of them says - the download alone, a backup and
+  an erase of everything installed, and nothing at all;
 * the notice: a check that ran on its own puts the version it found up through
   the app's notifications, once per version, and says nothing when the switch is
   off or nothing is ahead;
@@ -311,6 +316,33 @@ def test_the_helpers(upd: Any) -> None:
     check(upd._prefix({}) == "berry" and upd._prefix({"tag_prefix": "fork"}) == "fork",
           "the tag prefix was not read, or not defaulted")
 
+    # The major lines the left pane is built from: one row per line, newest line
+    # first, each holding the place its versions have in the list it was made from.
+    check(upd.major_of("1.6.1") == "1.6" and upd.major_of("1.6") == "1.6"
+          and upd.major_of("2") == "2",
+          f"a version's line is not its first two numbers: "
+          f"{[upd.major_of(v) for v in ('1.6.1', '1.6', '2')]}")
+    check(upd.major_of("nightly") == "" and upd.major_of("") == "",
+          "a tag nothing reads as a version was given a line anyway")
+    grouped = upd.majors([{"version": "2.0.1"}, {"version": "2.0.0"},
+                          {"version": "1.9.4"}, {"version": "nightly"},
+                          {"version": "1.6.1"}])
+    check([line["major"] for line in grouped] == ["2.0", "1.9", "1.6"],
+          f"the lines are not newest first, or a non-version joined them: "
+          f"{[(line['major'], line['entries']) for line in grouped]}")
+    check(grouped[0]["head"] == 0 and grouped[0]["entries"] == [0, 1]
+          and grouped[2]["head"] == 4 and grouped[2]["entries"] == [4],
+          f"a line does not name its own versions by their place in the list: "
+          f"{grouped}")
+    check(upd.majors([]) == [] and upd.majors(None) == [],
+          "no published versions produced a line anyway")
+
+    # With no theme to read, every colour is the one this tab has always worn.
+    check(upd.stance_colour("newer") == upd.STANCE_COLOUR["newer"]
+          and upd.stance_colour("too old") == upd.STANCE_COLOUR["too old"]
+          and upd.file_colour("Added") == upd.FILE_COLOUR["added"],
+          "a colour helper lost the sheet it falls back on")
+
     check(upd.offer_of({"stance": "newer", "download": ("a", "b", "c")})
           == "an update - file attached",
           f"an update with a file did not say so: {upd.offer_of({'stance': 'newer', 'download': 1})!r}")
@@ -412,6 +444,11 @@ def fresh(upd: Any, config: dict | None = None, version: str = "1.6.0",
     upd.published = []
     upd.picked = -1
     upd.ticker = None
+    upd.lines = []
+    upd.opened.clear()
+    upd.notes.clear()
+    upd.slot_names.clear()
+    upd.filling = False
     upd.announced.clear()
     if ask:
         wire(upd)
@@ -440,6 +477,18 @@ def last_status(api: Any) -> str:
 
 def rows_for(api: Any, identifier: str) -> list:
     return list(last_set(api, identifier, "rows") or [])
+
+
+def items_for(api: Any, identifier: str) -> list:
+    """The words one dropdown was last handed, when it was ever handed any."""
+    return list(last_set(api, identifier, "items") or [])
+
+
+def sets_for(api: Any, identifier: str, prop: str) -> list:
+    """Every value the addon sent one control for one property, oldest first."""
+    return [arguments[3] for where, arguments, _named in api.calls
+            if where == "tabs.set_widget" and len(arguments) >= 4
+            and arguments[1] == identifier and arguments[2] == prop]
 
 
 def cells(row: Any) -> list:
@@ -490,30 +539,78 @@ def test_the_tab(upd: Any) -> None:
           f"the log does not account for the floor: {api.logs[-2:]}")
 
 
+def cells(row: Any) -> list:
+    return list(row.get("cells") or []) if isinstance(row, dict) else list(row)
+
+
+def spec_words(node: Any) -> str:
+    """Every word a spec holds, however deep it is nested."""
+    if isinstance(node, dict):
+        return " ".join(spec_words(value) for value in node.values())
+    if isinstance(node, (list, tuple)):
+        return " ".join(spec_words(value) for value in node)
+    return str(node)
+
+
 def test_the_list_and_the_pane(upd: Any) -> None:
-    print("\n5. the list, and the pane beside it, say the same thing")
+    print("\n5. the lines, and the pane beside them, say the same thing")
     api = fresh(upd)
+    del TAILS[:]
     upd.check_now()
-    rows = rows_for(api, "list")
-    check([cells(row)[0] for row in rows] == ["1.6.1", "1.6.0", "1.5.9"],
-          f"the rows are not the versions: {[cells(row) for row in rows]}")
-    check([cells(row)[1] for row in rows]
-          == ["an update - file attached", "this copy", "older than the floor"],
-          f"a row does not say where its version stands: {[cells(row)[1] for row in rows]}")
-    check([row.get("color") for row in rows]
-          == [upd.STANCE_COLOUR["newer"], upd.STANCE_COLOUR["this"],
-              upd.STANCE_COLOUR["too old"]],
-          "the rows are not tinted by where they stand")
+    # three published versions on two lines: 1.6 with two builds, 1.5 with one.
+    check([line["major"] for line in upd.lines] == ["1.6", "1.5"],
+          f"the versions are not grouped into their lines: "
+          f"{[(line['major'], line['entries']) for line in upd.lines]}")
+    check(upd.opened == ["1.6"],
+          f"the pane did not open on the line the pick sits on: {upd.opened}")
+    check(upd.slot_of("1.6") == 0 and upd.slot_of("1.5") == 1
+          and upd.slot_of("9.9") == -1,
+          "a line is not placed in the row of the pane it is drawn in")
+    head = str(last_set(api, "mhead0", "text"))
+    check("berry1.6.x" in head and "2 published build(s)" in head
+          and "this copy is on it" in head,
+          f"an open line does not say what it holds and where this copy is: "
+          f"{head!r}")
+    check(last_set(api, "mhead0", "visible") is True
+          and last_set(api, "mpick0", "visible") is True
+          and str(last_set(api, "mopen0", "text")) == "1.6  less",
+          f"an open line is not drawn as its heading and its dropdown: "
+          f"{last_set(api, 'mhead0', 'visible')!r}")
+    check(last_set(api, "mpick1", "visible") is False
+          and str(last_set(api, "mopen1", "text")) == "1.5  more"
+          and last_set(api, "mpick1", "items") is None,
+          "a line below this copy was opened before anybody asked for it")
+
+    picks = items_for(api, "mpick0")
+    check([str(text).split(" ")[0] for text in picks] == ["1.6.1", "1.6.0"],
+          f"a line's dropdown is not its own versions, newest first: {picks}")
+    check("an update - file attached" in str(picks[0])
+          and "this copy" in str(picks[1]),
+          f"a dropdown entry does not say where its version stands: {picks}")
+    check(str(last_set(api, "mpick0", "value")) == str(picks[0]),
+          f"the dropdown is not pointing at the version the pane shows: "
+          f"{last_set(api, 'mpick0', 'value')!r}")
+    check(len(sets_for(api, "mpick0", "items")) == 1,
+          f"one check laid the same line down more than once: "
+          f"{sets_for(api, 'mpick0', 'items')}")
 
     # The pane opens on the update, since that is what a person came for.
     check(upd.picked == 0, f"the check did not open on the update: {upd.picked}")
     check(str(last_set(api, "vtitle", "text")) == "berry1.6.1  \u2014  Berry 1.6.1",
           f"the pane's title is not the tag and the release's own name: "
           f"{last_set(api, 'vtitle', 'text')!r}")
+    check(str(last_set(api, "vchip", "text")) == "an update - file attached"
+          and upd.stance_colour("newer") in str(last_set(api, "vchip", "style"))
+          and last_set(api, "vchip", "visible") is True,
+          f"the version's own state is not worn as one chip: "
+          f"{last_set(api, 'vchip', 'text')!r}")
+    check(str(last_set(api, "vsha", "text")) == "commit aaa1111",
+          f"the commit a version was cut from is not named in its own place: "
+          f"{last_set(api, 'vsha', 'text')!r}")
     meta = str(last_set(api, "vmeta", "text"))
-    check("fligma" in meta and "2026-10-12" in meta and "commit aaa1111" in meta
+    check("fligma" in meta and "2026-10-12" in meta
           and f"release asset: {THE_PROGRAM}" in meta
-          and "3 file(s) moved" in meta,
+          and "3 file(s) moved" in meta and "aaa1111" not in meta,
           f"the line of facts is not the facts: {meta!r}")
     state = str(last_set(api, "vstate", "text"))
     check("An update is ready" in state and "berry1.6.1" in state
@@ -529,8 +626,8 @@ def test_the_list_and_the_pane(upd: Any) -> None:
           == ["changed +40 -3", "added +1 -0", "removed +0 -12"],
           f"the file list is not what GitHub compared: {[cells(row) for row in files]}")
     check([row.get("color") for row in files]
-          == [upd.FILE_COLOUR["changed"], upd.FILE_COLOUR["added"],
-              upd.FILE_COLOUR["removed"]],
+          == [upd.file_colour("changed"), upd.file_colour("added"),
+              upd.file_colour("removed")],
           "the files are not tinted by what happened to them")
 
     print("\n6. a release with no words of its own, and one with no file")
@@ -547,20 +644,96 @@ def test_the_list_and_the_pane(upd: Any) -> None:
           f"the refusal did not reach the state line: {last_set(api, 'vstate', 'text')!r}")
     check("publish the tag as a release" not in str(last_set(api, "vdetail", "value")),
           "a version below the floor was told how to attach a file instead")
+    check(upd.opened == ["1.6", "1.5"],
+          f"picking a version did not pull its own line open: {upd.opened}")
 
-    print("\n7. picking a row by what the list reported")
-    upd.on_widget(upd.TAB, "list", "selected", {"count": 1})
-    api.answer("tabs.widget_value", ["1.6.0"])
-    upd.on_widget(upd.TAB, "list", "selected", {"count": 1})
+    print("\n7. picking a version out of a line's dropdown")
+    upd.pick_row(0)
+    upd.on_widget(upd.TAB, "mpick1", "changed",
+                  {"text": "1.5.9  \u2014  older than the floor"})
+    check(upd.picked == 2, f"a line's dropdown did not move the pane: {upd.picked}")
+    upd.on_widget(upd.TAB, "mpick0", "changed", {"text": "1.6.0  \u2014  this copy"})
     check(upd.picked == 1, f"a picked label did not move the pane: {upd.picked}")
-    upd.on_widget(upd.TAB, "list", "selected", {"text": "not-a-version"})
+    upd.on_widget(upd.TAB, "mpick0", "changed", {"text": "not-a-version"})
     check(upd.picked == 1, "an unknown label moved the pane off what it was showing")
-    upd.on_widget("Other tab", "list", "selected", {"text": "1.6.1"})
-    check(upd.picked == 1, "another tab's list was read as this one's")
-    upd.on_widget(upd.TAB, "list", "clicked", {"text": "1.6.1"})
-    check(upd.picked == 1, f"a click on a row was taken as a pick: {upd.picked}")
+    upd.on_widget("Other tab", "mpick0", "changed",
+                  {"text": "1.6.1  \u2014  an update - file attached"})
+    check(upd.picked == 1, "another tab's dropdown was read as this one's")
+    upd.on_widget(upd.TAB, "mpick0", "clicked",
+                  {"text": "1.6.1  \u2014  an update - file attached"})
+    check(upd.picked == 1, f"a dropdown's click was taken as a pick: {upd.picked}")
     upd.pick_row(99)
     check(upd.picked == 1, "a row that does not exist moved the pane")
+    check(upd.index_of("1.5", "1.6.1") == -1,
+          "a version was read out of another line's dropdown")
+    check(upd.index_of("1.6", "1.6.1") == 0,
+          "a dropdown entry was not matched by the version it starts with")
+    upd.filling = True
+    upd.on_widget(upd.TAB, "mpick0", "changed",
+                  {"text": "1.6.1  \u2014  an update - file attached"})
+    upd.filling = False
+    check(upd.picked == 1, "laying a line's versions down was taken as a pick")
+
+    # The button of a line opens it and shuts it, and neither costs a request.
+    print("\n7b. opening a line lays it down once, and reads nothing")
+    del TAILS[:]
+    del api.calls[:]
+    upd.toggle_major(1)                      # 1.5 is open from the pick: shut it
+    check("1.5" not in upd.opened
+          and last_set(api, "mpick1", "visible") is False
+          and str(last_set(api, "mopen1", "text")) == "1.5  more",
+          f"shutting a line left its dropdown on the page: {upd.opened}")
+    upd.toggle_major(1)                      # and open it again
+    check("1.5" in upd.opened
+          and last_set(api, "mpick1", "visible") is True
+          and not sets_for(api, "mpick1", "items"),
+          "opening a line a second time laid its versions down again")
+    check(not TAILS, f"opening a line cost a request: {TAILS}")
+    upd.on_widget(upd.TAB, "mopen1", "clicked", {})
+    check("1.5" not in upd.opened,
+          "the line's button did not shut its own line")
+    upd.on_widget("Other tab", "mopen1", "clicked", {})
+    upd.on_widget(upd.TAB, "mopen1", "changed", {})
+    check("1.5" not in upd.opened,
+          "another tab's button, or a report that is not a click, moved the pane")
+    upd.on_widget(upd.TAB, "mopen9", "clicked", {})
+    check(upd.opened == ["1.6"],
+          "a button in a row the pane never filled opened something anyway")
+    check(upd.slot_number("mpick3") == 3 and upd.slot_number("check") == -1
+          and upd.slot_number("mopen99") == -1,
+          "a control's row is not read off its own name")
+
+    print("\n7c. a story is read when a version is picked, and only once")
+    api = fresh(upd)
+    del TAILS[:]
+    upd.check_now()
+    at_check = list(TAILS)
+    values = upd.merge_config(upd.DEFAULTS, api.config.stored())
+    upd.show_detail(values, upd.published[1], "1.6.0", "1.6.0", fetch=False)
+    check("has not been read beyond the tag list" in
+          str(last_set(api, "vdetail", "value")),
+          f"a version nobody picked was given a story anyway: "
+          f"{last_set(api, 'vdetail', 'value')!r}")
+    check(TAILS == at_check, f"a redraw that was not a pick read GitHub again: "
+                             f"{TAILS[len(at_check):]}")
+    del TAILS[:]
+    upd.pick_row(1)
+    check(sum(1 for tail in TAILS if tail.startswith("commits/")) == 1
+          and sum(1 for tail in TAILS if tail.startswith("compare/")) == 1
+          and not any(tail.startswith("releases/tags/") for tail in TAILS),
+          f"picking a version whose release came in the batch read it again: "
+          f"{TAILS}")
+    del TAILS[:]
+    upd.pick_row(2)
+    check("releases/tags/berry1.5.9" in TAILS,
+          f"a tag outside the batch was not read for itself: {TAILS}")
+    del TAILS[:]
+    upd.pick_row(0)
+    check(not TAILS, f"a version already read was fetched a second time: {TAILS}")
+    upd.pick_row(1)
+    check(not TAILS, "coming back to a read version cost a request")
+    check(upd.read_already("berry1.6.1") and upd.read_already("berry1.6.0"),
+          "a read version's story was not kept where the next pick can find it")
 
 
 def test_the_way_back(upd: Any) -> None:
@@ -904,9 +1077,10 @@ def test_the_job(upd: Any) -> None:
                   f"the list read the versions again after installing one: "
                   f"{TAILS[tails_before:]}")
 
-        print("\n18. going back asks the plainer question and says it backwards")
+        print("\n18. going back asks three answers, and the one that keeps the setup lands")
         target.write_bytes(b"the old program")
         api2 = fresh(upd, version="1.6.1")
+        api2.answer("ui.dialog", {"answer": upd.KEEP_ANSWER})
         api2.answer("ui.question", True)
         upd.check_now()
         upd.pick_row(1)
@@ -920,15 +1094,31 @@ def test_the_job(upd: Any) -> None:
                      _later=lambda seconds, callback: callback(),
                      restart_app=lambda: restarts2.append(1)):
             upd.update_selected()
+        boxes = [(arguments, named) for where, arguments, named in api2.calls
+                 if where == "ui.dialog"]
+        check(len(boxes) == 1, f"a downgrade did not ask its own question once: {boxes}")
+        words = spec_words(boxes[0][0]) if boxes else ""
+        check(boxes and str(boxes[0][0][1]) == "Go back to berry1.6.0?"
+              and "This copy is berry1.6.1" in words
+              and "older program" in words
+              and "hotfix on the same line" in words,
+              f"the way back was not said as a way back: "
+              f"{None if not boxes else boxes[0][0][1]!r}")
+        check(boxes and all(str(risk).split(",")[0] in words
+                            for risk in upd.DOWNGRADE_RISKS),
+              f"the question does not name what may go wrong: {words!r}")
+        check(boxes and list(boxes[0][1].get("answers") or [])
+              == [upd.ERASE_ANSWER, upd.KEEP_ANSWER, upd.CANCEL_ANSWER],
+              f"the three answers are not the three offered: "
+              f"{None if not boxes else boxes[0][1]}")
         asked = [arguments for where, arguments, _n in api2.calls
                  if where == "ui.question"]
-        check(any(row[0] == "Go back to this version?"
-                  and "older program" in str(row[1]) for row in asked),
-              f"a downgrade asked the update's question: {asked}")
+        check(not any(row[0] == "Update Berry Manager?" for row in asked),
+              f"a downgrade asked the update's yes or no as well: {asked}")
         check(asked and asked[-1][0] == "Restart Berry Manager?"
               and "Go back to it now?" in str(asked[-1][1]),
               f"the finished downgrade did not ask to start the older copy: "
-              f"{asked[-1]}")
+              f"{asked[-1] if asked else None}")
         check("berry1.6.0 is in place" in last_status(api2)
               and "were not touched" in last_status(api2),
               f"a downgrade did not say which older copy had landed: "
@@ -939,6 +1129,134 @@ def test_the_job(upd: Any) -> None:
               f"the list still calls the downgraded-to version a way back: "
               f"{[(e['version'], e['stance']) for e in upd.published]}")
         check(restarts2 == [1], "the downgrade did not offer to start the older copy")
+
+        print("\n18b. the third answer leaves everything where it is")
+        target.write_bytes(b"the old program")
+        api3 = fresh(upd, version="1.6.1")
+        api3.answer("ui.dialog", {"answer": upd.CANCEL_ANSWER})
+        upd.check_now()
+        upd.pick_row(1)
+        tails_at_pick = len(TAILS)
+        touched: list[int] = []
+        with patched(upd, program_path=lambda: target,
+                     staging_target=lambda name: stage / name,
+                     system_name=lambda: THE_SYSTEM,
+                     _http=lambda values: touched.append(1) or FakeFetcher([]),
+                     restart_app=lambda: None):
+            upd.update_selected()
+            # a box closed without an answer is the same answer
+            api3.answer("ui.dialog", None)
+            upd.update_selected()
+        check("turned down" in last_status(api3)
+              and "nothing was fetched" in last_status(api3),
+              f"a turned-down way back did not say so: {last_status(api3)!r}")
+        check(not touched, "a cancelled way back opened its download anyway")
+        check(TAILS[tails_at_pick:] == [],
+              f"a cancelled way back read GitHub again: {TAILS[tails_at_pick:]}")
+        check(not api3.called("ui.progress_notice") and not api3.called("ui.question"),
+              "a cancelled way back started a job or asked another question")
+        check(not upd.working and upd.job is None and upd.found is None,
+              "a cancelled way back left the addon holding a job")
+        check(target.read_bytes() == b"the old program",
+              "a cancelled way back still touched the program")
+        check("turned down" in last_status(api3),
+              f"a closed box was not read as a refusal: {last_status(api3)!r}")
+
+        print("\n18c. erase data and download takes the written things and the "
+              "installed addons, and nothing else")
+        base = folder / "erase"
+        (base / "config").mkdir(parents=True)
+        (base / "config" / "profiles.json").write_text("{}", encoding="utf-8")
+        (base / "themes").mkdir()
+        (base / "themes" / upd.SHIPPED_THEME).write_text("a = 1\n", encoding="utf-8")
+        (base / "themes" / "mine.theme").write_text("a = 2\n", encoding="utf-8")
+        (base / "addons").mkdir()
+        data = base / "addons" / "_data"
+        (data / "berry_web").mkdir(parents=True)
+        (data / "some_addon").mkdir(parents=True)
+        (data / "berry_web" / "config.json").write_text("{}", encoding="utf-8")
+        (data / "some_addon" / "config.json").write_text("{}", encoding="utf-8")
+        (base / "addons" / "berry_web.py").write_text("# shipped\n", encoding="utf-8")
+        (base / "addons" / "some_addon.py").write_text("# installed\n", encoding="utf-8")
+        (base / "addons" / f"{upd.OWN_ID}.py").write_text("# this addon\n",
+                                                           encoding="utf-8")
+        keep_folder = base / "addons" / "some_addon"
+        keep_folder.mkdir()
+        (keep_folder / "helper.py").write_text("# part of the addon\n",
+                                                encoding="utf-8")
+        target2 = base / THE_FILE
+        target2.write_bytes(b"the old program")
+        stage2 = base / "stage"
+        stage2.mkdir()
+        rows = [{"id": "berry_web", "bundled": True, "running": True, "enabled": True},
+                {"id": "some_addon", "bundled": False, "running": True,
+                 "enabled": True},
+                {"id": upd.OWN_ID, "bundled": False, "running": True, "enabled": True}]
+        api4 = fresh(upd, version="1.6.1")
+        api4.answer("ui.dialog", {"answer": upd.ERASE_ANSWER})
+        api4.answer("ui.question", False)      # no restart at the end of this one
+        api4.answer("session.addons", rows)
+        upd.check_now()
+        upd.pick_row(1)
+        body3 = program_bytes(THE_SYSTEM, b"\xCC")
+        with patched(upd, program_path=lambda: target2,
+                     staging_target=lambda name: stage2 / name,
+                     system_name=lambda: THE_SYSTEM,
+                     _http=lambda values: FakeFetcher(
+                         [FakeResp(200, body3, {"Content-Length": str(len(body3))})]),
+                     _later=lambda seconds, callback: callback(),
+                     restart_app=lambda: None):
+            upd.update_selected()
+        check(not (base / "config").exists(), "the config folder outlived an erase")
+        check(not (base / "themes" / "mine.theme").exists(),
+              "a theme somebody copied outlived an erase")
+        check((base / "themes" / upd.SHIPPED_THEME).exists(),
+              "an erase took the theme that came inside the program")
+        check(not (base / "addons" / "some_addon.py").exists()
+              and not keep_folder.exists() and not (data / "some_addon").exists(),
+              "an erase left part of an installed addon behind")
+        check((base / "addons" / "berry_web.py").exists()
+              and (data / "berry_web").exists(),
+              "an erase took an addon that came inside the program")
+        check((base / "addons" / f"{upd.OWN_ID}.py").exists(),
+              "an erase took the addon that was running it")
+        stops = [arguments for where, arguments, _n in api4.calls
+                 if where == "session.set_addon_running"]
+        check(("some_addon", False) in stops
+              and not any(str(row[0]) == "berry_web" for row in stops),
+              f"an erase did not take the installed addons down first: {stops}")
+        backup = base / "backup-before-1.6.0.zip"
+        check(backup.is_file(),
+              f"no backup landed beside the program: {sorted(p.name for p in base.iterdir())}")
+        kept: list[str] = []
+        if backup.is_file():
+            with zipfile.ZipFile(backup) as archive:
+                kept = list(archive.namelist())
+        check(any(name.startswith("config/") for name in kept)
+              and any(name.startswith("addons/_data/some_addon/") for name in kept)
+              and any(name.startswith("addons/_data/berry_web/") for name in kept),
+              f"the backup is not everything that was about to go: {kept}")
+        check(any("backup-before-1.6.0.zip" in line for line in api4.logs),
+              f"the backup was not said out loud where it was written: {api4.logs[-4:]}")
+        check(any("some_addon" in line and "stopped and deleted" in line
+                  for line in api4.logs),
+              f"the erased addons were not accounted for: {api4.logs[-4:]}")
+        check(not api4.called("session.rescan_addons"),
+              "an erase rescanned while its own download was in the air")
+        said = [str(text) for text in sets_for(api4, "status", "text")]
+        check(any("written data is erased" in line for line in said),
+              f"the erase did not say it had happened before fetching: {said}")
+        check(any("is in place" in line and "backed up and erased" in line
+                  for line in said),
+              f"the finish line did not account for the erase: "
+              f"{last_status(api4)!r}")
+        check("were not touched" not in last_status(api4),
+              f"an erased download still promised nothing had been touched: "
+              f"{last_status(api4)!r}")
+        check(target2.read_bytes() == body3,
+              "the download after an erase did not land in the erased program's place")
+        check(not upd.working and upd.job is None and upd.found is None,
+              "the erase job left the addon working")
 
         print("\n19. a page on the wire stops the update without touching anything")
         target.write_bytes(b"the old program")
@@ -1004,6 +1322,134 @@ def test_the_job(upd: Any) -> None:
     upd.shutdown()
 
 
+# --- six b: the view the download puts over the tab ---
+
+def test_the_job_view(upd: Any) -> None:
+    """A download lays its console over the version list and counts its bytes on it.
+
+    The pane is only there when the built tab says it is: ``tabs.set_widget``
+    answers ``False`` for an id the layout does not hold. Both answers are driven
+    here on the stub api, with the swap's own file in a temporary folder, so the
+    card's name, the bar's share, the console's lines and the notice beside it
+    are all seen - and a tab with no pane is seen writing to no console at all.
+    """
+    print("\n22. the job's console, the card over it, and the notice beside it")
+    with tempfile.TemporaryDirectory() as raw:
+        folder = Path(raw)
+        target = folder / THE_FILE
+        target.write_bytes(b"the old program")
+        stage = folder / "stage"
+        stage.mkdir()
+        body = program_bytes(THE_SYSTEM, b"\xAA")
+        total = len(body)
+
+        api = fresh(upd, version="1.6.0")
+        api.answer("ui.question", True)
+        api.answer("tabs.set_widget", True)
+        upd.check_now()
+        upd.pick_row(0)
+        steps: list[Any] = []
+        with patched(upd, program_path=lambda: target,
+                     staging_target=lambda name: stage / name,
+                     system_name=lambda: THE_SYSTEM,
+                     _http=lambda values: FakeFetcher(
+                         [FakeResp(200, body, {"Content-Length": str(total)})]),
+                     _later=lambda seconds, callback: steps.append(callback),
+                     restart_app=lambda: None):
+            api.calls.clear()
+            upd.update_selected()
+            check(upd.job is not None and upd.job.get("pane") is True,
+                  f"a tab holding the pane was never told to show it: {upd.job}")
+            check(last_set(api, "jobpane", "visible") is True
+                  and last_set(api, "browse", "visible") is False,
+                  f"the job did not put its console over the list: "
+                  f"{last_set(api, 'jobpane', 'visible')!r} / "
+                  f"{last_set(api, 'browse', 'visible')!r}")
+            check(last_set(api, "jobterm", "clear") is True,
+                  "the console was started on a screen that still held the "
+                  "last job's lines")
+            check(str(last_set(api, "jobname", "text")) == "berry1.6.1",
+                  f"the card does not name the version being fetched: "
+                  f"{last_set(api, 'jobname', 'text')!r}")
+            check(bool(last_set(api, "jobicon", "image")),
+                  "the card wears no mark of its own")
+
+            # the answer's head is the first line on the screen, in both places
+            steps.pop(0)()                      # connect_step, by hand
+            line = f"downloading... 4 KB of {upd._size(total)}"
+            check(str(last_set(api, "jobstep", "text")) == line,
+                  f"the card never said how much had come down: "
+                  f"{last_set(api, 'jobstep', 'text')!r}")
+            check(last_set(api, "jobbar", "value")
+                  == api.asked("ui.progress_notice", "value"),
+                  f"the card's bar and the notice do not agree: "
+                  f"{api.last('ui.progress_notice')}")
+            check(0 < int(last_set(api, "jobbar", "value") or 0) < 99,
+                  f"a fifth of the way down read as nothing or as finished: "
+                  f"{last_set(api, 'jobbar', 'value')!r}")
+            written = [arguments[3] for where, arguments, _n in api.calls
+                       if where == "tabs.set_widget" and len(arguments) >= 4
+                       and arguments[1] == "jobterm" and arguments[2] == "write"]
+            check(any(str(one).startswith("updating to berry1.6.1") for one in written),
+                  f"the console never heard which version was being fetched: "
+                  f"{written}")
+            check(any(line in str(one) for one in written),
+                  f"the console was not told the byte count the card was: "
+                  f"{written}")
+
+            while steps:
+                steps.pop(0)()                  # the rest of the walk, to the swap
+            check(str(last_set(api, "jobstep", "text")).endswith(
+                  "; putting it in place"),
+                  f"the card never said the bytes were in: "
+                  f"{last_set(api, 'jobstep', 'text')!r}")
+            check(last_set(api, "jobbar", "value") == 99,
+                  f"the swap began with the bar not nearly full: "
+                  f"{last_set(api, 'jobbar', 'value')!r}")
+
+        check(last_set(api, "jobpane", "visible") is False
+              and last_set(api, "browse", "visible") is True,
+              "the job kept its console up after the program landed")
+        check(api.asked("ui.progress_notice", "value") == 100,
+              f"the finished update did not fill its notice: "
+              f"{api.last('ui.progress_notice')}")
+        check(target.read_bytes() == body, "the job view's run did not land the file")
+
+        # a job on a tab with no pane: the notice still counts, nothing is
+        # written to a console that is not on screen
+        target.write_bytes(b"the old program")
+        api2 = fresh(upd, version="1.6.0")
+        api2.answer("ui.question", True)
+        upd.check_now()
+        upd.pick_row(0)
+        api2.calls.clear()
+        with patched(upd, program_path=lambda: target,
+                     staging_target=lambda name: stage / name,
+                     system_name=lambda: THE_SYSTEM,
+                     _http=lambda values: FakeFetcher(
+                         [FakeResp(200, body, {"Content-Length": str(total)})]),
+                     _later=lambda seconds, callback: callback(),
+                     restart_app=lambda: None):
+            upd.update_selected()
+        check(any(where == "tabs.set_widget" and len(arguments) >= 3
+                  and arguments[1] == "jobpane"
+                  for where, arguments, _n in api2.calls),
+              "a job never asked the tab whether it has the pane at all")
+        check(not [arguments for where, arguments, _n in api2.calls
+                   if where == "tabs.set_widget" and len(arguments) >= 3
+                   and arguments[1] in ("jobterm", "jobcard", "jobicon",
+                                        "jobname", "jobstep", "jobbar")],
+              "a job with no pane wrote to the console and card that are not there")
+        check(api2.called("ui.progress_notice"),
+              "a job with no pane lost its notice with it")
+        check(not upd.working and upd.job is None,
+              "a job on a paneless tab could not end")
+
+    upd.found = None
+    upd.working = False
+    upd.job = None
+
+
 # --- run it ---
 
 def main() -> int:
@@ -1037,6 +1483,7 @@ def main() -> int:
         test_the_bytes(upd)
         test_the_swap(upd)
         test_the_job(upd)
+        test_the_job_view(upd)
 
     if FAILURES:
         print()

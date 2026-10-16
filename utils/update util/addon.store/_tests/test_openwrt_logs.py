@@ -297,7 +297,7 @@ def test_the_tabs(addon: Any, api: Api) -> None:
         _widget, registry = addon_api.build_spec(spec)
         missing = [i for i in ids if i not in registry]
         check(not missing, f"a spec does not carry its ids: {missing}")
-    from PyQt6.QtWidgets import QTabWidget
+    from PyQt6.QtWidgets import QApplication, QTabWidget
     page, whole = addon_api.build_spec(addon.TAB_SPEC)
     check(isinstance(page, QTabWidget) and page.count() == 2,
           "the tab's root should be a bar of the two sub-pages")
@@ -310,9 +310,28 @@ def test_the_tabs(addon: Any, api: Api) -> None:
           "and say which page shows when asked for 'index'")
     from PyQt6.QtWidgets import QHeaderView
     s_table = whole["s_table"]
-    check(s_table.header().sectionResizeMode(2) == QHeaderView.ResizeMode.Stretch
-          and s_table.header().sectionResizeMode(0) == QHeaderView.ResizeMode.Interactive,
-          "the Message column should take the slack the other columns leave")
+    modes = [s_table.header().sectionResizeMode(column)
+             for column in range(s_table.columnCount())]
+    check(all(mode == QHeaderView.ResizeMode.Interactive for mode in modes),
+          f"every column should be draggable by hand: "
+          f"{[str(mode.name) for mode in modes]}")
+    check(s_table.header().sectionsMovable(),
+          "and the person should be able to reorder the columns")
+    # The slack column only shows what it holds once the table has a width, so
+    # put the page on screen at a size a person would actually use it at.
+    app = QApplication.instance()
+    addon_api.apply_widget_property(page, "current", addon.SINGLE_MODE)
+    page.resize(900, 500)
+    page.show()
+    if app is not None:
+        app.processEvents()
+    widths = [s_table.columnWidth(column) for column in range(3)]
+    check(widths[2] > widths[0] and widths[2] > widths[1],
+          f"the Message column should take the room the others leave: {widths}")
+    check(widths[0] >= 150 and widths[1] >= 150,
+          f"and the pinned Time and Process columns keep the width asked for: "
+          f"{widths}")
+    page.hide()
 
 
 def test_single_device(addon: Any, api: Api) -> None:

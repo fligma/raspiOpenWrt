@@ -188,7 +188,7 @@ class ProcessAPI:
         "ui.progress_notice": ("title", "text", "value", "maximum"),
         "ui.progress_notice_close": (),
         "ui.menu_item": ("text", "callback", "menu", "shortcut"),
-        "ui.dialog": ("spec", "title", "ok"),
+        "ui.dialog": ("spec", "title", "ok", "answers"),
         "ui.set_setting_widget": ("widget_or_spec",),
         "tabs.add_web_tab": ("name", "url", "ip", "port", "path", "scheme",
                              "position", "pinned", "icon_only"),
@@ -240,6 +240,41 @@ class ProcessAPI:
         "session.set_addon_enabled": ("addon_id", "enabled"),
         "session.addon_state": ("addon_id",),
         "session.set_addon_running": ("addon_id", "running"),
+        "session.addons": (),
+        "session.addon_card": ("addon_id",),
+        "session.set_addon_popout": ("addon_id", "on"),
+        "session.addon_popout": ("addon_id",),
+        "session.set_addon_git_token": ("addon_id", "on"),
+        "session.set_addon_transport": ("addon_id", "transport", "on"),
+        "session.set_addon_own_connection": ("addon_id", "on"),
+        "session.addon_config": ("addon_id",),
+        "session.set_addon_config": ("addon_id", "values"),
+        "session.show_addon_window": ("addon_id",),
+        "session.set_addon_shortcut": ("addon_id", "on"),
+        "session.app_setting": ("key",),
+        "session.set_app_setting": ("key", "value"),
+        "session.git_token": (),
+        "session.github_headers": (),
+        "window.popped": ("tab",),
+        "window.popout": ("tab", "on"),
+        "window.state": ("tab",),
+        "window.names": ("tab",),
+        "window.open": ("tab",),
+        "window.close": ("tab",),
+        "window.raise_window": ("tab",),
+        "window.show": ("tab", "on"),
+        "window.center": ("tab",),
+        "window.set_title": ("tab", "text"),
+        "window.set_size": ("tab", "width", "height"),
+        "window.set_minimum": ("tab", "width", "height"),
+        "window.set_position": ("tab", "x", "y"),
+        "window.set_resizable": ("tab", "on"),
+        "window.set_closable": ("tab", "on"),
+        "window.set_always_on_top": ("tab", "on"),
+        "window.set_style": ("tab", "css"),
+        "window.set_icon": ("tab", "icon"),
+        "window.set_shortcut": ("on",),
+        "window.shortcut_path": (),
         "peers.info": ("addon_id",),
         "peers.send": ("addon_id", "data"),
         "theme.exists": ("name",),
@@ -286,8 +321,9 @@ class ProcessAPI:
         self.module = None                      # the addon, set by serve()
         self.base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) \
             else Path(__file__).resolve().parent
-        for namespace in ("device", "ui", "tabs", "settings", "settings_pages",
-                          "config", "peers", "session", "theme"):
+        for namespace in ("device", "ui", "tabs", "window", "settings",
+                          "settings_pages", "config", "peers", "session",
+                          "theme"):
             setattr(self, namespace, _Namespace(self, namespace))
         self.events = _Events(self)
         self.schedule = _Schedule(self)
@@ -768,8 +804,9 @@ class StubAPI:
         # The name an addon calls, so a test can drive a job that paces itself
         # through ``api.schedule.after``.
         self.schedule = self.timers
-        for namespace in ("device", "ui", "tabs", "settings", "settings_pages",
-                          "config", "peers", "session", "events", "theme"):
+        for namespace in ("device", "ui", "tabs", "window", "settings",
+                          "settings_pages", "config", "peers", "session",
+                          "events", "theme"):
             setattr(self, namespace, _StubNamespace(self, namespace))
         # The real folders, from the same environment a compiled addon reads.
         self.paths = _Paths(self)
@@ -1022,8 +1059,45 @@ class StubAPI:
             if method in ("session.addon_state", "session.set_addon_running"):
                 # With no app beside it, nothing is installed and nothing runs.
                 return {"installed": False, "enabled": False, "running": False}
+            if method in ("session.addons", "session.github_headers"):
+                # The Addon manager's rows, and the headers for an anonymous call.
+                return [] if method == "session.addons" else {}
+            if method == "session.addon_card":
+                return {}
+            if method == "session.addon_config":
+                # No app beside a test, so no other addon's file to read either.
+                return {"id": ask("addon_id", ""), "title": "", "path": "",
+                        "exists": False, "fields": [], "defaults": {},
+                        "values": {}}
+            if method == "session.set_addon_config":
+                return {}
+            if method == "session.git_token":
+                return ""
+            if method in ("session.addon_popout", "session.set_addon_popout",
+                          "session.set_addon_git_token",
+                          "session.set_addon_transport",
+                          "session.set_addon_own_connection",
+                          "session.show_addon_window",
+                          "session.set_addon_shortcut", "session.set_app_setting"):
+                return False
             return {} if method in ("session.profile", "session.settings",
                                     "session.status") else None
+        if method.startswith("window."):
+            # A test has no window: nothing is popped, nothing is there to steer,
+            # and the setters say so the way the app would when the tab is not its
+            # addon's to move.
+            if method == "window.popped":
+                return False
+            if method == "window.names":
+                return []
+            if method == "window.state":
+                return {"addon": self.id, "tab": ask("tab", ""),
+                        "popped": False, "declared": "", "switch": False,
+                        "shortcut": "", "shortcut_path": "", "size": [],
+                        "visible": False, "shown": False, "pages": []}
+            if method == "window.shortcut_path":
+                return ""
+            return False
         if method.startswith("peers."):
             return [] if method == "peers.list" else None
         if method.startswith("theme."):

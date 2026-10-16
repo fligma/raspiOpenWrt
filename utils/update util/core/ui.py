@@ -568,6 +568,7 @@ ui = sys.modules[__name__]
 from urllib.parse import urlparse
 
 from core.const import (
+    ADDON_DATA_DIR,
     ADDON_ID_TRANSLATIONS,
     APP_CONFIG_EXAMPLE_FILE,
     APP_CONFIG_FILE,
@@ -680,16 +681,25 @@ def _normalize_values(config: dict) -> dict:
     config["host"] = str(config.get("host", DEFAULT_PROFILE["host"]))
     config["username"] = str(config.get("username", DEFAULT_PROFILE["username"]))
     config["key_file"] = str(config.get("key_file", ""))
+    # The one git token is free text and is blank when there is nothing to send;
+    # the spaces a copy-paste brings along are trimmed here, so every reader -
+    # the Settings field, api.session.git_token() and the addons that build a
+    # GitHub header from it - sees the same clean value or an empty one.
+    config["git_token"] = str(config.get("git_token",
+                                         DEFAULT_APP_CONFIG["git_token"])).strip()
     config["remote_root"] = _translate_remote_root(config.get("remote_root"))
     config["source"] = str(config.get("source", DEFAULT_PROFILE["source"]))
     config["luci_url"] = str(config.get("luci_url", "http://192.168.1.1/"))
     config["web_path"] = str(config.get("web_path", "/cgi-bin/index.py"))
 
     # Tab order is a list of titles; else dropped so the app
-    # falls back to its built-in arrangement.
-    order = config.get("tab_order")
-    if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
-        config["tab_order"] = []
+    # falls back to its built-in arrangement. The pinned run is kept
+    # beside it, in the same shape, so a bad entry cannot put a
+    # system tab in the middle of the movable row by itself.
+    for key in ("tab_order", "pinned_tab_order"):
+        order = config.get(key)
+        if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
+            config[key] = []
 
     # Quick commands are {label, command} pairs; else dropped.
     quick = config.get("quick_commands")
@@ -1052,9 +1062,10 @@ def _translate_addon_ids(cleaned: dict) -> dict:
 
 def _normalize_addons(config: dict) -> dict:
     """Keep addons a plain id -> {enabled, own_connection, ssh_enabled,
-    sftp_enabled, settings} map; a retired addon's record is folded onto the
-    addon that took its place, each off and on the main
-    connection by default, with both of its transports allowed by default."""
+    sftp_enabled, popout, git_token, popout_geometry, tab_slot, settings} map;
+    a retired addon's record is folded onto the addon that took its place, each
+    off and on the main connection by default, with both of its transports
+    allowed by default."""
     raw = config.get("addons")
     if not isinstance(raw, dict):
         raw = {}
@@ -1072,6 +1083,19 @@ def _normalize_addons(config: dict) -> dict:
             # switch stays above them, so both have to be on.
             "ssh_enabled": bool(record.get("ssh_enabled", True)),
             "sftp_enabled": bool(record.get("sftp_enabled", True)),
+            # The app's two switches for the addon: whether its tabs live in a
+            # window of their own, and whether it is handed the profile's git
+            # token. A profile written before either existed answers the way a
+            # new record does - left in the bar, anonymous.
+            "popout": bool(record.get("popout", False)),
+            "git_token": bool(record.get("git_token", False)),
+            # Where its tabs stood, and how big its window was: both are the
+            # app's memory rather than a person's setting, so a bad one is
+            # emptied rather than thrown at the screen.
+            "popout_geometry": dict(record["popout_geometry"])
+            if isinstance(record.get("popout_geometry"), dict) else {},
+            "tab_slot": dict(record["tab_slot"])
+            if isinstance(record.get("tab_slot"), dict) else {},
             "settings": settings if isinstance(settings, dict) else {},
         }
     config["addons"] = _translate_addon_ids(cleaned)
@@ -1079,6 +1103,142 @@ def _normalize_addons(config: dict) -> dict:
 
 
 # --- load, save, transport ---
+
+#: The name every older copy of this program, and every older addon, kept a
+#: GitHub token under: the top-level ``token`` of an addon's own
+#: ``config.json``, and the same key among an addon's saved settings in a
+#: profile. There is one token for a profile now (``git_token``, seen in
+#: Settings > Connection), so these keys are read once, moved and dropped.
+LEGACY_TOKEN_KEY = "token"
+
+#: The words the lift has to say. It runs while the program is still loading, so
+#: the sentences wait here until the window - or the addon's own window, for a
+#: launch from a Desktop link - is up to write them in its log. See
+#: :func:`take_lift_lines`.
+_LIFT_LINES: list[str] = []
+
+
+def take_lift_lines() -> list[str]:
+    """The sayings the token lift left on the way up, given up once they are read."""
+    lines = list(_LIFT_LINES)
+    _LIFT_LINES.clear()
+    return lines
+
+
+def _legacy_token(record: Any) -> str:
+    """The token an addon's saved settings hold, blank when they hold none."""
+    settings = record.get("settings") if isinstance(record, dict) else None
+    if not isinstance(settings, dict):
+        return ""
+    return str(settings.get(LEGACY_TOKEN_KEY) or "").strip()
+
+
+def _lift_profile_token(profile: dict) -> list[str]:
+    """One profile's own lift: its addons' tokens up into its ``git_token``.
+
+    The first addon that had one, by id, supplies the value, since a profile now
+    has exactly one token and every addon that is allowed it reads that one. The
+    switch is turned on for every addon that had a token of its own, so nothing
+    that reached a private repository before stops reaching it now, and the old
+    keys are deleted so the same words are not lifted a second time.
+    """
+    lines: list[str] = []
+    addons = profile.get("addons")
+    if not isinstance(addons, dict):
+        return lines
+    holders = [addon_id for addon_id in sorted(addons) if _legacy_token(addons[addon_id])]
+    if not holders:
+        return lines
+    if not str(profile.get("git_token") or "").strip():
+        profile["git_token"] = _legacy_token(addons[holders[0]])
+        lines.append(f"the token {holders[0]} kept is now the profile's one git "
+                     f"token, shared by every addon switched on for it")
+    for addon_id in holders:
+        record = addons[addon_id]
+        record["git_token"] = True
+        record["settings"].pop(LEGACY_TOKEN_KEY, None)
+        lines.append(f"{addon_id} is switched on for the profile's git token, "
+                     "and its own copy of it is gone")
+    return lines
+
+
+def _lift_data_tokens(store: dict) -> list[str]:
+    """The tokens the addons' own ``config.json`` files hold, moved up and deleted.
+
+    An addon's settings file belongs to the installation rather than to one
+    profile, so its token cannot be handed to a profile of its own: the value
+    goes to the active profile when that profile has none, and every profile
+    that keeps a record for that addon has its switch turned on. A file that
+    will not read, or will not write back, is said and left alone rather than
+    half-edited.
+    """
+    lines: list[str] = []
+    if not ADDON_DATA_DIR.is_dir():
+        return lines
+    first = ""
+    holders: list[str] = []
+    for folder in sorted(ADDON_DATA_DIR.iterdir(), key=lambda path: path.name.lower()):
+        path = folder / "config.json"
+        if not folder.is_dir() or not path.is_file():
+            continue
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        value = str(loaded.get(LEGACY_TOKEN_KEY) or "").strip()
+        if not value:
+            continue
+        holders.append(folder.name)
+        first = first or value
+        del loaded[LEGACY_TOKEN_KEY]
+        try:
+            path.write_text(json.dumps(loaded, indent=2) + "\n", encoding="utf-8")
+        except OSError as error:
+            lines.append(f"{folder.name} still holds its token: {path} could not "
+                         f"be written back ({error})")
+            continue
+        lines.append(f"the token {folder.name} kept in its own settings is now "
+                     "the profile's one git token")
+    if not holders:
+        return lines
+    active = next((prof for prof in store.get("profiles") or []
+                   if prof.get("name") == store.get("active")), None)
+    if first and active is not None \
+            and not str(active.get("git_token") or "").strip():
+        active["git_token"] = first
+    for addon_id in holders:
+        for prof in store.get("profiles") or []:
+            record = (prof.get("addons") or {}).get(addon_id)
+            if isinstance(record, dict):
+                record["git_token"] = True
+    return lines
+
+
+def lift_git_token() -> list[str]:
+    """Move an addon's own GitHub token into the profile's one ``git_token``.
+
+    This version has exactly one token per profile - a private repository and
+    the higher rate limit are the profile's business, not one addon's - and
+    ``api.session.git_token()`` hands it out to whichever addons are switched on
+    for it. An installation coming from an older copy has the value written in
+    two older places, so they are read once here, lifted, and deleted, and the
+    addon that had one is switched on so it keeps fetching what it fetched
+    before. Nothing is touched when the profile already names a token, and
+    nothing is touched a second time, since the old keys go with the lift.
+
+    The sayings are kept for the window's log, and a profile file is only
+    rewritten when something actually moved.
+    """
+    lines: list[str] = []
+    for profile in _STORE["profiles"]:
+        lines += _lift_profile_token(profile)
+    lines += _lift_data_tokens(_STORE)
+    if lines:
+        _LIFT_LINES.extend(lines)
+    return lines
+
 
 def _prepare_config_dir() -> None:
     """Make the config folder and move loose files in (only into empty slots), picking up the old log name too."""
@@ -1119,6 +1279,11 @@ def load_app_config() -> dict:
         _build_store(config)
         # First run or older layout: write back once as the index
         # plus one file per profile.
+        persist_store()
+
+    # An addon's own token, from whichever place an older copy kept it in, is
+    # now the profile's one git token; the words it has to say wait for a log.
+    if lift_git_token():
         persist_store()
 
     return _working_copy()
@@ -1567,8 +1732,10 @@ class RightPinnedTabBar(QTabBar):
     tabs on the left. ``set_gap_index`` tells the bar which tab is the spacer and
     how many tabs follow it as a pinned block; their widths are recomputed from
     the bar's own width every time a tab moves or the window is resized, so the
-    pinned run always ends up flush right and never takes part in the squeezing
-    or the saved order.
+    pinned run always ends up flush right and never takes part in the squeezing.
+    The tabs in it can still be slid along the edge - that order is kept by the
+    window as its own, apart from the order of the movable tabs (see
+    ``core.window``).
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:

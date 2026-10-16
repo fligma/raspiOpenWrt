@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Stop a build on a row that would say the wrong thing about its addon.
 
-An addon's row in Settings says which connection it rides, and that saying
+An addon's row says which connection it rides - on the Settings page for a
+shipped addon, on the store's Addon manager for one installed later - and that
+saying
 comes out of two small decisions: how the word in a manifest's ``connection``
 is read, and which of the four sayings wins when an addon's transports, its
 being shipped with the program, and its declaration disagree. Both are pure,

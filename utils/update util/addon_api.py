@@ -26,13 +26,32 @@ The namespaces on ``api``
     ``tabs()``, ``current_tab()``, ``version()``, ``app_stylesheet()`` (the theme
     in force, already scaled to the interface zoom), ``zoom()`` (that
     percentage), ``app_icon()`` (the logo the program wears itself).
+    The installed addons as the app sees them - what the store's Addon manager
+    page is built from: ``addons()``, ``addon_card(id)``, ``set_addon_enabled``,
+    ``addon_state``, ``set_addon_running``, ``rescan_addons``, and what the app
+    owns beside the enable switch: ``set_addon_popout``/``addon_popout``,
+    ``set_addon_git_token``, ``set_addon_shortcut``, ``set_addon_transport`` and
+    ``set_addon_own_connection``, plus ``show_addon_window`` to bring an addon's
+    own window up. Another addon's own settings file is read and written here too -
+    ``addon_config(id)`` for its declared fields and current values and
+    ``set_addon_config(id, values)`` to save them - which is how the manager can
+    edit an addon it did not build. ``app_setting(key)`` reads any profile
+    setting; ``set_app_setting(key, value)`` writes only the handful an addon may
+    touch (``addon_dev_enabled``), so a profile's connection details stay the
+    user's.
+    One GitHub token per profile, in Settings > Connection: ``git_token()``
+    answers this addon's copy of it - empty unless the addon is switched on for
+    it in the Addon manager, and empty when the field is - and
+    ``github_headers()`` gives the two headers ``http.client`` wants for a
+    private repository and the higher rate limit, or ``{}`` to ask anonymously.
 
 ``api.device``
     SSH and SFTP. The program keeps one main connection to the device and it
     carries both transports. Every call passes the same gates, in this order:
     the master switch in Settings > Connection, that transport's app-wide switch
-    (``ssh_enabled`` / ``sftp_enabled``), this addon's own switch in
-    Settings > Addons, the same addon's switch for *that transport* on its row,
+    (``ssh_enabled`` / ``sftp_enabled``), this addon's own switch on its row in
+    the store's Addon manager, the same addon's switch for *that transport* on its
+    row,
     the transport listed under ``"requires"`` in the manifest, and the
     connection it reaches - which must be the one the manifest declared under
     ``"connection"``: ``"app"`` (the default - only the app's main session,
@@ -75,9 +94,11 @@ The namespaces on ``api``
     out the tab goes immediately left of the leftmost movable tab this addon
     already owns - a helper or a report sits beside the tab that opened it, not at
     the far end of the bar - and an addon with nothing open starts at the end of
-    the movable row. ``pinned=True`` holds the tab in the run at the right edge,
-    beside Settings: not draggable, not part of the saved order, keeping its place
-    while the tabs around it come and go. ``icon_only=True`` draws it as its mark
+    the movable row. ``pinned=True`` holds the tab in the run at the right edge
+    beside Settings: it cannot be dragged out of that run, it keeps its place in
+    it while the tabs around it come and go, and it is saved in the pinned order
+    rather than in the order of the movable tabs - within the run it may be slid
+    about like any other tab. ``icon_only=True`` draws it as its mark
     with no caption (the name still addresses it and is its tooltip); both apply to
     a web tab as well, and ``set_pinned(name, pinned=True, icon_only=None)``
     changes either afterwards - ``pinned=False`` lets the tab back into the row
@@ -87,6 +108,23 @@ The namespaces on ``api``
     ``rename``, ``names``, ``exists``, ``set_icon`` (a mark beside the tab's label,
     the way a page's favicon sits beside its title), ``use_app_icon`` (wear the logo
     the program uses and keep following it when it is switched).
+
+``api.window``
+    The window this addon's tabs live in, when they live in one of their own.
+    ``popout(tab, on=True)`` undocks one of this addon's tabs into a top-level
+    window wearing the addon's name and mark, and docks it back into the place in
+    the bar it came from; ``popped(tab)`` and ``state(tab)`` say where a tab
+    stands now. While it is out, the addon steers the frame: ``open``, ``close``,
+    ``raise_window``, ``show(tab, on)``, ``center``, ``set_title``, ``set_size``,
+    ``set_minimum``, ``set_position``, ``set_resizable``, ``set_closable``,
+    ``set_always_on_top``, ``set_style``, ``set_icon``. A tab that never left the
+    bar has no window to steer, so those calls say so. ``set_shortcut(on)`` asks
+    for a Desktop link that starts this one addon in its own window - a copy
+    launched that way loads nothing else besides it, its api and, when the addon
+    rides it, the profile's main connection - and ``shortcut_path()`` says where it
+    is. What the window does comes back through ``api.events.on("window")`` as
+    ``{"addon", "tab", "event", ...}`` for ``opened``, ``closing``, ``closed``,
+    ``docked``, ``undocked``, ``resized`` and ``moved``.
 
 ``api.ui``
     ``information/warning/error(title, text)``, ``question(title, text)`` ->
@@ -150,7 +188,9 @@ The namespaces on ``api``
     addon's own folder. Unlike
     ``api.settings`` it belongs to the installation rather than to one profile,
     it is plain JSON a user can edit in any editor, and the app shows it under
-    the addon's name in Settings > Addons. ``declare(fields, defaults, title)``
+    the addon's name in the store's Addon manager - as its own Settings page for
+    an addon that came inside the program, and through ``api.session.addon_config``
+    and ``set_addon_config`` for one that was installed later. ``declare(fields, defaults, title)``
     describes the keys so the app can build a form for them; then ``get``,
     ``set``, ``update``, ``all``, ``pop``, ``reset``, ``text``, ``save_text``,
     ``exists``, ``path``, ``file``, ``schema``, ``open_folder``.
@@ -184,7 +224,12 @@ can also be filled while it is on show: ``set_widget(tab, id, "add_page",
 somewhere other than the end, ``"current": False`` leaves the view where it is),
 ``"remove_page"`` takes one away by index or caption, and
 ``widget_value(tab, id, "pages")`` reads every caption back - which is how an
-addon opens a sub-page per connection and shuts it again.
+addon opens a sub-page per connection and shuts it again. An ``overlay``
+stacks its children in one area: the first is the background and fills it, every
+one after it keeps to its own size and floats on top at the place named by its
+``align`` (``center`` - the default - ``top``, ``bottom``, ``left``, ``right``),
+and is re-centred when the pane is resized. This is how a job's console can show
+what it is doing while the addon it is working on sits in the middle of it.
 ``label``, ``button``, ``line``, ``multi`` (plain text edit), ``check``,
 ``combo``, ``list``, ``tree``, ``table``, ``progress``, ``spin``, ``slider``,
 ``spacer``, ``image``, ``web``, ``color`` (a hex line with the colour wheel
@@ -238,6 +283,32 @@ a folder of keys - and ``"expanded"`` says whether it starts open. A table
 paints its rows through its own delegate: the app sheet names ``::item``
 colours, and a stylesheet colour would otherwise win over every per-item brush
 and drop all of this on the floor.
+Every column of a ``table`` or ``tree`` is dragged to the width it is wanted at,
+and its headers are dragged across to a new order. ``col_widths`` pins a
+starting width per column and ``stretch`` names the column (or columns) that
+take the room the others leave over, so the table fills its pane and still
+answers to a hand on its edge; a column left out of ``col_widths`` starts as
+wide as its own heading reads, so a tab is never opened with a caption cut
+short. Nothing is drawn narrower than it can be read at - a pane too narrow
+for all of them grows a bar to scroll instead of cutting words off - and
+the slack column gives itself back on a double-click of its header once it has
+been dragged.
+
+PANES THE PERSON CAN MOVE. A ``splitter`` lays its children side by side with a
+fold line between each pair, and ``sizes`` are the shares each is promised (a
+``[3, 1]`` is three parts of the room to the first pane and one to the second).
+A child that says ``"collapsed": True`` starts folded away: nothing of it shows
+but its fold line, which is dragged open or double-clicked, and which comes back
+to the share it was promised. The same folding comes to a ``column`` or ``row``
+from ``"resizable": True`` - the same stack of panes, only with the room between
+them movable - and a pane the addon did not say may fold cannot be dragged out
+of sight at all, so no row of words can be squeezed into nothing.
+``set_widget(tab, id, "sizes", [3, 1])`` lays a splitter's panes out again by
+hand, a ``0`` folding that pane away, and ``widget_value(tab, id, "panes")``
+reads back ``{"sizes": [...], "open": [...], "ids": [...]}`` to see how they
+stand. The shares are kept as the window moves, until somebody drags a line -
+which is them saying they know better - and the addon laying them out again
+takes the promise back up.
 """
 
 from __future__ import annotations
@@ -253,8 +324,10 @@ import stat as stat_module
 from typing import Any, Callable
 
 from PyQt6.QtCore import (
+    QEvent,
     QEventLoop,
     QModelIndex,
+    QObject,
     QSize,
     Qt,
     QTimer,
@@ -267,6 +340,7 @@ from PyQt6.QtGui import (
     QColor,
     QAction,
     QFont,
+    QFontMetrics,
     QIcon,
     QPainter,
     QPen,
@@ -304,6 +378,8 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTabWidget,
+    QTableView,
+    QTreeView,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -392,6 +468,37 @@ def on_gui_thread() -> bool:
 _LAYPOUT_KINDS = {
     "column": QVBoxLayout, "vbox": QVBoxLayout, "row": QHBoxLayout, "hbox": QHBoxLayout,
 }
+
+#: Where a floating child of an ``overlay`` is laid on top of what is under it.
+#: Only the first child fills the whole area; every one after it hugs its own
+#: contents and sits at the place named here, centred when nothing is said.
+OVERLAY_ALIGN = {
+    "center": Qt.AlignmentFlag.AlignCenter,
+    "top": Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+    "bottom": Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
+    "left": Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+    "right": Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+}
+
+#: The strip a person drags to move the line between two panes. Qt's own is a
+#: few pixels of nothing at all, which reads as a border rather than as
+#: something to grab - and a pane folded away is only worth having if the line
+#: to pull it back is to be found.
+PANE_HANDLE = 7
+
+#: How narrow a table column may be drawn, and where one starts when the addon
+#: pinned no width for it. Both are only a beginning: every column is dragged
+#: wider from there, and nothing is cut off below the first of the two - a
+#: cramped table grows a horizontal bar instead of eating its own words.
+MIN_SECTION = 36
+DEFAULT_SECTION = 110
+
+#: Room left over beside the word a column's header shows, when the addon
+#: pinned no width to start from: the frame, the little gap before the drag
+#: mark and a character or two of what sits under the label. A header cut to
+#: "Mess..." is the table saying its own words do not fit, so the width is
+#: measured from the font rather than guessed at.
+SECTION_PADDING = 28
 
 
 #: Row shades for the table delegate, which paints rows by hand. They are read
@@ -486,6 +593,192 @@ class _RowStyleDelegate(QStyledItemDelegate):
                 box, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                 elided)
         painter.restore()
+
+
+def _table_header(view: QTreeView | QTableView) -> QHeaderView:
+    """The headings across the top of a table, whichever kind of table it is.
+
+    A tree names its header ``header()`` and the app's own ``QTableWidget``
+    lists name it ``horizontalHeader()``; saying it once here is what lets the
+    same rules about dragging and slack cover both, instead of the addon's
+    tables being laid out one way and the program's another.
+    """
+    getter = getattr(view, "header", None) or getattr(view, "horizontalHeader", None)
+    if getter is None:
+        raise TypeError("a table without a header cannot be laid out")
+    return getter()
+
+
+class _SlackColumn(QObject):
+    """Keeps the room a table leaves over with the columns that were told to take it.
+
+    ``QHeaderView.ResizeMode.Stretch`` hands out the slack all by itself, but a
+    stretched column cannot be dragged, so a table that fills its pane could not
+    be resized by hand - and a table that can be dragged leaves a strip of empty
+    ground at its right when the pane widens. This is both at once: every column
+    stays interactive, the slack goes to the columns the spec named with
+    ``stretch`` each time the view is laid out, and the first drag of one of
+    those edges stops that for that column, because it is somebody saying they
+    meant that width. Double-clicking its header hands the slack back.
+    """
+
+    def __init__(self, view: QTreeView | QTableView, columns: list[int]) -> None:
+        super().__init__(view)
+        self._view = view
+        self._columns = [int(column) for column in columns]
+        self._owned: set[int] = set()      # taken by hand, so left alone
+        self._fitting = False
+        header = _table_header(view)
+        header.sectionResized.connect(self._taken)
+        header.sectionDoubleClicked.connect(self._given_back)
+        view.viewport().installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Resize:
+            self.fit()
+        return False
+
+    def _taken(self, column: int, _old: int, _new: int) -> None:
+        if not self._fitting and column in self._columns:
+            self._owned.add(column)
+
+    def _given_back(self, column: int) -> None:
+        if column in self._columns:
+            self._owned.discard(column)
+            self.fit()
+
+    def open(self, column: int) -> bool:
+        """Whether this column still answers to the space it is given."""
+        return int(column) in self._columns and int(column) not in self._owned
+
+    def fit(self) -> None:
+        """Share what the other columns leave between the ones that take slack."""
+        header = _table_header(self._view)
+        wanted = [column for column in self._columns if self.open(column)]
+        if not wanted:
+            return
+        free = self._view.viewport().width() - 2 * self._view.frameWidth()
+        for column in range(header.count()):
+            if column not in self._columns:
+                free -= header.sectionSize(column)
+        share = max(header.minimumSectionSize(), free // len(wanted))
+        self._fitting = True
+        try:
+            for column in wanted:
+                header.resizeSection(column, share)
+        finally:
+            self._fitting = False
+
+
+def _slack_of(view: QTreeView | QTableView, columns: list[int]) -> _SlackColumn:
+    """The one slack-taker a table has, made on the first ask and found again
+    after: two of them fighting over the same columns would only argue."""
+    held = getattr(view, "_addon_slack", None)
+    if held is None:
+        held = _SlackColumn(view, columns)
+        view._addon_slack = held
+    return held
+
+
+class _PaneFitter(QObject):
+    """Keeps a splitter's panes in the shares the addon promised them.
+
+    ``setSizes`` asks in pixels, and a pane asking for three parts of the room
+    against its neighbour's one only gets them if the numbers are of the order
+    the room is in - ``[3, 1]`` is swallowed and both panes end up even, which
+    is why the shares named in a spec have never really divided the panes the
+    way they read. So the shares are kept here and worked out against whatever
+    length the splitter has, every time it is laid out - until somebody drags a
+    fold line, which is them saying they know better than the addon; the line
+    then stays where they left it. An addon laying the panes out again through
+    ``set_widget(tab, id, "sizes", ...)`` takes the promise back up.
+    """
+
+    def __init__(self, splitter: QSplitter, shares: list[int],
+                 shut: list[bool]) -> None:
+        super().__init__(splitter)
+        self._splitter = splitter
+        # A pane promised nothing still keeps a ratio of one, so folding it and
+        # opening it again hands back the room it had rather than a pixel.
+        self._shares = [max(1, int(share)) for share in shares]
+        self._shut = [bool(one) for one in shut]
+        self._taken = False                      # a fold line has been dragged
+        self._laying = False
+        splitter.splitterMoved.connect(self._dragged)
+        splitter.installEventFilter(self)
+        self.lay()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Resize and not self._taken:
+            self.lay()
+        return False
+
+    def _dragged(self, _index: int, _size: int) -> None:
+        """A fold line moved under a hand: the room is the person's business now."""
+        if self._laying:
+            return
+        self._taken = True
+        self._shut = [int(size) <= 0 for size in _splitter_sizes(self._splitter)]
+        held = getattr(self._splitter, "_addon_panes", None)
+        if held:
+            held["shut"] = list(self._shut)
+
+    def promise(self, shares: list[int]) -> None:
+        """Lay the panes out to these shares, and keep doing so as the room moves.
+
+        A zero is the pane folded rather than a ratio of nothing: what it was
+        promised before it went is kept, so it comes back at that size.
+        """
+        for index, share in enumerate(shares):
+            if index >= len(self._shares) or index >= len(self._shut):
+                break
+            share = max(0, int(share))
+            if share:
+                self._shares[index] = share
+            self._shut[index] = share == 0
+        self._taken = False
+        self.lay()
+
+    def fold(self, index: int) -> None:
+        """This pane goes away, or comes back to the room it was promised.
+
+        What a fold line's double-click does: the shares are taken up again, so
+        the rest of the splitter moves with it the way the spec said it would.
+        """
+        index = int(index)
+        if not 0 <= index < len(self._shut):
+            return
+        self._shut[index] = not self._shut[index]
+        self._taken = False
+        self.lay()
+
+    def lay(self) -> None:
+        """Turn the shares into the pixels the splitter has in hand."""
+        splitter = self._splitter
+        count = splitter.count()
+        if count < 1:
+            return
+        room = (splitter.height() if splitter.orientation() == Qt.Orientation.Vertical
+                else splitter.width())
+        room = max(0, room - splitter.handleWidth() * (count - 1))
+        open_it = [index for index in range(count) if not self._shut[index]]
+        total = sum(self._shares[index] for index in open_it) or max(1, len(open_it))
+        sizes = [0] * count
+        for index in open_it:
+            sizes[index] = max(1, self._shares[index] * room // total)
+        # The pixels rounding left over go to the widest pane, so the sum is the
+        # room and Qt is not left to hand the odd one to whichever it likes.
+        spare = room - sum(sizes)
+        if open_it and spare:
+            sizes[max(open_it, key=lambda index: sizes[index])] += spare
+        self._laying = True
+        try:
+            splitter.setSizes(sizes)
+        finally:
+            self._laying = False
+        held = getattr(splitter, "_addon_panes", None)
+        if held:
+            held["shut"] = list(self._shut)
 
 
 def _swatch_icon(colour: QColor) -> QIcon:
@@ -922,12 +1215,300 @@ def _make_layout(parent: QWidget, kind: str) -> QLayout:
     return layout
 
 
+class _PaneHandle(QObject):
+    """One fold line, answering for one pane: a double-click folds it or opens it.
+
+    Qt only toggles a pane its own drag happened to collapse, so a pane the addon
+    folded at build time - a job's log, to leave the work the whole of the tab -
+    would not answer a double-click at all. This does the same job from the line,
+    whichever way the pane came to be shut.
+    """
+
+    def __init__(self, splitter: QSplitter, index: int) -> None:
+        super().__init__(splitter)
+        self._splitter = splitter
+        self._index = int(index)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() != QEvent.Type.MouseButtonDblClick:
+            return False
+        held = getattr(self._splitter, "_addon_panes", None) or {}
+        fitter = held.get("fit")
+        if fitter is None:
+            return False
+        fitter.fold(self._index)
+        event.accept()
+        return True
+
+
+def _pane_shares(count: int, wanted: Any) -> list[int]:
+    """The shares a splitter's panes are promised, one per pane, all over zero.
+
+    An addon names them as ratios - ``[3, 1]`` is three parts of the room to the
+    first pane and one to the second - and a row or column made resizable with
+    nothing said gets an even share, which is what a layout gives today.
+    """
+    shares = [int(item) for item in (wanted or []) if str(item).strip() != ""]
+    if len(shares) != count:
+        shares = [1] * count
+    if not any(share > 0 for share in shares):
+        shares = [1] * count
+    return shares
+
+
+def _make_splitter(children: list, vertical: bool, spec: dict,
+                   registry: dict, events) -> QSplitter | None:
+    """One pane beside another, with a line between them that moves.
+
+    This is what a ``splitter`` is, and also what a ``column`` or ``row`` becomes
+    when the addon says ``"resizable": True`` - the same row of panes, only with
+    the freedom to give one of them more of the room. Two things are remembered
+    on the widget for that: the shares each pane was promised, so a pane folded
+    away can be opened back to what it was, and which pane a fold line belongs
+    to, so ``set_widget(tab, id, "sizes", ...)`` can be read back.
+    """
+    splitter = QSplitter(Qt.Orientation.Vertical if vertical
+                         else Qt.Orientation.Horizontal)
+    ids: list[str] = []
+    foldable: list[bool] = []
+    shut: list[bool] = []
+    for child in children:
+        widget = _build_one(child, registry, events)
+        if widget is None:
+            continue
+        splitter.addWidget(widget)
+        ids.append(str((child or {}).get("id") or ""))
+        # Only a pane the addon folds on purpose, or one that was asking for
+        # room anyway, may be dragged out of sight: the rest keep the words they
+        # hold, however hard the line between them is pulled.
+        shut.append(bool((child or {}).get("collapsed")))
+        foldable.append(shut[-1] or bool((child or {}).get("collapsible")))
+    if not splitter.count():
+        return None
+    shares = _pane_shares(splitter.count(), spec.get("sizes"))
+    for index, fold in enumerate(foldable):
+        splitter.setCollapsible(index, fold)
+    splitter._addon_panes = {"ids": ids, "open": shares, "shut": list(shut)}
+    _style_panes(splitter, foldable)
+    # The fold lines are as wide as they are going to be, so the shares are
+    # worked out against the room that is really left.
+    splitter._addon_panes["fit"] = _PaneFitter(splitter, shares, shut)
+    return splitter
+
+
+def _lay_panes(splitter: QSplitter, sizes: list[int]) -> None:
+    """Give every pane its share, and the same say in what happens after.
+
+    ``setSizes`` is only a request: the room it leaves over is handed out by each
+    pane's stretch factor, so shares named as ratios - ``[3, 1]`` - need the
+    stretch to be said in the same ratios or the two panes end up even. A pane
+    folded away is given no stretch at all, so nothing drifts back into it.
+    """
+    for index, share in enumerate(sizes):
+        splitter.setStretchFactor(index, max(0, int(share)))
+    splitter.setSizes(sizes)
+
+
+def _style_panes(splitter: QSplitter, foldable: list[bool] | None = None) -> None:
+    """Draw the fold lines so they can be seen, and named so they can be found.
+
+    Qt's own handle is a couple of pixels that match the background exactly, and
+    a pane folded to nothing leaves nothing but that line to pull it back, so the
+    line gets the theme's handle colour and a width worth aiming at. A line next
+    to a pane that may be folded is also double-clicked, and says so.
+    """
+    splitter.setHandleWidth(zoom_size(PANE_HANDLE))
+    shade = core.ui.color("handle", default="#5a5a5a")
+    held = getattr(splitter, "_addon_panes", None)
+    # Which fold lines already answer a double-click, and for which pane: laying
+    # the same splitter out twice must not hand it two answers, or the second
+    # would open what the first just closed, and a line taken over by another
+    # pane has to change its mind rather than gain a second opinion.
+    dressed = held.setdefault("lines", {}) if held is not None else {}
+    handles: dict[int, int] = {}
+    for index, fold in enumerate(foldable or []):
+        if fold and splitter.count() > 1:
+            # The line under the pane answers for it; a line between two foldable
+            # panes is given to the later one, which is the one being closed.
+            handles[index if index > 0 else 1] = index
+    for index in range(1, splitter.count()):
+        handle = splitter.handle(index)
+        if handle is None:
+            continue
+        handle.setStyleSheet(scaled_sheet(f"background-color: {shade};"))
+        pane = handles.get(index)
+        if pane is None:
+            continue
+        keeper = dressed.get(index)
+        if keeper is None:
+            dressed[index] = _PaneHandle(splitter, pane)
+            handle.setToolTip("Drag to resize; double-click to fold this pane "
+                              "away, and again to open it back up")
+            handle.installEventFilter(dressed[index])
+        else:
+            keeper._index = pane
+
+
+def fit_panes(splitter: QSplitter, shares: list | None = None,
+              foldable: list | None = None) -> QSplitter:
+    """Give a splitter the app builds for itself the same say as one a spec builds.
+
+    Some panes are laid out in Qt rather than in a spec - the Addon Dev tab's
+    compile-and-test split, the reference over the log under it. Left alone
+    those lines are Qt's two pixels of background, and a size asked for there is
+    answered once and then dropped at the next resize. This draws the line in
+    the theme's handle colour and wide enough to find and grab, keeps the shares
+    in `shares` as the window moves until somebody drags it, and lets a pane
+    named in `foldable` be folded out of the way and pulled back - the three
+    things a ``"splitter"`` gets for nothing. Calling it again on the same
+    splitter only lays it out to the new shares.
+    """
+    count = splitter.count()
+    if count < 2:
+        return splitter
+    given = _pane_shares(count, shares)
+    held = getattr(splitter, "_addon_panes", None)
+    if held is None:
+        held = {"ids": [""] * count, "open": given, "shut": [False] * count}
+        splitter._addon_panes = held
+    else:
+        held["open"] = given
+    fold = [bool(one) for one in (foldable or [])][:count]
+    fold += [False] * (count - len(fold))
+    for index, may in enumerate(fold):
+        splitter.setCollapsible(index, may)
+    _style_panes(splitter, fold)
+    fitter = held.get("fit")
+    if fitter is None:
+        held["fit"] = _PaneFitter(splitter, given, held["shut"])
+    else:
+        fitter.promise(given)
+    return splitter
+
+
+def _splitter_sizes(splitter: QSplitter) -> list[int]:
+    """How much room each pane has now, in the shares they were given."""
+    return [int(size) for size in splitter.sizes()]
+
+
+def _header_text(view: QTreeView | QTableView, column: int) -> str:
+    """The word a column's header shows, read the same off either kind of table."""
+    model = view.model()
+    if model is None:
+        return ""
+    try:
+        value = model.headerData(column, Qt.Orientation.Horizontal,
+                                 Qt.ItemDataRole.DisplayRole)
+    except (TypeError, RuntimeError):
+        return ""
+    return str(value or "")
+
+
+def _column_room(view: QTreeView | QTableView, column: int) -> int:
+    """Where a column nobody pinned starts: as wide as its own words need.
+
+    The label over it and whatever it holds now are both measured, and the wider
+    wins, so a table is never opened with its own headings cut short - which is
+    what sizing to contents used to buy, before it made every column impossible
+    to drag.
+    """
+    room = zoom_size(DEFAULT_SECTION)
+    text = _header_text(view, column)
+    if text:
+        room = max(room, QFontMetrics(view.font()).horizontalAdvance(text)
+                   + zoom_size(SECTION_PADDING))
+    try:
+        room = max(room, int(view.sizeHintForColumn(column)))
+    except (TypeError, ValueError, RuntimeError, AttributeError):
+        pass
+    return max(zoom_size(MIN_SECTION), room)
+
+
+def fit_table_columns(view: QTreeView | QTableView, flexible: list[int],
+                      widths: list) -> None:
+    """Give a table's columns room enough for their words and a drag that works.
+
+    Qt's own way to fill a pane is to stretch every section, which shares the
+    room out nicely and will not be resized by hand; the way that can be
+    resized leaves an empty strip at the right once the pane widens. So every
+    column stays interactive, the ones named in `flexible` are handed what the
+    others leave over (see :class:`_SlackColumn`), and the rest start at the
+    width the addon pinned for them - or, where it pinned none, as wide as their
+    own heading reads, which is what a table stretched by contents used to give
+    without taking the drag away. Nothing may go under ``MIN_SECTION``, and a
+    table that cannot show all its columns at that width grows a bar to scroll
+    rather than cutting its own words off.
+    """
+    header = _table_header(view)
+    header.setStretchLastSection(False)
+    header.setSectionsClickable(True)
+    header.setSectionsMovable(True)
+    header.setMinimumSectionSize(zoom_size(MIN_SECTION))
+    columns = view.columnCount()
+    for column in range(columns):
+        header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        pinned = int(widths[column]) if column < len(widths) else 0
+        if pinned > 0:
+            view.setColumnWidth(column, zoom_size(pinned))
+        elif column not in flexible:
+            view.setColumnWidth(column, _column_room(view, column))
+    wanted = [column for column in flexible if 0 <= column < columns]
+    if wanted:
+        _slack_of(view, wanted)
+
+
+def _apply_pane_sizes(splitter: QSplitter, value: Any) -> None:
+    """Hand each pane its share, folding away the ones told to have nothing.
+
+    The shares are the same ratios a spec's ``sizes`` gives, and a zero is the
+    pane shut: it keeps its fold line, which is dragged back open or
+    double-clicked, and the room it was promised before it went.
+    """
+    held = getattr(splitter, "_addon_panes", None) or {}
+    try:
+        shares = [max(0, int(item)) for item in (value or [])]
+    except (TypeError, ValueError):
+        shares = []
+    if len(shares) != splitter.count():
+        # Nothing usable said: go back to the promise the spec made.
+        shares = [int(one) for one in (held.get("open") or [])]
+        if len(shares) != splitter.count():
+            shares = [1] * splitter.count()
+    for index, share in enumerate(shares):
+        if share == 0:
+            splitter.setCollapsible(index, True)
+    fitter = held.get("fit")
+    if fitter is not None:
+        fitter.promise(shares)
+    else:
+        _lay_panes(splitter, shares)
+    if held:
+        held["shut"] = [share == 0 for share in shares]
+        # A pane folded here has to answer its fold line the same as one the
+        # spec folded at build time, or the box that opened it would be the only
+        # way back. Dressing is idempotent, so the lines already answering are
+        # left with the one filter they have.
+        _style_panes(splitter, [splitter.isCollapsible(index)
+                                for index in range(splitter.count())])
+
+
 def _build_one(spec: dict, registry: dict,
                events: Callable[[str, str, dict], None] | None) -> QWidget | None:
     kind = str(spec.get("kind") or "").lower()
     children = spec.get("children") or []
 
     if kind in ("grid", "form") or kind in _LAYPOUT_KINDS:
+        if spec.get("resizable") and kind in ("column", "vbox", "row", "hbox"):
+            splitter = _make_splitter(children, kind in ("column", "vbox"),
+                                      spec, registry, events)
+            if splitter is not None and kind in ("row", "hbox"):
+                # A row of panes still hugs its contents, as a plain row does:
+                # the room it is handed is for the panes to split between them.
+                splitter.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                       QSizePolicy.Policy.Fixed)
+            if splitter is not None:
+                _apply_common(splitter, spec, registry, events)
+            return splitter
         holder = QWidget()
         layout = _make_layout(holder, kind)
         _fill_children(layout, children, kind, spec, registry, events)
@@ -963,16 +1544,36 @@ def _build_one(spec: dict, registry: dict,
         return area
 
     if kind == "splitter":
-        splitter = QSplitter(Qt.Orientation.Vertical if spec.get("vertical")
-                             else Qt.Orientation.Horizontal)
-        for child in children:
-            widget = _build_one(child, registry, events)
-            if widget is not None:
-                splitter.addWidget(widget)
-        if spec.get("sizes"):               # starting shares, e.g. [3, 2]
-            splitter.setSizes([int(s) for s in spec["sizes"]])
+        splitter = _make_splitter(children, bool(spec.get("vertical")),
+                                  spec, registry, events)
+        if splitter is None:
+            return None
         _apply_common(splitter, spec, registry, events)
         return splitter
+
+    if kind == "overlay":
+        # One pane laid over another. The first child is the background and fills
+        # the area; each child after it keeps to its own size and floats where
+        # "align" says, which is how a job's console carries the addon it is
+        # working on in the middle of the screen. A grid cell holding two widgets
+        # with an alignment on the second is exactly that, and Qt moves the
+        # floating one when the pane is resized rather than the addon having to.
+        holder = QWidget()
+        grid = QGridLayout(holder)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(0)
+        for order, child in enumerate(children):
+            widget = _build_one(child, registry, events)
+            if widget is None:
+                continue
+            if order == 0:
+                grid.addWidget(widget, 0, 0)
+                continue
+            place = OVERLAY_ALIGN.get(str(child.get("align") or "").lower(),
+                                      OVERLAY_ALIGN["center"])
+            grid.addWidget(widget, 0, 0, place)
+        _apply_common(holder, spec, registry, events)
+        return holder
 
     if kind == "tabs":
         tabs = QTabWidget()
@@ -1077,7 +1678,9 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         tree = QTreeWidget()
         tree.setHeaderLabels([str(name) for name in spec.get("columns") or ["Name"]])
         tree.setAlternatingRowColors(True)
-        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        # The first column is the one that takes what the rest leave; it stays
+        # draggable, which a stretched column is not.
+        fit_table_columns(tree, [0], list(spec.get("col_widths") or []))
         tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         return tree
     if kind == "table":
@@ -1086,24 +1689,24 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         names = [str(name) for name in spec.get("columns") or [""]]
         table.setHeaderLabels(names)
         table.setAlternatingRowColors(True)
-        header = table.header()
-        # By default every column shares the width equally; "stretch" hands
-        # the slack to one column (or several) and "col_widths" gives the rest
-        # starting widths, so a long log line is not elided into nothing.
+        # By default every column shares the width out and the last of them
+        # takes what is left over; "stretch" names the ones that take it
+        # instead, and "col_widths" pins the rest, so a long line has the room
+        # its words need and every column can still be dragged. See
+        # :func:`fit_table_columns`.
         stretch = spec.get("stretch")
         if stretch is None:
-            header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            flexible = [len(names) - 1]
         else:
-            flexible = {int(i) for i in
-                        (stretch if isinstance(stretch, (list, tuple)) else [stretch])}
-            widths = list(spec.get("col_widths") or [])
-            for column in range(len(names)):
-                if column in flexible:
-                    header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+            asked = stretch if isinstance(stretch, (list, tuple)) else [stretch]
+            flexible = []
+            for item in asked:
+                try:
+                    column = int(item)
+                except (TypeError, ValueError):
                     continue
-                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
-                if column < len(widths):
-                    table.setColumnWidth(column, zoom_size(int(widths[column])))
+                flexible.append(column if column >= 0 else len(names) + column)
+        fit_table_columns(table, flexible, list(spec.get("col_widths") or []))
         table.setMouseTracking(True)          # so a row knows the mouse is over it
         if spec.get("multi"):
             # More than one row picked at once: ctrl- and shift-click work the
@@ -1322,6 +1925,12 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
             _terminal_send(widget, value)
         else:
             _terminal_send(widget, value, line=True)
+    elif prop == "sizes":
+        # A splitter's panes: the shares each is given, where a 0 folds that
+        # pane away and leaves its fold line to pull it back.
+        if not isinstance(widget, QSplitter):
+            raise AddonError("'sizes' opens and folds the panes of a splitter")
+        _apply_pane_sizes(widget, value)
     elif prop in ("add_page", "remove_page"):
         # Sub-pages built after the tab is on screen: how an addon opens one
         # page per connection and takes it away again when the link drops.
@@ -1696,6 +2305,16 @@ def read_widget_value(widget: QWidget, what: str = "value") -> Any:
         # Every caption a ``tabs`` container holds, in order.
         return [str(widget.tabText(index))
                 for index in range(widget.count())] if hasattr(widget, "tabText") else None
+    if what == "sizes" and isinstance(widget, QSplitter):
+        return _splitter_sizes(widget)
+    if what == "panes" and isinstance(widget, QSplitter):
+        # How the panes are laid now: the room each has, whether it is showing,
+        # and the id each one answers to.
+        held = getattr(widget, "_addon_panes", None) or {}
+        sizes = _splitter_sizes(widget)
+        return {"sizes": sizes,
+                "ids": [str(one) for one in (held.get("ids") or [])],
+                "open": [int(size) > 0 for size in sizes]}
     if what == "state" and _is_terminal(widget):
         # What a terminal is attached to, password left out of it by design.
         state = widget._addon_terminal
@@ -1708,6 +2327,11 @@ def read_widget_value(widget: QWidget, what: str = "value") -> Any:
     # Spin boxes and progress bars answer to text() with the formatted label.
     if isinstance(widget, numeric):
         return int(widget.value())
+    if what == "value" and isinstance(widget, QCheckBox):
+        # A check box's value is its tick, which is the one thing "value" writes to
+        # it; its words are only ever asked for as ``text``, and are what a dialog
+        # would otherwise read back instead of the answer.
+        return bool(widget.isChecked())
     for name in ("currentText", "text", "toPlainText", "value"):
         accessor = getattr(widget, name, None)
         if callable(accessor):
@@ -1875,6 +2499,322 @@ class SessionAPI:
         manager.set_enabled(str(addon_id), bool(running))
         return self.addon_state(str(addon_id))
 
+    # --- the addon manager, and the profile's own switches ---
+
+    #: The only app settings an addon may write. Everything else in the profile is
+    #: somebody's connection, password or tab layout, and an addon has no business
+    #: moving it; reading is unrestricted.
+    _WRITABLE_SETTINGS = ("addon_dev_enabled",)
+
+    def _addon_row(self, addon: Any) -> dict:
+        """One addon, in the shape the Addon manager's table and form are built from."""
+        manager = self._api._manager
+        return {
+            "id": addon.id,
+            "name": addon.name,
+            "version": addon.version,
+            "author": addon.author,
+            "description": addon.description,
+            "kind": addon.kind,
+            "installed": True,
+            "enabled": bool(addon.enabled),
+            "running": bool(addon.loaded),
+            "bundled": bool(addon.is_bundled),
+            "error": addon.error,
+            "requires": list(addon.requires),
+            "connection": addon.connection,
+            "own_connection": bool(addon.own_connection),
+            # The two gates the addon holds over its own traffic, and whether it
+            # may hold either: an addon that declared no transport is offered no
+            # switch, and only one that said "both" gets to pick a connection.
+            "ssh_allowed": bool(addon.transport_allowed("ssh")),
+            "sftp_allowed": bool(addon.transport_allowed("sftp")),
+            "own_switchable": bool(addon.connection == "both"
+                                   and not addon.is_bundled),
+            "popout_declared": str(addon.popout or ""),
+            "popout_switch": bool(addon.popout_record),
+            "popout_switchable": bool(addon.popout_switchable),
+            "popout": bool(addon.effective_popout),
+            "git_token": bool(addon.git_token),
+            "tabs": sorted(addon.tabs),
+            "window_open": bool(manager.popped(addon.id)),
+            "shortcut": self._addon_shortcut(addon),
+            # Which of the two pages the addon belongs to: Settings shows a
+            # shipped addon and the Addon manager shows every other one, so the
+            # store asks the app rather than guessing from ``bundled``, which
+            # means something slightly different in a source checkout.
+            "settings_page": bool(getattr(manager, "owns_settings_page",
+                                          lambda _a: False)(addon)),
+        }
+
+    def _addon_shortcut(self, addon: Any) -> str:
+        """The path of this addon's Desktop link, or nothing when it has none.
+
+        The Addon manager's **Desktop shortcut** button is drawn from the file on
+        disk rather than from what was clicked last, so a link made by
+        ``api.window.set_shortcut`` - or deleted by hand - reads the same either
+        way. Nothing is created here: this only asks the popout module where the
+        link would live and whether it is there.
+        """
+        try:
+            from core import popout
+        except ImportError:                      # no window support on this build
+            return ""
+        try:
+            if not popout.has_shortcut(addon):
+                return ""
+            return str(popout.shortcut_file(addon))
+        except Exception as error:               # a missing folder is not an error
+            self._api.log(f"desktop shortcut for {getattr(addon, 'id', '?')}: {error}")
+            return ""
+
+    def addons(self) -> list[dict]:
+        """Every addon this profile knows, the way the Addon manager lists them.
+
+        One call builds the whole page: a row per addon in the folder, named in
+        the order the manager found them, each saying whether the program is
+        there (``installed``), whether the profile switches it on (``enabled``)
+        and whether it is loaded this moment (``running``), whether it came
+        inside the program (``bundled``), what it needs and which connection it
+        rides, and the three window answers - what its manifest ``popout_declared``
+        (``"always"``, ``"never"`` or ``""`` for nothing said), whether the app's
+        ``popout_switch`` is up, whether that switch is offered at all
+        (``popout_switchable``), and what actually holds (``popout``) - beside its
+        tab names, whether its own window is ``window_open``, the path of its
+        Desktop ``shortcut`` when it has one (empty when it has not) and whether
+        the application's own Settings page lists it (``settings_page``, true for
+        the addons that came inside the program, which the Addon manager leaves
+        out). Its two traffic gates come back too, as ``ssh_allowed`` and
+        ``sftp_allowed`` for the switches on the addon's own row, and
+        ``own_switchable`` says whether the *own connection* choice is this addon's
+        to make - true only for one that declared ``"connection": "both"`` and did
+        not come inside the program.
+        """
+        manager = self._api._manager
+        return jsonable([self._addon_row(addon) for addon in manager.addons])
+
+    def addon_card(self, addon_id: str) -> dict:
+        """One addon, in the same shape as :meth:`addons` puts them in.
+
+        ``installed`` says False when the folder holds nothing under that id, and
+        the rest of the answer is the defaults a page can draw without testing for
+        a missing row.
+        """
+        addon = self._api._manager.find(str(addon_id))
+        if addon is None:
+            return jsonable({
+                "id": str(addon_id), "name": str(addon_id), "version": "",
+                "author": "", "description": "", "kind": "", "installed": False,
+                "enabled": False, "running": False, "bundled": False,
+                "error": "", "requires": [], "connection": "app",
+                "own_connection": False, "ssh_allowed": True,
+                "sftp_allowed": True, "own_switchable": False,
+                "popout_declared": "",
+                "popout_switch": False, "popout_switchable": False,
+                "popout": False, "git_token": False, "tabs": [],
+                "window_open": False, "shortcut": "", "settings_page": False})
+        return jsonable(self._addon_row(addon))
+
+    def set_addon_popout(self, addon_id: str, on: bool) -> bool:
+        """Move the app's **force popout** switch for one addon, and move its tabs.
+
+        On, every page the addon owns leaves the main window's bar for a window of
+        its own; off, they go back to the slots they left. Only an addon that said
+        nothing about it in its manifest, and that did not come inside the program,
+        has a switch to move - anything else answers False and says why in the log.
+        An addon wanting its *own* tab out uses ``api.window.popout(tab)``, which is
+        allowed for any addon.
+        """
+        return bool(self._api._manager.set_popout(str(addon_id), bool(on)))
+
+    def addon_popout(self, addon_id: str) -> bool:
+        """Whether this addon's pages belong in a window of their own right now."""
+        addon = self._api._manager.find(str(addon_id))
+        return bool(addon is not None and addon.effective_popout)
+
+    def set_addon_git_token(self, addon_id: str, on: bool) -> bool:
+        """Let one addon read the profile's global git token, or not.
+
+        This is the switch the Addon manager puts beside an addon's enable switch:
+        on, ``api.session.git_token()`` and ``api.session.github_headers()`` answer
+        for that addon with what the profile holds; off, they answer empty and the
+        addon is anonymous, which is the default for everybody.
+        """
+        return bool(self._api._manager.set_git_token(str(addon_id), bool(on)))
+
+    def show_addon_window(self, addon_id: str) -> bool:
+        """Bring one addon's own window up, popping its tabs out of the bar first.
+
+        The row's **Raise window**: an addon whose window was closed is still
+        running, so this is how the user gets it back without touching the switch.
+        """
+        return bool(self._api._manager.show_addon_window(str(addon_id)))
+
+    def set_addon_shortcut(self, addon_id: str, on: bool) -> bool:
+        """Put, or take away, the Desktop link that starts one addon in its own window.
+
+        The link launches this program with ``--popout <id>``, which loads that one
+        addon and nothing else, and opens the profile's main connection only when
+        the addon rides it. Returns whether the link is there afterwards.
+        """
+        addon = self._api._manager.find(str(addon_id))
+        if addon is None:
+            return False
+        try:
+            from core import popout
+        except ImportError as error:
+            self._api.log(f"no desktop shortcut support here: {error}")
+            return False
+        made, where = (popout.write_shortcut(addon) if bool(on)
+                       else popout.remove_shortcut(addon))
+        if not made:
+            self._api.log(f"desktop shortcut for {addon_id}: {where}")
+        return bool(made)
+
+    def set_addon_transport(self, addon_id: str, transport: str, on: bool) -> bool:
+        """Move one addon's own gate over SSH or SFTP, and say whether it has one.
+
+        This is the switch that used to sit under the addon's name in Settings and
+        now sits on its row in the store's Addon manager: off, the addon is refused
+        that transport even with the main connection open and the app-wide switch
+        on. Only a transport its manifest asked for is switchable - anything else
+        answers False, because the addon never declared it and would not use it
+        either way.
+        """
+        name = str(transport).strip().lower()
+        if name not in ("ssh", "sftp"):
+            return False
+        manager = self._api._manager
+        addon = manager.find(str(addon_id))
+        if addon is None or name not in (addon.requires or ()):
+            self._api.log(f"{addon_id} has no {name.upper()} switch to move - "
+                          f"its manifest does not ask for that transport")
+            return False
+        manager.set_transport_enabled(str(addon_id), name, bool(on))
+        return True
+
+    def set_addon_own_connection(self, addon_id: str, on: bool) -> bool:
+        """Put one addon on a connection of its own, or back on the app's session.
+
+        Offered only for an addon whose manifest said ``"connection": "both"`` -
+        every other kind has already decided, and the app would refuse the switch.
+        On, the addon opens its own connection per call and works whether the main
+        one is up or not; off, it shares the app's session and waits for Connect.
+        """
+        manager = self._api._manager
+        addon = manager.find(str(addon_id))
+        if addon is None:
+            self._api.log(f"{addon_id} is not installed, so it has no "
+                          f"connection of its own to be given")
+            return False
+        if addon.is_bundled or addon.connection != "both":
+            self._api.log(f"{addon_id} has no own-connection switch: it declared "
+                          f"\"connection\": \"{addon.connection}\""
+                          + (", and came inside the program" if addon.is_bundled
+                             else ""))
+            return False
+        manager.set_own_connection(str(addon_id), bool(on))
+        return True
+
+    def addon_config(self, addon_id: str) -> dict:
+        """One addon's own settings file, as the form it declared and the values it holds.
+
+        Everything the store's Addon manager needs to edit another addon is in the
+        one answer: ``fields`` (the schema the addon passed to ``api.config.declare``,
+        or the copy kept in ``addons/_data/<id>/fields.json`` while it is switched
+        off), ``values`` (the file over those defaults, which is what the addon
+        would read now), ``defaults``, ``title``, the file's ``path`` and whether it
+        ``exists`` yet. An addon that declared nothing and has no file answers with
+        empty ``fields``, so a page can say there is nothing to set rather than
+        showing a blank box.
+        """
+        manager = self._api._manager
+        name = str(addon_id)
+        title, fields, defaults = manager.config_layout(name)
+        path = addon_config_path(name)
+        return jsonable({"id": name, "title": title, "path": str(path),
+                         "exists": path.is_file(), "fields": fields,
+                         "defaults": defaults,
+                         "values": manager.config_values(name)})
+
+    def set_addon_config(self, addon_id: str, values: dict) -> dict:
+        """Write keys into another addon's ``config.json``, and tell it they changed.
+
+        The file is read first and only the named keys put over it, so a key the
+        form never showed survives the save; dotted keys write inside their
+        section, the way ``api.config`` reads them. The addon is then sent the same
+        ``on_config`` call the app's own Settings page sends, so a change lands
+        while it runs rather than at the next start. Comes back with the whole
+        merged view - empty when the file could not be written.
+        """
+        manager = self._api._manager
+        name = str(addon_id)
+        stored = read_config_json(addon_config_path(name))
+        for key, value in (values or {}).items():
+            put_config_value(stored, str(key), value)
+        if not manager.save_config(name, stored, "addon manager"):
+            return {}
+        return jsonable(manager.config_values(name))
+
+    def app_setting(self, key: str) -> Any:
+        """One application setting by name, as the profile holds it.
+
+        Reading is unrestricted, and this is how an addon asks after a switch it
+        cannot see in :meth:`settings` under a name it does not know; a key the
+        profile never set answers ``None``. The per-addon stores are not reached
+        here - that is ``api.settings``.
+        """
+        return jsonable(self._win.app_config.get(str(key)))
+
+    def set_app_setting(self, key: str, value: Any) -> bool:
+        """Write one application setting, for the handful the app lets an addon move.
+
+        Only :attr:`_WRITABLE_SETTINGS` may be written - today
+        ``addon_dev_enabled``, which the Addon manager's **Show the Addon Dev tab**
+        check reads - and writing it takes effect at once rather than at the next
+        start. Anything else is somebody's connection, password or layout, and is
+        refused with ``False`` and a line in the log.
+        """
+        name = str(key)
+        if name not in self._WRITABLE_SETTINGS:
+            self._api.log(f"app setting {name!r} is not one an addon may write")
+            return False
+        setter = getattr(self._win, f"set_{name}", None)
+        if callable(setter):
+            setter(value)
+            return True
+        self._win.app_config[name] = value
+        self._win.save_app_config()
+        return True
+
+    # --- the git token the profile holds ---
+
+    def git_token(self) -> str:
+        """The profile's global git token, for this addon, or ``""`` for anonymous.
+
+        One token is kept in Settings > Connection and an addon only ever sees it
+        when its own **use the global git token** switch is up: the default answer
+        is empty, so an addon that asks without asking gets the public rate limit
+        and nothing else. The token buys two things and no third - a private
+        repository can be read, and the hourly limit is the authenticated one.
+        """
+        addon = getattr(self._api, "_addon", None)
+        if addon is None or not bool(getattr(addon, "git_token", False)):
+            return ""
+        return str(self._win.app_config.get("git_token") or "").strip()
+
+    def github_headers(self) -> dict:
+        """The two headers a GitHub call wants: empty for nobody, or the token in the
+        shape GitHub reads with the API version pinned. An addon's own
+        ``http.client`` code has to send these itself, and this call is the one
+        thing it needs; an addon with no token allowed gets ``{}``.
+        """
+        token = self.git_token()
+        if not token:
+            return {}
+        return {"Authorization": f"token {token}",
+                "X-GitHub-Api-Version": "2022-11-28"}
+
 
 class Connection:
     """A live SSH/SFTP pair, handed out by ``api.device.open()``."""
@@ -1967,7 +2907,7 @@ class DeviceAPI:
     def _guard(self, transport: str, uses_main: bool | None = None) -> None:
         """Refuse a transport unless every gate allows it: the master switch,
         that transport's app-wide switch, this addon's own switch (the addon as
-        a whole, and that transport on its Settings row) and the addon's
+        a whole, and that transport on its row) and the addon's
         ``requires`` - and, when the call would ride the app's session, unless
         that session is actually open.
 
@@ -1987,14 +2927,14 @@ class DeviceAPI:
         addon = self._addon()
         if addon is not None and not bool(getattr(addon, "enabled", True)):
             raise AddonError(
-                "this addon is switched off: turn it on in Settings > Addons "
-                "before it can use a connection")
+                "this addon is switched off: turn it on on its row in the "
+                "Addon manager before it can use a connection")
         if addon is not None \
                 and not bool(getattr(addon, f"{transport}_enabled", True)):
             raise AddonError(
                 f"{transport.upper()} is switched off for this addon: its own "
-                f"{transport.upper()} switch, under its name in Settings > "
-                "Addons, has to be on as well as the app-wide one")
+                f"{transport.upper()} switch, on its row in the Addon "
+                "manager, has to be on as well as the app-wide one")
         declared = tuple(getattr(addon, "requires", ()) or ()) if addon is not None else ()
         if transport not in declared:
             wanted = sorted(set(declared) | {transport})
@@ -2009,11 +2949,11 @@ class DeviceAPI:
                 "the main connection is not open: press Connect in the "
                 "Connection panel, or call device.ensure_connected() to ask "
                 "for it" + (" - or switch this addon onto a connection of its "
-                            "own in Settings > Addons" if self._may_have_own()
+                            "own on its row in the Addon manager" if self._may_have_own()
                             else ""))
 
     def _may_have_own(self) -> bool:
-        """Whether a Settings switch could put this addon on its own connection."""
+        """Whether the row's switch could put this addon on its own connection."""
         addon = self._addon()
         if addon is None or getattr(addon, "is_bundled", False):
             return False
@@ -2070,7 +3010,7 @@ class DeviceAPI:
         return self._main()
 
     def _mark(self, transport: str) -> None:
-        """Note the transport for the Settings dot; never fails the call."""
+        """Note the transport for the dot on the addon's row; never fails the call."""
         try:
             self._api._manager.mark_transport(self._api._addon, transport)
         except Exception:
@@ -2224,7 +3164,8 @@ class DeviceAPI:
         if not self._uses_own():
             raise AddonError("bind only applies to an addon using its own "
                              "connection: declare \"connection\": \"both\" "
-                             "and switch it on in Settings, or call "
+                             "and switch on its own connection in the store's "
+                             "Addon manager, or call "
                              "api.device.set_mode('own') first")
         wanted = str(host or "").strip()
         if not wanted:
@@ -2702,8 +3643,17 @@ class UIAPI:
         menu = bar.addMenu(str(title))
         return menu
 
-    def dialog(self, spec: dict, title: str = "Input", ok: bool = True) -> dict | None:
-        """A modal dialog built from a widget spec; returns its values by id."""
+    def dialog(self, spec: dict, title: str = "Input", ok: bool = True,
+               answers: list | None = None) -> dict | None:
+        """A modal dialog built from a widget spec; returns its values by id.
+
+        ``answers`` replaces the Ok button with the named ones, for a question
+        that has more than two honest answers - go back and keep what is
+        written, go back and start clean, or leave it alone. Whichever button
+        was pressed comes back under the ``answer`` key beside the field
+        values; closing the box any other way is ``None``, so a person who
+        never touched it is told apart from one who picked something.
+        """
         from PyQt6.QtWidgets import QDialogButtonBox
 
         box = QDialog(self._win)
@@ -2711,8 +3661,15 @@ class UIAPI:
         layout = QVBoxLayout(box)
         body, registry = build_spec(spec if isinstance(spec, dict) else {"kind": "column", "children": spec})
         layout.addWidget(body, 1)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        chosen: list[str] = []
+        buttons = QDialogButtonBox(box)
+        for text in (answers or []):
+            button = buttons.addButton(str(text),
+                                       QDialogButtonBox.ButtonRole.AcceptRole)
+            button.clicked.connect(lambda _=False, name=str(text): chosen.append(name))
+        if not answers:
+            buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(box.accept)
         buttons.rejected.connect(box.reject)
         layout.addWidget(buttons)
@@ -2721,6 +3678,8 @@ class UIAPI:
         values = {}
         for identifier, widget in registry.items():
             values[identifier] = read_widget_value(widget)
+        if chosen:
+            values["answer"] = chosen[0]
         if not ok:
             return values
         return values
@@ -2830,6 +3789,34 @@ class TabsAPI:
         """The tabs this addon has open, under the names it gave them."""
         return list(self._store)
 
+    def _settle(self, name: str) -> bool:
+        """Hand a tab just built to the addon's own window, when it keeps them there.
+
+        The move is the app's decision rather than the addon's: a record with the
+        force-popout switch up, or a manifest that says ``"always"``, puts every
+        page this addon builds in a window instead of in the bar, and the addon is
+        none the wiser - its widget, its registry and its name are untouched.
+        """
+        settle = getattr(self._api._manager, "settle_tab", None)
+        if not callable(settle):
+            return False
+        try:
+            return bool(settle(self._api.id, str(name)))
+        except Exception as error:            # a tab in the bar beats no tab at all
+            self._api.log(f"could not open '{name}' in its own window: {error}")
+            return False
+
+    def _recall(self, name: str) -> None:
+        """Take a page out of the addon's window before it is deleted, so no window
+        is left holding a widget that has been destroyed under it."""
+        recall = getattr(self._api._manager, "recall_tab", None)
+        if not callable(recall):
+            return
+        try:
+            recall(self._api.id, str(name))
+        except Exception:
+            pass
+
     def exists(self, name: str) -> bool:
         """Whether this addon holds a tab under that name."""
         return str(name) in self._store
@@ -2852,6 +3839,9 @@ class TabsAPI:
             "page": entry["page"], "url_input": entry["url_input"],
             "view": entry["view"], "tab": tab, "web": True, "registry": {},
         }
+        if self._settle(name):
+            self._api.log(f"opened web tab '{name}' in its own window")
+            return name
         if pinned or icon_only:
             self.set_pinned(name, pinned, icon_only=icon_only)
         self._api.log(f"opened web tab '{name}' -> {entry['url_input'].text()}")
@@ -2892,6 +3882,10 @@ class TabsAPI:
             "page": widget, "url_input": None, "view": widget if _is_web_view(widget) else None,
             "tab": {"name": name}, "web": False, "registry": registry,
         }
+        if self._settle(name):
+            self._refresh_tab_dots()
+            self._api.log(f"opened tab '{name}' in its own window")
+            return name
         if pinned or icon_only:
             self.set_pinned(name, pinned, icon_only=icon_only)
         self._refresh_tab_dots()
@@ -2902,9 +3896,11 @@ class TabsAPI:
                    icon_only: bool | None = None) -> bool:
         """Hold one of this addon's tabs beside Settings, or let it back into the row.
 
-        A pinned tab is window furniture: the user cannot drag it into the
-        reorderable run, it keeps its place while other tabs come and go, and it
-        is left out of the saved tab order. ``icon_only`` draws it as a mark with
+        A pinned tab is window furniture: the user cannot drag it out of the run
+        at the right edge, it keeps its place there while other tabs come and go,
+        and its own order along the edge is remembered apart from the movable tabs
+        - which may be slid about within the run, but never leave it.
+        ``icon_only`` draws it as a mark with
         no caption - the name still identifies it, and the tooltip shows it - and
         only a pinned tab may keep a blank caption, because the bar puts a
         movable tab's name back the moment it re-measures.
@@ -2957,6 +3953,7 @@ class TabsAPI:
         entry = self._store.pop(str(name), None)
         if entry is None:
             return False
+        self._recall(str(name))
         for control in (entry.get("registry") or {}).values():
             # A shell left running when its page goes out is a thread still
             # writing into a widget that no longer is.
@@ -3293,6 +4290,288 @@ def _tab_definition(url: Any, ip: Any, port: Any, path: Any,
     }
 
 
+class WindowAPI:
+    """The window this addon's tabs live in, when that is a window of its own.
+
+    A tab normally stands in the main window's bar, inside a frame the addon has no
+    say about. An addon whose tabs are **popped out** owns a top-level window
+    instead: the page leaves the bar and is put in a window wearing this addon's
+    name and mark, and it comes back to the place it left when the popout is
+    switched off or the window's **Dock back** button is pressed. Nothing is
+    rebuilt and the addon is not restarted, so a job running in the page keeps
+    running through the trip.
+
+    Every call names one of this addon's own tabs. A tab it does not own is refused
+    by name. A tab still standing in the bar has no window to steer: :meth:`open`
+    and :meth:`popout` make one, and the calls that ask after the frame say they
+    found none. What the window does - opened, closed, moved, resized, docked,
+    undocked - is told through ``api.events.on("window", callback)`` as
+    ``{"addon", "tab", "event", ...}``.
+    """
+
+    def __init__(self, api: "AddonAPI") -> None:
+        self._api = api
+
+    @property
+    def _win(self) -> QWidget:
+        return self._api.win
+
+    @property
+    def _addon(self) -> Any:
+        return self._api._addon
+
+    def _popout(self) -> Any:
+        """The module that owns the windows; missing only in a bare addon process."""
+        try:
+            from core import popout
+        except ImportError as error:            # an addon running with no app
+            raise AddonError(f"there is no window support in this program: {error}")
+        return popout
+
+    def _entry(self, tab: str) -> dict:
+        """This addon's record for one of its tabs, or a refusal naming it."""
+        entry = (self._addon.tabs or {}).get(str(tab))
+        if entry is None:
+            raise AddonError(f"this addon has no tab called {tab!r}")
+        return entry
+
+    def _window(self, tab: str) -> Any:
+        """The window holding this tab, or ``None`` while it stands in a bar."""
+        name = str(tab)
+        self._entry(name)
+        window = self._api._manager.windows.get(str(self._addon.id))
+        if window is not None and window.has_page(name):
+            return window
+        # A program launched as one addon's window has no bar to go back to: the
+        # window it is standing in owns every page it holds.
+        host = self._win
+        if getattr(host, "is_main_window", True) is False:
+            return host
+        return None
+
+    def _target(self, tab: str) -> Any:
+        """The window this tab lives in; an addon that has no window is told so."""
+        window = self._window(tab)
+        if window is None:
+            raise AddonError(
+                f"tab {tab!r} stands in the main window's bar and has no window of "
+                "its own; call api.window.popout(tab, True) to give it one")
+        return window
+
+    # --- the decision to have a window ---
+
+    def popped(self, tab: str) -> bool:
+        """Whether this tab is in a window of its own rather than in the bar."""
+        try:
+            return self._window(tab) is not None
+        except AddonError:
+            return False
+
+    def popout(self, tab: str, on: bool = True) -> bool:
+        """Undock one of this addon's tabs into a window of its own, or dock it back.
+
+        ``on=True`` takes the page out of the main window's tab bar and puts it in a
+        top-level window, making that window the first time; ``on=False`` puts it
+        back in the slot in the bar it came from, at the same place in the order and
+        pinned or not as it was. The addon's own switch, ``enabled`` in Settings and
+        the store's **force popout** all move the same pages by the same code.
+        Returns whether anything moved.
+        """
+        name = str(tab)
+        self._entry(name)
+        popout = self._popout()
+        manager, addon = self._api._manager, self._addon
+        if bool(on):
+            return bool(popout.pop_out(manager, addon, name))
+        return bool(popout.dock_back(manager, addon, name))
+
+    # --- what the window is ---
+
+    def state(self, tab: str) -> dict:
+        """Everything worth knowing about this tab's window: whether it has one, and
+        its title, size, place, visibility, the three flags, and whether a desktop
+        shortcut for this addon exists. A tab still in the bar answers with
+        ``popped`` False and the same keys empty, so a caller never has to guess.
+        """
+        name = str(tab)
+        entry = self._entry(name)
+        popout = self._popout()
+        addon = self._addon
+        linked = bool(popout.has_shortcut(addon))
+        data: dict = {
+            "addon": str(addon.id), "tab": name, "popped": False,
+            "declared": str(getattr(addon, "popout", "") or ""),
+            "switch": bool(getattr(addon, "popout_record", False)),
+            "shortcut": linked,
+            "shortcut_path": str(popout.shortcut_file(addon)) if linked else "",
+        }
+        window = self._window(name)
+        if window is not None:
+            data.update(window.state())
+            data["popped"] = True
+            return jsonable(data)
+        bar = getattr(self._win, "tabs", None)
+        index = bar.indexOf(entry["page"]) if bar is not None else -1
+        data.update({
+            "title": str(self._win.windowTitle()) if hasattr(self._win, "windowTitle") else "",
+            "size": [], "position": [], "visible": bool(index >= 0),
+            "shown": bool(index >= 0 and bar.currentIndex() == index),
+            "resizable": True, "closable": True, "on_top": False,
+            "pages": [name] if index >= 0 else [],
+        })
+        return jsonable(data)
+
+    def names(self, tab: str) -> list[str]:
+        """Every page this tab's window holds; empty for a tab that has no window."""
+        window = self._window(tab)
+        return list(window.names()) if window is not None else []
+
+    # --- showing and going away ---
+
+    def open(self, tab: str) -> bool:
+        """Put this tab's window on screen and give it the keyboard, making the
+        window by popping the tab out when it is still standing in the bar."""
+        window = self._window(tab)
+        if window is None:
+            if not self.popout(tab, True):
+                return False
+            window = self._window(tab)
+        if window is None:
+            return False
+        window.present()
+        return True
+
+    def close(self, tab: str) -> bool:
+        """Take this tab's window out of sight, the way closing it with its own
+        button does: the addon keeps running and the page keeps everything it held.
+        To give the tab back to the main window use :meth:`popout` with ``False``.
+        """
+        window = self._window(tab)
+        if window is None:
+            return False
+        window.close()
+        return True
+
+    def raise_window(self, tab: str) -> bool:
+        """Bring the window above the others without moving it or waking the addon."""
+        window = self._window(tab)
+        if window is None:
+            return False
+        window.present()
+        return True
+
+    def show(self, tab: str, on: bool = True) -> bool:
+        """Show or hide the window; hidden means out of sight, not shut down."""
+        window = self._window(tab)
+        if window is None:
+            return False
+        if bool(on):
+            window.present()
+        else:
+            window.hide()
+        return True
+
+    def center(self, tab: str) -> bool:
+        """Stand the window in the middle of the screen it is on."""
+        window = self._window(tab)
+        if window is None:
+            return False
+        window.center()
+        return True
+
+    # --- the frame the addon asks for ---
+
+    def set_title(self, tab: str, text: str) -> bool:
+        """What the window's title bar and its own header say."""
+        self._target(tab).set_title(str(text))
+        return True
+
+    def set_size(self, tab: str, width: int, height: int) -> bool:
+        """How big the window is, in pixels; the smaller of it the user may drag."""
+        window = self._target(tab)
+        window.set_sizes(int(width), int(height))
+        return True
+
+    def set_minimum(self, tab: str, width: int, height: int) -> bool:
+        """The smallest the window may be shrunk to; kept when it is locked shut."""
+        self._target(tab).set_minimum(int(width), int(height))
+        return True
+
+    def set_position(self, tab: str, x: int, y: int) -> bool:
+        """Where the window stands, on the screen's own coordinates."""
+        self._target(tab).set_position(int(x), int(y))
+        return True
+
+    def set_resizable(self, tab: str, on: bool = True) -> bool:
+        """Whether the user may drag the window bigger or smaller; off freezes it at
+        the size it is, and the minimum the addon set is kept for when it comes back.
+        """
+        return bool(self._target(tab).set_flag("resizable", bool(on)))
+
+    def set_closable(self, tab: str, on: bool = True) -> bool:
+        """Whether the window wears a close button. Off leaves the addon running with
+        no way for the user to put the window down but **Dock back**.
+        """
+        return bool(self._target(tab).set_flag("closable", bool(on)))
+
+    def set_always_on_top(self, tab: str, on: bool = True) -> bool:
+        """Keep the window above the rest of the desktop, for a thing to watch."""
+        return bool(self._target(tab).set_flag("on_top", bool(on)))
+
+    def set_style(self, tab: str, css: str) -> bool:
+        """This addon's own stylesheet laid over the theme the window is drawn from."""
+        self._target(tab).set_style(str(css or ""))
+        return True
+
+    def set_icon(self, tab: str, icon: Any = None) -> bool:
+        """The window's mark, and the picture its tab wears; the same two shapes
+        ``api.tabs.set_icon`` takes - SVG text or a picture file - and ``None``
+        clears it. An addon that owns one window with two pages marks the page.
+        """
+        name = str(tab)
+        self._entry(name)
+        wanted = str("" if icon is None else icon).strip()
+        mark = None
+        if wanted:
+            mark = build_icon(wanted, self._addon.home)
+            if mark is None:
+                self._api.log("that window icon could not be read, so nothing changed")
+                return False
+        window = self._window(name)
+        if window is None:
+            return self._api.tabs.set_icon(name, wanted or None)
+        if mark is not None:
+            window.set_icon(mark)
+        window.set_tab_icon(name, mark)
+        return True
+
+    # --- the desktop link ---
+
+    def set_shortcut(self, on: bool = True) -> bool:
+        """Ask for, or take back, a link on the Desktop that starts this one addon in
+        a window of its own; a copy launched that way loads nothing else but this
+        addon, the API it runs on and, when the addon rides it, the profile's main
+        connection. The user may move or delete the link, which switches it off here.
+        """
+        addon = self._addon
+        popout = self._popout()
+        if bool(on):
+            made, where = popout.write_shortcut(addon)
+        else:
+            made, where = popout.remove_shortcut(addon)
+        self._api.log(f"desktop shortcut: {where}" if made or not on
+                      else f"no desktop shortcut: {where}")
+        return bool(made)
+
+    def shortcut_path(self) -> str:
+        """Where this addon's Desktop link is, or why it is not."""
+        popout = self._popout()
+        addon = self._addon
+        if popout.has_shortcut(addon):
+            return str(popout.shortcut_file(addon))
+        return ""
+
+
 class EventsAPI:
     """Subscribe to what the app does."""
 
@@ -3514,7 +4793,7 @@ class ConfigAPI:
     """The addon's own file in ``addons/_data/<id>``, shared by every profile.
 
     Declare the keys once from ``init`` and the app shows them in
-    Settings > Addons."""
+    the store's Addon manager."""
 
     def __init__(self, api: "AddonAPI") -> None:
         self._api = api
@@ -4012,6 +5291,7 @@ class AddonAPI:
         self.device = DeviceAPI(self)
         self.ui = UIAPI(self)
         self.tabs = TabsAPI(self)
+        self.window = WindowAPI(self)
         self.events = EventsAPI(self)
         self.settings = SettingsAPI(self)
         self.settings_pages = SettingsPagesAPI(self)

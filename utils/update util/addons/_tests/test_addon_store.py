@@ -273,7 +273,8 @@ def test_the_layout(store: Any) -> None:
         import addon_api
         from PyQt6.QtCore import Qt
         from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QLineEdit,
-                                     QPlainTextEdit, QSplitter, QTreeWidget)
+                                     QPlainTextEdit, QProgressBar, QSplitter,
+                                     QTreeWidget)
 
         _QT_APP = QApplication.instance() or QApplication([])
     except Exception as error:                      # noqa: BLE001 - Qt is optional
@@ -294,10 +295,45 @@ def test_the_layout(store: Any) -> None:
     check(pane is not None and not isinstance(pane, QSplitter)
           and pane.findChild(QTreeWidget) is not None,
           f"the detail pane beside the list is not the pair it was said to be: {pane!r}")
-    outer = bar.parentWidget() if bar is not None else None
+    # The browsing panes are only half of what sits above the log: the job's own
+    # console is laid over them, so the two are held in a column and that column
+    # is what the vertical splitter carries.
+    holder = bar.parentWidget() if bar is not None else None
+    check(holder is not None and not isinstance(holder, QSplitter)
+          and bar in holder.findChildren(QSplitter),
+          f"the browsing panes are not held in a column of their own: {holder!r}")
+    outer = holder.parentWidget() if holder is not None else None
     check(isinstance(outer, QSplitter)
           and outer.orientation() == Qt.Orientation.Vertical and outer.widget(1) is log,
           f"the two panes do not sit above the log in a splitter of their own: {outer!r}")
+    # The job's console, then: the pane over the browsing, put away until a job
+    # asks for it, with a terminal for a background and a card in the middle.
+    shown = registry.get("jobpane")
+    check(shown is not None and holder is not None
+          and shown.parentWidget() is holder,
+          f"the job's pane is not laid over the browsing column: {shown!r}")
+    check((spec_of(store.tab_spec(), "jobpane") or {}).get("visible") is False,
+          "the job's pane is promised up when the store is only being browsed")
+    check(shown is not None and not shown.isVisibleTo(holder),
+          "the job's pane is shown before any job has started")
+    term = registry.get("jobterm")
+    check(term is not None and getattr(term, "_addon_terminal", None) is not None,
+          f"the job has no terminal to show its work in: {term!r}")
+    card = registry.get("jobcard")
+    check(card is not None and shown is not None
+          and card.parentWidget() is shown and card is not term,
+          f"the job's card does not float over its own console: {card!r}")
+    check((spec_of(store.tab_spec(), "jobcard") or {}).get("align") == "center",
+          "the job's card is not promised the middle of the console")
+    # What the card is made of: the addon's mark, its name, what it is doing,
+    # and how far it has got.
+    mark = registry.get("jobicon")
+    check(isinstance(mark, QLabel) and getattr(mark, "_addon_picture_side", 0) >= 8,
+          f"the card wears no picture of its own: {mark!r}")
+    for ident, wanted in (("jobname", QLabel), ("jobstep", QLabel),
+                          ("jobbar", QProgressBar)):
+        check(isinstance(registry.get(ident), wanted),
+              f"the card is missing its own {ident}: {registry.get(ident)!r}")
     # The status has no row of its own any more: it shares the header line with
     # the title and the repository chip, so all the height goes to the panes.
     status = registry.get("status")
@@ -1098,11 +1134,11 @@ def test_the_sources(store: Any) -> None:
                                             {"owner": " c ", "repo": " d "}]})
           == [store.normalize_source({"owner": "c", "repo": "d"})],
           "a half-typed source was kept, or a whole one not cleaned")
-    check(store.source_values(store.normalize_source({"owner": "a", "repo": "b"}),
-                              " gh ")
+    check(store.source_values(store.normalize_source({"owner": "a", "repo": "b"}))
           == {"owner": "a", "repo": "b", "ref": "main",
-              "store_path": "utils/update util/addon.store", "token": "gh"},
-          "a source did not come out as the flat address the fetches read")
+              "store_path": "utils/update util/addon.store"},
+          "a source did not come out as the flat address the fetches read, or it "
+          "still carried a token of its own")
 
     # one source, on the tab: the chip names it and the rows say where they came from
     api = fresh(store)
@@ -2576,6 +2612,128 @@ def test_the_kept_picture(store: Any) -> None:
             os.environ.pop("RASCONF_ADDON_DATA", None)
 
 
+def test_the_job_view(store: Any) -> None:
+    """A job puts its console over the browsing panes and prints its work on it.
+
+    The pane is only there when the built tab says it is: ``tabs.set_widget``
+    answers ``False`` for an id the layout does not hold, and a job started on
+    such a tab keeps the browsing view up and writes to no console at all. Both
+    answers are driven here on the stub api, so the swap, the console's lines,
+    the card's name and the bar's share are all seen - and the tab that has no
+    pane is seen putting up no card either.
+    """
+    print("\n5g. the job's console, the card over it, and a tab that has neither")
+    real_entries, real_updates = store.entries, store.updates
+    real_dir = store.addons_dir
+    try:
+        with tempfile.TemporaryDirectory() as where:
+            folder = Path(where)
+            store.addons_dir = lambda: folder
+            store.entries = store.parse_catalog(CATALOG)
+            store.updates = {}
+            entry = store.entry_for("hello_store")
+
+            api = fresh(store)
+            api.answer("tabs.set_widget", True)
+            api.calls.clear()
+            store._begin("install", entry)
+
+            def set_as(ident: str, prop: str) -> Any:
+                """The last thing the job wrote to one widget's one property."""
+                for name, arguments, _named in reversed(api.calls):
+                    if name == "tabs.set_widget" and len(arguments) >= 4 \
+                            and arguments[1] == ident and arguments[2] == prop:
+                        return arguments[3]
+                return None
+
+            check(store.job is not None and store.job.get("pane") is True,
+                  f"a tab holding the pane was never told to show it: "
+                  f"{store.job}")
+            check(set_as("jobpane", "visible") is True
+                  and set_as("browse", "visible") is False,
+                  f"the job did not put its console over the browsing: "
+                  f"{set_as('jobpane', 'visible')!r} / "
+                  f"{set_as('browse', 'visible')!r}")
+            check(set_as("jobterm", "clear") is True,
+                  "the console was started on a screen that still held the "
+                  "last job's lines")
+            check(set_as("jobname", "text") == "Hello from the store",
+                  f"the card does not name the addon being installed: "
+                  f"{set_as('jobname', 'text')!r}")
+            check(isinstance(set_as("jobicon", "image"), str)
+                  and set_as("jobicon", "image") != "",
+                  f"the card wears no picture of its own: {set_as('jobicon', 'image')!r}")
+
+            # every line the job logs goes onto the console as well, in its own
+            # words and with the carriage a terminal needs
+            api.calls.clear()
+            store.note("building with python")
+            check(set_as("jobterm", "write") == "building with python\r\n",
+                  f"the console did not get the line the log got: "
+                  f"{set_as('jobterm', 'write')!r}")
+
+            # and a step is on the card, in the bar and in the notice at once
+            api.calls.clear()
+            store._progress("compiling hello_store...", 0.5)
+            check(set_as("jobstep", "text") == "compiling hello_store...",
+                  f"the card never said what the job is doing: "
+                  f"{set_as('jobstep', 'text')!r}")
+            check(set_as("jobbar", "value") == 50,
+                  f"the card's bar is not at the batch's half: "
+                  f"{set_as('jobbar', 'value')!r}")
+            check(api.asked("ui.progress_notice", "value") == 50,
+                  f"the notice and the card do not agree: "
+                  f"{api.last('ui.progress_notice')}")
+
+            # a long step is cut for the card, since all of it is behind it
+            api.calls.clear()
+            long_step = "running " + "a very long line " * 8
+            store._progress(long_step, 0.5)
+            step = str(set_as("jobstep", "text"))
+            check(len(step) == store._JOB_STEP_LEN and step.endswith("\u2026"),
+                  f"a long step was written to the card as it came: {step!r}")
+            check(str(api.asked("ui.progress_notice", "text")) == long_step,
+                  f"the notice was cut short with the card: "
+                  f"{api.last('ui.progress_notice')}")
+
+            # the job ends the way it began: the browsing panes back, the log kept
+            api.calls.clear()
+            store._finish("installed hello_store")
+            check(set_as("jobpane", "visible") is False
+                  and set_as("browse", "visible") is True,
+                  "the job kept the console up after it ended")
+            check(store.job is None and not store.working,
+                  "the finished job is still holding the tab")
+
+            # a tab built without the pane: no console, no card, no stopped job
+            api2 = fresh(store)
+            api2.calls.clear()
+            store._begin("install", entry)
+            check(store.job is not None and store.job.get("pane") is False,
+                  f"a tab with no pane claimed it showed one: {store.job}")
+            check(any(name == "tabs.set_widget" and len(arguments) >= 3
+                      and arguments[1] == "jobpane"
+                      for name, arguments, _n in api2.calls),
+                  "a job never asked the tab whether it has the pane at all")
+            store.note("building with python")
+            store._progress("compiling hello_store...", 0.5)
+            check(not [arguments for name, arguments, _n in api2.calls
+                       if name == "tabs.set_widget" and len(arguments) >= 3
+                       and arguments[1] in ("jobterm", "jobcard", "jobicon",
+                                            "jobname", "jobstep", "jobbar")],
+                  "a job with no pane wrote to the console and card that are "
+                  "not there")
+            check(api2.called("ui.progress_notice"),
+                  "a job with no pane lost its notice with it")
+            store._finish("installed hello_store")
+            check(store.job is None and not store.working,
+                  "a job on a paneless tab could not end")
+    finally:
+        store.entries, store.updates, store.addons_dir = (real_entries,
+                                                          real_updates, real_dir)
+        store.job, store.working = None, False
+
+
 # --- run it ---
 
 def main() -> int:
@@ -2598,6 +2756,7 @@ def main() -> int:
     test_installed(store)
     test_the_updates(store)
     test_the_switches(store)
+    test_the_job_view(store)
     test_the_sources(store)
     test_bundled_assets(store)
     test_the_generator(store)

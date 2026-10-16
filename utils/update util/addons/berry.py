@@ -389,7 +389,8 @@ def _nav_row(side: str) -> dict:
                      "on": ["clicked"]})
     children.append({"kind": "combo", "id": pid(side, "places"), "on": ["changed"],
                      "items": ["Places..."] + _places(side),
-                     "tooltip": "Jump to a bookmarked folder (set them in Settings > Addons)"})
+                     "tooltip": "Jump to a bookmarked folder (set them on the "
+                                "Berry page in Settings)"})
     return {"kind": "row", "children": children}
 
 
@@ -429,15 +430,30 @@ def _toolbar(side: str) -> dict:
 
 
 def _page(side: str, label: str) -> dict:
-    listing_columns = (["Name", "Size", "Type", "Modified", "Path"] if side == LOCAL
-                       else ["Name", "Size", "Type", "Modified", "Mode", "Path"])
+    listing_columns = (["Name", "Size", "Type", "Modified", "Path"]
+                       if side == LOCAL else
+                       ["Name", "Size", "Type", "Modified", "Mode", "Path"])
+    # A name needs the room the fixed-shape columns leave: size, type, stamp and
+    # mode are each only so many characters wide, so they are pinned and the name
+    # takes what is left over - and every one of them can still be dragged wider,
+    # or moved along the row, once the listing is showing a long path.
     listing = {"kind": "table", "id": pid(side, "files"), "on": ["selected", "context"],
                "columns": listing_columns,
+               "stretch": 0, "col_widths": _listing_widths(side),
                "tooltip": "Double-click to open; right-click for actions"}
     status = {"kind": "label", "id": pid(side, "status"), "text": "Ready.",
               "word_wrap": True, "style": "color:#23d18b; padding:2px 4px;"}
     return {"kind": "column", "label": label, "children": [
         _nav_row(side), _refine_row(side), _toolbar(side), listing, status]}
+
+
+def _listing_widths(side: str) -> list[int]:
+    """Where each column of a listing starts, the name left out to take the slack."""
+    room = [0, 90, 100, 140]              # name, size, type, modified
+    if side != LOCAL:
+        room.append(70)                   # the mode's nine characters of rwx
+    room.append(230)                      # and the whole path, as far as it goes
+    return room
 
 
 def berry_spec() -> dict:

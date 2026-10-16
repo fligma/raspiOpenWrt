@@ -125,10 +125,10 @@ DEFAULTS = {
     "confirm_delete": True,
     "save_applies": True,
     "expand_groups": True,
-    # The store: which repositories the catalog is read from, and how GitHub
-    # is reached. The same shape the addon store keeps.
+    # The store: which repositories the catalog is read from. The same shape
+    # the addon store keeps; the GitHub token is not kept here, since a profile
+    # has exactly one of those and it is read through ``profile_token``.
     "sources": [dict(MAIN_SOURCE)],
-    "token": "",
 }
 
 FIELDS = [
@@ -145,15 +145,13 @@ FIELDS = [
      "kind": "bool",
      "hint": "The editor's trees list every token, grouped by what it is used "
              "for. Closed, only the first group of each is opened for you."},
-    {"key": "token", "label": "GitHub token", "kind": "text",
-     "hint": "Used for every store source. Only needed for a private "
-             "repository, or when anonymous requests are refused",
-     "placeholder": "blank for a public repository"},
 ]
 
+#: The store's GitHub token is not one of these: it belongs to the profile and is
+#: written in Settings > Connection, and the switch on this addon's row in the
+#: store's Addon manager decides whether it is handed over at all.
 GROUPS = (("The editor", ["save_applies", "expand_groups"]),
-          ("Files", ["confirm_delete"]),
-          ("The store", ["token"]))
+          ("Files", ["confirm_delete"]))
 
 # --- the tab's own look ---
 
@@ -406,6 +404,24 @@ def clean_token(value: Any) -> str:
     return one_line(value).replace(" ", "")
 
 
+def profile_token() -> str:
+    """The token this addon is allowed to send to GitHub, which is the profile's.
+
+    There is one token for a profile and it is written in Settings > Connection;
+    the switch on this addon's row in the store's Addon manager decides whether
+    ``api.session.git_token()`` answers with it at all. An empty string is a real
+    answer rather than a failure - it means anonymous, which is what a public
+    theme store is read with - so a build with no api, no token and a refused
+    call all list exactly the same way.
+    """
+    if api is None:
+        return ""
+    try:
+        return clean_token(api.session.git_token())
+    except (AddonError, AttributeError, TypeError):
+        return ""
+
+
 # --- the sources: which repositories the theme catalog is read from ---
 
 def normalize_source(raw: Any) -> dict:
@@ -434,15 +450,14 @@ def source_label(source: dict) -> str:
             f" @ {one_line(data.get('ref') or 'main')}")
 
 
-def source_values(source: dict, token: str = "") -> dict:
+def source_values(source: dict) -> dict:
     """One source as the flat values dict every address builder reads."""
     data = source if isinstance(source, dict) else {}
     return {"owner": one_line(data.get("owner")),
             "repo": one_line(data.get("repo")),
             "ref": one_line(data.get("ref")) or "main",
             "store_path": one_line(data.get("store_path")).strip("/")
-                         or MAIN_SOURCE["store_path"],
-            "token": clean_token(token)}
+                         or MAIN_SOURCE["store_path"]}
 
 
 def _source_key(source: dict) -> tuple:
@@ -543,7 +558,15 @@ _fetchers: dict[str, Fetcher] = {}
 
 
 def _http(config: dict) -> Fetcher:
-    key = clean_token(config_get(config, "token", ""))
+    """The reused connections for this job, carrying the profile's token.
+
+    ``config`` names the source a fetch is aimed at, which is nothing to do with
+    what is sent as credentials: a profile has one token and every source in it
+    is read with that one. Keying the pool by the token rather than by the source
+    is therefore what keeps a switched-off addon, or a profile that never wrote
+    one, on the anonymous fetcher - the only kind there was before the field.
+    """
+    key = profile_token()
     fetcher = _fetchers.get(key)
     if fetcher is None:
         fetcher = Fetcher(token=key)
@@ -579,7 +602,8 @@ def _refused(status: int, path: str) -> str:
                 "branch and store folder in the sources")
     if status == 403:
         return (f"GitHub refused the request for {path} (403). Anonymous requests "
-                "are limited, so add a token under Settings or try again later")
+                "are limited, so put a token in Settings > Connection, switch "
+                "this addon on for it, or try again later")
     return f"GitHub answered {status} for {path}"
 
 
@@ -681,7 +705,7 @@ def local_entries() -> list[dict]:
     return out
 
 
-def merge_catalogs(sources: list[dict], token: str = "") -> tuple[list[dict], list[str]]:
+def merge_catalogs(sources: list[dict]) -> tuple[list[dict], list[str]]:
     """The bundled catalog, then each source's, with the clashes said out loud.
 
     A theme two publishers both list is taken from the first - the bundled
@@ -702,7 +726,7 @@ def merge_catalogs(sources: list[dict], token: str = "") -> tuple[list[dict], li
     for source in sources:
         label = source_label(source)
         try:
-            rows = load_catalog(source_values(source, token))
+            rows = load_catalog(source_values(source))
         except AddonError as error:
             failed.append(f"{label}: {error}")
             note(f"catalog {label}: {error}")
@@ -900,7 +924,7 @@ def _read_commit(entry: dict) -> None:
     if not isinstance(source, dict):
         return
     entry["asking"] = False
-    config = source_values(source, clean_token(config_get(values(), "token", "")))
+    config = source_values(source)
     path = commit_address(config, one_line(entry.get("filename")))
     try:
         status, body = _http(config).get(_API_HOST, path, accept="application/json")
@@ -926,7 +950,7 @@ def _entry_config(entry: dict) -> dict:
     source = entry.get("src")
     if not isinstance(source, dict):
         source = (read_sources(config) or [dict(MAIN_SOURCE)])[0]
-    return source_values(source, clean_token(config_get(config, "token", "")))
+    return source_values(source)
 
 
 def fetch_theme_text(entry: dict) -> str:
@@ -1107,8 +1131,7 @@ def refresh_store(_checked: bool = False) -> None:
              if isinstance(entry.get("commit"), dict)}
     held = {one_line(entry.get("id")): entry["theme"] for entry in entries
             if isinstance(entry.get("theme"), dict)}
-    entries, failed = merge_catalogs(sources,
-                                     clean_token(config_get(config, "token", "")))
+    entries, failed = merge_catalogs(sources)
     for entry in entries:
         ident = one_line(entry.get("id"))
         if known.get(ident) is not None:
@@ -1134,7 +1157,7 @@ def load_local_store() -> None:
     global entries
     if api is None or entries:
         return
-    entries, _failed = merge_catalogs([], "")
+    entries, _failed = merge_catalogs([])
     show_store_entries()
 
 
@@ -1529,50 +1552,60 @@ def edit_page() -> dict:
              "on": ["clicked"], "tooltip": "A draft of the shipped look, not on "
                                            "disk until it is saved"},
         ]},
-        {"kind": "splitter", "sizes": [5, 4], "children": [
-            {"kind": "tree", "id": "tokens", "columns": ["Colour", "Hex"],
-             "on": ["selected", "context"],
-             "tooltip": "Every colour the interface is painted with, in the "
-                        "blocks it is used for. Pick one and set it on the "
-                        "right; right-click it to change it with the wheel."},
-            {"kind": "column", "children": [
-                {"kind": "label", "id": "tokennote", "text": "", "word_wrap": True,
-                 "style": _HEAD_STYLE},
-                {"kind": "row", "children": [
-                    {"kind": "label", "text": "hex"},
-                    {"kind": "color", "id": "hex", "expand": True,
-                     "placeholder": "#rrggbb",
-                     "tooltip": "Type a colour, or press the chip for the wheel"},
-                    {"kind": "button", "id": "wheel", "text": "Wheel...",
-                     "on": ["clicked"], "tooltip": "The app's colour wheel"},
-                    {"kind": "button", "id": "chgcolor", "text": "Change colour...",
-                     "on": ["clicked"], "tooltip": "Open the wheel on the picked "
-                                                   "token and set it in one go"},
-                    {"kind": "button", "id": "setcolor", "text": "Set colour",
-                     "on": ["clicked"], "tooltip": "Put that colour on the "
-                                                   "picked token in the draft"},
-                ]},
-                {"kind": "label", "text": "The tab bar", "style": _HEAD_STYLE},
-                {"kind": "tree", "id": "knobs", "columns": ["Knob", "Now"],
-                 "on": ["selected"],
-                 "tooltip": "What the app owns about a tab: its picture, its "
-                            "air, its corners, whether it shows its name at all."},
-                {"kind": "row", "children": [
-                    {"kind": "label", "text": "to"},
-                    {"kind": "spin", "id": "knobnum", "minimum": 0, "maximum": 200,
-                     "value": 0,
-                     "tooltip": "For a knob measured in pixels"},
-                    {"kind": "check", "id": "knobbool", "text": "on",
-                     "tooltip": "For a knob that is a switch"},
-                    {"kind": "button", "id": "setknob", "text": "Set knob",
-                     "on": ["clicked"], "tooltip": "Put that value on the picked "
-                                                   "knob in the draft"},
+        {"kind": "splitter", "vertical": True, "sizes": [4, 1], "children": [
+            {"kind": "splitter", "sizes": [5, 4], "children": [
+                {"kind": "tree", "id": "tokens", "columns": ["Colour", "Hex"],
+                 "on": ["selected", "context"],
+                 "tooltip": "Every colour the interface is painted with, in the "
+                            "blocks it is used for. Pick one and set it on the "
+                            "right; right-click it to change it with the wheel."},
+                {"kind": "column", "children": [
+                    {"kind": "label", "id": "tokennote", "text": "",
+                     "word_wrap": True, "style": _HEAD_STYLE},
+                    {"kind": "row", "children": [
+                        {"kind": "label", "text": "hex"},
+                        {"kind": "color", "id": "hex", "expand": True,
+                         "placeholder": "#rrggbb",
+                         "tooltip": "Type a colour, or press the chip for the "
+                                    "wheel"},
+                        {"kind": "button", "id": "wheel", "text": "Wheel...",
+                         "on": ["clicked"],
+                         "tooltip": "The app's colour wheel"},
+                        {"kind": "button", "id": "chgcolor",
+                         "text": "Change colour...", "on": ["clicked"],
+                         "tooltip": "Open the wheel on the picked "
+                                    "token and set it in one go"},
+                        {"kind": "button", "id": "setcolor", "text": "Set colour",
+                         "on": ["clicked"], "tooltip": "Put that colour on the "
+                                                       "picked token in the draft"},
+                    ]},
+                    {"kind": "label", "text": "The tab bar", "style": _HEAD_STYLE},
+                    {"kind": "tree", "id": "knobs", "columns": ["Knob", "Now"],
+                     "on": ["selected"],
+                     "tooltip": "What the app owns about a tab: its picture, its "
+                                "air, its corners, whether it shows its name at "
+                                "all."},
+                    {"kind": "row", "children": [
+                        {"kind": "label", "text": "to"},
+                        {"kind": "spin", "id": "knobnum", "minimum": 0,
+                         "maximum": 200, "value": 0,
+                         "tooltip": "For a knob measured in pixels"},
+                        {"kind": "check", "id": "knobbool", "text": "on",
+                         "tooltip": "For a knob that is a switch"},
+                        {"kind": "button", "id": "setknob", "text": "Set knob",
+                         "on": ["clicked"], "tooltip": "Put that value on the "
+                                                       "picked knob in the draft"},
+                    ]},
                 ]},
             ]},
+            # The draft's own file, under the two lists rather than beside them:
+            # pulled up it is the bigger part of the page, folded down it leaves
+            # the colours and the knobs the whole of the room.
+            {"kind": "multi", "id": "source", "highlight": "json",
+             "expand": True,
+             "placeholder": "the draft as its file holds it - edit it here and "
+                            "press Use the JSON"},
         ]},
-        {"kind": "multi", "id": "source", "highlight": "json",
-         "placeholder": "the draft as its file holds it - edit it here and "
-                        "press Use the JSON"},
         {"kind": "row", "children": buttons(EDIT_BUTTONS) + [
             {"kind": "label", "id": "draftstate", "text": "", "expand": True,
              "style": _HEAD_STYLE},

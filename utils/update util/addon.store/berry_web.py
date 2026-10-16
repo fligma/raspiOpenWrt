@@ -26,10 +26,11 @@ colours as the window that installed it.
 Nothing that a user might want to change is hardcoded. The repository, the ref,
 the folder inside it, the patterns that are never sent, the served folder's name,
 the uhttpd section, the port and the restart command all live in
-``addons/_data/berry_web/config.json``, shown as a form under this addon's name in
-Settings > Addons. That file is the one the retired **Rasconf web installer** kept
-its own settings in - the keys are deliberately named the same, so an install that
-existed before carries its settings straight across.
+``addons/_data/berry_web/config.json``, shown as a form by **Edit settings** on
+this addon's row in the store's Addon manager page. That file is the one the
+retired **Rasconf web installer** kept its own settings in - the keys are
+deliberately named the same, so an install that existed before carries its
+settings straight across.
 
 The tab is built from a declarative spec and its buttons report back through
 ``on_widget``, so the same file works imported into the app and compiled into a
@@ -59,15 +60,28 @@ ADDON = {
     # 1.1 is the same code as 1.0, put out again so the store offers an update:
     # a program built before the launcher was repaired dies the moment it is
     # started, and the only way to replace one is to install it afresh.
-    "version": "1.1",
+    # 1.2 is the check that could not be answered. Asking the host what it has
+    # used to leave one address unbounded - a port nobody answers costs the
+    # router's own TCP patience, two minutes, and the app gave up on the command
+    # first and reported the made-up -1 as though the device had said it. Every
+    # ask now bounds itself, a folder that holds the page is looked for rather
+    # than assumed, and the move that renames it starts from what the device
+    # said instead of from a setting an older install never wrote.
+    # 1.3 drops the addon's own GitHub token field. A profile has one token, kept
+    # in Settings > Connection, and the switch on this addon's row in the store's
+    # Addon manager decides whether it is handed over; the old key is lifted into
+    # the profile by the app the first time it loads, so nothing stops working.
+    "version": "1.3",
     "author": "fligma",
     "description": "Looks for the Berry dashboard on the connected host and, when "
                    "it is not there, installs src/www_rasconf from GitHub over "
                    "SFTP: a backup, the files, the theme this program is wearing, "
                    "the uhttpd section written with uci, the exec bit on the CGI "
                    "entry, a restart and a check that the page answers. Also "
-                   "views and edits those options and can move the served folder "
-                   "from /www_rasconf to /www_berry.",
+                   "views and edits those options, finds which folder on the "
+                   "device holds the page, and can move that one to /www_berry "
+                   "- an install left in /www_rasconf by an older setup "
+                   "included.",
     "requires": ["ssh", "sftp"],
     # The files go up over the profile's own session. "both" so a person can
     # switch this addon onto a connection of its own, which is also what lets a
@@ -94,7 +108,6 @@ DEFAULTS = {
     "repo": "raspiOpenWrt",
     "ref": "main",
     "repo_path": "src/www_rasconf",
-    "token": "",
     "local_dir": "",
     "subdir": "",
     "skip": ["README.md"],
@@ -129,10 +142,6 @@ FIELDS = [
      "hint": "main, a tag like v1.6, or a full commit sha"},
     {"key": "repo_path", "label": "Folder inside the repository", "kind": "text",
      "hint": "Its contents are what gets installed"},
-    {"key": "token", "label": "GitHub token", "kind": "text",
-     "hint": "Only needed for a private repository, or when the file list is "
-             "refused because too many anonymous requests were made",
-     "placeholder": "blank for a public repository"},
     {"key": "local_dir", "label": "Local folder", "kind": "text",
      "hint": "Used when the files come from a local folder; blank means the "
              "source folder of the current profile",
@@ -186,10 +195,13 @@ FIELDS = [
     {"key": "verify", "label": "Check the page answers afterwards", "kind": "bool"},
 ]
 
-#: The install form, on the installer page.
+#: The install form, on the installer page. The GitHub token is not a field of
+#: this addon: it belongs to the profile, is written in Settings > Connection and
+#: reaches a request through ``profile_token`` while the switch on this addon's
+#: row in the store's Addon manager is on.
 GROUPS_INSTALL = [
     ("Where the files come from", ["source", "owner", "repo", "ref", "repo_path",
-                                   "token", "local_dir"]),
+                                   "local_dir"]),
     ("How they are written", ["subdir", "skip", "keep", "skip_unchanged",
                                "remove_extra"]),
     ("Before the files go over", ["backup_first", "backup_dir"]),
@@ -535,6 +547,7 @@ def parse_check(result: Any) -> dict:
     out = str(result.get("out") if isinstance(result, dict) else (result or ""))
     info = {"folder": False, "files": 0, "home": "", "python": "",
             "answered": False, "url": "", "is_berry": False,
+            "sections": {}, "served": [], "no_fetch": False,
             "code": int(result.get("code") or 0) if isinstance(result, dict) else 0,
             "body": ""}
     body: list[str] = []
@@ -549,6 +562,23 @@ def parse_check(result: Any) -> dict:
                 info["files"] = 0
         elif text.startswith("HOME "):
             info["home"] = text[5:].strip().strip("'\"")
+        elif text.startswith("SH "):
+            # ``uhttpd.lan.home='/www'``, as the device's own uci showed it.
+            name, _, where = text[3:].strip().partition("=")
+            parts = name.split(".")
+            where = where.strip().strip("'\"")
+            if len(parts) >= 3 and parts[2] == "home" and where:
+                info["sections"][parts[1]] = where
+        elif text.startswith("SERVED "):
+            words = text[7:].split()
+            if words:
+                try:
+                    count = int(words[1])
+                except (IndexError, ValueError):
+                    count = 0
+                info["served"].append({"folder": words[0], "files": count})
+        elif text.startswith("NOFETCH"):
+            info["no_fetch"] = True
         elif text.startswith("PY "):
             word = text[3:].strip()
             info["python"] = "" if word in ("-", "none") else word
@@ -566,7 +596,7 @@ def parse_check(result: Any) -> dict:
 
 
 def summary_rows(check: dict) -> list[dict]:
-    """The status table: four lines the device gave, in the words a person reads."""
+    """The status table: what the device gave, in the words a person reads."""
     check = check or {}
     home = str(check.get("home") or "(nothing set)")
     folder = ("yes" if check.get("folder") else "no")
@@ -583,7 +613,38 @@ def summary_rows(check: dict) -> list[dict]:
         rows.append({"cells": ["Answers as this dashboard",
                               "yes" if check.get("is_berry") else "not obviously"],
                      "color": "#23d18b" if check.get("is_berry") else "#ffb020"})
+    # What the device holds even though no setting names it: the answer to
+    # "where is my dashboard", and the folder a move has to start from.
+    served = check.get("served") or []
+    if served:
+        names = [f"{one.get('folder')} ({one.get('files', 0)} file(s))"
+                 for one in served[:5]]
+        rows.append({"cells": ["Folders holding the page", ", ".join(names)]})
+    sections = check.get("sections") or {}
+    if sections:
+        pairs = [f"{name} \u2192 {where}" for name, where
+                 in list(sections.items())[:5]]
+        rows.append({"cells": ["uhttpd serves", ", ".join(pairs)]})
+    if check.get("no_fetch"):
+        rows.append({"cells": ["Asking the page", "neither curl nor wget is on "
+                                                 "the device, so the page could "
+                                                 "not be asked"],
+                     "color": "#ffb020"})
     return rows
+
+
+def elsewhere(check: dict, home: str) -> str:
+    """The folder the device says holds the page, when it is not the named one.
+
+    Nothing is decided from this on its own; it is the answer to a person's
+    "mine is in /www_rasconf", and the starting point of a rename.
+    """
+    keep = str(home or "").strip().rstrip("/")
+    for one in (check or {}).get("served") or []:
+        folder = str(one.get("folder") or "").strip().rstrip("/")
+        if folder and folder != keep:
+            return folder
+    return ""
 
 
 def bridge_settings(stored: dict, root: str = "") -> dict:
@@ -917,20 +978,29 @@ def _uci_page(values: dict) -> dict:
                 )),
             ]},
             {"kind": "column", "label": "Raw file", "children": [
-                {"kind": "multi", "id": "raw_uci", "readonly": True,
-                 "placeholder": "/etc/config/uhttpd, exactly as the device holds it",
-                 "tooltip": "Read only: this page shows the file, the options "
-                            "above are what change it"},
                 buttons_spec((
-                    ("refresh_raw", "Refresh", "Read the file off the device again"),
+                    ("refresh_raw", "Refresh", "Read the file off the device "
+                                              "again"),
                     ("copy_raw", "Copy to editor", "Put the text below in the "
                                                    "editor box, where it can be "
                                                    "changed and kept for reading"),
                 )),
-                {"kind": "multi", "id": "raw_edit",
-                 "placeholder": "A copy of the file, for reading over or for "
-                                "keeping a note in",
-                 "tooltip": "Nothing here is ever written back to the device"},
+                # The two boxes side by side down the page, with a line between
+                # them: what the device holds and the copy made of it can each be
+                # given the room their lines need.
+                {"kind": "splitter", "vertical": True, "sizes": [1, 1],
+                 "children": [
+                     {"kind": "multi", "id": "raw_uci", "readonly": True,
+                      "placeholder": "/etc/config/uhttpd, exactly as the device "
+                                     "holds it",
+                      "tooltip": "Read only: this page shows the file, the "
+                                 "options above are what change it"},
+                     {"kind": "multi", "id": "raw_edit",
+                      "placeholder": "A copy of the file, for reading over or "
+                                     "for keeping a note in",
+                      "tooltip": "Nothing here is ever written back to the "
+                                 "device"},
+                 ]},
             ]},
         ]},
     ]}
@@ -1122,6 +1192,24 @@ def show_check(check: dict) -> None:
 
 # --- network: standard library only ---
 
+def profile_token() -> str:
+    """The token this addon is allowed to send to GitHub, which is the profile's.
+
+    There is one token for a profile and it is written in Settings > Connection;
+    the switch on this addon's row in the store's Addon manager decides whether
+    ``api.session.git_token()`` answers with it at all. An empty string is a real
+    answer rather than a failure - it means anonymous, which is what a public
+    repository is read with - so a build with no api, no token and a refused call
+    all fetch exactly the same way.
+    """
+    if api is None:
+        return ""
+    try:
+        return one_line(api.session.git_token()).replace(" ", "")
+    except (AddonError, AttributeError, TypeError):
+        return ""
+
+
 class Fetcher:
     """A few HTTPS connections, kept open and reused for the whole download."""
 
@@ -1190,12 +1278,14 @@ def _refused(status: int, body: bytes, path: str) -> str:
     if status == 404:
         return (f"GitHub has no such branch, tag or commit, or no such repository: "
                 f"{path}. Check the owner, the repository and the ref on the form, "
-                "or the token if the repository is private.")
+                "and the token in Settings > Connection if the repository is "
+                "private.")
     if status == 403:
         return (f"GitHub refused the request for {path} (403)"
                 + (f": {detail}" if detail else
                    ". Anonymous requests are limited to sixty an hour, so put a "
-                     "token in the config or try again later."))
+                     "token in Settings > Connection, switch this addon on for "
+                     "it, or try again later."))
     return f"GitHub answered {status} for {path}" + (f": {detail}" if detail else "")
 
 
@@ -1203,8 +1293,16 @@ _fetchers: dict[str, Fetcher] = {}
 
 
 def _http(values: dict) -> Fetcher:
-    """The shared fetcher, keyed by token so a changed one does not inherit connections."""
-    key = str(config_get(values, "token", "") or "")
+    """The shared fetcher, keyed by the profile's token.
+
+    ``values`` says where the files come from, which is nothing to do with what
+    is sent as credentials: a profile has one token and every repository named in
+    it is read with that one. Keying the pool by the token is what keeps a
+    switched-off addon, or a profile that never wrote one, on the anonymous
+    fetcher - and makes a token typed into Settings take effect at once rather
+    than inherit connections made before it.
+    """
+    key = profile_token()
     fetcher = _fetchers.get(key)
     if fetcher is None:
         fetcher = Fetcher(token=key)
@@ -1238,15 +1336,23 @@ def local_folder(values: dict) -> str:
 
 
 def job_paths(values: dict) -> dict:
-    """Every path, name and pattern this job works with, cleaned once here."""
-    home = home_path(config_get(values, "web_home", ""), "") or _profile_root()
+    """Every path, name and pattern this job works with, cleaned once here.
+
+    ``home`` is where the files go: the served folder and, when the form names
+    one, a subfolder inside it. ``home_root`` is the folder itself, which is the
+    thing a rename in the device's own tree can act on - a folder holding the
+    dashboard under another name has to be moved whole, subfolder and all, and
+    not the path inside it.
+    """
+    root = home_path(config_get(values, "web_home", ""), "") or _profile_root()
     sub = safe_path(config_get(values, "subdir", ""))
-    if sub:
-        home = posixpath.join(home, sub)
+    home = posixpath.join(root, sub) if sub else root
     entry = safe_path(config_get(values, "cgi_entry", DEFAULTS["cgi_entry"]),
                       DEFAULTS["cgi_entry"])
     return {
         "home": home,
+        "home_root": root,
+        "subdir": sub,
         "entry": entry,
         "section": uci_name(config_get(values, "uci_section", DEFAULTS["uci_section"])),
         "skip": clean_list(config_get(values, "skip", DEFAULTS["skip"])),
@@ -1278,7 +1384,10 @@ def page_urls(paths: dict) -> list[str]:
     """The addresses the device can ask itself for its page at; loopback first.
 
     Both schemes are probed: the section is set up to answer over plain HTTP, but
-    a router that has TLS switched on for uhttpd answers ``https`` and nothing else.
+    a router that has TLS switched on for uhttpd answers ``https`` and nothing
+    else. Loopback is asked before the address the app connected to, because the
+    two are the same machine here and a router answering itself costs no more
+    than a second, while an address that is filtered costs what it is allowed to.
     """
     host = ""
     try:
@@ -1287,10 +1396,9 @@ def page_urls(paths: dict) -> list[str]:
     except (AddonError, AttributeError, TypeError):
         host = ""
     out: list[str] = []
-    for scheme in ("http", "https"):
-        out.append(f"{scheme}://127.0.0.1:{paths['port']}{paths['web_path']}")
-        if host:
-            out.append(f"{scheme}://{host}:{paths['port']}{paths['web_path']}")
+    for place in ["127.0.0.1"] + ([host] if host and host != "127.0.0.1" else []):
+        for scheme in ("http", "https"):
+            out.append(f"{scheme}://{place}:{paths['port']}{paths['web_path']}")
     return out
 
 
@@ -1309,17 +1417,42 @@ def _ignored(relative: str) -> bool:
 
 # --- asking the host what it has ---
 
+#: The probe's budget, in seconds, per address: a connect that no one answers
+#: is cut off at ``PROBE_CONNECT``, and an answer that never finishes at
+#: ``PROBE_ASK``. Both are options given to the device's own tool, so they hold
+#: whether or not this machine's timeout applet exists.
+PROBE_CONNECT = 2
+PROBE_ASK = 5
+#: How much of a page is worth reading to find out what answered.
+PROBE_BYTES = 4096
+
+
 def _page_probe(urls: list[str]) -> list[str]:
     """Shell that asks for the page at each address, stopping at the first answer.
 
-    The body is printed with ``B `` in front of each line, so a reader can tell
-    the lines of the page from the lines of the report above it.
+    Every ask bounds itself, and that is the whole point of this function. A
+    filtered port used to cost the router's own TCP patience - about two minutes
+    - because the fallback fetch had no timeout option at all, and the app gave
+    up on the command long before that and handed back a made-up ``-1`` that
+    looked like something the device had said.
+
+    One tool is chosen for all the addresses rather than tried at each: curl and
+    then wget would double the cost of the slowest address. What comes back is
+    capped, since a page that streams forever is the same stall in another hat,
+    and six lines of its head is enough to know what answered. Those lines are
+    printed with ``B `` in front of each, so a reader can tell the lines of the
+    page from the lines of the report above it.
     """
     return [
+        'if command -v curl >/dev/null 2>&1; then'
+        f' FETCH="curl -s -k --connect-timeout {PROBE_CONNECT}'
+        f' --max-time {PROBE_ASK}";'
+        ' elif command -v wget >/dev/null 2>&1; then'
+        f' FETCH="wget -q -T {PROBE_ASK} -t 1 --no-check-certificate -O -";'
+        ' else FETCH=""; fi',
+        'if [ -z "$FETCH" ]; then echo "NOFETCH"; echo "NOANSWER"; exit 0; fi',
         "for URL in %s; do" % " ".join(quoted(text) for text in urls),
-        '  BODY=$(command -v curl >/dev/null 2>&1 && curl -s -k -m 10 "$URL" 2>/dev/null)',
-        '  if [ -z "$BODY" ]; then'
-        ' BODY=$(wget -q --no-check-certificate -O - "$URL" 2>/dev/null); fi',
+        f'  BODY=$($FETCH "$URL" 2>/dev/null | head -c {PROBE_BYTES})',
         '  if [ -n "$BODY" ]; then echo "ANSWERED $URL";'
         ' echo "$BODY" | head -n 6 | sed "s/^/B /"; exit 0; fi',
         "done",
@@ -1328,13 +1461,32 @@ def _page_probe(urls: list[str]) -> list[str]:
 
 
 def check_script(paths: dict) -> str:
-    """The one command that asks the device everything the status page shows."""
+    """The one command that asks the device everything the status page shows.
+
+    The file questions are one test each and cannot stall; the page probe past
+    the end carries its own seconds, which is what keeps this command inside the
+    app's patience. The folder is named ``WEBHOME`` rather than ``HOME``: a bare
+    assignment gives the new value to every command the script runs, and curl
+    reads ``$HOME/.curlrc``.
+
+    As well as the folder the form names, the device is asked two questions an
+    older install can answer and a setting cannot: which of its web folders
+    actually hold this dashboard's entry file (``SERVED``) and which uhttpd
+    section serves which folder (``SH``). Without them, a dashboard left in
+    ``/www_rasconf`` by a setup that never wrote a section of its own was
+    invisible here, and the rename had nothing to start from.
+    """
     section = paths["section"]
+    entry = paths["entry"]
     return "\n".join([
-        f'HOME={quoted(paths["home"])}',
-        'echo "FOLDER $(if [ -d "$HOME" ]; then echo yes; else echo no; fi)"',
-        'echo "FILES $(find "$HOME" -type f 2>/dev/null | wc -l)"',
+        f'WEBHOME={quoted(paths["home"])}',
+        'echo "FOLDER $(if [ -d "$WEBHOME" ]; then echo yes; else echo no; fi)"',
+        'echo "FILES $(find "$WEBHOME" -type f 2>/dev/null | wc -l)"',
         f'echo "HOME $(uci -q get uhttpd.{section}.home 2>/dev/null)"',
+        'uci -q show uhttpd 2>/dev/null | grep home= | sed "s/^/SH /"',
+        f'for D in /www /www_* /srv /srv/www; do'
+        f' if [ -f "$D/{entry}" ]; then'
+        ' echo "SERVED $D $(find "$D" -type f 2>/dev/null | wc -l)"; fi; done',
         'echo "PY $(command -v python3 2>/dev/null)"',
     ] + _page_probe(page_urls(paths)))
 
@@ -1356,22 +1508,36 @@ def check_device(_checked: bool = False) -> None:
         last_check.update(check)
         show_check(check)
         land_on(check)
+        found = elsewhere(check, paths["home"])
         if check.get("is_berry"):
-            say(f"the Berry dashboard answers on {check.get('url')}")
+            say(f"the Berry dashboard answers on {check.get('url')}"
+                + (f", and its files are in {found}" if found and
+                   not check.get("folder") else ""))
         elif not check.get("folder"):
-            say(f"{paths['home']} is not on the device - the installer page "
-                "writes it", bad=True)
+            if found:
+                say(f"the page's files are in {found}, not in {paths['home']} - "
+                    "\u201cMove folder\u201d on the uhttpd page renames it and "
+                    "points the web server at the new name", bad=True)
+            else:
+                say(f"{paths['home']} is not on the device - the installer page "
+                    "writes it", bad=True)
         elif not check.get("answered"):
             say("the folder is there but nothing answers the page - the installer "
                 "can set the web server up", bad=True)
         else:
             say("something answers, but it is not this dashboard - an install will "
                 "put these files in its place", bad=True)
+        if check.get("no_fetch"):
+            note("neither curl nor wget is on the device, so the page could not be "
+                 "asked from it: opkg install curl")
         if not check.get("python"):
             note("python3 is not on the device's path: install it before the CGI "
                  "can run (opkg install python3)")
 
-    _quick(check_script(paths), told, "asking the host what it has", timeout=90)
+    # The script bounds its own asks, so this is patience rather than a guess at
+    # the router's TCP timeout: it is what the device gets before the app says it
+    # never came back.
+    _quick(check_script(paths), told, "asking the host what it has", timeout=45)
 
 
 # --- the job: one unit of work per tick ---
@@ -1571,6 +1737,26 @@ def _problem(text: str) -> None:
     api.error(text)
 
 
+def _why_failed(result: dict, step: str, timeout: int = 0) -> str:
+    """Say in words why a command did not come back.
+
+    ``-1`` is not something a device ever answered: it is what the app makes up
+    when the command did not return at all, and the reason it stopped - a read
+    that ran out of patience, a channel that would not open - travels in a field
+    this addon used to throw away. So a stall is said as a stall, with the
+    seconds it was given and the reason beside it.
+    """
+    code = int(result.get("code") or 0)
+    reason = str(result.get("err") or "").strip()
+    first = f" ({reason.splitlines()[0]})" if reason else ""
+    if code == -1:
+        said = f"{step}: the device never came back"
+        if timeout:
+            said += f" within {timeout}s"
+        return said + (first or " - and it said nothing about why")
+    return f"{step} did not finish: the device answered {code}{first}"
+
+
 def _device(command: str, then: Callable[[dict], None], timeout: int = 90,
             step: str = "") -> None:
     """One SSH command for the job; its answer comes back on the GUI thread."""
@@ -1584,12 +1770,10 @@ def _device(command: str, then: Callable[[dict], None], timeout: int = 90,
             return
         code = int(result.get("code") or 0)
         out = str(result.get("out") or "").strip()
-        err = str(result.get("err") or "").strip()
         for line in out.splitlines()[:40]:
             note(line)
         if code != 0:
-            _problem(f"{step or 'a command'} answered {code}"
-                     + (f": {err.splitlines()[0]}" if err else ""))
+            _problem(_why_failed(result, step or "a command", timeout))
         then(result)
 
     api.device.run_async(command, answered, timeout=timeout)
@@ -1720,7 +1904,7 @@ def _unit_fetch() -> None:
              f"{one_line(config_get(values, 'repo', ''))} has no "
              f"{full} at {one_line(config_get(values, 'ref', 'main'))}. Check the "
              "branch, tag or commit, the folder inside the repository, and the "
-             "token if the repository is private.")
+             "token in Settings > Connection if the repository is private.")
         return
     if status != 200:
         _problem(f"{item['path']}: GitHub answered {status}")
@@ -2037,7 +2221,8 @@ def _stage_verify() -> None:
         '  echo "MISSING: there is no CGI entry file on the device"; fi',
         'echo "== the page =="',
     ] + _page_probe(page_urls(paths)))
-    _device(script, on_verified, timeout=60, step="asking the device for its page")
+    _device(script, on_verified, timeout=45,
+            step="asking the device for its page")
 
 
 def on_verified(result: dict) -> None:
@@ -2162,8 +2347,7 @@ def _quick(command: str, told: Callable[[dict], None], step: str,
             note(line)
         if int(result.get("code") or 0) != 0:
             bar_text(f"{step} failed")
-            say(f"{step} did not finish: the device answered "
-                f"{result.get('code')}", bad=True)
+            say(_why_failed(result, step, timeout), bad=True)
             return
         bar_text("done")
         told(result)
@@ -2204,7 +2388,7 @@ def check_page(_checked: bool = False) -> None:
         else:
             say(f"{check.get('url')} answered, but not with the dashboard", bad=True)
 
-    _quick(script, told, "asking the device for its page", timeout=60)
+    _quick(script, told, "asking the device for its page", timeout=35)
 
 
 def read_uci(_checked: bool = False) -> None:
@@ -2260,10 +2444,68 @@ def check_device_later() -> None:
         pass
 
 
-def move_home(_checked: bool = False) -> None:
-    """Rename the folder the web server is using to the name in the form.
+#: Folders a rename must never take for the dashboard's own: the device runs out
+#: of them, or out of its own admin page, and no dashboard is worth that.
+PROTECTED_FOLDERS = ("/", "/www", "/bin", "/etc", "/lib", "/overlay",
+                     "/rom", "/root", "/sbin", "/srv", "/tmp", "/usr")
 
-    This is the one thing here that moves a device's own files rather than
+
+def _root_of(folder: Any) -> str:
+    """A device folder as one plain path: no quotes, no trailing slash."""
+    return str(folder or "").strip().strip("'\"").rstrip("/")
+
+
+def _find_old(paths: dict) -> tuple[str, str]:
+    """Where the dashboard's files sit now, and which section serves them.
+
+    The section named in the form is believed when uci has a folder for it. When
+    it has none - the usual for an install that predates this addon, which never
+    wrote a section of its own - a section of the router's that serves one of the
+    folders holding the entry file is believed next; and failing even that, the
+    folder holding the file on its own, whose section comes back empty because
+    nothing admits to serving it. ``("", "")`` means the device never said where
+    anything is, which is a question for a check, not for a rename.
+    """
+    into = _root_of(paths["home_root"])
+    served = [_root_of(one.get("folder"))
+              for one in last_check.get("served") or []]
+    served = [one for one in served if one]
+    sections = last_check.get("sections") or {}
+    home = _root_of(last_check.get("home"))
+    if home:
+        # Our own section says something, so the folder it names is where the
+        # files are - with what the form keeps inside it taken back off, since a
+        # rename moves the folder and not the path inside it.
+        sub = _root_of(paths["subdir"])
+        if sub and home.endswith("/" + sub):
+            home = home[: -len("/" + sub)]
+        return home, str(paths["section"])
+    for folder in served:
+        if folder == into:
+            continue
+        for name, where in sections.items():
+            if name != paths["section"] and _root_of(where).startswith(folder):
+                return folder, name
+    for folder in served:
+        if folder != into:
+            return folder, ""
+    for name, where in sections.items():
+        if name != paths["section"] and _root_of(where) != into:
+            return _root_of(where), name
+    return "", ""
+
+
+def move_home(_checked: bool = False) -> None:
+    """Rename the folder the device really serves to the name in the form.
+
+    Two answers are needed and only one of them is in the settings: where the
+    files are now, and where they are to go. The first is read off the device
+    rather than assumed (see :func:`_find_old`). When it says nothing, nothing is
+    renamed and nothing is written: this button used to point uhttpd at an empty
+    ``/www_berry`` whenever it could not work out where the files were, which is
+    the one way to lose the dashboard without moving anything back into place.
+
+    It is also the only thing here that moves a device's own files rather than
     writing this addon's, so it is asked about by name first, and the script
     refuses outright when the new name is already taken - a ``mv`` onto an
     existing folder would bury the dashboard inside it rather than replace it.
@@ -2272,43 +2514,95 @@ def move_home(_checked: bool = False) -> None:
         return
     values = merge_current()
     paths = job_paths(values)
-    into = paths["home"]
+    into = _root_of(paths["home_root"])
     section = paths["section"]
-    old = str(last_check.get("home") or "").strip() \
-        or home_path(config_get(values, "web_home", ""), "")
-    if old == into:
+    if not into:
+        say("there is no name to move to: the served folder box is empty", bad=True)
+        return
+    if into in PROTECTED_FOLDERS:
+        say(f"{into} is a folder the device needs as itself - name somewhere "
+            "else for the dashboard to live", bad=True)
+        return
+    if not last_check:
+        say("the device has not been asked what it has yet - Re-check first, so "
+            "the move starts from what is really there", bad=True)
+        return
+    old, old_section = _find_old(paths)
+    if not old:
+        say(f"the device named no folder to move from, and {into} is not on it - "
+            "the installer page writes the dashboard first", bad=True)
+        return
+    if old in PROTECTED_FOLDERS:
+        say(f"{old} is the device's own folder and stays where it is - an install "
+            f"writes {into} beside it", bad=True)
+        return
+    if old == into and old_section == section:
         say(f"{into} is already what uhttpd.{section} serves")
         return
-    if not api.ui.question(
-            "Move the served folder",
-            f"uhttpd.{section} is to stop serving\n\n  {old or '(nothing set)'}\n\n"
-            f"and serve\n\n  {into}\n\ninstead.\n\nThe folder on the device is "
-            "renamed, the setting is written with uci, committed, and the web "
-            "server restarted. Continue?", default=False):
+    foreign = "" if not old_section or old_section == section \
+        else uci_name(old_section)
+    who = f"uhttpd.{old_section}" if old_section else "no section of uhttpd"
+    ask = (f"{who} serves\n\n  {old}\n\nand the form names\n\n  {into}\n\n"
+           "instead.\n\nThe folder on the device is renamed, the setting is "
+           "written with uci, committed, and the web server restarted. What is "
+           "inside the folder goes with it, the file holding the page's PIN "
+           "included - which is why this is a move and not an install.")
+    if foreign:
+        ask += ("\n\nuhttpd." + foreign + " is what serves that folder today, so "
+                "its home moves along with the files under it.")
+    if not api.ui.question("Move the served folder", ask + "\n\nContinue?",
+                           default=False):
         say("the folder was left where it is")
         return
-    restart = " ; ".join(paths["restart"]) if paths["restart"] else "true"
-    script = "\n".join([
+    # The rename works on the folder itself; anything the form keeps inside it as
+    # a subfolder goes with it, and is put back on the end for the setting.
+    into_home = posixpath.join(into, paths["subdir"]) if paths["subdir"] else into
+    lines = [
         f'OLD={quoted(old)}',
         f'NEW={quoted(into)}',
-        'if [ ! -d "$OLD" ]; then echo "note: $OLD is not on the device, so only '
-        'the setting changes"; fi',
-        'if [ -e "$NEW" ]; then echo "STOP: $NEW is already there, so nothing '
-        'was moved"; exit 1; fi',
-        'if [ -d "$OLD" ]; then mv "$OLD" "$NEW" && echo "moved $OLD to $NEW"; fi',
-        uci_script(section, into, paths["port"]),
-        'echo "== after =="'
-        f' ; {restart} || echo "note: the web server did not restart"',
-    ])
+        'if [ ! -d "$OLD" ]; then echo "STOP: $OLD is not on the device, so '
+        'nothing was moved"; exit 0; fi',
+        'if [ -e "$NEW" ]; then echo "STOP: $NEW is already there, holding '
+        '$(find "$NEW" -type f 2>/dev/null | wc -l) file(s), so nothing was '
+        'moved"; exit 0; fi',
+        'mv "$OLD" "$NEW" && echo "moved $OLD to $NEW"',
+    ]
+    if foreign:
+        # That section named a folder, not a name: whatever followed the old path
+        # keeps following the new one, so a dashboard in a subfolder of it is
+        # still in a subfolder of the folder it moves to.
+        was = _root_of((last_check.get("sections") or {}).get(old_section) or old)
+        after = into + was[len(old):]
+        lines.append(f'uci set uhttpd.{foreign}.home={squoted(after)}')
+        lines.append(f'echo "uhttpd.{foreign}.home now {after}"')
+    lines.append(uci_script(section, into_home, paths["port"]))
+    lines.append('echo "== what uhttpd serves now =="')
+    lines.append('uci -q show uhttpd 2>/dev/null | grep home= '
+                 '|| echo "(nothing is set)"')
+    restart = " ; ".join(paths["restart"]) if paths["restart"] else "true"
+    lines.append(f'{restart} || echo "note: the web server did not restart"')
 
     def told(result: dict) -> None:
-        if "STOP" in str(result.get("out") or ""):
-            say("nothing was moved: the new name is already taken", bad=True)
+        out = str(result.get("out") or "")
+        refused = next((one for one in out.splitlines() if one.startswith("STOP")), "")
+        if refused:
+            say(refused[len("STOP"):].lstrip(": "), bad=True)
             return
+        # The name on the device and the name in the settings have to agree, or
+        # the next install makes the old folder again and the dashboard ends up
+        # in two pieces; the form is put right for the same reason.
+        try:
+            api.config.update({"web_home": into})
+        except AddonError:
+            pass
+        try:
+            api.tabs.set_widget(TAB, "web_home", "value", into)
+        except AddonError:
+            pass
         say(f"{into} is what uhttpd.{section} serves now")
         check_device_later()
 
-    _quick(script, told, "moving the served folder", timeout=180)
+    _quick("\n".join(lines), told, "moving the served folder", timeout=180)
 
 
 def copy_raw(_checked: bool = False) -> None:

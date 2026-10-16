@@ -50,7 +50,7 @@ def find_asset(filename: str) -> Path | None:
 #: The program's own version, the one the About dialog shows and the update
 #: addon compares against the tags published on GitHub (``berry`` + this).
 #: One line to change per release, everything else reads it from here.
-APP_VERSION = "1.8.2"
+APP_VERSION = "2.0.0"
 UPDATE_TAG_PREFIX = "berry"
 
 # --- file names and fixed identifiers ---
@@ -180,6 +180,14 @@ DEFAULT_APP_CONFIG = {
     "trust_unknown_host": DEFAULT_PROFILE["trust_unknown_host"],
     "remember_password": DEFAULT_PROFILE["remember_password"],
     "ssh_timeout": 12,
+    # The one git token the whole profile has. It buys two things: a private
+    # repository can be read, and GitHub's rate limit is the authenticated one
+    # rather than the shared anonymous bucket. Addons never hold a token of
+    # their own - each one's "use the global git token" switch in the store's
+    # Addon manager decides whether api.session.git_token() answers it, and off
+    # the addon works anonymously as it always could. See core.window for the
+    # field and core.ui for the one-time lift of an old per-addon token.
+    "git_token": "",
     "logging_enabled": True,
     "show_hidden_files": False,
     # Master connection switch (Connection panel header). Off
@@ -234,9 +242,11 @@ DEFAULT_APP_CONFIG = {
     "reboot_auto_watch": True,
     "default_tab": "Berry",
     # Tab arrangement: whether the dragged order is kept between
-    # launches, and that order. See core.window.
+    # launches, and that order. The tabs pinned to the right edge
+    # are remembered separately, in their own run. See core.window.
     "remember_tab_order": True,
     "tab_order": [],
+    "pinned_tab_order": [],
     "terminal_font_size": 10,
     # Interface size, as a percent of the shipped sizes. View >
     # Zoom in/out owns it; terminal_font_size is the terminal's.

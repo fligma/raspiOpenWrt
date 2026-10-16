@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+import http.client
 import json
 from pathlib import Path
 import posixpath
 import threading
 from typing import Any
 
-from PyQt6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QUrl
+from PyQt6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QIcon, QKeySequence, QPixmap, QResizeEvent, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -125,6 +126,45 @@ THEME_MANAGER_TAB = "Theme Manager"
 ADDON_DEV_TAB = "Addon Dev"
 
 
+#: The row the Startup order list puts between the tabs the user places and the
+#: run held against the right edge. The pinned tabs are listed as well - their
+#: order along the edge is the user's too - and this row is what says where the
+#: second run begins, so a commit knows which names to keep together.
+ORDER_PINNED_HEAD = "Pinned at the right edge"
+
+
+def split_order_rows(rows: list[str]) -> tuple[list[str], list[str]]:
+    """The Startup list's rows as the two runs they are: movable tabs, then pinned.
+
+    Everything above the heading names the order of the tabs the user places, and
+    everything below it the order of the run at the right edge. A list with no
+    heading is one run, which is what an order written before the pinned tabs
+    could be arranged holds.
+    """
+    try:
+        cut = rows.index(ORDER_PINNED_HEAD)
+    except ValueError:
+        return [row for row in rows if row], []
+    return [row for row in rows[:cut] if row], [row for row in rows[cut + 1:] if row]
+
+
+def sort_into_runs(rows: list[str],
+                   pinned_titles: list[str]) -> tuple[list[str], list[str]]:
+    """Put every row of the Startup list back in the run its tab belongs to.
+
+    A pinned tab dragged up into the movable rows, or a movable one dropped in
+    among the pinned, is put back rather than obeyed: the pinned run is furniture
+    at the right edge, and only the order *inside* it is the user's to choose. A
+    pinned tab the rows have lost its place for - one that arrived since the page
+    was filled - is kept at the end of the run rather than dropped.
+    """
+    named = [row for row in rows if row and row != ORDER_PINNED_HEAD]
+    pinned = [title for title in pinned_titles if title]
+    movable = [title for title in named if title not in pinned]
+    moved = [title for title in named if title in pinned]
+    return movable, moved + [t for t in pinned if t not in moved]
+
+
 #: The two logos read off disk, kept by file so a zoom step or an icon toggle
 #: does not fetch and decode the picture again. QPixmap copies by reference and
 #: Qt decodes small PNGs on its own cache anyway; what this saves is the disk
@@ -145,6 +185,92 @@ def logo_pixmap(path: Path) -> QPixmap | None:
     image: QPixmap | bool = False if made.isNull() else made
     _LOGO_PIXMAPS[key] = image
     return None if image is False else image
+
+
+# --- the profile's one git token: what it buys, and how to prove it works ---
+
+#: GitHub's own door, and the one path that answers without costing a request:
+#: ``/rate_limit`` says who the site thinks it is talking to. This is the only
+#: call the program makes of its own - an addon reaching GitHub goes through
+#: ``api.session.github_headers()`` and its own socket.
+GITHUB_API_HOST = "api.github.com"
+GITHUB_RATE_LIMIT_PATH = "/rate_limit"
+
+#: The API version every request here spells out, so a change on GitHub's side
+#: cannot silently arrive as a differently shaped answer.
+GITHUB_API_VERSION = "2022-11-28"
+
+
+def git_token_words(status: int, headers: dict, payload: dict,
+                    sent: bool) -> str:
+    """What to say about the profile's token, from what GitHub answered.
+
+    Pure, so the wording can be read without a network: the answer names the
+    identity GitHub gave the request and the two numbers worth knowing - the
+    hour's allowance and what is left of it. A refused token is said as a
+    refusal rather than as an anonymous answer, since the field is not empty and
+    whoever typed it deserves to know it does not work.
+    """
+    if status == 401:
+        reason = str(payload.get("message") or "the token was refused").strip()
+        return f"GitHub refused the token: {reason}"
+    if status != 200:
+        return f"GitHub answered with {status}"
+    core = (payload.get("resources") or {}).get("core") or {}
+    limit = core.get("limit", "?")
+    left = core.get("remaining", "?")
+    scopes = str(headers.get("x-oauth-scopes") or "").strip()
+    named = f", scopes: {scopes}" if scopes else ""
+    if not sent:
+        return (f"nothing was sent, so this is the anonymous answer: {limit} "
+                f"requests an hour, {left} left")
+    return (f"GitHub knows the token: {limit} requests an hour, {left} "
+            f"left{named}")
+
+
+class GitTokenWorker(QThread):
+    """Ask GitHub who it is talking to; off the GUI thread, one answer, then done."""
+
+    answered = pyqtSignal(str)
+    stopped = pyqtSignal(str)
+
+    def __init__(self, token: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.token = str(token or "").strip()
+
+    def run(self) -> None:
+        headers = {
+            "User-Agent": f"BerryManager/{APP_VERSION}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        }
+        if self.token:
+            headers["Authorization"] = f"token {self.token}"
+        conn = None
+        try:
+            conn = http.client.HTTPSConnection(GITHUB_API_HOST, timeout=15)
+            conn.request("GET", GITHUB_RATE_LIMIT_PATH, headers=headers)
+            response = conn.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+            status = int(response.status)
+            got = {str(key).lower(): str(value)
+                   for key, value in response.getheaders()}
+        except (http.client.HTTPException, OSError, ValueError) as error:
+            self.stopped.emit(f"GitHub did not answer: {error}")
+            return
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = {}
+        self.answered.emit(git_token_words(
+            status, got, payload if isinstance(payload, dict) else {},
+            bool(self.token)))
 
 
 class BerryManager(
@@ -170,6 +296,9 @@ class BerryManager(
         self.shell_worker: SSHShellWorker | None = None
         self.exec_worker: RemoteExecWorker | None = None
         self.reboot_worker: RebootWaitWorker | None = None
+        # The one HTTP call this program makes itself, and only while a press of
+        # the Connection page's Test button is waiting on an answer.
+        self.git_token_worker: GitTokenWorker | None = None
         self.shared_conn = SharedConnection()
         self.tray: QSystemTrayIcon | None = None
         self.tray_menu: QMenu | None = None
@@ -216,6 +345,7 @@ class BerryManager(
         self.addons.start_done()
         self.sync_tab_transport_dots()
         self._natural_tab_order = self.capture_tab_order()
+        self._natural_pinned_order = self.capture_pinned_order()
         self._apply_remembered_order()
         self._select_default_tab()
         core.ui.progress(0.95, "Arranging the tabs")
@@ -567,12 +697,17 @@ class BerryManager(
 
     def _pinned_block(self) -> list[QWidget]:
         """The tabs that sit at the right edge, left to right: the gap, every
-        system tab in the order it registered, then Settings.
+        pinned tab in the order the bar shows it, then Settings.
 
         Empty until the window is built enough to pin: a missing gap or a
         missing Settings page means nothing here is in its final place yet.
         A page the window no longer holds (an addon reloaded, a tab closed) is
         dropped here, so a registry cannot outlive the widget it named.
+
+        The run is read off the bar rather than off the order it was registered
+        in, which is what lets a pinned tab stay where it was dragged: the block
+        only says who belongs at the edge and in what order they stand, so the
+        pinning pass slides them there without arguing about the sequence.
         """
         gap = getattr(self, "_gap_page", None)
         settings = getattr(self, "settings_page", None)
@@ -586,6 +721,7 @@ class BerryManager(
                 if page not in alive:
                     self._pinned_labels.pop(page, None)
                     self._pinned_icon_only.pop(page, None)
+        alive.sort(key=self.tabs.indexOf)
         return [gap] + alive + [settings]
 
     def pin_tab(self, page: QWidget, label: str = "",
@@ -685,14 +821,79 @@ class BerryManager(
                       icon_only=bool(self._pinned_icon_only.get(page, True)),
                       tooltip=label)
 
+    def _pinned_title(self, page: QWidget) -> str:
+        """The full name one pinned tab is known by in a saved order.
+
+        Read from the tab's data rather than its caption, because a tab pinned
+        icon-only has no caption to read and still has to be named.
+        """
+        index = self.tabs.indexOf(page)
+        return tab_caption(self.tabs.tabBar(), index) if index >= 0 else ""
+
+    def _pinned_pages_from_bar(self) -> list[QWidget]:
+        """The tabs held in the pinned run, left to right as the bar shows them.
+
+        The gap and Settings are not part of it: one always leads the run and the
+        other always closes it, so only the tabs between them can be placed.
+        """
+        gap = getattr(self, "_gap_page", None)
+        settings = getattr(self, "settings_page", None)
+        return [page for page in self._pinned_block()
+                if page is not gap and page is not settings]
+
+    def capture_pinned_order(self) -> list[str]:
+        """The titles of the pinned tabs, in the order they stand along the right edge.
+
+        Kept apart from :meth:`capture_tab_order` rather than merged into it, so
+        a stored order can never name a pinned tab as one of the movable ones and
+        drop it into the middle of the row on the next launch.
+        """
+        return [title for title in (self._pinned_title(page)
+                                    for page in self._pinned_pages_from_bar())
+                if title]
+
+    def apply_pinned_order(self, order: list[str] | None) -> None:
+        """Slide the pinned run into `order`, the gap still first and Settings still last.
+
+        Only tabs that are pinned here are moved, and one the saved order does not
+        name (an addon switched off, or installed since) falls to the end of the
+        run rather than vanishing. The moves are the tab-at-a-time sort the
+        pinning pass uses; the run is flush right already, so its middle begins on
+        the slot just left of Settings.
+        """
+        pages = self._pinned_pages_from_bar()
+        if not pages or not order:
+            return
+        left = list(pages)
+        wanted: list[QWidget] = []
+        for title in order:
+            for page in left:
+                if self._pinned_title(page) == title:
+                    wanted.append(page)
+                    left.remove(page)
+                    break
+        wanted += left
+        if wanted == pages:
+            return
+        bar = self.tabs.tabBar()
+        start = self.tabs.count() - len(wanted) - 1
+        for offset, page in enumerate(wanted):
+            index = self.tabs.indexOf(page)
+            if index >= 0 and index != start + offset:
+                bar.moveTab(index, start + offset)
+        self._sync_pinned_settings()
+
     def _sync_pinned_settings(self) -> None:
-        """Snap the gap and the pinned run back to the far right, in that order, then recompute the gap width.
+        """Snap the gap and the pinned run back to the far right, then recompute the gap width.
 
         The block is moved a tab at a time, and a move is measured against every
         tab the bar holds now, so a tab that has just been added after Settings
         (or taken out of the middle) shifts the rest of the run along with it.
         One pass is therefore not always enough: the passes repeat until the bar
-        agrees with the block, with the block's own length as the brake.
+        agrees with the block, with the block's own length as the brake. The
+        block's own order is what the bar already shows (see
+        :meth:`_pinned_block`), so this pulls the run to the edge and leaves a
+        pinned tab where the user put it along it.
         """
         bar = self.tabs.tabBar()
         block = self._pinned_block()
@@ -822,7 +1023,7 @@ class BerryManager(
             self.tabs.setCurrentWidget(self.addon_dev)
 
     def addon_dev_wanted(self) -> bool:
-        """The Settings > Startup switch: is the Addon Dev tab wanted?"""
+        """Is the Addon Dev tab wanted? The store's Addon manager writes the key."""
         return bool(self.app_config.get("addon_dev_enabled", True))
 
     def ensure_addon_dev_tab(self) -> None:
@@ -1163,7 +1364,7 @@ class BerryManager(
         editor_action = QAction("Theme Manager...", self)
         editor_action.setToolTip(
             "The addon that makes and edits themes, with the templates and the "
-            "documentation: its tab is switched on in Settings > Addons.")
+            "documentation: it is switched on on its own page in Settings.")
         editor_action.triggered.connect(self.show_theme_manager)
         menu.addAction(editor_action)
         self._reload_theme_combo()
@@ -1204,7 +1405,8 @@ class BerryManager(
                 self.tabs.setCurrentIndex(index)
                 return
         self.notify_popup("Themes", "The Theme Manager addon is not running: "
-                                    "switch it on under Settings > Addons.")
+                                    "switch it on on the Theme Manager page in "
+                                    "Settings.")
 
     def show_appearance_settings(self) -> bool:
         """Open Settings and stand on its Appearance page, where the theme in
@@ -1335,7 +1537,7 @@ class BerryManager(
 
         An empty id means the app's own SSH terminal tab, which answers to the
         app-wide switches alone; an addon's tab also answers to the SSH and SFTP
-        switches on that addon's own Settings row."""
+        switches on that addon's own row."""
         pages: dict[QWidget, str] = {}
         ssh = getattr(self, "ssh_page", None)
         if ssh is not None and self.tabs.indexOf(ssh) >= 0:
@@ -1400,8 +1602,10 @@ class BerryManager(
         """The titles of the reorderable tabs, left to right.
 
         The pinned gap and the whole run beside it - Settings and every system
-        tab - are always last and never moved, so they are left out. Leaving one
-        in would let a later apply drag a pinned tab back into the movable row.
+        tab - are always last, so they are left out here and answered for by
+        :meth:`capture_pinned_order`. Leaving one in would let a later apply drag
+        a pinned tab back into the movable row, and would mix the two runs in the
+        file the order is kept in.
         """
         bar = self.tabs.tabBar()
         pinned = getattr(bar, "is_pinned", None)
@@ -1447,6 +1651,7 @@ class BerryManager(
             return
         if bool(self.app_config.get("remember_tab_order", True)):
             self.apply_tab_order(self.app_config.get("tab_order"))
+            self.apply_pinned_order(self.app_config.get("pinned_tab_order"))
             self._sync_pinned_settings()
 
     def _select_default_tab(self, title: str | None = None) -> None:
@@ -1461,14 +1666,16 @@ class BerryManager(
             self.tabs.setCurrentIndex(0)
 
     def _build_tab_order_controls(self) -> QWidget:
-        """The order editor on the Startup page: the movable tabs as rows.
+        """The order editor on the Startup page: the tabs on the bar, as rows.
 
-        One row per tab that the user may place, in the order the bar shows them.
-        A row can be dragged, or selected and moved with the arrows, and either
-        way the tabs follow at once and the order is written down then - there is
-        nothing to remember to save. The pinned run (the gap, the system tabs and
-        Settings) stays at the right edge and is deliberately not listed, so it
-        cannot be reordered into the middle by accident.
+        One row per tab the user may place, in the order the bar shows them, and
+        then the run pinned to the right edge under a heading of its own. A row
+        can be dragged, or selected and moved with the arrows, and either way the
+        tabs follow at once and the order is written down then - there is nothing
+        to remember to save. The two runs are kept apart: the heading is not a tab
+        and cannot be picked up, and a row dragged across it is put back rather
+        than obeyed, so a pinned tab can change its neighbours but never leave the
+        edge it belongs to.
         """
         listed = QListWidget()
         listed.setObjectName("tabOrderList")
@@ -1477,11 +1684,14 @@ class BerryManager(
         listed.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         listed.setUniformItemSizes(True)
         listed.setSpacing(zoom_size(2))
-        listed.setMaximumHeight(zoom_size(150))
+        # Both runs and the row between them are read at a glance, given that a
+        # profile with its web tabs open has eight or nine to show.
+        listed.setMaximumHeight(zoom_size(190))
         listed.setToolTip(
             "Every tab you can place, in the order they appear on the bar. Drag a "
             "row, or pick one and use the arrows: the tabs move straight away and "
-            "this order is what the app starts with next time.")
+            "this order is what the app starts with next time. The tabs under "
+            "'Pinned at the right edge' only change places among themselves.")
         self.tab_order_list = listed
         # An internal drag is reported by the model, which is the one signal that
         # also covers the arrows' take-and-reinsert.
@@ -1496,7 +1706,8 @@ class BerryManager(
         down.setToolTip("Move the selected tab one place right on the bar")
         down.clicked.connect(lambda: self._move_order_row(1))
         reset = QPushButton("Reset to built-in order")
-        reset.setToolTip("Put every tab back the way the program builds them")
+        reset.setToolTip("Put every tab back the way the program builds them, "
+                         "the pinned run with them")
         reset.clicked.connect(self.reset_tab_order)
         buttons = QHBoxLayout()
         buttons.setSpacing(zoom_size(6))
@@ -1517,6 +1728,19 @@ class BerryManager(
         self._refresh_tab_order_list()
         return wrap
 
+    def _order_heading(self) -> QListWidgetItem:
+        """The row that divides the two runs in the order list.
+
+        It is drawn disabled and cannot be picked up, dragged or dropped on, so
+        the only thing it can do is say where the pinned tabs begin - which is
+        also what tells a commit which rows belong to which saved order.
+        """
+        head = QListWidgetItem(ORDER_PINNED_HEAD)
+        head.setFlags(Qt.ItemFlag.NoItemFlags)
+        head.setToolTip("These tabs stay at the right edge of the bar; drag them "
+                        "to change the order among themselves only")
+        return head
+
     def _refresh_tab_order_list(self) -> None:
         """Refill the rows from the bar, after a tab went in, came out or moved."""
         listed = getattr(self, "tab_order_list", None)
@@ -1527,6 +1751,11 @@ class BerryManager(
             listed.clear()
             for title in self.capture_tab_order():
                 listed.addItem(QListWidgetItem(title))
+            pinned = self.capture_pinned_order()
+            if pinned:
+                listed.addItem(self._order_heading())
+                for title in pinned:
+                    listed.addItem(QListWidgetItem(title))
         finally:
             self._order_list_syncing = False
 
@@ -1538,17 +1767,27 @@ class BerryManager(
         return [listed.item(i).text() for i in range(listed.count())]
 
     def _commit_tab_order_list(self, *_args: Any) -> None:
-        """Apply and store the order the list shows, the moment it changes."""
+        """Apply and store both runs the list shows, the moment either changes.
+
+        The rows are sorted by which tabs are actually pinned rather than by the
+        side of the heading they end up on, so a pinned row dragged up into the
+        movable list moves the store along the edge instead of unpinning it.
+        """
         if getattr(self, "_order_list_syncing", False):
             return
         if getattr(self, "_natural_tab_order", None) is None:
             return
-        order = self._order_list_rows()
-        if not order:
+        rows = self._order_list_rows()
+        if not rows:
             return
-        self.app_config["tab_order"] = order
+        movable, pinned = sort_into_runs(rows, self.capture_pinned_order())
+        if not movable and not pinned:
+            return
+        self.app_config["tab_order"] = movable
+        self.app_config["pinned_tab_order"] = pinned
         self.save_app_config()
-        self.apply_tab_order(order)
+        self.apply_tab_order(movable)
+        self.apply_pinned_order(pinned)
         # Reordering must not change what is on screen, so the tab being looked
         # at is put back where it was rather than left wherever the moves land.
         shown = next((tab_caption(self.tabs.tabBar(), i)
@@ -1556,15 +1795,33 @@ class BerryManager(
                       if self.tabs.widget(i) is self.tabs.currentWidget()), "")
         if shown:
             self._select_default_tab(shown)
+        # A row that crossed the heading was put back rather than obeyed, so the
+        # list is refilled to say what the bar really did. A move inside its own
+        # run already shows the truth and is left alone, keeping the selection.
+        if (movable, pinned) != split_order_rows(rows):
+            self._refresh_tab_order_list()
 
     def _move_order_row(self, step: int) -> None:
-        """One arrow click: trade the selected row for its neighbour."""
+        """One arrow click: trade the selected row for its neighbour in its own run.
+
+        The heading is a wall rather than a neighbour: a pinned row is moved along
+        the pinned run and a movable one along the movable rows, so the arrows give
+        the same answer a drag inside one run gives.
+        """
         listed = getattr(self, "tab_order_list", None)
         if listed is None:
             return
         row = listed.currentRow()
+        if row < 0:
+            return
+        rows = listed.count()
+        head = next((i for i in range(rows)
+                     if listed.item(i) is not None
+                     and listed.item(i).text() == ORDER_PINNED_HEAD), -1)
+        low, high = (0, rows) if head < 0 else \
+            ((0, head) if row < head else (head + 1, rows))
         to = row + int(step)
-        if row < 0 or not (0 <= to < listed.count()):
+        if not (low <= to < high):
             return
         item = listed.takeItem(row)
         listed.insertItem(to, item)
@@ -1573,11 +1830,19 @@ class BerryManager(
 
     def reset_tab_order(self) -> None:
         """Put the tabs back the way the program builds them and forget the
-        saved arrangement (the remembered order is restored next launch too)."""
+        saved arrangement (the remembered order is restored next launch too).
+
+        The pinned run is reset with the rest, since it is remembered alongside
+        it: one button answers for both, and there is no other way back for a
+        pinned order that has stopped making sense.
+        """
         natural = getattr(self, "_natural_tab_order", None) or []
+        pinned = getattr(self, "_natural_pinned_order", None) or []
         self.apply_tab_order(natural)
+        self.apply_pinned_order(pinned)
         self._sync_pinned_settings()
         self.app_config["tab_order"] = list(natural)
+        self.app_config["pinned_tab_order"] = list(pinned)
         self.save_app_config()
         self._refresh_tab_order_list()
         self._reload_default_tab_combo(select=self.app_config.get("default_tab", "Berry"))
@@ -1586,16 +1851,28 @@ class BerryManager(
 
     def _maybe_persist_order(self) -> None:
         """After a drag, store the new order only when remembering is on and a
-        tab really moved (selecting a tab must not write the config)."""
+        tab really moved (selecting a tab must not write the config).
+
+        The run is synced first, which pulls a pinned tab dragged out of the edge
+        back into it and sends a movable one dragged past the gap the other way;
+        what is left after that is the user's doing and so is worth writing down.
+        """
         if getattr(self, "_natural_tab_order", None) is None:
             return
         if not bool(self.app_config.get("remember_tab_order", True)):
             return
 
         self._sync_pinned_settings()
+        changed = False
         order = self.capture_tab_order()
         if order != (self.app_config.get("tab_order") or []):
             self.app_config["tab_order"] = order
+            changed = True
+        pinned = self.capture_pinned_order()
+        if pinned != (self.app_config.get("pinned_tab_order") or []):
+            self.app_config["pinned_tab_order"] = pinned
+            changed = True
+        if changed:
             self.save_app_config()
         # The list on the Startup page is a window onto the bar, so a drag there
         # has to show up here.
@@ -1607,6 +1884,7 @@ class BerryManager(
         self.app_config["remember_tab_order"] = bool(checked)
         if checked:
             self.app_config["tab_order"] = self.capture_tab_order()
+            self.app_config["pinned_tab_order"] = self.capture_pinned_order()
         self.save_app_config()
         listed = getattr(self, "tab_order_list", None)
         if listed is not None:
@@ -1871,6 +2149,110 @@ class BerryManager(
         group = ToggleGroup(title, checked, body="box", tip=tip)
         return group, group.body_layout
 
+    def _build_git_token_box(self) -> QGroupBox:
+        """The profile's one GitHub token: the field, a show switch and a test.
+
+        Two things are bought with a token and the box names both - a private
+        repository can be read, and GitHub's rate limit becomes the authenticated
+        one rather than the shared anonymous bucket. Addons keep no token of their
+        own in this version: the switch on an addon's row in the store's Addon
+        manager decides whether ``api.session.git_token()`` answers it with this
+        value, so an empty field leaves every addon anonymous, which is exactly
+        what an addon with no token has always been.
+        """
+        box = QGroupBox("GitHub token")
+        tip_on_title(box,
+            "The one token this profile has, kept in the profile's own file - the "
+            "same place the remembered-password switch is written. The addons "
+            "switched on for it read it through the api; nothing here is sent "
+            "anywhere but GitHub.")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+
+        words = QLabel(
+            "A token buys two things: a private repository can be read, and "
+            "GitHub's rate limit becomes the authenticated one instead of the "
+            "shared sixty requests an hour. Nothing of your own is needed for "
+            "public addons - leave this blank and every one of them stays "
+            "anonymous.")
+        words.setStyleSheet("color: #aaaaaa;")
+        words.setWordWrap(True)
+        form.addRow(words)
+
+        self.git_token_input = QLineEdit(str(self.app_config.get("git_token", "")))
+        self.git_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.git_token_input.setPlaceholderText("ghp_... - optional")
+        self.git_token_input.setToolTip(
+            "A personal access token, classic or fine-grained, with at least read "
+            "access to whatever repository the store or an addon is asked to "
+            "reach. It is written to this profile's file and nowhere else.")
+        self.show_git_token_check = QCheckBox("Show")
+        self.show_git_token_check.setToolTip(
+            "Write the field out in plain letters rather than dots, while you "
+            "check what is in it. Nothing is sent by this switch.")
+        self.show_git_token_check.toggled.connect(
+            lambda on: self.git_token_input.setEchoMode(
+                QLineEdit.EchoMode.Normal if on
+                else QLineEdit.EchoMode.Password))
+        field = QHBoxLayout()
+        field.addWidget(self.git_token_input, 1)
+        field.addWidget(self.show_git_token_check)
+        field_wrap = QWidget()
+        field_wrap.setLayout(field)
+        form.addRow("Token", field_wrap)
+
+        self.git_token_test_button = QPushButton("Test")
+        self.git_token_test_button.setToolTip(
+            "Ask GitHub who it is talking to, through its own /rate_limit - the "
+            "identity and the hour's allowance this token gives, or that nothing "
+            "was sent at all. Costs no API request of the counted kind.")
+        self.git_token_test_button.clicked.connect(self.test_git_token)
+        self.git_token_state = QLabel("Not tested yet.")
+        self.git_token_state.setStyleSheet("color: #aaaaaa;")
+        self.git_token_state.setWordWrap(True)
+        line = QHBoxLayout()
+        line.addWidget(self.git_token_test_button)
+        line.addWidget(self.git_token_state, 1)
+        line_wrap = QWidget()
+        line_wrap.setLayout(line)
+        form.addRow(line_wrap)
+
+        # Written the moment the field is left, as the other connection lines are:
+        # an addon reading the token has to be given the one on screen.
+        self.git_token_input.editingFinished.connect(self.save_git_token)
+        return box
+
+    def save_git_token(self, _value: object = None) -> None:
+        """Keep the field's token in the profile, and say what that means here."""
+        token = self.git_token_input.text().strip()
+        self.app_config["git_token"] = token
+        self.save_app_config()
+        self.git_token_state.setText(
+            "Saved for this profile." if token
+            else "Nothing kept: every addon reaches GitHub anonymously.")
+
+    def test_git_token(self) -> None:
+        """Ask GitHub, off the GUI thread, whose requests these would be."""
+        if self.git_token_worker is not None and self.git_token_worker.isRunning():
+            return
+        self.git_token_state.setText("Asking GitHub...")
+        self.git_token_test_button.setEnabled(False)
+        worker = GitTokenWorker(self.git_token_input.text(), parent=self)
+        worker.answered.connect(self._git_token_answered)
+        worker.stopped.connect(self._git_token_answered)
+        worker.finished.connect(worker.deleteLater)
+        self.git_token_worker = worker
+        worker.start()
+
+    def _git_token_answered(self, words: str) -> None:
+        """Put GitHub's answer on the page and in the log, and free the button."""
+        self.git_token_state.setText(words)
+        self.git_token_test_button.setEnabled(True)
+        self.git_token_worker = None
+        self.log(f"github token: {words}")
+
     def _settings_category(self, title: str) -> QVBoxLayout:
         """One page of the Settings tab bar, with its own scrolling column."""
         host = QWidget()
@@ -1957,7 +2339,8 @@ class BerryManager(
             "Add or remove the SSH terminal tab. This switch is also the SSH "
             "gate for the addons and the device API: switched off, they are "
             "refused SSH work, and the terminal closes, until it is on. Each "
-            "addon carries an SSH switch of its own on its Settings row, and "
+            "addon carries an SSH switch of its own on its row - Settings for a "
+            "shipped addon, the store's Addon manager for an installed one - and "
             "both have to be on for that addon to use SSH. The master switch in "
             "this panel's header stops both protocols for everyone, and an "
             "addon may only work once the main connection is open."
@@ -2020,7 +2403,8 @@ class BerryManager(
             "The gate for file transfer. Switched off, the Remote dir line goes "
             "away and the addons and the device API are refused SFTP work until "
             "it is on again; the main connection itself stays open for SSH. Each "
-            "addon carries an SFTP switch of its own on its Settings row, and "
+            "addon carries an SFTP switch of its own on its row - Settings for a "
+            "shipped addon, the store's Addon manager for an installed one - and "
             "both have to be on for that addon to transfer files. The master "
             "switch in this panel's header stops both protocols for everyone."
         )
@@ -2031,6 +2415,10 @@ class BerryManager(
 
         panel_body.addWidget(status_group)
         connection_tab.addWidget(connection_group)
+        # The token is the profile's business but not the device's, so it sits
+        # beside the connection rather than inside it - and stays reachable when
+        # the master switch hides everything above it.
+        connection_tab.addWidget(self._build_git_token_box())
         self.refresh_connection_overview()
 
         startup_group = QGroupBox("Startup & defaults")
@@ -2057,16 +2445,9 @@ class BerryManager(
         # saved, and it takes effect the moment you let go.
         startup_form.addRow("Tab order", self._build_tab_order_controls())
 
-        self.addon_dev_check = ToggleSwitch("Show the Addon Dev tab")
-        self.addon_dev_check.setToolTip(
-            "The page that lists every addon with its logs and processes, reads and "
-            "edits its files, and turns a .py addon into a program of its own. The "
-            "same entry appears under Tools. Switching it off takes the tab away; "
-            "switching addons on and off is done in Settings > Addons below."
-        )
-        self.addon_dev_check.setChecked(self.addon_dev_wanted())
-        self.addon_dev_check.toggled.connect(self._on_addon_dev_toggled)
-        startup_form.addRow(self.addon_dev_check)
+        # The Addon Dev tab's switch used to sit here. It belongs with the rest
+        # of the addon settings, which are now the store's Addon manager page, so
+        # the key is written by set_addon_dev_enabled alone.
 
         self.notify_check = ToggleSwitch("Pop up notifications")
         self.notify_check.setToolTip(
@@ -2251,11 +2632,11 @@ class BerryManager(
         self.app_config["reboot_retry_interval"] = self.reboot_retry_spin.value()
         self.app_config["reboot_auto_watch"] = self.reboot_auto_watch_check.isChecked()
         self.app_config["ignore_cert_errors"] = self.cert_bypass_check.isChecked()
-        self.app_config["addon_dev_enabled"] = self.addon_dev_check.isChecked()
         self.app_config["system_notifications"] = self.notify_check.isChecked()
         self.app_config["splash_enabled"] = self.splash_check.isChecked()
         self.app_config["tooltips_enabled"] = self.tooltips_check.isChecked()
         self.app_config["remember_tab_order"] = self.tab_order_check.isChecked()
+        self.app_config["git_token"] = self.git_token_input.text().strip()
         self.save_app_config()
         self.apply_runtime_settings()
         self._apply_remembered_order()
@@ -2300,12 +2681,25 @@ class BerryManager(
             "transport_changed", transport=transport, scope="app",
             enabled=bool(self.app_config.get(f"{transport}_enabled", True)))
 
-    def _on_addon_dev_toggled(self, _checked: bool = False) -> None:
-        """Show or hide the Addon Dev tab and its Tools entry as it is switched."""
-        self.app_config["addon_dev_enabled"] = self.addon_dev_check.isChecked()
+    def set_addon_dev_enabled(self, on: bool) -> bool:
+        """Write the Addon Dev tab switch, and show or hide the tab at once.
+
+        The switch left the Startup form with the rest of the addon settings, so
+        the store's Addon manager is what moves it - through
+        ``api.session.set_app_setting`` - and this is the only place the key is
+        written. The value is kept whether or not anything on screen moved, so an
+        addon asking twice cannot leave the profile out of step with the bar.
+        """
+        wanted = bool(on)
+        changed = bool(self.app_config.get("addon_dev_enabled", True)) != wanted
+        self.app_config["addon_dev_enabled"] = wanted
         self.save_app_config()
-        self.ensure_addon_dev_tab()
-        self._apply_remembered_order()
+        if changed:
+            self.ensure_addon_dev_tab()
+            self._apply_remembered_order()
+            self.log("the Addon Dev tab " + ("is being shown again" if wanted
+                                             else "has been hidden"))
+        return wanted
 
     # Profiles and credentials
 
@@ -2364,6 +2758,15 @@ class BerryManager(
         self.password_input.clear()
         self.load_saved_password()
 
+        # The one git token travels with the profile, so a switch shows the other
+        # profile's token - or none - and the field goes back to wearing dots.
+        self.show_git_token_check.blockSignals(True)
+        self.show_git_token_check.setChecked(False)
+        self.show_git_token_check.blockSignals(False)
+        self.git_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.git_token_input.setText(str(cfg.get("git_token", "")))
+        self.git_token_state.setText("Not tested yet.")
+
         self.auto_connect_check.setChecked(bool(cfg.get("auto_connect", False)))
         self.logging_group.setChecked(bool(cfg.get("logging_enabled", True)))
         self.max_log_spin.setValue(int(cfg.get("max_log_lines", 500)))
@@ -2372,10 +2775,6 @@ class BerryManager(
         self.reboot_retry_spin.setValue(int(cfg.get("reboot_retry_interval", 10)))
         self.reboot_auto_watch_check.setChecked(bool(cfg.get("reboot_auto_watch", True)))
         self.cert_bypass_check.setChecked(bool(cfg.get("ignore_cert_errors", False)))
-
-        self.addon_dev_check.blockSignals(True)
-        self.addon_dev_check.setChecked(bool(cfg.get("addon_dev_enabled", True)))
-        self.addon_dev_check.blockSignals(False)
 
         self.tab_order_check.blockSignals(True)
         self.tab_order_check.setChecked(bool(cfg.get("remember_tab_order", True)))

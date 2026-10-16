@@ -33,7 +33,8 @@ from __future__ import annotations
 #     still gives it styled tabs, tables, text views and live updates.
 #
 # A crash, a bad manifest or a refused call is written to the log and shown on the
-# addon's row in Settings; it can never take the window down.
+# addon's own row - in Settings for a shipped addon, on the store's Addon
+# manager for one installed later; it can never take the window down.
 #
 ###############################################################################
 
@@ -82,6 +83,8 @@ from addon_api import (
     addon_schema_path,
     build_spec,
     config_get,
+    fit_panes,
+    fit_table_columns,
     guard,
     jsonable,
     merge_config,
@@ -109,6 +112,7 @@ from core.const import (
     THEMES_DIR,
 )
 import core.ui
+import core.popout
 from core.ui import (ToggleSwitch, tab_caption, tip_on_title,
                      transport_dot)
 
@@ -342,11 +346,22 @@ class Addon:
         self.requires: tuple = ()             # manifest "requires"
         self.own_connection = False           # False: share the app connection
         self.connection = "app"               # manifest "connection": app/own/both
-        # The addon's own gates over the two transports, on its Settings row.
+        # The addon's own gates over the two transports, on its row. They are
+        # drawn where the addon is listed: Settings for a shipped addon, the
+        # store's Addon manager for one installed later.
         # The app-wide switch in the Connection panel stays above these, so an
         # addon reaches a transport only when both are on.
         self.ssh_enabled = True
         self.sftp_enabled = True
+        # Where its tabs live. ``popout`` is what the manifest declared -
+        # "always", "never" or "" for nothing - and ``popout_declared`` says
+        # whether it named one at all; an addon that stayed silent leaves the
+        # choice to the profile's switch. See ``effective_popout``.
+        self.popout = ""
+        self.popout_declared = False
+        self.popout_record = False      # the profile's force-popout switch
+        # Whether this addon may read the profile's global git token.
+        self.git_token = False
 
     @property
     def is_bundled(self) -> bool:
@@ -374,10 +389,32 @@ class Addon:
             return False
 
     @property
+    def effective_popout(self) -> bool:
+        """Whether this addon's tabs belong in a window of their own.
+
+        A manifest that named a state settles the question - an addon knows
+        whether its pages are built to float - and only one that stayed silent
+        leaves it to the switch beside its enable toggle.
+        """
+        if self.popout_declared:
+            return self.popout == "always"
+        return bool(self.popout_record)
+
+    @property
+    def popout_switchable(self) -> bool:
+        """Whether the app may offer a force-popout switch for this addon.
+
+        An addon that declared a state has answered the question already, and a
+        shipped one belongs to the main window's bar unless its own code asks
+        otherwise; neither is offered a switch that would be overruled anyway.
+        """
+        return not self.popout_declared and not self.is_bundled
+
+    @property
     def uses_own(self) -> bool:
         """Whose connection this addon actually runs on: the manifest says
         whether it may have one of its own at all, and only a "both" addon
-        leaves that choice to the user's Settings switch."""
+        leaves that choice to the switch on its row."""
         if self.is_bundled:
             return False          # a shipped addon is pinned to the app session
         if self.connection == "own":
@@ -429,7 +466,7 @@ class ProcessBridge:
 
     #: Requests served on the GUI thread because they touch Qt.
     GUI_METHODS = ("ui.", "tabs.", "session.", "events.", "settings.", "config.",
-                   "settings_pages.", "schedule.", "peers.", "theme.")
+                   "settings_pages.", "schedule.", "peers.", "theme.", "window.")
 
     #: Asked by the addon about a job the app is still running for it. These
     #: never reach the api: the bridge answers them from its own registry,
@@ -816,6 +853,15 @@ def connection_choice(requires, is_bundled: bool, connection: str) -> str:
 class AddonManager:
     """Everything the app knows about its addons."""
 
+    #: The store's own tab, the id of the sub-bar inside it and the page the
+    #: Addon manager sits on. Settings no longer lists an installed addon, so
+    #: reaching it means starting the store and moving that bar to its second
+    #: page; the three names are written here rather than guessed at by the one
+    #: button that does it.
+    STORE_TAB = "Addon store"
+    STORE_SUBTABS = "maintabs"
+    STORE_MANAGER_PAGE = 1
+
     #: Events an addon may listen for; also what the Settings text advertises.
     EVENT_NAMES = (
         "startup", "shutdown", "sftp_connected", "sftp_disconnected",
@@ -823,6 +869,11 @@ class AddonManager:
         "profile_changed", "settings_applied", "addon_enabled", "addon_disabled",
         "addon_config_changed", "connections_enabled", "connections_disabled",
         "transport_changed", "theme_changed",
+        # One addon's own window: opened, hidden, docked back, moved, resized.
+        # "window" carries every one of them with the change named in its payload,
+        # so an addon that only cares about its window subscribes once.
+        "window", "window_opened", "window_closed", "window_docked",
+        "window_undocked", "window_resized", "window_moved",
     )
 
     #: How an addon that dies on the way up is kept from dying forever.
@@ -848,12 +899,14 @@ class AddonManager:
         self.shadowed: dict[str, list[Addon]] = {}   # lost same-id copies
         self.listeners: dict[str, list[tuple[str, object]]] = {}
         self.rows: dict[str, dict] = {}
-        self.body: QVBoxLayout | None = None       # the Installed addons page
+        self.body: QVBoxLayout | None = None   # the shipped addons' Settings page
         self.hint: QLabel | None = None
         self.settings_tabs: QTabWidget | None = None
         self.installed_scroll: QScrollArea | None = None
         # id -> a Settings page of its own, for the addons shipped inside the app
         self.bundled_tabs: dict[str, dict] = {}
+        # id -> the window an addon's tabs were taken out into; see core.popout.
+        self.windows: dict[str, Any] = {}
         self.dot_refs: dict[str, dict] = {}         # id -> transport -> its dot
         self.config_panels: dict[str, tuple] = {}   # id -> editor, per file
         self._started = False
@@ -881,15 +934,102 @@ class AddonManager:
         record = store.get(addon_id)
         if not isinstance(record, dict):
             record = {"enabled": False, "settings": {}, "own_connection": False,
-                      "ssh_enabled": True, "sftp_enabled": True}
+                      "ssh_enabled": True, "sftp_enabled": True,
+                      "popout": False, "popout_geometry": {}, "tab_slot": {},
+                      "git_token": False}
             store[addon_id] = record
         record.setdefault("enabled", False)
         record.setdefault("own_connection", False)
         record.setdefault("ssh_enabled", True)
         record.setdefault("sftp_enabled", True)
+        record.setdefault("popout", False)
+        record.setdefault("git_token", False)
         if not isinstance(record.get("settings"), dict):
             record["settings"] = {}
+        if not isinstance(record.get("popout_geometry"), dict):
+            record["popout_geometry"] = {}
+        if not isinstance(record.get("tab_slot"), dict):
+            record["tab_slot"] = {}
         return record
+
+    def slots_for(self, addon_id: str) -> dict:
+        """Where each of an addon's tabs stood in the main bar, by tab name."""
+        return self.record_for(addon_id)["tab_slot"]
+
+    def remember_slot(self, addon_id: str, name: str, index: int,
+                      pinned: bool = False, icon_only: bool = False) -> None:
+        """Write down where a tab was, so docking it back can put it there again.
+
+        Only the popped-out tabs leave the bar's order, and the bar is what
+        ``capture_tab_order`` reads to save that order, so remembering the slot
+        here is what keeps a tab's place from being lost while it is away.
+        """
+        self.slots_for(addon_id)[str(name)] = {
+            "slot": int(index), "pinned": bool(pinned),
+            "icon_only": bool(icon_only)}
+
+    def slot_for(self, addon_id: str, name: str) -> dict:
+        """The remembered place of one tab, or an empty answer for a new one."""
+        where = self.slots_for(addon_id).get(str(name))
+        return dict(where) if isinstance(where, dict) else {}
+
+    def forget_slot(self, addon_id: str, name: str) -> None:
+        self.slots_for(addon_id).pop(str(name), None)
+
+    def window_events(self, addon_id: str, event: str, extra: dict) -> None:
+        """Say that an addon's own window did something, to that addon.
+
+        The tab the change concerns travels with the saying, so an addon that
+        owns two pages can tell which one was moved without asking every window.
+        Everything is said twice: once under ``window``, where the change is a
+        field of the payload, and once under ``window_<change>``, so an addon can
+        subscribe to its window as a whole or to one moment of it.
+        """
+        name = str(event or "").strip()
+        if not name:
+            return
+        payload = {"addon": str(addon_id), "event": name, **dict(extra or {})}
+        self.notify("window", payload)
+        self.notify(f"window_{name}", payload)
+
+    def settle_tab(self, addon_id: str, name: str) -> bool:
+        """Hand a tab the addon has just built to its window, when it lives there.
+
+        Called as the tab is created rather than once at load: a process addon
+        opens its pages whenever it likes, and a window that only took the first
+        tab would leave the rest in a bar the addon has left.
+        """
+        addon = self.find(addon_id)
+        if addon is None or not addon.effective_popout:
+            return False
+        return core.popout.pop_out(self, addon, str(name))
+
+    def recall_tab(self, addon_id: str, name: str) -> bool:
+        """Put a tab back in the main bar before it is closed or deleted.
+
+        An addon's page is deleted by name, and only the main bar is asked where
+        it is; a page that is standing in a popout window would be deleted inside
+        a window that still lists it. So the page comes home first.
+        """
+        addon = self.find(addon_id)
+        if addon is None:
+            return False
+        moved = core.popout.dock_back(self, addon, str(name))
+        if moved:
+            self.forget_slot(addon_id, str(name))
+        return moved
+
+    def popped(self, addon_id: str) -> bool:
+        """Whether this addon has a window of its own open right now."""
+        window = self.windows.get(str(addon_id))
+        return bool(window is not None and window.names())
+
+    def window_for(self, addon_id: str, create: bool = False):
+        """The window this addon owns in this run, making it when asked."""
+        addon = self.find(addon_id)
+        if addon is None:
+            return None
+        return core.popout.window_for(self, addon, create=create)
 
     def save_records(self) -> None:
         self.win.save_app_config()
@@ -1043,6 +1183,13 @@ class AddonManager:
             "sftp_enabled": bool(addon.sftp_enabled),
             "connection": addon.connection,
             "uses_own": bool(addon.uses_own),
+            "popout": addon.popout,
+            "popout_declared": bool(addon.popout_declared),
+            "popout_forced": bool(addon.popout_record),
+            "popout_switchable": bool(addon.popout_switchable),
+            "effective_popout": bool(addon.effective_popout),
+            "popped": self.popped(addon.id),
+            "git_token": bool(addon.git_token),
             "loaded": bool(addon.loaded),
             "source": str(addon.source),
             "home": str(addon.home),
@@ -1089,24 +1236,41 @@ class AddonManager:
             except Exception as error:      # a layout fix-up never breaks a load
                 self.log("", f"restore tab order: {error}", warning=True)
 
-    def reload(self) -> None:
-        """Rescan the folder, then start whatever the profile has enabled."""
+    def reload(self, only: Any = None, force: bool = False) -> None:
+        """Rescan the folder, then start whatever the profile has enabled.
+
+        ``only`` narrows the whole job to the ids named - a program launched as
+        one addon's window reads and starts that addon and nothing else, so no
+        other addon can build a tab, take a connection or be in the way. With
+        ``force`` those ids run whatever their switch says, which is what a
+        Desktop link asks for: the link was made on purpose, and an addon left
+        switched off in some profile should still open rather than refuse.
+        """
+        wanted = {str(item).strip().lower() for item in
+                  (([only] if isinstance(only, str) else list(only or []))
+                   if only else []) if str(item).strip()}
         keep = {addon.id: addon for addon in self.addons}
         active = self._active_tab()
         for addon in list(self.addons):
             self.unload(addon)
         discovered = self.scan()
+        if wanted:
+            discovered = [addon for addon in discovered
+                          if str(addon.id).lower() in wanted]
         for addon in discovered:
             self.apply_record(addon)
+            if force:
+                addon.enabled = True
             previous = keep.get(addon.id)
-            if previous is not None and previous.loaded:
+            if previous is not None and previous.loaded \
+                    and previous not in discovered:
                 # Same id still on: tear the old one down so new code runs.
                 self.unload(previous)
         self.addons = discovered
-        wanted = [addon for addon in self.addons if addon.enabled]
-        for number, addon in enumerate(wanted, start=1):
+        wanted_addons = [addon for addon in self.addons if addon.enabled]
+        for number, addon in enumerate(wanted_addons, start=1):
             # Named on the boot splash while it is up; harmless afterwards.
-            core.ui.addon_step(number, len(wanted),
+            core.ui.addon_step(number, len(wanted_addons),
                                       addon.name or addon.id)
             self.load(addon)
         self.refresh_rows()
@@ -1120,6 +1284,12 @@ class AddonManager:
         # Each transport needs its app-wide gate and this addon's own.
         addon.ssh_enabled = bool(record.get("ssh_enabled", True))
         addon.sftp_enabled = bool(record.get("sftp_enabled", True))
+        addon.popout_record = bool(record.get("popout", False))
+        addon.git_token = bool(record.get("git_token", False))
+        # A switch left on for an addon that has since declared a state, or that
+        # the program now ships itself, is not the app's to honour.
+        if addon.popout_record and not addon.popout_switchable:
+            record["popout"] = addon.popout_record = False
         # Bundled addons are pinned to the main connection.
         addon.own_connection = (
             bool(record.get("own_connection", False)) and not addon.is_bundled)
@@ -1211,6 +1381,8 @@ class AddonManager:
             record = self.record_for(addon.id)
             addon.ssh_enabled = bool(record.get("ssh_enabled", True))
             addon.sftp_enabled = bool(record.get("sftp_enabled", True))
+            addon.popout_record = bool(record.get("popout", False))
+            addon.git_token = bool(record.get("git_token", False))
             wanted = bool(record.get("enabled", False))
             if wanted and not addon.loaded:
                 self.load(addon)
@@ -1254,6 +1426,20 @@ class AddonManager:
                 addon.connection = "own"
             elif text == "both":
                 addon.connection = "both"
+        # "popout" says whether this addon's tabs live in a window of their own.
+        # An addon that names it owns the answer: the app's force-popout switch
+        # is then greyed, because a page built to float cannot be asked to sit in
+        # a bar it was never drawn for.
+        value = manifest.get("popout")
+        if value is not None:
+            text = str(value).strip().lower()
+            if text in ("always", "window", "true"):
+                addon.popout, addon.popout_declared = "always", True
+            elif text in ("never", "tab", "false"):
+                addon.popout, addon.popout_declared = "never", True
+            elif text in ("ask", "optional", ""):
+                # Names a key without choosing: the switch is the user's.
+                addon.popout, addon.popout_declared = "", False
 
     def preview_manifest(self, addon: Addon) -> None:
         """What a program's sidecar says about it, read before it has run once.
@@ -1440,6 +1626,10 @@ class AddonManager:
         # says whether the addon that is running now has used it, so a stopped
         # and restarted addon has to earn the green state again.
         addon.uses_ssh = addon.uses_sftp = False
+        # Its tabs are home in the bar and nothing of the addon is left to show,
+        # so the window it may have been standing in goes with them: a window is
+        # only ever kept while its addon runs.
+        core.popout.close_windows(self, addon)
 
     def mark_stopped(self, addon: Addon) -> None:
         """A process addon exited by itself: keep the row, say why."""
@@ -1598,6 +1788,75 @@ class AddonManager:
         if callable(sync):
             sync()
 
+    # --- the window of its own ---
+
+    def set_popout(self, addon_id: str, on: bool, force: bool = False) -> bool:
+        """Move one addon's tabs out into a window, or back into the bar.
+
+        The switch is the app's answer for an addon that said nothing about it,
+        so an addon that declared a state - or one that came inside the program -
+        is refused unless ``force`` says its own code is asking. Everything the
+        addon built keeps running: only the widgets change hands.
+        """
+        addon = self.find(addon_id)
+        if addon is None:
+            return False
+        if not force and not addon.popout_switchable:
+            self.log(addon_id, "the popout switch is not this addon's to move: it "
+                               + ("came with the program" if addon.is_bundled
+                                  else f'declared "popout": "{addon.popout}"'), True)
+            return False
+        record = self.record_for(addon_id)
+        # A forced move is the addon's own code asking for its window, not the
+        # user's switch: the record only ever holds what the app may decide, so
+        # an addon that declared a state keeps it out of the profile.
+        if not force:
+            record["popout"] = bool(on)
+            addon.popout_record = bool(on)
+        self.save_records()
+        if on:
+            core.popout.apply_popout(self, addon, force=force)
+        else:
+            core.popout.dock_back(self, addon)
+        self.refresh_row(addon_id)
+        return True
+
+    def set_git_token(self, addon_id: str, on: bool) -> bool:
+        """Whether this addon may read the profile's global git token."""
+        addon = self.find(addon_id)
+        if addon is None:
+            return False
+        record = self.record_for(addon_id)
+        record["git_token"] = bool(on)
+        addon.git_token = bool(on)
+        self.save_records()
+        self.refresh_row(addon_id)
+        return True
+
+    def show_addon_window(self, addon_id: str) -> bool:
+        """Bring an addon's own window up, making it if its tabs are in the bar."""
+        addon = self.find(addon_id)
+        if addon is None:
+            return False
+        window = core.popout.window_for(self, addon, create=True)
+        if window is None:
+            return False
+        for name in list(addon.tabs):
+            if not window.has_page(name):
+                core.popout.pop_out(self, addon, name)
+        window.open()
+        self.refresh_row(addon_id)
+        return True
+
+    def hide_addon_window(self, addon_id: str) -> bool:
+        """Put an addon's tabs back in the bar and take its window down."""
+        addon = self.find(addon_id)
+        if addon is None:
+            return False
+        moved = core.popout.dock_back(self, addon)
+        self.refresh_row(addon_id)
+        return moved
+
     def restart(self, addon_id: str) -> None:
         addon = self.find(addon_id)
         if addon is None:
@@ -1695,15 +1954,20 @@ class AddonManager:
         """Re-mark the addon tabs that asked to wear the app's own logo."""
         path = app_icon_path(self.win)
         for addon in self.addons:
+            window = self.windows.get(addon.id)
             for entry in (addon.tabs or {}).values():
                 if not entry.get("app_icon") or entry.get("web"):
                     continue
                 page = entry.get("page")
                 index = self.win.tabs.indexOf(page)
+                bar = self.win.tabs
+                if index < 0 and window is not None:
+                    index = window.tabs.indexOf(page)
+                    bar = window.tabs
                 if index < 0:
                     continue
                 mark = build_icon(path, addon.home) if path else None
-                self.win.tabs.setTabIcon(index, mark or QIcon())
+                bar.setTabIcon(index, mark or QIcon())
         # Marks came on or went off: let the bar re-measure the captions.
         reader = getattr(self.win.tabs, "tabBar", None)
         bar = reader() if callable(reader) else None
@@ -1715,11 +1979,11 @@ class AddonManager:
     def build_settings_tabs(self, tabs: QTabWidget) -> None:
         """Give the addons their pages in the Settings tab bar.
 
-        Everything dropped in later - a hand-written file, a program built here,
-        an addon the store installed - shares the one **Installed addons** page
-        made here. A page for each addon that came inside the program is made
+        The **Installed addons** page made here holds the addons that came inside
+        the program only; a page for each of them is made
         with its row in ``refresh_rows``, so an addon found by a later Rescan
-        needs nothing else.
+        needs nothing else. Everything dropped in later is run from the store's
+        Addon manager page, which the button below hands over to.
         """
         self.settings_tabs = tabs
         host = QWidget()
@@ -1728,12 +1992,14 @@ class AddonManager:
         layout.setSpacing(8)
 
         saying = QLabel(
-            "Python files, addon folders and programs you put in the 'addons' "
-            "folder next to Berry Manager, and the ones the addon store "
-            "installs. Switching one off stops it and takes away its tabs; "
-            "switching it on starts it again without a restart. Each profile "
-            "remembers its own choices, and the addons that came inside the "
-            "program have a page of their own beside this one."
+            "Only the addons that came inside the program are set out here - "
+            "Berry, the addon store, the updater and the theme manager, each on a "
+            "page of its own beside this one. Everything else is run from the "
+            "Addon manager, the second page of the store's tab: an addon the store "
+            "installed, one built on the Addon Dev tab or a file dropped into the "
+            "folder below is switched, popped out into a window of its own, given "
+            "a Desktop link or deleted from there. Each profile remembers its own "
+            "answers for every addon, wherever it is managed from."
         )
         saying.setWordWrap(True)
         saying.setStyleSheet("color: #8f8f8f;")
@@ -1759,10 +2025,20 @@ class AddonManager:
         rescan_button = QPushButton("Rescan")
         rescan_button.setToolTip("Look for addons that were added or removed since startup")
         rescan_button.clicked.connect(self.reload)
+        manager_button = QPushButton("Open addon manager")
+        manager_button.setObjectName("primaryAction")
+        manager_button.setToolTip(
+            "Start the addon store and go to the Addon manager page, where every "
+            "addon that did not come with the program is switched on or off, moved "
+            "into a window of its own, given a Desktop link or deleted. The store "
+            "is what holds that page, so this starts it when it is switched off."
+        )
+        manager_button.clicked.connect(self.open_addon_manager)
         folder_row.addWidget(path_label, 1)
         folder_row.addWidget(open_button)
         folder_row.addWidget(config_button)
         folder_row.addWidget(rescan_button)
+        folder_row.addWidget(manager_button)
         layout.addLayout(folder_row)
 
         self.body = QVBoxLayout()
@@ -1779,14 +2055,16 @@ class AddonManager:
         self.installed_scroll.setWidget(host)
         tabs.addTab(self.installed_scroll, "Installed addons")
 
-    def _owns_settings_page(self, addon: Addon) -> bool:
+    def owns_settings_page(self, addon: Addon) -> bool:
         """Whether this addon gets a Settings page of its own.
 
         Only an addon the program carries: ``is_bundled`` reads "came with the
         program", and in a source checkout that also covers anything dropped
-        into the same folder, so the page follows the ids the build ships and
-        what the store installed. Everything else shares the Installed addons
-        page.
+        into the same folder, so the page follows the ids the build ships.
+        Everything else - a store install, a program built on the Addon Dev tab,
+        a file put in by hand - is listed and run from the store's Addon manager
+        instead, and ``api.session.addons()`` says which of the two an addon
+        belongs to so the pages cannot both show it, or neither.
         """
         if addon.origin:
             return False
@@ -1795,10 +2073,11 @@ class AddonManager:
     def _addon_tab_body(self, addon: Addon) -> QVBoxLayout | None:
         """One shipped addon's Settings page, made the first time its row is built.
 
-        ``None`` for an addon the user put in: it belongs on the shared
-        Installed addons page.
+        ``None`` for an addon the user put in or the store installed: it is run
+        from the Addon manager on the store's tab rather than from anywhere in
+        Settings, so it is not listed here at all.
         """
-        if not self._owns_settings_page(addon) or self.settings_tabs is None:
+        if not self.owns_settings_page(addon) or self.settings_tabs is None:
             return None
         title = addon.name or addon.id
         entry = self.bundled_tabs.get(addon.id)
@@ -2023,6 +2302,38 @@ class AddonManager:
         self.ensure_folder()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(ADDON_DATA_DIR)))
 
+    def open_addon_manager(self) -> bool:
+        """Start the store if need be and put its Addon manager page on screen.
+
+        Settings shows only the addons that came inside the program, so this is
+        the one way to reach an installed addon's switches when the store itself
+        has been switched off - which is why the button sits on the page it
+        opens. The store is asked for its second sub-page by name through its own
+        api, and a store that will not start is said so rather than left blank.
+        """
+        store = self.find(STORE_ADDON_ID)
+        if store is None:
+            self.log(STORE_ADDON_ID, "the addon store is not in the addons "
+                                     "folder, so there is no Addon manager to "
+                                     "open", True)
+            return False
+        if not store.loaded:
+            self.set_enabled(STORE_ADDON_ID, True)
+            store = self.find(STORE_ADDON_ID)
+        if store is None or not store.loaded or store.api is None:
+            self.log(STORE_ADDON_ID, "the addon store did not start, so there is "
+                                     "no Addon manager to open", True)
+            return False
+        try:
+            store.api.tabs.set_widget(self.STORE_TAB, self.STORE_SUBTABS,
+                                      "current", self.STORE_MANAGER_PAGE)
+            store.api.tabs.activate(self.STORE_TAB)
+        except Exception as error:            # a store that cannot be shown
+            self.log(STORE_ADDON_ID, f"the Addon manager page could not be "
+                                     f"opened: {error}", True)
+            return False
+        return True
+
     def config_panel(self, addon: Addon) -> QWidget | None:
         """The config editor under an addon's own row, built once and reused."""
         title, fields, defaults = self.config_layout(addon.id)
@@ -2210,6 +2521,12 @@ class AddonManager:
         installed = 0
         shipped: set[str] = set()
         for addon in self.addons:
+            if not self.owns_settings_page(addon):
+                # An addon that came from the store, from the Addon Dev tab or
+                # from a file dropped in the folder is run from the store's Addon
+                # manager rather than from here; its record is the same one either
+                # way, so nothing about the addon changes - only where it is read.
+                continue
             page = self._addon_tab_body(addon)
             target = self.body if page is None else page
             row = self._build_row(addon, carried.get(addon.id, []), target)
@@ -2225,10 +2542,11 @@ class AddonManager:
         self.hint.setVisible(not installed)
         if not installed:
             self.hint.setText(
-                "No drop-in addons. Put an 'addon.py' inside a folder named after "
-                f"the addon, or a .py file, in {ADDONS_DIR}, install one from the "
-                "addon store, and press Rescan. The addons that ship with the "
-                "program have a page of their own beside this one."
+                "Nothing is listed on this page: every addon that did not come "
+                f"with the program is run from the Addon manager, on the second "
+                f"page of the store's tab - press Open addon manager above. "
+                f"Programs and files still go in {ADDONS_DIR}, and Rescan picks "
+                "them up there."
             )
         self._restore_scroll(saved)
 
@@ -2410,7 +2728,7 @@ class AddonManager:
             gate_wrap.setLayout(gates)
             column.addWidget(gate_wrap)
 
-        if self._owns_settings_page(addon):
+        if self.owns_settings_page(addon):
             cfg = addon_config_path(addon.id)
             try:
                 shown = cfg.relative_to(BASE_DIR).as_posix()
@@ -2486,7 +2804,9 @@ class AddonManager:
             addon.api.tabs.activate(tab)
 
     def set_setting_widget(self, addon: Addon, widget_or_spec: Any) -> None:
-        """Give an addon its own controls inside its Settings row."""
+        """Give an addon its own controls inside its row on the Settings
+        addons page - which is only drawn for an addon that came with the
+        program, so an installed addon keeps its controls on its own tab."""
         if isinstance(widget_or_spec, QWidget):
             widget = widget_or_spec
         else:
@@ -2599,7 +2919,8 @@ def _write_config_value(widget: QWidget, field: dict, value: Any) -> None:
 # was manager_addondev.py
 # The Addon Dev tab: what an addon is, what it does, and how to make one.
 #
-# The tab is switched from Settings like any other. In a source checkout an addon
+# The tab is switched like any other addon setting, on the store's Addon manager
+# page. In a source checkout an addon
 # is a ``.py`` file there to be read, edited, tested and compiled. In a packaged
 # program the same panels still list every addon, show its log lines and its
 # processes, and open the sources that ship inside it - but a file that came with
@@ -2665,7 +2986,6 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -2808,18 +3128,19 @@ def duration(seconds: Any) -> str:
 
 def make_table(headers: list[str], stretch: int | None = None,
                widths: dict | None = None) -> QTableWidget:
-    """A list the way this tab draws all of them: whole rows, nothing typed in."""
+    """A list the way this tab draws all of them: whole rows, nothing typed in.
+
+    The columns are laid out by the engine an addon's table is built with, so a
+    list here behaves like every list there: each column can be dragged, the one
+    named by `stretch` takes the room the others leave over instead of a Qt
+    stretch that could not be moved, and a column pinned in `widths` starts at
+    that width. Whatever is not pinned starts as wide as its own heading reads.
+    """
     table = QTableWidget(0, len(headers))
     table.setHorizontalHeaderLabels(list(headers))
-    header = table.horizontalHeader()
-    header.setStretchLastSection(False)
-    for index in range(len(headers)):
-        header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
-    if stretch is not None:
-        header.setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)
-    for column, pixels in (widths or {}).items():
-        header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(column, pixels)
+    pinned = [max(0, int((widths or {}).get(column) or 0))
+              for column in range(len(headers))]
+    fit_table_columns(table, [] if stretch is None else [int(stretch)], pinned)
     table.verticalHeader().setVisible(False)
     table.verticalHeader().setDefaultSectionSize(ROW_H)
     table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -3222,7 +3543,7 @@ ADDON = {
     "author": "$author",
     "description": "$description",
     # The transports api.device may use; leave the key out if never. Each one
-    # also gets a switch of its own on this addon's row in Settings > Addons,
+    # also gets a switch of its own on this addon's row in the Addon manager,
     # and both the app-wide and the addon's own have to be on.
     "requires": ["ssh", "sftp"],
     # Whose connection the device calls use: "app" (the app's one main SSH+SFTP
@@ -3243,7 +3564,8 @@ TAB = "$tab"
 PAGE = "$id-settings"
 HISTORY: list[str] = []
 
-#: The settings the user can change in Settings > Addons, and their defaults.
+#: The settings the user can change on this addon's Addon manager row, and their
+#: defaults.
 #: A key with a dot reads and writes inside a section of the config file.
 FIELDS = [
     {"key": "greeting", "label": "Text to show", "kind": "text",
@@ -4260,8 +4582,8 @@ app and as a program of its own.
 
 - Press **New addon...** above: it writes ``addons/<id>.py`` and, when asked,
   ``addons/_tests/test_<id>.py``.
-- Switch it on - the checkbox above, or Settings > Addons. Its tab appears in
-  the bar.
+- Switch it on - the checkbox above, or the addon's row on the store's Addon
+  manager page. Its tab appears in the bar.
 - Edit the file in any editor, then press **Restart** here. Only the addon is
   read again; the app does not move.
 
@@ -4302,14 +4624,18 @@ Everything else is a hook the app calls when something happens:
 Only ``name`` is needed. ``api`` should stay at the version the app speaks, and
 ``requires`` names the transports ``api.device`` may use - ``["ssh", "sftp"]``,
 or leave the key out for an addon that never connects. Each transport gets a
-switch of its own on the addon's Settings row, and both the app-wide and the
+switch of its own on its row, and both the app-wide and the
 addon's own have to be on. ``connection`` says whose session the calls go over:
 ``"app"`` for the program's one main connection, ``"own"`` for a connection the
 addon opens for itself per call, ``"both"`` where the user picks with a switch on
 the row, or ``"none"`` - which says no more than leaving ``requires`` out, and is
 answered on the row and in **Connection status** as *no device connection*
 rather than with a dot that could never go green. An addon that ships inside the
-program always rides its session, whatever it declared. ``icon`` names the
+program always rides its session, whatever it declared. ``popout`` says where the
+addon's tabs live: ``"always"`` for a window of their own, ``"never"`` for the
+main window's bar, and leaving it out hands the choice to the user's **Force
+popout** switch in the store's Addon manager (see
+[A window of its own](guide:popout)). ``icon`` names the
 picture the addon wears; a file named ``<id>icon.png`` in either of the two
 folders the rule allows is found without being declared at all (see
 [Notices and icons](guide:notice)).
@@ -4340,8 +4666,9 @@ steal the view; [activate](api:tabs.activate) puts it on screen.
     })
 
 Layouts: ``column`` / ``vbox``, ``row`` / ``hbox``, ``grid``, ``form``,
-``group``, ``scroll``, ``splitter``, ``tabs``. Leaves: ``label``, ``button``,
-``line``, ``color``, ``multi``, ``check``, ``combo``, ``list``, ``tree``,
+``group``, ``scroll``, ``splitter``, ``tabs``, ``overlay``. Leaves: ``label``,
+``button``, ``line``, ``color``, ``multi``, ``check``, ``combo``, ``list``,
+``tree``,
 ``table``, ``progress``, ``spin``, ``slider``, ``spacer``, ``image``, ``web``,
 ``terminal``.
 
@@ -4362,6 +4689,44 @@ item as ``{"text": ..., "icon": ...}``, a row as a dict with ``"icon"`` beside
 ``"cells"``, and that picture is drawn in front of the row's first cell - which
 is how one list can carry a device's own mark next to its own colour.
 
+## Sharing the room
+
+A ``splitter`` lays its children side by side, or one over another with
+``"vertical": True``, with a line between each pair that the user can drag. Its
+``sizes`` are shares rather than pixels: ``[3, 1]`` is three parts of the room to
+the first pane and one to the second, and those parts are kept as the window
+moves - until somebody drags the line, which is them saying they know better,
+and then the panes stay where they were put until the tab lays them out again.
+A row or a column becomes the same thing on ``"resizable": True``, so the change
+is one key rather than a rewrite. ``"collapsed": True`` on a child starts it
+folded away: nothing of it shows but its line, which is dragged open or
+double-clicked, and which comes back at the share it was promised. A pane that
+was never asked to fold cannot be dragged out of sight at all, so no row of
+words can be squeezed into nothing - say ``"collapsible": True`` on one that is
+meant to be put away.
+
+    {"kind": "splitter", "vertical": True, "sizes": [3, 1], "children": [
+        {"kind": "table", "id": "work", "columns": ["Thing", "State"]},
+        {"kind": "multi", "id": "log", "collapsed": True, "readonly": True},
+    ]}
+
+The same from code is ``set_widget(tab, id, "sizes", [3, 0])``, which folds the
+log, and ``[3, 1]``, which brings it back to a third of the room; a ``0`` there
+means the folded pane, not one of no size at all.
+[widget_value(tab, id, "panes")](api:tabs.widget_value) reads the shares back,
+with which panes are open and what each is called, so a check box beside the tab
+can be ticked from how the panes really stand rather than from what was last
+sent to them.
+
+A table's columns are all dragged to the width they are wanted at, and their
+headings moved across to a new order. ``col_widths`` pins a starting width and
+``stretch`` names the column that takes what the others leave over, so the table
+fills its pane and still answers to a hand on its edge - a stretched column
+would not. A column that was pinned nothing starts as wide as its own heading
+reads, so a tab is not opened with a caption cut short; a pane too narrow for
+the whole row of them grows a bar to scroll. Double-clicking the heading of the
+stretching column hands its slack back after it has been dragged by hand.
+
 ## Where a tab lands
 
 A tab an addon opens goes immediately to the left of the tab that addon already
@@ -4369,10 +4734,16 @@ owns, so a report or a helper sits beside its parent instead of at the far end
 of the bar where the user has to go looking for it. Pass ``position`` to choose
 otherwise.
 
+A tab can leave the bar altogether as well: [api.window.popout](api:window.popout)
+puts it in a window of its own, and docking it back returns it to the slot it left
+(see [A window of its own](guide:popout)).
+
 ## Pinned, icon-only tabs
 
 ``pinned=True`` holds the tab in the block at the right edge, beside Settings:
-out of the row the user drags about, out of the saved tab order, and keeping its
+out of the row the user drags about, kept in that run whatever else moves, and
+remembered along the edge in its own saved order (``pinned_tab_order``) which the
+user can arrange in Settings > Startup beside the tabs of their own. It keeps its
 place while other tabs come and go. ``icon_only=True`` draws it as a mark with
 no caption - the name still identifies it to the addon, and the tooltip says it
 aloud. Both work on an embedded page from
@@ -4437,6 +4808,85 @@ addon with several machines should reach for.
 [inject_js](api:tabs.inject_js) shape what it shows, and
 [view](api:tabs.view) hands over the whole page object - in an imported addon
 only.
+
+## A view for a long job
+
+An ``overlay`` is a stack instead of a row: its first child fills the area and
+every child after it keeps to its own size and floats on top, at the place its
+``align`` names - ``center`` (the default), ``top``, ``bottom``, ``left``,
+``right`` - re-centred whenever the pane changes size. That is the shape a job
+wants: the addon store and the manager updater both put a ``terminal`` in the
+stack and float a card over it, so what the build is printing runs across the
+whole tab while the addon or version being worked on, its step and its bar stay
+in the middle of it. The stack starts hidden and is switched on with
+``set_widget(tab, id, "visible", True)`` - and since
+[set_widget](api:tabs.set_widget) answers ``False`` for an id the built tab does
+not hold, the same code is safe on a copy whose layout was built before the view
+existed: it keeps the browsing panes on screen and writes its steps to its log
+instead.
+"""),
+
+    ("popout", "A window of its own", """
+# A window of its own
+
+An addon's tabs normally stand in the main window's bar with everybody else's. A
+popout takes one of them out and puts it in a top-level window of its own - not a
+copy of the page, the same widget, with the same live state and the same
+``on_widget`` calls - and puts it back in the slot in the bar it came from.
+
+## Who decides
+
+Three things can say, and they are asked in that order:
+
+- the manifest: ``"popout": "always"`` means the addon's tabs only ever live in a
+  window, ``"never"`` means they only ever live in the bar. Either value is the
+  addon's word on the matter, and the app's switch is greyed out beside an
+  explanation rather than fighting it.
+- the app's **Force popout** switch, on the addon's row in the store's Addon
+  manager page. It is offered only for an addon that declared nothing, and it is
+  kept in that profile's record beside the enable switch, so two profiles can
+  disagree about the same addon.
+- the addon itself, at any time, with
+  [api.window.popout(tab, on)](api:window.popout).
+
+An addon that ships inside the program - Berry, the addon store, the manager
+updater, the theme manager - is never pushed out by the app's switch, since it has
+no row to put the switch on; only its own call can move its tabs.
+
+## What the window is
+
+It wears the theme like the main window does, and the addon's name and mark as its
+title and icon. Its own tab bar shows only when the addon has more than one tab
+out. There is a **dock back** button, and closing the window hides it instead of
+destroying it: the addon keeps running, and the row's **Raise window** brings it
+back. Size and place are remembered per addon, and a tab that is out is simply not
+in the bar's saved order any more - which is how a popped tab stops being dragged
+about with the rest.
+
+The addon steers the whole frame while it is out - [state](api:window.state) reads
+it, [set_size](api:window.set_size), [set_position](api:window.set_position),
+[set_minimum](api:window.set_minimum), [set_title](api:window.set_title),
+[set_always_on_top](api:window.set_always_on_top),
+[set_resizable](api:window.set_resizable), [set_closable](api:window.set_closable),
+[set_style](api:window.set_style) and [set_icon](api:window.set_icon) write it, and
+[open](api:window.open) / [close](api:window.close) / [show](api:window.show) /
+[raise_window](api:window.raise_window) / [center](api:window.center) move it about.
+What happens to it comes back as ``window`` events (see
+[Events and hooks](guide:events)).
+
+A popout window has no Settings, no profile picker and no pinned run, so
+[add_settings_page](api:settings_pages.add) and a ``pinned=True`` tab are refused
+plainly rather than crashing - on that window, that is all there is.
+
+## Starting from a Desktop link
+
+[api.window.set_shortcut(on)](api:window.set_shortcut) asks for a Desktop link
+(``shortcut_path()`` says where it is, or why it is not) that starts this program
+again with ``--popout <id>``. A copy launched that way loads exactly one addon: no
+main window, no splash, no other addon - its peers answer *not running*. Its api is
+the ordinary one, and the profile's connection is opened at launch only when that
+addon rides it: an addon on a connection of its own is given nothing, and an addon
+that needs no device is given nothing, whatever the startup switch says.
 """),
 
     ("notice", "Notices and icons", """
@@ -4465,6 +4915,25 @@ finished, a device that stopped answering, an update that arrived. Anything that
 only matters while they are watching belongs on the tab or in
 [api.log](api:log). Keep it to a sentence or two - a notification is a nudge, and
 the detail is one click away.
+
+## A job that is worth watching
+
+[progress_notice](api:ui.progress_notice) is the other kind of news: a small card
+over the window's corner holding one line of text and a bar with its percentage,
+painted by the app and needing nothing from the addon but the calls.
+
+    api.ui.progress_notice("My addon", f"working on {name}", done, total)
+
+Each step re-shows the same card rather than raising another, so a long job reads
+as one thing moving along instead of a stack of toasts; it never covers the whole
+window and never needs closing. Fill it to the end on the job's last line and it
+holds a moment and fades; [progress_notice_close](api:ui.progress_notice_close)
+takes it away at once, which is what a job that failed should do - leaving a bar
+half full over the window saying nothing is worse than saying it stopped.
+
+The card is for the percentage; what the job is doing belongs on the tab, and a
+``terminal`` under an ``overlay`` is the plainest way to show it (see
+[Tabs, pinned and plain](guide:tabs)).
 
 ## Wearing a picture
 
@@ -4497,8 +4966,9 @@ wants to sit beside it.
 
 ``api.settings_pages`` builds a page of the app's Settings window: the same
 controls as a tab, on a page that stands beside the program's own categories -
-outside the shared **Installed addons** page, which keeps the switches and the
-form built from the declared fields.
+outside **Installed addons**, the page that now keeps only the addons that ship
+inside the program, and outside the store's Addon manager, where an installed
+addon's switches and its declared form live.
 
     api.settings_pages.add("planner", title="My planner", spec={
         "kind": "form",
@@ -4611,7 +5081,9 @@ Two stores, and picking the right one is most of it:
 
 - [api.config](api:config.all) is the addon's own file,
   ``addons/_data/<id>/config.json``. It belongs to the installation rather than
-  to one profile, is what the Settings form edits, and is a plain JSON file a
+  to one profile, is what the form on its row edits - the Settings panel for an
+  addon that came with the program, **Edit settings** on the store's Addon
+  manager for one installed later - and is a plain JSON file a
   user can open and change.
 - [api.settings](api:settings.all) is the addon's private keys inside the
   profile's record - per profile, never shown to the user, good for counters
@@ -4750,7 +5222,8 @@ its store folder:
 - ``tools/gen_addon_store_index.py`` writes the index from the addons in a
   checkout - their manifests, their icons, their test scripts.
 - ``addons/_data/<id>/config.json`` and ``fields.json`` travel with the file, so
-  an installed addon shows a settings form of its own.
+  the addon's row on the store's Addon manager can show its settings form before
+  the program has ever run.
 - A source is a repository: owner, repository, branch or tag, and the store
   folder inside it. **Sources...** on the store's tab adds one, puts it first or
   drops it, and the first source wins an id that two of them publish.
@@ -4771,6 +5244,7 @@ GUIDE_FOR_NAMESPACE = {
     "device": "device",
     "ui": "notice",
     "tabs": "tabs",
+    "window": "popout",
     "events": "events",
     "settings": "config",
     "settings_pages": "settings-pages",
@@ -5120,7 +5594,8 @@ class AddonDevWidget(QWidget):
                      "The doing part of the addon picked above, gathered where its "
                      "details are read: switch it on or off, load its file again, "
                      "come to the tab it opened, or edit the source it runs from. "
-                     "Settings > Addons has the same switches for every addon at once.")
+                     "The store's Addon manager page has the same switches for "
+                     "every addon at once.")
         line = QHBoxLayout(run)
         line.setContentsMargins(14, 10, 12, 8)
         line.setSpacing(10)
@@ -5134,7 +5609,7 @@ class AddonDevWidget(QWidget):
         line.addStretch(1)
         self.enabled_switch = QCheckBox("Enabled")
         self.enabled_switch.setToolTip(
-            "The same switch as Settings > Addons: it starts the addon and keeps "
+            "The same switch as the Addon manager's row: it starts the addon and keeps "
             "its tabs, or stops it and takes them away")
         self.enabled_switch.toggled.connect(self._set_enabled)
         line.addWidget(self.enabled_switch)
@@ -5151,7 +5626,7 @@ class AddonDevWidget(QWidget):
 
         box = QGroupBox("Addon details")
         tip_on_title(box,
-                     "The manifest the app shows in Settings > Addons. It is saved "
+                     "The manifest the app reads when it loads the addon. It is saved "
                      "into the ADDON dict of the addon's own file when the file has "
                      "one, and otherwise into the <id>.json manifest beside it.")
         inner = QVBoxLayout(box)
@@ -5199,7 +5674,7 @@ class AddonDevWidget(QWidget):
         tip_on_title(config_box,
                      "addons/_data/<id>/config.json: this addon's own settings, shared "
                      "by every profile. Written as plain JSON, so the addon can read it "
-                     "and a user can edit it. The Addons section in Settings offers "
+                     "and a user can edit it. The addon's row in the Addon manager offers "
                      "the same thing as a form, once the addon has declared its keys.")
         column = QVBoxLayout(config_box)
         column.setContentsMargins(14, 10, 12, 8)
@@ -5398,7 +5873,10 @@ class AddonDevWidget(QWidget):
         split = QSplitter()
         split.addWidget(self._build_compile())
         split.addWidget(self._build_test())
-        split.setSizes([520, 520])
+        # Two halves of the same job, evenly read, with a line between them that
+        # can be seen and pulled - and keeps the halves even as the window moves,
+        # rather than the sizes Qt was asked for once at build time.
+        fit_panes(split, [1, 1])
         layout.addWidget(split, 1)
         return page
 
@@ -5485,7 +5963,9 @@ class AddonDevWidget(QWidget):
         split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(self._build_docs_side())
         split.addWidget(self._build_log())
-        split.setSizes([440, 240])
+        # The page being read above the lines it wrote, in about that order of
+        # importance; the line is draggable, so either can be given the tab.
+        fit_panes(split, [11, 6])
         layout.addWidget(split, 1)
         return page
 
@@ -5544,9 +6024,10 @@ class AddonDevWidget(QWidget):
         # generated pages are; the links below are handled by hand.
         self.docs_view.anchorClicked.connect(self._docs_link)
         split.addWidget(self.docs_view)
-        split.setStretchFactor(0, 0)
-        split.setStretchFactor(1, 1)
-        split.setSizes([240, 620])
+        # The tree keeps to about a quarter of the width and the page it opens
+        # takes the rest, at every window size; a stretch factor only answers to
+        # the room Qt has left over, which is why the pane used to drift.
+        fit_panes(split, [240, 620])
         layout.addWidget(split, 1)
 
         self._fill_docs()

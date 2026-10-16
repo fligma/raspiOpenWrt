@@ -1058,6 +1058,11 @@ class TerminalScreen(QWidget):
 
     def _put(self, ch: str) -> None:
         if self.wrap_next:
+            # The character that is already on the row filled it, so the line
+            # turns here - and the pending wrap is spent with it. Left standing,
+            # every character after the first turn would take a row of its own,
+            # which is what a cursor that "gets behind" the typing really is.
+            self.wrap_next = False
             self.cc = 0
             self._line_feed()
         if self.bottom_margin < self.rows - 1 and self.cr > self.bottom_margin:
@@ -1339,9 +1344,30 @@ class TerminalScreen(QWidget):
                         font = self._font_for(flags, fonts)
                     painter.setFont(font)
                     painter.setPen(text_color)
-                    painter.drawText(QRect(col * self._cw + 1, y, (run - col + 1) * self._cw, self._ch),
-                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
-                                     text)
+                    place = (Qt.AlignmentFlag.AlignLeft
+                             | Qt.AlignmentFlag.AlignBottom)
+                    if self._runs_straight(font, text):
+                        painter.drawText(
+                            QRect(col * self._cw + 1, y,
+                                  (run - col + 1) * self._cw, self._ch),
+                            place, text)
+                    else:
+                        # One glyph per cell, each at its own grid position.
+                        # A run drawn in one go is laid out by the font's own
+                        # advances, and a character the monospace face does not
+                        # carry - a box-drawing line, a check mark, an
+                        # ideograph - comes from a fallback with a width of its
+                        # own, which slides every glyph after it sideways. The
+                        # cursor is placed by counting cells, so the two
+                        # disagree and the block lands behind the words that
+                        # were actually typed, further back with every odd
+                        # glyph on the line.
+                        for offset, glyph in enumerate(text):
+                            if glyph == " ":
+                                continue
+                            painter.drawText(
+                                QRect((col + offset) * self._cw + 1, y,
+                                      self._cw, self._ch), place, glyph)
                 col = run + 1
         self._paint_selection(painter, view_top, rows)
         self._paint_cursor(painter)
@@ -1355,6 +1381,18 @@ class TerminalScreen(QWidget):
         font.setStrikeOut(bool(flags & STRIKE))
         cache[flags] = font
         return font
+
+    def _runs_straight(self, font: QFont, text: str) -> bool:
+        """Whether this run would sit on the grid if it were drawn in one go.
+
+        Measured with the font actually about to draw it: an ordinary line of
+        characters costs a single ``drawText``, which is how the whole screen is
+        painted, and only the lines carrying a glyph the face does not own pay
+        for being placed cell by cell.
+        """
+        if not text:
+            return True
+        return QFontMetrics(font).horizontalAdvance(text) == len(text) * self._cw
 
     def _paint_selection(self, painter: QPainter, view_top: int, rows: list) -> None:
         if self._select_from is None or self._select_to is None:

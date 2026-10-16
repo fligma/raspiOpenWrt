@@ -3,9 +3,9 @@
     {
       "id": "berry_web",
       "name": "Berry web dashboard",
-      "version": "1.1",
+      "version": "1.3",
       "author": "fligma",
-      "description": "Looks for the Berry dashboard on the connected host and, when it is not there, installs src/www_rasconf from GitHub over SFTP: a backup, the files, the theme this program is wearing, the uhttpd section written with uci, the exec bit on the CGI entry, a restart and a check that the page answers. Also views and edits those options and can move the served folder from /www_rasconf to /www_berry.",
+      "description": "Looks for the Berry dashboard on the connected host and, when it is not there, installs src/www_rasconf from GitHub over SFTP: a backup, the files, the theme this program is wearing, the uhttpd section written with uci, the exec bit on the CGI entry, a restart and a check that the page answers. Also views and edits those options, finds which folder on the device holds the page, and can move that one to /www_berry - an install left in /www_rasconf by an older setup included.",
       "filename": "berry_web.py",
       "requires": [
         "ssh",
@@ -55,7 +55,7 @@
     {
       "id": "openwrt_logs",
       "name": "OpenWrt Log Viewer",
-      "version": "2.10",
+      "version": "3.0",
       "author": "fligma",
       "description": "a single-device log viewer and a multi-device view, colour-coded connections, the log in time order. The search highlights or filters the matching lines.",
       "filename": "openwrt_logs.py",

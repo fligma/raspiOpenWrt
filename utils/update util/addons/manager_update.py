@@ -29,36 +29,72 @@ simply replaces the old in one step. What an update never touches is what
 the user wrote: the ``config`` folder beside the program, the ``addons``
 folder and everything under ``addons/_data`` stay exactly where they are -
 the swap moves one file and nothing else - and an addon installed by the
-store keeps its own settings because they were never in play.
+store keeps its own settings because they were never in play. Going *back* over
+a newer copy is the one case where that is not simply assumed to be wanted, and
+the tab asks instead of deciding - see the three answers below.
 
 Once the new file is in place the addon offers to restart through the app's
 own relaunch, so the copy that starts is the program that was just
 downloaded; refusing leaves this one running the old version until the user
 starts the new one themselves.
 
-The repository, tag prefix and token live in
+The repository and tag prefix live in
 ``addons/_data/manager_update/config.json``, so pointing the check at a fork
-is a config edit. The tab is a declarative spec and its buttons report back
-through ``on_widget``; it wears ``assets/manager_updateicon.png`` when the
-program ships one and a drawn download mark when it does not.
+is a config edit. The tab holds no token of its own: every request carries
+whatever ``api.session.git_token()`` answers with, which is the profile's one
+GitHub token while the switch on this addon's row in the store's Addon manager
+is on, and nothing at all while it is off. The tab is a declarative spec and
+its buttons report back through ``on_widget``; it wears
+``assets/manager_updateicon.png`` when the program ships one and a drawn
+download mark when it does not.
 
-The tab lists every published version rather than only the newest, newest
-first, and says which of them this copy is: a version ahead is offered as an
-update, the running one is marked, and an older one is offered as a way back -
-the same swap, since a program that has gone wrong is fixed by putting the
-previous file in its place. Going back has a floor, ``1.6.0`` by default and a
-setting like everything else: a version older than that predates things the
-swap itself relies on, so it is refused with the reason rather than installed.
-Picking a row shows what that release was for - its title, the words it was
-published with, the commit it was made from, who published it and when - and
-the files it moved against the version before it, which GitHub answers from
-the difference between the two tags.
+The tab lists every published version rather than only the newest, but groups
+them into their major lines - ``2.0``, ``1.9``, ``1.8`` - newest line first, each
+line opening to the hotfixes under it. A flat list of every build reads as noise
+once a program has a few years of tags, and the line below the one this copy is
+on is only wanted occasionally, so it starts as one button and its versions are
+laid out when it is opened; opening costs nothing, since the tags were all read
+in one request. Where the version itself sits is said three ways: in the heading
+of its line, as one coloured chip in the pane beside it, and in the words of the
+entry in its line's dropdown.
+
+What a version was published for is read on demand and cached: picking an entry
+asks GitHub for that one release's account and the files it moved against the
+version before it, and coming back to it afterwards costs nothing. Until a
+version is picked the pane says so rather than showing an empty box, because the
+list of versions itself is only two requests however many there are, and reading
+the story of every one of them to draw a tab would be the slowest way to say
+nothing new.
+
+Installing is offered in both directions: a version ahead is an update, the
+running one is marked, and an older one is a way back - the same swap, since a
+program that has gone wrong is fixed by putting the previous file in its place.
+Going back has a floor, ``1.6.0`` by default and a setting like everything else:
+a version older than that predates things the swap itself relies on, so it is
+refused with the reason rather than installed, warning or no warning. Above the
+floor, an older version is asked about with three honest answers rather than a
+yes or no, because what is at risk is not the program but everything written down
+beside it: keep it and take the risk, back up ``config`` and every addon's data
+folder into a zip beside the program and delete what a newer copy wrote - the
+installed addons, the profile files, the written themes - or leave this copy
+where it is. Nothing is fetched or written before that answer is given.
 
 When the check runs by itself it is the user who has to notice, not the tab
 that is not open, so a version found is sent through ``api.ui.popup`` and comes
 up as a notice from the app's tray icon, once per version per run. When checks
 happen is configured: on starting the app, and again on a timer while it runs
 for anyone who leaves it open for days.
+
+An install is the one long job here, and it is shown as one. While the bytes are
+coming down the tab's browsing panes give way to the job's own view: a terminal
+for a background, printing every step as it arrives, with a card in the middle
+naming the version being fetched and counting its share of the download. The same
+steps and the same share go up in the app's floating notice at the corner of the
+screen, so the job can be followed from any other tab, and the notice ends with
+the job - filled and fading when the swap landed, closed straight away when it
+did not. The view is put together from the spec language alone (an ``overlay``
+over a ``terminal``), and a tab built without it simply keeps the browsing panes
+on screen: the job does not care where its lines are printed.
 """
 
 from __future__ import annotations
@@ -67,6 +103,7 @@ import http.client
 import json
 import os
 import re
+import shutil
 import ssl
 import sys
 import time
@@ -80,16 +117,22 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Berry Manager update",
-    "version": "1.2",
+    "version": "1.4",
     "author": "fligma",
-    "description": "Lists the berry tags published on GitHub newest first, says "
-                   "which one this copy is, and puts any of them - a newer "
-                   "release, or an older one back to the floor set here - in the "
-                   "running program's place once its release's file has been "
-                   "checked, without touching the config or the addons. Each "
-                   "version shows what it was published for and which files it "
-                   "moved, and one found by a check that ran on its own is "
-                   "announced as a notice.",
+    "description": "Groups the berry tags published on GitHub into their major "
+                   "lines, newest first, each line opening to its own builds, and "
+                   "says which version this copy is. Any of them - a newer "
+                   "release, or an older one back to the floor set here - is put "
+                   "in the running program's place once its release's file has "
+                   "been checked. A version's words, its commit and its file list "
+                   "are read only when it is picked, and kept; going back to an "
+                   "older copy asks three questions instead of one, so the choice "
+                   "is between taking what is written down as it stands, backing "
+                   "it up and starting clean, or leaving this copy alone. One "
+                   "found by a check that ran on its own is announced as a notice, "
+                   "and a download is shown as a job: a terminal behind a card "
+                   "that names the version and counts its bytes, with the same "
+                   "progress in a floating notice.",
     "requires": [],
     # This talks to GitHub and to the disk it runs on, never to a device.
     "connection": "none",
@@ -106,6 +149,11 @@ picked: int = -1            # which of them the tab is showing, by index
 found: dict | None = None   # the version the install button is pointed at
 announced: set[str] = set()  # versions already sent up as a notice this run
 ticker: Any = None          # the repeat-while-running timer, when one is on
+lines: list[dict] = []      # those versions, grouped into their major lines
+opened: list[str] = []      # which major line has its dropdown pulled out
+notes: dict[str, dict] = {}  # what a pick read about one tag, kept for later
+slot_names: dict[str, list] = {}   # the words each dropdown was last handed
+filling = False             # a dropdown is being laid out, not chosen from
 
 #: What follows is far too small to be this program; a page or a stub.
 MIN_PROGRAM_BYTES = 200_000
@@ -125,7 +173,6 @@ DEFAULTS = {
     "owner": "fligma",
     "repo": "raspiOpenWrt",
     "tag_prefix": "berry",
-    "token": "",
     "check_startup": True,
     "check_again": False,
     "check_minutes": 60,
@@ -140,10 +187,6 @@ FIELDS = [
     {"key": "tag_prefix", "label": "Version tag prefix", "kind": "text",
      "hint": "Tags read as versions start with this: berry1.5.9 is version "
              "1.5.9. Anything else the tags name is ignored."},
-    {"key": "token", "label": "GitHub token", "kind": "text",
-     "hint": "Only needed for a private repository, or when anonymous "
-             "requests are refused",
-     "placeholder": "blank for a public repository"},
     {"key": "check_startup", "label": "Check when the app starts", "kind": "bool",
      "hint": "One read of the published tags a moment after the window is up. "
              "It costs a few requests, and says nothing when nothing is ahead."},
@@ -166,8 +209,11 @@ FIELDS = [
              "publishes differently may name its own."},
 ]
 
+#: The GitHub token is not one of these: it belongs to the profile and is read
+#: through ``profile_token``, so one field feeds the store, the updater and every
+#: other addon that asks GitHub for anything.
 GROUPS = [("Where updates come from",
-           ["owner", "repo", "tag_prefix", "token"]),
+           ["owner", "repo", "tag_prefix"]),
           ("When it checks, and what it says",
            ["check_startup", "check_again", "check_minutes", "notify_found",
             "min_version"])]
@@ -192,6 +238,24 @@ def safe_segment(value: Any) -> str:
 def clean_token(value: Any) -> str:
     """A token stripped of the spaces a copy-paste tends to add."""
     return one_line(value).replace(" ", "")
+
+
+def profile_token() -> str:
+    """The token this addon is allowed to send to GitHub, which is the profile's.
+
+    There is one token for a profile and it is written in Settings > Connection;
+    the switch on this addon's row in the store's Addon manager decides whether
+    ``api.session.git_token()`` answers with it at all. An empty string is a real
+    answer rather than a failure - it means anonymous, which is how a public
+    repository has always been read - so a build with no api, no token and a
+    refused call all check exactly the same way.
+    """
+    if api is None:
+        return ""
+    try:
+        return clean_token(api.session.git_token())
+    except (AddonError, AttributeError, TypeError):
+        return ""
 
 
 # --- versions and tags ---
@@ -265,21 +329,80 @@ def system_name() -> str:
 
 # --- the tab ---
 
-TAB_STYLE = """
-QWidget { background-color: #161616; }
-QGroupBox { border: 1px solid #3c3c3c; border-radius: 6px; margin-top: 12px;
-            padding: 12px 10px 10px 10px; font-weight: 600; }
-QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left;
-                   left: 12px; padding: 0 6px; color: #c51a4a; }
-QPlainTextEdit { font-family: Consolas, monospace; }
-QPushButton { padding: 7px 14px; }
+# --- the look: every colour and every size taken from the theme in force ---
+
+#: What each helper below falls back to is the sheet this tab has always been
+#: drawn with, so a copy of it with no theme to read - a test, or this addon run
+#: on its own - looks exactly the way it did before themes had a say.
+
+def _colour(token: str, fallback: str) -> str:
+    """One colour out of the interface, or the hex that stood in for it."""
+    if api is None:
+        return fallback
+    try:
+        found = one_line(api.theme.color(token))
+    except (AddonError, AttributeError, TypeError):
+        return fallback
+    return found or fallback
+
+
+def _metric(knob: str, fallback: int) -> int:
+    """One of the theme's own sizes, so the tab spends the air the app spends."""
+    if api is None:
+        return fallback
+    try:
+        value = api.theme.metric(knob)
+    except (AddonError, AttributeError, TypeError):
+        return fallback
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        return fallback
+    return max(0, number)
+
+
+def _room(times: int = 1) -> int:
+    """The theme's gap between two things, taken several times for a loose line."""
+    return _metric("gap_px", 8) * max(1, int(times))
+
+
+def tab_style() -> str:
+    """The sheet the tab wears: the theme's ground, edges, accent and sizes.
+
+    Written as a function rather than kept as a block of text because the theme
+    is only in hand once the app has handed over an api - a constant would be
+    settled before then and could not name a colour at all.
+    """
+    radius = _metric("radius_px", 6)
+    gap = _room()
+    return f"""
+QWidget {{ background-color: {_colour('base', '#161616')}; }}
+QGroupBox {{ border: 1px solid {_colour('border', '#3c3c3c')};
+             border-radius: {radius}px; margin-top: {gap + 4}px;
+             padding: {gap + 4}px {gap + 2}px {gap + 2}px {gap + 2}px;
+             font-weight: 600; }}
+QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left;
+                    left: {gap + 4}px; padding: 0 {max(2, gap // 2)}px;
+                    color: {_colour('accent', '#c51a4a')}; }}
+QPlainTextEdit {{ font-family: Consolas, monospace; }}
+QPushButton {{ padding: {max(2, gap - 1)}px {_metric('pad_x_px', 14)}px; }}
 """
 
-BANNER_STYLE = ("QLabel { color: #e8e8e8; font-size: 13pt; font-weight: 600;"
-                " padding: 4px 2px 2px 2px; }")
 
-_STATUS_STYLE = ("QLabel { color: #9a9a9a; padding: 2px 6px;"
-                 " border: 1px solid #3c3c3c; border-radius: 9px; }")
+def banner_style() -> str:
+    """The tab's own name, in the theme's brightest words."""
+    return (f"QLabel {{ color: {_colour('bright', '#e8e8e8')};"
+            f" font-size: 13pt; font-weight: 600;"
+            f" padding: {max(2, _room() // 2)}px 2px 2px 2px; }}")
+
+
+def chip_style() -> str:
+    """The small plate the repository's address is written on."""
+    gap = max(2, _room() - 2)
+    return (f"QLabel {{ color: {_colour('note', '#9a9a9a')};"
+            f" padding: 2px {gap}px;"
+            f" border: 1px solid {_colour('border', '#3c3c3c')};"
+            f" border-radius: {_metric('radius_px', 6) + 3}px; }}")
 
 TAB_ICON = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
@@ -318,57 +441,259 @@ def tab_icon() -> str:
         return TAB_ICON
 
 
-_VERSION_STYLE = ("QLabel { color: #e8e8e8; font-size: 12pt; font-weight: 600;"
-                  " padding: 4px 2px 0 2px; }")
+def version_style() -> str:
+    """A picked version's own name."""
+    return (f"QLabel {{ color: {_colour('bright', '#e8e8e8')};"
+            f" font-size: 12pt; font-weight: 600;"
+            f" padding: {max(2, _room() // 2)}px 2px 0 2px; }}")
 
-_META_STYLE = "QLabel { color: #9a9a9a; font-size: 9pt; padding: 0 2px; }"
 
-_STATE_STYLE = "QLabel { color: #23d18b; padding: 2px 2px 4px 2px; }"
+def meta_style() -> str:
+    """The line of facts under it, in the theme's quietest words."""
+    return (f"QLabel {{ color: {_colour('note', '#9a9a9a')};"
+            f" font-size: 9pt; padding: 0 2px; }}")
+
+
+def mono_style() -> str:
+    """The commit a version was cut from, in the theme's mono face.
+
+    A sha is read, not spoken, so it is set apart from the sentence it sits in
+    and given the one font that keeps its columns lined up.
+    """
+    return (f"QLabel {{ color: {_colour('muted', '#aaaaaa')};"
+            f" font-family: Consolas, monospace; font-size: 9pt;"
+            f" padding: 0 2px; }}")
+
+
+def section_style() -> str:
+    """The heading over a panel of the picked version's account."""
+    return (f"QLabel {{ color: {_colour('accent', '#c51a4a')};"
+            f" font-size: 9pt; font-weight: 600;"
+            f" padding: {max(2, _room() - 2)}px 2px 2px 2px; }}")
+
+
+def major_style() -> str:
+    """The heading of one major line of versions."""
+    return (f"QLabel {{ color: {_colour('text', '#e0e0e0')};"
+            f" font-size: 10pt; font-weight: 600;"
+            f" padding: {max(2, _room() // 2)}px 2px 0 2px; }}")
+
+
+def state_style() -> str:
+    """What installing the picked version would do, in the theme's own words."""
+    return (f"QLabel {{ color: {_colour('ok', '#23d18b')};"
+            f" padding: 2px 2px {max(2, _room() - 4)}px 2px; }}")
+
+
+def words_style(colour: str) -> str:
+    """One of the header lines, tinted by whatever the caller says it means."""
+    return (f"color: {colour};"
+            f" padding: 2px 2px {max(2, _room() - 4)}px 2px;")
+
+
+def chip_words_style(colour: str) -> str:
+    """The one chip a version's state is written on, worn in that state's colour."""
+    return (f"QLabel {{ color: {colour};"
+            f" border: 1px solid {colour}; border-radius:"
+            f" {_metric('radius_px', 6)}px;"
+            f" padding: 1px {max(4, _room() - 2)}px; }}")
+
+#: The splitter that holds the browsing panes over the job's log, and the share
+#: of the tab's height each of the two is promised. The log starts folded away -
+#: see :func:`show_log` - so the versions fill the screen, and it opens back to
+#: two parts in seven when it is wanted.
+LOG_PANE = "logpane"
+LOG_SHARE = [5, 2]
+
+#: How many major lines the left pane can lay out at once. A spec is built once
+#: and an addon cannot grow a column while it runs, so the rows are promised
+#: here and shown or hidden as the published versions need them; a line past the
+#: last of these is counted in words instead, and the releases page holds every
+#: one of them whatever their number.
+MAJOR_SLOTS = 10
+
+# --- the view a job puts over the browsing panes ---
+
+#: The card that floats in the middle of the job's console. It has to be read
+#: over the output moving behind it, so it is drawn on its own dark plate rather
+#: than on the terminal's own ground, and kept to a width that leaves the lines
+#: behind it visible at the sides.
+def job_card_style() -> str:
+    """The plate a job's name and its bar sit on, over the moving console."""
+    return (f"#jobcard {{ background-color: rgba(24, 24, 24, 236);"
+            f" border: 1px solid {_colour('border', '#3c3c3c')};"
+            f" border-radius: {_metric('radius_px', 6) + 4}px;"
+            f" padding: {_room() + 4}px; max-width: 340px; }}")
+
+
+def job_title_style() -> str:
+    """The version being fetched, in the theme's brightest words."""
+    return (f"QLabel {{ color: {_colour('bright', '#f2f2f2')};"
+            f" font-size: 13pt; font-weight: 700; padding: 0px; }}")
+
+
+def job_sub_style() -> str:
+    """The step it is on, in the mono face the console itself is drawn in."""
+    return (f"QLabel {{ color: {_colour('note', '#9a9a9a')};"
+            f" font-size: 9pt; padding: 0px;"
+            f" font-family: Consolas, monospace; }}")
+
+#: How much of a step the card is allowed to be. The download's whole line goes
+#: onto the console behind the card anyway; the card only has to be readable.
+_JOB_STEP_LEN = 52
+
+
+def _job_view() -> dict:
+    """The pane a download puts over the version list: its console, and the version in hand.
+
+    The ``terminal`` is never connected to anything - it is used for what it is as
+    a screen as well as a shell, so the bytes coming down are counted onto it as
+    they arrive. The card floats over it through an ``overlay``, which keeps it
+    centred when the tab is resized rather than leaving the addon to count pixels;
+    the pane starts hidden, since an install is only one press of a button away.
+    """
+    return {"kind": "overlay", "id": "jobpane", "visible": False, "children": [
+        {"kind": "terminal", "id": "jobterm", "font_size": 10},
+        {"kind": "column", "id": "jobcard", "object_name": "jobcard",
+         "align": "center", "style": job_card_style(), "children": [
+             {"kind": "image", "id": "jobicon", "size": 64},
+             {"kind": "label", "id": "jobname", "text": "",
+              "style": job_title_style(), "word_wrap": True},
+             {"kind": "label", "id": "jobstep", "text": "",
+              "style": job_sub_style(), "word_wrap": True},
+             {"kind": "progress", "id": "jobbar", "maximum": 100, "value": 0},
+         ]},
+    ]}
+
+
+# --- the left pane: one row per major line, its hotfixes in a dropdown ---
+
+def _major_slot(index: int) -> dict:
+    """One major line as it is laid out: its heading, its dropdown, its button.
+
+    All three are built and left hidden, because a row of the pane is decided by
+    how many lines the published tags make and a spec cannot be grown afterwards.
+    The button is the line when it is shut - ``1.9  more`` - and stays as the way
+    to shut it again; the heading and the dropdown are the line opened.
+    """
+    return {"kind": "column", "id": f"major{index}", "visible": False,
+            "children": [
+                {"kind": "label", "id": f"mhead{index}", "text": "",
+                 "word_wrap": True, "visible": False, "style": major_style()},
+                {"kind": "combo", "id": f"mpick{index}", "visible": False,
+                 "tooltip": "The versions published on this line, newest first. "
+                            "Picking one reads what it was for; the button puts "
+                            "whichever one is picked in this program's place.",
+                 "on": ["changed"]},
+                {"kind": "button", "id": f"mopen{index}", "text": "",
+                 "visible": False, "on": ["clicked"]},
+            ]}
+
+
+def _majors_pane() -> dict:
+    """The published versions as their major lines, newest line first.
+
+    A flat list of every hotfix reads as noise once a program has a few years of
+    tags: what a person wants is the line this copy is on and the handful of
+    builds under it, so the pane is one row per line and the line's versions are
+    the dropdown's. Lines below the one being read start shut, and opening one
+    costs nothing, because the tags were all read in one request.
+    """
+    return {"kind": "column", "children": [
+        {"kind": "label", "text": "Published version lines",
+         "style": section_style()},
+        {"kind": "scroll", "children": [{"kind": "column", "children": [
+            {"kind": "column", "id": "majors", "children":
+             [_major_slot(index) for index in range(MAJOR_SLOTS)] + [
+                 {"kind": "label", "id": "mrest", "text": "", "visible": False,
+                  "word_wrap": True, "style": meta_style()},
+                 {"kind": "spacer"}]},
+        ]}]},
+    ]}
+
+
+def _story_pane() -> dict:
+    """The account of the version picked: its name, its state, its words, its files."""
+    return {"kind": "column", "children": [
+        {"kind": "label", "id": "vtitle", "text": "", "word_wrap": True,
+         "style": version_style()},
+        {"kind": "label", "id": "vmeta", "text": "", "word_wrap": True,
+         "style": meta_style()},
+        {"kind": "row", "children": [
+            {"kind": "label", "id": "vchip", "text": "", "visible": False},
+            {"kind": "label", "id": "vsha", "text": "", "visible": False,
+             "style": mono_style()},
+        ]},
+        {"kind": "label", "id": "vstate", "text": "", "word_wrap": True,
+         "style": state_style()},
+        {"kind": "splitter", "vertical": True, "sizes": [3, 1], "children": [
+            {"kind": "column", "children": [
+                {"kind": "label", "text": "What it was published for",
+                 "style": section_style()},
+                {"kind": "multi", "id": "vdetail", "readonly": True,
+                 "expand": True,
+                 "placeholder": "pick a version to read what it was for"},
+            ]},
+            {"kind": "column", "children": [
+                {"kind": "label", "text": "The files it moved",
+                 "style": section_style()},
+                {"kind": "table", "id": "vfiles",
+                 "columns": ["File", "Change"],
+                 "stretch": 0, "col_widths": [300, 130],
+                 "tooltip": "What this version moved against the "
+                            "one before it"},
+            ]},
+        ]},
+    ]}
 
 
 def tab_spec() -> dict:
     """The published versions beside what the picked one was for, over the log.
 
     A version list is only useful beside the story of the version picked from
-    it, so the tab is two panes: the tags newest first on the left, and on the
-    right the release's own title, who published it and when, the commit it
-    was made from, the words it was published with, and the files it moved.
-    The job's log keeps the bottom half, where a download says what it is
-    doing step by step.
+    it, so the tab is two panes: the major lines newest first on the left, each
+    opening to its own builds, and on the right the release's own title, who
+    published it and when, the commit it was cut from, the words it was
+    published with, and the files it moved. The job's log keeps the bottom half,
+    where a download says what it is doing step by step.
+
+    The two browsing panes are held in a column of their own, because a job
+    lays its console over them - see :func:`_job_view` - and the log stays under
+    the whole of it.
+
+    Every line between those panes moves: the list beside its account of the
+    picked version, the version's words above the files it moved, and the log
+    under both. The log starts folded away and stays out of the way until it is
+    asked for - the box in the header, a drag of the fold line, or a job that
+    ended badly, which opens it by itself.
     """
     return {"kind": "column", "children": [
         {"kind": "row", "children": [
-            {"kind": "label", "text": "Berry Manager update", "style": BANNER_STYLE},
-            {"kind": "label", "id": "status", "text": "Ready.", "word_wrap": True,
-             "expand": True, "style": "color: #23d18b; padding: 2px 4px;"},
-            {"kind": "label", "id": "source", "text": "", "style": _STATUS_STYLE},
+            {"kind": "label", "text": "Berry Manager update",
+             "style": banner_style()},
+            {"kind": "label", "id": "status", "text": "Ready.",
+             "word_wrap": True, "expand": True,
+             "style": words_style(_colour('ok', '#23d18b'))},
+            {"kind": "label", "id": "source", "text": "",
+             "style": chip_style()},
+            {"kind": "check", "id": "showlog", "text": "show log",
+             "checked": False,
+             "tooltip": "The job's log under the two panes. It starts folded "
+                        "away; tick it to pull it back up, or drag - or "
+                        "double-click - the line between the panes and it",
+             "on": ["toggled"]},
         ]},
-        {"kind": "splitter", "vertical": True, "sizes": [5, 2], "children": [
-            {"kind": "splitter", "sizes": [2, 3], "children": [
-                {"kind": "table", "id": "list", "columns": ["Version",
-                                                             "Where it stands"],
-                 "stretch": 1, "col_widths": [90, 170],
-                 "tooltip": "Newest first. Pick one to read what it was "
-                            "published for; the button below puts whichever "
-                            "one is picked in this program's place.",
-                 "on": ["selected"]},
-                {"kind": "column", "children": [
-                    {"kind": "label", "id": "vtitle", "text": "", "word_wrap": True,
-                     "style": _VERSION_STYLE},
-                    {"kind": "label", "id": "vmeta", "text": "", "word_wrap": True,
-                     "style": _META_STYLE},
-                    {"kind": "label", "id": "vstate", "text": "", "word_wrap": True,
-                     "style": _STATE_STYLE},
-                    {"kind": "multi", "id": "vdetail", "readonly": True,
-                     "expand": True,
-                     "placeholder": "pick a version to read what it was for"},
-                    {"kind": "table", "id": "vfiles", "columns": ["File",
-                                                                  "Change"],
-                 "stretch": 0, "col_widths": [300, 130],
-                 "tooltip": "What this version moved against the one before it"},
+        {"kind": "splitter", "vertical": True, "id": LOG_PANE,
+         "sizes": LOG_SHARE, "children": [
+            {"kind": "column", "children": [
+                {"kind": "splitter", "id": "browse", "sizes": [2, 3],
+                 "children": [
+                    _majors_pane(),
+                    _story_pane(),
                 ]},
+                _job_view(),
             ]},
-            {"kind": "multi", "id": "log", "readonly": True,
+            {"kind": "multi", "id": "log", "collapsed": True, "readonly": True,
              "placeholder": "every step of the last update, as it happened",
              "tooltip": "The same lines go into the program's own log"},
         ]},
@@ -386,33 +711,75 @@ def build_tab() -> None:
     the program always offers, not a page the user laid out, so it holds beside
     Settings and is found by its mark.
     """
-    api.tabs.add_tab(TAB, spec=tab_spec(), style=TAB_STYLE,
+    api.tabs.add_tab(TAB, spec=tab_spec(), style=tab_style(),
                      pinned=True, icon_only=True)
     api.tabs.set_icon(TAB, tab_icon())
+
+
+def _set(identifier: str, prop: str, value: Any) -> None:
+    """One write to one control of this tab, quietly.
+
+    A control the spec does not hold is not a failure worth a traceback over -
+    an older spec, or a test that stopped at the check - so it is dropped here
+    rather than at every call.
+    """
+    if api is None:
+        return
+    try:
+        api.tabs.set_widget(TAB, identifier, prop, value)
+    except (AddonError, TypeError):
+        pass
 
 
 def say(text: str, bad: bool = False) -> None:
     """One line on the tab's status, and nothing once this copy is gone."""
     if api is None:
         return
+    colour = _colour('warn', '#ffb020') if bad else _colour('ok', '#23d18b')
     try:
         api.tabs.set_widget(TAB, "status", "text", str(text))
-        api.tabs.set_widget(TAB, "status", "style",
-                            "color: #ffb020; padding: 2px 4px;" if bad
-                            else "color: #23d18b; padding: 2px 4px;")
+        api.tabs.set_widget(TAB, "status", "style", f"color: {colour}; padding: 2px 4px;")
     except AddonError:
         pass
 
 
 def note(text: str) -> None:
-    """One line into the tab's own log and the program's log, the same words."""
+    """One line into the tab's own log and the program's log, the same words.
+
+    While a job is on screen its words go out onto the job's console as well,
+    which is what that pane is for: a step is read as it arrives rather than
+    scrolled back to once the job has ended.
+    """
     if api is None:
         return
     try:
         api.tabs.set_widget(TAB, "log", "append", str(text))
     except AddonError:
         pass
+    _job_write(text)
     api.log(text)
+
+
+def show_log(open_it: bool) -> None:
+    """Fold the job's log away, or pull it back up under the browsing panes.
+
+    A folded pane keeps its fold line, so the log is reachable by dragging that
+    line, or double-clicking it, as much as by the box in the header; the two
+    stay in step because the box is set from what is being asked for, and Qt only
+    reports a check box whose tick really moved.
+    """
+    if api is None:
+        return
+    open_it = bool(open_it)
+    shares = [LOG_SHARE[0], LOG_SHARE[1]] if open_it else [LOG_SHARE[0], 0]
+    try:
+        api.tabs.set_widget(TAB, LOG_PANE, "sizes", shares)
+    except AddonError:
+        pass
+    try:
+        api.tabs.set_widget(TAB, "showlog", "checked", open_it)
+    except AddonError:
+        pass
 
 
 def show_text(identifier: str, text: str) -> None:
@@ -529,7 +896,15 @@ _fetchers: dict[str, Fetcher] = {}
 
 
 def _http(values: dict) -> Fetcher:
-    key = clean_token(config_get(values, "token", ""))
+    """The reused connections for this job, carrying the profile's token.
+
+    ``values`` names the repository a check is aimed at, which is nothing to do
+    with what is sent as credentials: a profile has one token and every fork it
+    points at is read with that one. Keying the pool by the token is what keeps
+    a switched-off addon, or a profile that never wrote one, on the anonymous
+    fetcher - the only kind there was before the field.
+    """
+    key = profile_token()
     fetcher = _fetchers.get(key)
     if fetcher is None:
         fetcher = Fetcher(token=key)
@@ -556,7 +931,8 @@ def _refused(status: int, path: str) -> str:
                 "in the settings")
     if status in (403, 429):
         return (f"GitHub refused {path} ({status}). Anonymous requests are "
-                "limited, so add a token in the settings or try again later")
+                "limited, so put a token in Settings > Connection, switch "
+                "this addon on for it, or try again later")
     return f"GitHub answered {status} for {path}"
 
 
@@ -770,6 +1146,29 @@ STANCE_COLOUR = {"newer": "#23d18b", "this": "#ffb020", "older": "#6ea8fe",
 FILE_COLOUR = {"added": "#23d18b", "removed": "#c51a4a", "changed": "#ffb020",
                "renamed": "#6ea8fe", "copied": "#6ea8fe"}
 
+#: Which token of the theme each of those states is asked for by. The hex tables
+#: above stay as the answer when there is no theme to ask - a test, or this addon
+#: run as its own program - so the colours below are the same ones either way.
+STANCE_TOKEN = {"newer": "ok", "this": "warn", "older": "icon_alt",
+                "too old": "accent", "unknown": "note"}
+
+FILE_TOKEN = {"added": "ok", "removed": "accent", "changed": "warn",
+              "renamed": "icon_alt", "copied": "icon_alt"}
+
+
+def stance_colour(stance: Any) -> str:
+    """Where a version stands, in the theme's colour for it."""
+    name = one_line(stance)
+    return _colour(STANCE_TOKEN.get(name, "note"),
+                   STANCE_COLOUR.get(name, "#d6d6d6"))
+
+
+def file_colour(status: Any) -> str:
+    """What happened to one file, in the theme's colour for it."""
+    name = one_line(status).lower()
+    return _colour(FILE_TOKEN.get(name, "note"),
+                   FILE_COLOUR.get(name, "#d6d6d6"))
+
 
 def _floor(values: dict) -> str:
     """The oldest version the swap will go back to, as this copy is configured."""
@@ -859,13 +1258,88 @@ def picked_entry() -> dict | None:
     return None
 
 
-def row_of(text: str) -> int:
-    """Which row of the version list one picked label names."""
-    wanted = one_line(text)
-    for index, entry in enumerate(published):
-        if wanted in (entry.get("version"), entry.get("tag")):
-            return index
+# --- the major lines the left pane is built from ---
+
+def major_of(version: Any) -> str:
+    """The line one published version belongs to, named by its first two numbers.
+
+    ``1.6.1`` and ``1.6.9`` are both on the ``1.6`` line: what separates them is a
+    hotfix, and a pane that lists them one under the other reads as noise once a
+    program has a few years of tags behind it. A version with a single number is
+    its own line, and a tag nothing here reads as a version belongs to none.
+    """
+    parts = _version_parts(version)
+    if not parts:
+        return ""
+    return ".".join(str(part) for part in parts[:2])
+
+
+def majors(entries: list) -> list[dict]:
+    """The published versions grouped into their major lines, newest line first.
+
+    The entries arrive newest first, so the first version of a line is its head -
+    the one a dropdown opens on - and the lines come out in the order their heads
+    were read, which is newest line first without a sort of their own. Each line
+    holds the ``published`` indices of the versions on it rather than copies of
+    them, so a repaint never has to match a version back up by its text and the
+    story already read for one stays where it belongs.
+    """
+    lines: list[dict] = []
+    by_name: dict[str, dict] = {}
+    for index, entry in enumerate(entries or []):
+        name = major_of(entry.get("version"))
+        if not name:
+            continue
+        line = by_name.get(name)
+        if line is None:
+            line = {"major": name, "head": index, "entries": []}
+            by_name[name] = line
+            lines.append(line)
+        line["entries"].append(index)
+    return lines
+
+
+def line_at(slot: int) -> dict | None:
+    """The major line laid out in one row of the pane, when there is one to lay."""
+    if 0 <= slot < len(lines):
+        return lines[slot]
+    return None
+
+
+def slot_of(major: Any) -> int:
+    """Which row of the pane one major line is laid out in; -1 past the last.
+
+    A version published on a line older than the pane can hold has no row and no
+    dropdown, which is why the rows it could not show are counted in words under
+    the last of them rather than left out in silence.
+    """
+    wanted = one_line(major)
+    for slot, line in enumerate(lines[:MAJOR_SLOTS]):
+        if str(line.get("major") or "") == wanted:
+            return slot
     return -1
+
+
+def open_line_for(index: int) -> str:
+    """The line the pane has to be pulled open on for one version to be visible."""
+    if not 0 <= index < len(published):
+        return ""
+    return major_of(published[index].get("version"))
+
+
+def slot_number(identifier: Any) -> int:
+    """Which row of the pane one of this pane's controls belongs to; -1 for none.
+
+    The heading, the dropdown and the button of a line are named for their row,
+    so a report coming back from ``mpick3`` is answered by the fourth line - the
+    number is read off the name rather than kept in a table that could fall out
+    of step with the pane.
+    """
+    text = re.findall(r"(\d+)$", one_line(identifier))
+    if not text:
+        return -1
+    number = int(text[0])
+    return number if 0 <= number < MAJOR_SLOTS else -1
 
 
 def restance(have: str, floor: str) -> None:
@@ -919,31 +1393,71 @@ def _release_words(release: dict) -> str:
     return str(release.get("body") or release.get("body_text") or "").strip()
 
 
-def load_detail(entry: dict, values: dict) -> None:
-    """Read what only a further request can give, and keep it for next time.
+def read_already(tag: Any) -> bool:
+    """Whether one version's story has been read and kept from an earlier pick."""
+    return one_line(tag) in notes
 
-    A version list is read in two requests whatever the number of versions, so
-    the tab can come up quickly; the commit's own words and the file list belong
-    to one version and are asked for when a row is picked, then cached on the
-    entry - clicking back and forth costs nothing.
+
+def keep_read(tag: str, entry: dict) -> None:
+    """Put what was just read for one version where the next pick can find it.
+
+    The download a release carries is left out on purpose: which file this machine
+    can take is worked out from whatever the release is known to be at the moment
+    the pane is drawn, so a version whose file has since come off its release is
+    not offered from a remembered answer.
     """
+    notes[tag] = {key: entry.get(key) for key in
+                  ("release", "commit", "files")}
+
+
+def load_detail(entry: dict, values: dict) -> None:
+    """Read what only a further request can give, once for each version.
+
+    The list itself is read in two requests whatever the number of versions, so
+    the tab can come up quickly; a commit's words and a file list belong to the
+    one version picked and are asked for when it is picked, then kept under its
+    tag. That is what lets the pane say *not read yet* honestly, and what makes
+    coming back to a version already read cost nothing at all.
+
+    Each part is only asked for when the entry says nothing about it, which is how
+    the batch read of the releases is used rather than repeated - and how a
+    version known to carry no file is left known to carry no file.
+    """
+    tag = one_line(entry.get("tag"))
+    kept = notes.get(tag) or {}
     if entry.get("release") is None:
-        try:
-            entry["release"] = release_for(values, str(entry.get("tag")))
-        except (AddonError, http.client.HTTPException, OSError,
-                ValueError) as error:
-            note(f"the release under {entry.get('tag')} could not be read: {error}")
-            entry["release"] = {}
-        entry["download"] = download_source(entry["release"], system_name())
-    if entry.get("commit") is None and entry.get("sha"):
-        entry["commit"] = commit_of(values, str(entry.get("sha")))
+        release = kept.get("release")
+        if not isinstance(release, dict):
+            try:
+                release = release_for(values, tag)
+            except (AddonError, http.client.HTTPException, OSError,
+                    ValueError) as error:
+                note(f"the release under {tag} could not be read: {error}")
+                release = {}
+        entry["release"] = release
+        entry["download"] = download_source(release, system_name())
+    if entry.get("commit") is None:
+        commit = kept.get("commit")
+        if isinstance(commit, dict) and commit:
+            entry["commit"] = commit
+        elif entry.get("sha"):
+            entry["commit"] = commit_of(values, str(entry.get("sha")))
+        else:
+            entry["commit"] = {}
     if entry.get("files") is None:
-        entry["files"] = changed_files(values, str(entry.get("tag")),
-                                       str(entry.get("previous")))
+        files = kept.get("files")
+        entry["files"] = files if isinstance(files, list) else changed_files(
+            values, tag, str(entry.get("previous")))
+    if tag:
+        keep_read(tag, entry)
 
 
 def meta_of(entry: dict, values: dict) -> str:
-    """The one line of facts beside a version's name."""
+    """The one line of facts beside a version's name, its commit aside.
+
+    The sha is left out of the sentence it used to sit in: it is read rather than
+    spoken, so it wears the mono face of its own beside the state chip.
+    """
     release = entry.get("release") if isinstance(entry.get("release"), dict) else {}
     commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
     pieces = []
@@ -953,9 +1467,6 @@ def meta_of(entry: dict, values: dict) -> str:
     who = who or str(commit.get("who") or "")
     if day or who:
         pieces.append(" ".join(part for part in (who, day) if part))
-    sha = str(entry.get("sha") or commit.get("sha") or "")
-    if sha:
-        pieces.append(f"commit {sha[:7]}")
     source = entry.get("download")
     pieces.append(f"{source[2]}: {source[0]}" if source else "no file attached")
     files = entry.get("files")
@@ -1015,17 +1526,224 @@ def account_of(entry: dict, values: dict, have: str, floor: str) -> str:
 
 
 def show_versions(have: str, floor: str) -> None:
-    """Repaint the version list: newest first, each row saying where it stands."""
+    """Repaint the left pane: one row per major line, newest line first.
+
+    The grouping is redone from the versions in hand, so a repository that grew a
+    line or lost one is reflected without another read, and a line whose versions
+    have all gone is taken off the page rather than left shut. Which lines are
+    open survives a repaint - the user's own doing, not this pane's - but only
+    for lines that still exist, and a dropdown never lays its versions down here
+    unless its line is already open.
+    """
+    global lines, filling
     if api is None:
         return
-    rows = []
-    for entry in published:
-        rows.append({"cells": [one_line(entry.get("version")), offer_of(entry)],
-                     "color": STANCE_COLOUR.get(str(entry.get("stance")), "#d6d6d6")})
+    lines = majors(published)
+    named = {str(line.get("major") or "") for line in lines}
+    opened[:] = [major for major in opened if major in named]
+    was, filling = filling, True
     try:
-        api.tabs.set_widget(TAB, "list", "rows", rows)
-    except AddonError:
-        pass
+        for slot in range(MAJOR_SLOTS):
+            line = line_at(slot)
+            if line is None:
+                _clear_slot(slot)
+            else:
+                _paint_slot(slot, line, have, floor)
+        rest = len(lines) - MAJOR_SLOTS
+        _set("mrest", "visible", rest > 0)
+        if rest > 0:
+            _set("mrest", "text",
+                 f"{rest} older line(s) have no room here; the releases page "
+                 "under the tab holds every version on them")
+    finally:
+        filling = was
+
+
+# --- the left pane, line by line ---
+
+def item_text(entry: dict) -> str:
+    """One entry of a line's dropdown: its version, and where it stands.
+
+    A dropdown only shows one of its entries at a time, so the marking beside the
+    version is what tells a person which of the hotfixes on a line is worth
+    opening before they open it.
+    """
+    return f"{one_line(entry.get('version'))}  \u2014  {offer_of(entry)}"
+
+
+def combo_text(payload: Any) -> str:
+    """What a dropdown says it is showing, out of whatever it reported."""
+    if isinstance(payload, dict):
+        return one_line(payload.get("text") or payload.get("value"))
+    return one_line(payload)
+
+
+def index_of(major: Any, text: Any) -> int:
+    """Which published version one dropdown entry names, within its own line.
+
+    The version is the first word of the entry, so the marking beside it never
+    gets in the way of the match, and the search stays inside the line that
+    reported it: a version number published on two lines of a fork's repository
+    is answered by the line the user was looking at rather than the first one
+    that comes to mind.
+    """
+    wanted = one_line(text).split(" ")[0].strip()
+    slot = slot_of(major)
+    if slot < 0 or not wanted:
+        return -1
+    for index in lines[slot].get("entries") or []:
+        if not 0 <= index < len(published):
+            continue
+        entry = published[index]
+        if wanted in (entry.get("version"), entry.get("tag")):
+            return index
+    return -1
+
+
+def major_words(line: dict, have: str, floor: str) -> str:
+    """One major line's heading: its number, how many builds it holds, and where
+    this copy sits in it.
+
+    A line this copy is on is worth telling apart from a line that is only ahead
+    of it or only behind it, because the builds under a person's own version are
+    the ones they might actually want to go back to - and a line further back than
+    the floor is named as such, since opening it can only ever end in a refusal.
+    """
+    entries = [published[index] for index in line.get("entries") or []
+               if 0 <= index < len(published)]
+    stances = {str(entry.get("stance") or "") for entry in entries}
+    major = str(line.get("major") or "")
+    if major and major == major_of(have):
+        where = "this copy is on it"
+    elif "this" in stances:
+        where = "this copy is on it"
+    elif stances == {"too old"}:
+        where = f"further back than {floor}, where going back stops"
+    elif "newer" in stances and len(stances) > 1:
+        where = "ahead of this copy, and a way back lower down"
+    elif "newer" in stances:
+        where = "ahead of this copy"
+    elif "older" in stances:
+        where = "a way back"
+    else:
+        where = "nothing here reads as a version"
+    builds = len(entries)
+    return (f"berry{major}.x  \u2014  {builds} published "
+            f"{'build' if builds == 1 else 'build(s)'}, {where}")
+
+
+def not_read_words(entry: dict) -> str:
+    """What the account panel says of a version nobody has picked yet.
+
+    Honest rather than empty: the tag list named this version and the release
+    batch said whether it has a file, but its words, its commit and its files are
+    a request apiece and are only asked for when a person picks it.
+    """
+    return (f"{one_line(entry.get('tag'))} has not been read beyond the tag "
+            "list - pick it from its line and what it was published for, the "
+            "commit it was cut from and the files it moved will be fetched, and "
+            "kept for whenever you come back to it.")
+
+
+def _fill(slot: int, line: dict) -> None:
+    """Hand one open line its versions, and point them at what the pane is showing.
+
+    A dropdown is laid out when its line is opened and not before, which is what
+    makes a line below the one this copy is on cost nothing until it is asked for.
+    Names a line already holds are left alone, because clearing a dropdown that
+    has not changed would move the user's choice out from under their hand. All of
+    it happens with ``filling`` up: laying versions down reports a choice of its
+    own, and that report is not anybody picking anything.
+    """
+    key = f"mpick{slot}"
+    names = [item_text(published[index]) for index in line.get("entries") or []
+             if 0 <= index < len(published)]
+    global filling
+    was, filling = filling, True
+    try:
+        if names and slot_names.get(key) != names:
+            _set(key, "items", names)
+            slot_names[key] = names
+        if 0 <= picked < len(published) and picked in (line.get("entries") or []):
+            _set(key, "value", item_text(published[picked]))
+    finally:
+        filling = was
+
+
+def _clear_slot(slot: int) -> None:
+    """Take one row of the pane off the page, and forget what its dropdown held."""
+    _set(f"major{slot}", "visible", False)
+    for name in ("mhead", "mpick", "mopen"):
+        _set(f"{name}{slot}", "visible", False)
+    slot_names.pop(f"mpick{slot}", None)
+
+
+def _paint_slot(slot: int, line: dict, have: str, floor: str) -> None:
+    """One major line on the page: open with its versions, or shut as one button.
+
+    The button is the line when it is shut and the way to shut it again once it is
+    open, so a pane of six lines is six lines tall rather than six lines and all
+    of their builds.
+    """
+    major = str(line.get("major") or "")
+    open_it = bool(major) and major in opened
+    builds = len(line.get("entries") or [])
+    _set(f"major{slot}", "visible", True)
+    _set(f"mhead{slot}", "visible", open_it)
+    _set(f"mhead{slot}", "text", major_words(line, have, floor))
+    _set(f"mpick{slot}", "visible", open_it)
+    _set(f"mopen{slot}", "visible", True)
+    _set(f"mopen{slot}", "text", f"{major}  {'less' if open_it else 'more'}")
+    _set(f"mopen{slot}", "tooltip",
+         f"{'Hide' if open_it else 'Show'} the {builds} version(s) published on "
+         f"the {major} line")
+    if open_it:
+        _fill(slot, line)
+
+
+def toggle_major(slot: int, force: Any = None) -> None:
+    """Pull one line's dropdown out, or shut it back into its button.
+
+    Opening a line is the only thing that lays its versions down, and even that is
+    made from the tags already read, so it costs no request at all; what costs a
+    request is picking a version, whose story is then read once and kept. A line
+    opened that holds nothing the right-hand pane is telling the story of points
+    itself at its own newest, so the two panes never disagree about the pick.
+    """
+    line = line_at(slot)
+    if line is None or api is None:
+        return
+    major = str(line.get("major") or "")
+    want = (major not in opened) if force is None else bool(force)
+    if want:
+        if major not in opened:
+            opened.append(major)
+    elif major in opened:
+        opened.remove(major)
+    values = merge_config(DEFAULTS, api.config.stored())
+    _paint_slot(slot, line, local_version(), _floor(values))
+    if want and picked not in (line.get("entries") or []):
+        pick_row(int(line.get("head") or 0))
+
+
+def pick_text(slot: int, payload: Any) -> None:
+    """A dropdown reported what it is showing: move the pane to that version.
+
+    Laying a line's versions down reports a choice as it goes, and this addon run
+    as its own process hears that back later rather than under the hand that set
+    it, so the guard up during a fill is not enough on its own: a version already
+    picked is not picked a second time, and a line already showing the pick is not
+    laid out again.
+    """
+    if filling:
+        return
+    line = line_at(slot)
+    if line is None:
+        return
+    index = index_of(line.get("major"), combo_text(payload))
+    if index < 0 or index == picked:
+        return
+    pick_row(index)
 
 
 def show_files(entry: dict | None) -> None:
@@ -1041,22 +1759,51 @@ def show_files(entry: dict | None) -> None:
         rows.append({"cells": [name, f"{status} "
                                      f"+{int(file.get('additions') or 0)}"
                                      f" -{int(file.get('deletions') or 0)}"],
-                     "color": FILE_COLOUR.get(status, "#d6d6d6")})
-    try:
-        api.tabs.set_widget(TAB, "vfiles", "rows", rows)
-    except (AddonError, TypeError, ValueError):
-        pass
+                     "color": file_colour(status)})
+    _set("vfiles", "rows", rows)
+
+
+def show_chip(entry: dict) -> None:
+    """One version's own state, as a single chip in the colour it is worn in.
+
+    The chip is the short answer - an update, this copy, a way back, below the
+    floor - so a person scrolling back to a version they read earlier can place it
+    without reading the sentence under it again.
+    """
+    if api is None:
+        return
+    stance = str(entry.get("stance") or "unknown")
+    _set("vchip", "visible", True)
+    _set("vchip", "text", offer_of(entry))
+    _set("vchip", "style", chip_words_style(stance_colour(stance)))
+    sha = one_line(entry.get("sha"))
+    _set("vsha", "visible", bool(sha))
+    _set("vsha", "text", f"commit {sha[:7]}" if sha else "")
+
+
+def hide_chip() -> None:
+    """Take the chip and the commit off the pane, for a version there is none of."""
+    _set("vchip", "visible", False)
+    _set("vsha", "visible", False)
 
 
 def show_detail(values: dict, entry: dict | None, have: str, floor: str,
                 fetch: bool = True) -> None:
-    """The right-hand pane, for one version or for the state of having none."""
+    """The right-hand pane, for one version or for the state of having none.
+
+    ``fetch`` is whether picking this version was the reason the pane is being
+    drawn. A redraw that is not a pick - the list being re-placed after an
+    install, say - must not go to GitHub for a story it has never been asked for,
+    so it says as much in the account panel and leaves the rest of the pane, which
+    the tag list already named, in place.
+    """
     if api is None:
         return
     if entry is None:
-        show_words("vtitle", "Nothing published yet", STANCE_COLOUR["unknown"])
+        show_words("vtitle", "Nothing published yet", stance_colour("unknown"))
         show_words("vmeta", "")
         show_words("vstate", "")
+        hide_chip()
         show_text("vdetail", no_tags_account(values, have, _prefix(values)))
         show_files(None)
         return
@@ -1068,23 +1815,39 @@ def show_detail(values: dict, entry: dict | None, have: str, floor: str,
     if named and named != title:
         title = f"{title}  \u2014  {named}"
     ok, why = installable(entry, values, have, floor)
-    colour = STANCE_COLOUR.get(str(entry.get("stance")), "#d6d6d6")
+    colour = stance_colour(entry.get("stance"))
     show_words("vtitle", title, colour)
     show_words("vmeta", meta_of(entry, values))
+    show_chip(entry)
     show_words("vstate", state_of(entry, have, ok, why),
-               colour if ok else STANCE_COLOUR["too old"])
-    show_text("vdetail", account_of(entry, values, have, floor))
+               colour if ok else stance_colour("too old"))
+    if fetch or read_already(entry.get("tag")):
+        show_text("vdetail", account_of(entry, values, have, floor))
+    else:
+        show_text("vdetail", not_read_words(entry))
     show_files(entry)
 
 
 def pick_row(index: int) -> None:
-    """Point the tab at one row of the version list and read that one's story."""
+    """Point the tab at one published version and read that one's story.
+
+    The line the version sits on is pulled open on the way, so the left pane is
+    never left showing the dropdown of one line while the right pane tells the
+    story of another: a pick made from anywhere, by the check or by a person, is
+    a pick the pane can see.
+    """
     global picked
     if api is None or not 0 <= index < len(published):
         return
     picked = index
     values = merge_config(DEFAULTS, api.config.stored())
     have, floor = local_version(), _floor(values)
+    major = major_of(published[index].get("version"))
+    slot = slot_of(major)
+    if slot >= 0:
+        if major and major not in opened:
+            opened.append(major)
+        _paint_slot(slot, lines[slot], have, floor)
     show_detail(values, published[index], have, floor)
 
 
@@ -1169,15 +1932,26 @@ def check_now(_checked: bool = False) -> None:
         entry["previous"] = (entries[index + 1]["tag"]
                              if index + 1 < len(entries) else "")
     published = entries
+    # A version that has gone out of the repository takes the story that was read
+    # for it with it, so a copy left checking on a timer cannot fill its cache
+    # with tags nothing lists any more.
+    live = {one_line(entry.get("tag")) for entry in entries}
+    for gone in [tag for tag in notes if tag not in live]:
+        notes.pop(gone, None)
     announce(values, have)
     if not entries:
         picked = -1
+        opened.clear()
         say(f"no {prefix}<version> tag is published yet - nothing to compare "
             "with")
         show_versions(have, floor)
         show_detail(values, None, have, floor)
         return
     picked = _default_pick(entries)
+    # The pane opens on the line the picked version is on and on nothing else:
+    # the newest of the newest major is what a person came for, and every older
+    # line waits as one button until it is asked for.
+    opened[:] = [open_line_for(picked)]
     newest, oldest = entries[0], entries[-1]
     counts = {"newer": 0, "this": 0, "older": 0, "too old": 0, "unknown": 0}
     for entry in entries:
@@ -1197,6 +1971,283 @@ def check_now(_checked: bool = False) -> None:
     show_detail(values, published[picked], have, floor)
     note(f"{len(entries)} published version(s) read; this copy is "
          f"berry{have or '?'}, the floor for going back is {floor}")
+
+
+# --- what a way back may ask to be taken away first ---
+
+#: What can go wrong when an older program is put where a newer one runs, said in
+#: the dialog rather than left to be discovered on the next start. All three are
+#: written-down things, which is why the answer to them is a folder of files and not
+#: an apology.
+DOWNGRADE_RISKS = (
+    "a profile file the older copy cannot read, which loses the connections and "
+    "settings of whoever wrote it",
+    "an addon installed against a newer api, which the older program refuses to "
+    "load",
+    "a theme key that does not exist yet, which draws a half-styled window until "
+    "the theme is changed",
+)
+
+#: The three answers the downgrade asks for, as their buttons are named and as
+#: they come back: keep what is written, start clean, or leave it alone.
+ERASE_ANSWER = "Erase data and download"
+KEEP_ANSWER = "Download with current setup"
+CANCEL_ANSWER = "Cancel"
+
+#: The one ``.theme`` file that came inside the program, so an erase takes every
+#: copy somebody wrote beside it and leaves the look that always works.
+SHIPPED_THEME = "default.theme"
+
+
+def program_folder() -> Path:
+    """The folder the program runs from, which everything beside it is named for.
+
+    The backup of an erase lands here - the one place somebody who cannot start the
+    program can still find a file - and so do the three kinds of thing it takes away:
+    the written config, the written themes and the addons that did not come inside
+    the program. A copy running from its source files has no program to look beside,
+    so it falls back on the folder the app was started from.
+    """
+    try:
+        return Path(program_path()).parent
+    except AddonError:
+        pass
+    try:
+        return Path(str(api.paths.base))
+    except (AddonError, AttributeError, TypeError) as error:
+        raise AddonError(f"the folder the program runs from cannot be found: {error}")
+
+
+def installed_rows() -> list[dict]:
+    """Every addon the app has in its folder, as the app's own list names them.
+
+    Read through the api rather than off the disk because the app is what knows
+    which of them came inside the program: an erase leaves those and takes
+    everything a person installed, and telling them apart by whether a file is
+    there would leave an installed addon's program behind or take a shipped one
+    with it.
+    """
+    if api is None:
+        return []
+    try:
+        rows = api.session.addons()
+    except (AddonError, AttributeError, TypeError) as error:
+        note(f"the installed addons could not be listed: {error}")
+        return []
+    return [row for row in (rows or []) if isinstance(row, dict)]
+
+
+def erasable(row: dict) -> bool:
+    """Whether one addon row names something an erase may take away.
+
+    Two things keep it from taking the parts that have to keep working: an addon
+    that came inside the program stays, and this addon stays whatever the scan
+    calls it, because the download that follows an erase is being run out of these
+    very files.
+    """
+    if row.get("bundled") or not row.get("id"):
+        return False
+    return one_line(row.get("id")) != OWN_ID
+
+
+def addon_files(base: Path, addon_id: Any) -> list[Path]:
+    """Every file and folder one addon was written as, and its own data beside it.
+
+    An addon the store installed is a program named for its id - a compiled
+    ``.exe`` or ``.bin``, or the source file a person dropped in - with its
+    settings and downloads under ``addons/_data``, and, for a build that keeps its
+    files apart, a folder of its own beside them. Every shape is named here so that
+    taking an addon away takes the whole of it, leaving nothing that would come back
+    to life on the next scan.
+    """
+    name = safe_segment(addon_id)
+    if not name:
+        return []
+    folder = base / "addons"
+    return [folder / f"{name}.exe", folder / f"{name}.bin",
+            folder / f"{name}.py", folder / name, folder / "_data" / name]
+
+
+def written_themes(base: Path) -> list[Path]:
+    """The ``.theme`` files somebody wrote, the shipped one left where it is.
+
+    A copy of a theme made by the theme manager is the thing an older program may
+    name a colour it has never heard of; the file the program came with is the one
+    look that always works, so it stays put.
+    """
+    folder = base / "themes"
+    if not folder.is_dir():
+        return []
+    return [path for path in sorted(folder.glob("*.theme"))
+            if path.name != SHIPPED_THEME]
+
+
+def backup_targets(base: Path) -> list[Path]:
+    """What gets copied into the zip before any of it goes: the written data.
+
+    The config folder and every addon's data folder, the shipped addons' among
+    them, since their settings were written by a person too. Nothing the program
+    came with is kept, because it comes with the older program as well.
+    """
+    out: list[Path] = []
+    config = base / "config"
+    if config.is_dir():
+        out.append(config)
+    data = base / "addons" / "_data"
+    if data.is_dir():
+        out += [folder for folder in sorted(data.iterdir()) if folder.is_dir()]
+    return out
+
+
+def erase_targets(base: Path) -> list[Path]:
+    """Everything an erase would take away, as things stand right now.
+
+    Only paths that really exist are named, so a program that has never written
+    anything is erased by doing almost nothing - and the list is the one the dialog
+    is asking permission for, so what a person agrees to is what goes.
+    """
+    gone: list[Path] = [base / "config"]
+    gone += written_themes(base)
+    for row in installed_rows():
+        if erasable(row):
+            gone += addon_files(base, row.get("id"))
+    return [path for path in gone if path.exists()]
+
+
+def write_backup(base: Path, version: str) -> tuple[Path | None, int]:
+    """Copy everything written down into one zip beside the program.
+
+    The zip is named for the version being gone back to, so two erases on one
+    machine say which of them belongs to which program, and the paths inside it
+    start at the program's folder - unpacking it over any copy puts every file
+    back where it was found. ``(where, how many)``, with ``None`` for a program
+    that had nothing written down to keep.
+    """
+    wanted = backup_targets(base)
+    if not wanted:
+        return None, 0
+    target = base / f"backup-before-{one_line(version) or 'unknown'}.zip"
+    count = 0
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        for root in wanted:
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    archive.write(path, path.relative_to(base).as_posix())
+                    count += 1
+    return target, count
+
+
+def stop_addons(rows: list[dict]) -> list[str]:
+    """Take down every addon that did not come inside the program, and name them.
+
+    Stopped before their files are deleted, because a running addon holds its own
+    program open and the delete would fail on the one file that matters. The app's
+    own switch is what kills the process - this addon has no business reaching into
+    another's - and the shipped ones are left running, this one among them, since
+    the download that follows is theirs to finish.
+    """
+    gone: list[str] = []
+    for row in rows:
+        if not erasable(row):
+            continue
+        ident = one_line(row.get("id"))
+        if row.get("running") or row.get("enabled"):
+            try:
+                api.session.set_addon_running(ident, False)
+            except (AddonError, AttributeError, TypeError) as error:
+                note(f"{ident} could not be stopped: {error}")
+        gone.append(ident)
+    return gone
+
+
+def factory_reset(version: str) -> list[str]:
+    """Erase what was written down, and account for it in lines.
+
+    This is the answer for a way back that a profile written by a newer program
+    would break: everything the user or an installed addon made goes, and what is
+    left is the state the older copy would start in on a first run. The account is
+    handed back rather than logged on the way, so the caller can put it in its log
+    in its own order. Nothing here rescans the addons folder: a rescan shuts this
+    addon down while its own download is in the air, and the program that starts
+    after the swap reads the folder for itself.
+    """
+    base = program_folder()
+    rows = installed_rows()
+    words: list[str] = []
+    where, count = write_backup(base, version)
+    if where is None:
+        words.append("nothing was written down to keep, so no backup was made")
+    else:
+        words.append(f"{count} file(s) copied to {where}; unpack it over the "
+                     "program's folder to put them back")
+    doomed = erase_targets(base)
+    stopped = stop_addons(rows)
+    if stopped:
+        words.append(f"{len(stopped)} installed addon(s) stopped and deleted: "
+                     + ", ".join(stopped))
+    else:
+        words.append("no addon had to be taken away: every one here came inside "
+                     "the program")
+    deleted = 0
+    for path in doomed:
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            deleted += 1
+        except OSError as error:
+            words.append(f"{path.name} could not be deleted: {error}")
+    words.append(f"{deleted} of the written things went: the config folder and "
+                 "the addon records in it, the themes somebody copied, and the "
+                 "addons the store installed")
+    return words
+
+
+def downgrade_words(entry: dict, have: str, wanted: str, across: bool) -> str:
+    """The first half of the question: what is being replaced, and how far back.
+
+    A hotfix on the same line and a line nobody has been on are not the same risk,
+    so they are not said the same way - and the version still being named here is
+    the one the picked entry carries, not whatever the list was showing when the
+    button was first looked at.
+    """
+    step = ("That reaches across a major line: the older program predates whole "
+            "features of this one."
+            if across else
+            "It is a hotfix on the same line as this copy, so the older program "
+            "is close to this one.")
+    return (f"This copy is berry{have or '?'} and {one_line(entry.get('tag'))} "
+            f"is berry{wanted}, so installing puts an older program where the "
+            f"newer one runs now.\n{step}\n\nThe swap itself moves one file and "
+            "nothing else; what is at risk is everything written down beside it.")
+
+
+def downgrade_dialog(entry: dict, have: str, wanted: str, across: bool) -> str:
+    """Ask somebody going backwards what should happen to what is written down.
+
+    Three honest answers rather than a yes or no, because the question really has
+    three: keep everything and take the risk, start clean and take the loss, or
+    leave the program where it is. Closing the box without an answer comes back
+    ``""``, which is treated exactly as **Cancel** is - nothing fetched, nothing
+    written, one line on the status.
+    """
+    spec = {"kind": "column", "children": [
+        {"kind": "label", "text": downgrade_words(entry, have, wanted, across),
+         "word_wrap": True},
+        {"kind": "label", "text": "What may go wrong:", "word_wrap": True},
+        {"kind": "multi", "readonly": True, "value":
+         "\n".join(f"- {risk}" for risk in DOWNGRADE_RISKS)},
+    ]}
+    try:
+        answer = api.ui.dialog(spec, f"Go back to berry{wanted}?",
+                               answers=[ERASE_ANSWER, KEEP_ANSWER, CANCEL_ANSWER])
+    except AddonError as error:
+        note(f"the question could not be asked: {error}")
+        return ""
+    if not isinstance(answer, dict):
+        return ""
+    return one_line(answer.get("answer"))
 
 
 # --- the program this update replaces ---
@@ -1377,30 +2428,170 @@ def restart_app() -> None:
 
 # --- the job: download one step per tick, then swap ---
 
-def _begin(verb: str, values: dict) -> dict:
+def _job_show(show: bool) -> bool:
+    """Swap the browsing panes for the job's console, or hand them back.
+
+    ``set_widget`` answers ``False`` for an id the tab does not hold, which is how
+    a job started on a tab built without the pane - an older layout, or a bare
+    test harness - finds out it has nowhere to print and carries on regardless.
+    """
+    if api is None:
+        return False
+    try:
+        placed = api.tabs.set_widget(TAB, "jobpane", "visible", bool(show))
+        api.tabs.set_widget(TAB, "browse", "visible", not show)
+    except AddonError:
+        return False
+    return bool(placed)
+
+
+def _job_write(text: str) -> None:
+    """One line onto the job's console, in the same words the log is given.
+
+    The screen is a terminal rather than a text box, so a bare newline would walk
+    down the page without going back to the left margin. Nothing is written at all
+    until a job has put the pane on screen.
+    """
+    if api is None or job is None or not job.get("pane"):
+        return
+    try:
+        api.tabs.set_widget(TAB, "jobterm", "write", f"{text}\r\n")
+    except AddonError:
+        pass
+
+
+def _job_card(name: str = "", step: str | None = None,
+              percent: int | None = None, picture: str | None = None) -> None:
+    """Fill the card floating over the job's console: the version, its step, its share.
+
+    Only what is said is written, so a step that names no share leaves the bar
+    where it stands - a download whose length was never told has no share to
+    count up to. The step is cut short: the whole of it goes onto the screen
+    behind the card as well, and the card is the one thing here that has to stay
+    readable over it.
+    """
+    if api is None or job is None or not job.get("pane"):
+        return
+    try:
+        if name:
+            api.tabs.set_widget(TAB, "jobname", "text", str(name))
+        if step is not None:
+            line = one_line(step)
+            if len(line) > _JOB_STEP_LEN:
+                line = line[:_JOB_STEP_LEN - 1].rstrip() + "\u2026"
+            api.tabs.set_widget(TAB, "jobstep", "text", line)
+        if percent is not None:
+            api.tabs.set_widget(TAB, "jobbar", "value", int(percent))
+        if picture:
+            api.tabs.set_widget(TAB, "jobicon", "image", str(picture))
+    except AddonError:
+        pass
+
+
+def _progress(text: str, frac: float | None = None) -> None:
+    """One step of the job: the floating notice's line and share, and the card's.
+
+    The share is the download's own bytes so far, so a 20 MB program counts up as
+    it arrives rather than in made-up stages; a step that knows its part of the
+    whole - the swap at the end - is given as ``frac`` instead. An answer that
+    never told its length has no share to show: the bar is left where it stands
+    and the line carries the byte count on its own.
+
+    Nothing here touches the tab's status line: the notice wears the steps, and
+    the page hears the job only at its start and its end, so a download does not
+    read as a flicker behind the card's bar. The step is printed on the job's
+    console too, in full, because for a download these counts are the whole of
+    what is going on - there is no build output behind the card to read instead.
+    """
+    if api is None or job is None:
+        return
+    if frac is not None:
+        percent = max(0, min(99, int(round(100.0 * float(frac)))))
+    else:
+        total = int(job.get("total") or 0)
+        got = int(job.get("got") or 0)
+        percent = min(99, int(round(100.0 * got / total))) if total else None
+    try:
+        api.ui.progress_notice("Berry Manager update", str(text),
+                               percent if percent is not None else 0, 100)
+    except Exception:
+        pass
+    _job_write(text)
+    _job_card(step=text, percent=percent)
+
+
+def _bytes_line() -> str:
+    """How far the download has come, in the words the notice and the card wear."""
+    got = int((job or {}).get("got") or 0)
+    total = int((job or {}).get("total") or 0)
+    return (f"downloading... {_size(got)}"
+            + (f" of {_size(total)}" if total else ""))
+
+
+def _begin(verb: str, values: dict, name: str = "") -> dict:
+    """Start a job: the buttons grey out and its console goes up over the tab.
+
+    ``pane`` says whether the tab could put that console on screen, and so whether
+    the download's steps have anywhere to be printed on; nothing else about the job
+    depends on the answer. ``name`` is what the card in the middle of it is to
+    call the version being fetched.
+    """
     global working, job
     working = True
     job = {"verb": verb, "values": values, "host": "", "path": "",
            "response": None, "chunks": [], "got": 0, "total": 0,
-           "hops": 0, "ticks": 0}
+           "hops": 0, "ticks": 0, "pane": False}
     _buttons(False)
     try:
         api.tabs.set_widget(TAB, "log", "value", "")
     except AddonError:
         pass
+    job["pane"] = _job_show(True)
+    if job["pane"]:
+        try:
+            api.tabs.set_widget(TAB, "jobterm", "clear", True)
+        except AddonError:
+            pass
+        _job_card(name, step="", picture=tab_icon())
+    say(f"{verb} starting...")
+    _progress(f"{verb} starting...", 0.0)
     return job
 
 
 def _finish(text: str, bad: bool = False) -> None:
+    """End the job in hand: the browsing panes come back and one line is left up.
+
+    The live notice ends either way: filled to hundred percent, to be held a
+    moment and fade, when all is well; closed straight away when the job ended
+    bad.
+    """
     global working, job
     if job is not None and job.get("response") is not None:
         try:
             job["response"].close()
         except (http.client.HTTPException, OSError):
             pass
+    was_pane = bool((job or {}).get("pane"))
     job = None
     working = False
     _buttons(True)
+    if was_pane:
+        # The browsing view is what the tab was showing before the job, and the
+        # job's log is still underneath for anyone who wants to read it over.
+        _job_show(False)
+    if bad:
+        # The log starts folded, but a failure is exactly when its full text is
+        # wanted; the status line only ever carries one line of it.
+        show_log(True)
+    if api is not None:
+        try:
+            if bad:
+                api.ui.progress_notice_close()
+            else:
+                api.ui.progress_notice("Berry Manager update", str(text),
+                                       100, 100)
+        except Exception:
+            pass
     say(text, bad=bad)
     note(text)
 
@@ -1458,8 +2649,7 @@ def connect_step() -> None:
             return
         job["chunks"] = [peek]
         job["got"] = len(peek)
-        say(f"downloading... {_size(job['got'])}"
-            + (f" of {_size(job['total'])}" if job["total"] else ""))
+        _progress(_bytes_line())
         _later(0.0, read_step)
     except (AddonError, http.client.HTTPException, OSError, ValueError) as error:
         _finish(f"the download could not start: {error}", bad=True)
@@ -1476,8 +2666,7 @@ def read_step() -> None:
             job["got"] += len(data)
             job["ticks"] += 1
             if job["ticks"] % 10 == 0:
-                say(f"downloading... {_size(job['got'])}"
-                    + (f" of {_size(job['total'])}" if job["total"] else ""))
+                _progress(_bytes_line())
             _later(0.0, read_step)
             return
         if job["total"] and job["got"] < job["total"]:
@@ -1506,6 +2695,7 @@ def finish_download() -> None:
     wanted = one_line((found or {}).get("version"))
     tag = one_line((found or {}).get("tag"))
     back = str((found or {}).get("stance") or "") == "older"
+    erased = bool((found or {}).get("erased"))
     data = b"".join(job["chunks"])
     try:
         job["response"].close()
@@ -1516,7 +2706,9 @@ def finish_download() -> None:
     try:
         system = system_name()
         program, how = check_bytes(data, system)
-        say(f"{_size(len(program))} {how}; putting it in place")
+        # The bytes are down, so the job's own part of the work is done and what
+        # is left is the swap: one line, said once, on the notice and the card.
+        _progress(f"{_size(len(program))} {how}; putting it in place", 1.0)
         target = program_path()
         staged = staging_target(target.name + ".new")
         staged.write_bytes(program)
@@ -1531,7 +2723,10 @@ def finish_download() -> None:
         return
     found = None
     _finish(f"berry{wanted or ''} is in place from {tag or 'a published tag'}; "
-            f"{words}. The config folder and the addons were not touched.")
+            f"{words}. "
+            + ("Its written data was backed up and erased before this landed."
+               if erased else "The config folder and the addons were not "
+                              "touched."))
     # This copy now runs the version that was picked, so the list's account of
     # which ones are ahead of it has to be redone - without reading anything.
     values = merge_config(DEFAULTS, api.config.stored())
@@ -1555,10 +2750,11 @@ def finish_download() -> None:
 def update_selected(_checked: bool = False) -> None:
     """Download the picked release and swap it for this program, forwards or back.
 
-    The same careful swap either way: one file replaced, nothing else moved.
-    What differs is the asking - going back over a newer version is worth a
-    plainer warning than going up to one is, and the floor says no before
-    anything is fetched rather than halfway through a swap.
+    The same careful swap either way: one file replaced. What differs is the
+    asking - going up is a yes or no, while going back over a newer version has
+    three honest answers, because the thing at risk is not the program but
+    everything written down beside it. The answer is taken before anything is
+    fetched or written, and the floor says no before the answer is even asked.
     """
     global found
     if api is None or working:
@@ -1566,7 +2762,7 @@ def update_selected(_checked: bool = False) -> None:
     entry = picked_entry()
     if entry is None:
         say("there is no version picked yet - press Check, then pick one from "
-            "the list", bad=True)
+            "a line", bad=True)
         return
     values = merge_config(DEFAULTS, api.config.stored())
     have, floor = local_version(), _floor(values)
@@ -1581,23 +2777,39 @@ def update_selected(_checked: bool = False) -> None:
         return
     back = str(entry.get("stance")) == "older"
     wanted = one_line(entry.get("version"))
-    if not api.ui.question(
-            "Go back to this version?" if back else "Update Berry Manager?",
+    erase = False
+    if back:
+        choice = downgrade_dialog(entry, have, wanted,
+                                  major_of(wanted) != major_of(have))
+        if choice == ERASE_ANSWER:
+            erase = True
+        elif choice != KEEP_ANSWER:
+            say("the way back was turned down; nothing was fetched and nothing "
+                "was written")
+            return
+    elif not api.ui.question(
+            "Update Berry Manager?",
             (f"Replace this copy (berry{have or '?'}) with berry{wanted}?\n\n"
-             + ("This puts an older program where the newer one runs now. The "
-                "config folder and the addons keep what they have, but a "
-                "setting written by a newer version may mean nothing to this "
-                "one.\n\n" if back else "")
-             + "The new program is put where the old one ran. Nothing else "
-               "moves: the config folder, the addons folder and every addon's "
-               "settings beside them stay exactly as they are.")):
+             "The new program is put where the old one ran. Nothing else "
+             "moves: the config folder, the addons folder and every addon's "
+             "settings beside them stay exactly as they are.")):
         say("the update was declined")
         return
+    if erase:
+        # Everything the user or an installed addon wrote goes before the older
+        # program lands, so the copy that starts is a clean one; the backup is
+        # written first and its address is said in the log, whatever happens to
+        # the download after it.
+        for line in factory_reset(wanted):
+            note(line)
+        say(f"the written data is erased; fetching berry{wanted}")
     name, url, _how = entry["download"]
-    found = entry
+    found = dict(entry)
+    found["erased"] = erase
+    wanted_line = f"berry{one_line(entry.get('version'))}"
+    job_local = _begin("update", values, name=wanted_line)
     note(f"{'going back' if back else 'updating'} to "
          f"{one_line(entry.get('tag'))}: fetching {name}")
-    job_local = _begin("update", values)
     try:
         job_local["host"], job_local["path"] = split_url(url)
     except AddonError as error:
@@ -1706,51 +2918,53 @@ def shutdown() -> None:
     working = False
     job = None
     found = None
+    lines.clear()
+    opened.clear()
+    notes.clear()
+    slot_names.clear()
     api = None
 
 
-def pick_from(payload: dict) -> None:
-    """Show the version the user just picked in the list.
+def _run(name: str, *arguments: Any) -> None:
+    """Call one of this addon's own steps by the name it is held under now.
 
-    A table's ``selected`` answer carries only how many rows are picked, so the
-    row is read back from the widget; a double-click arrives with its text
-    already, and either way an unknown label is ignored rather than guessed at.
+    Looking the step up when the interaction lands rather than fixing it at
+    import is what lets a test - or a hot patch - swap a function on the module
+    and truly get the click.
     """
-    text = one_line((payload or {}).get("text"))
-    if not text and api is not None:
-        try:
-            rows = api.tabs.widget_value(TAB, "list", "selected")
-        except (AddonError, AttributeError, TypeError):
-            rows = None
-        if isinstance(rows, (list, tuple)) and rows:
-            text = one_line(rows[0])
-    index = row_of(text)
-    if index >= 0:
-        pick_row(index)
+    handler = globals().get(name)
+    if callable(handler):
+        handler(*arguments)
 
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     """Something on the tab was used: run what its id and interaction mean.
 
-    The handler is looked up by name when the click lands, not fixed at
-    import: a test - or a hot patch - that swaps one of these functions on
-    the module then truly gets the click. Picking a row is the one interaction
-    that is not a button, and it goes to :func:`pick_from` instead.
+    Three kinds of thing report in here. The buttons at the bottom are looked up
+    by their id, the log's fold box is its own case, and the version pane answers
+    for itself: a dropdown whose line was laid out says what it is showing, and
+    the button of a line says to open or shut it. Both of the last two carry the
+    row of the pane they belong to in their name, so a pick is matched against the
+    versions of that line alone - which is the one place a fork's repository can
+    publish the same number on two lines and still be answered correctly.
     """
     if str(tab) != TAB:
         return
-    if str(event) == "selected" and str(identifier) == "list":
-        handler = globals().get("pick_from")
-        if callable(handler):
-            handler(payload or {})
+    name = one_line(identifier)
+    slot = slot_number(name)
+    if slot >= 0 and name.startswith("mopen") and str(event) == "clicked":
+        _run("toggle_major", slot)
+        return
+    if slot >= 0 and name.startswith("mpick") and str(event) == "changed":
+        _run("pick_text", slot, payload or {})
+        return
+    if name == "showlog" and str(event) in ("toggled", "changed"):
+        show_log((payload or {}).get("checked"))
         return
     if str(event) != "clicked":
         return
-    name = {"check": "check_now", "update": "update_selected",
-            "page": "open_page"}.get(str(identifier))
-    handler = globals().get(name or "")
-    if callable(handler):
-        handler()
+    _run({"check": "check_now", "update": "update_selected",
+          "page": "open_page"}.get(name or "") or "")
 
 
 def on_config(payload: dict) -> None:

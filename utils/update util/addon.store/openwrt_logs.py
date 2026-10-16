@@ -14,7 +14,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "OpenWrt Log Viewer",
-    "version": "2.10",
+    "version": "3.0",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],
@@ -417,7 +417,11 @@ SINGLE_SPEC = {
 }
 
 MULTI_SPEC = {
+    # The boxes a log is read from are a short list; the lines are what needs the
+    # width. The line between the two moves, so either can be given more of the
+    # tab: one part to the connections, three to the log itself.
     "kind": "splitter",
+    "sizes": [1, 3],
     "label": "Multi device",
     "children": [
         {
@@ -467,7 +471,8 @@ TAB_SPEC = {
 def init(plugin_api: Any) -> None:
     global api
     api = plugin_api
-    # The form under Settings > Addons; the file is read fresh, never cached.
+    # The form the 'Edit settings' button builds on this addon's row in the
+    # Addon manager; the file is read fresh, never cached.
     api.config.declare(
         fields=CONFIG_FIELDS, defaults=CONFIG_DEFAULTS,
         title="OpenWrt Log Viewer - addons/_data/openwrt_logs/config.json")

@@ -136,10 +136,12 @@ Log Viewer**, **OpenWrt Package Manager**, **Multi SSH** (any number of SSH
 sessions in sub-tabs, each on a connection of its own) - and an install is not a
 second-class addon. The store writes an `addons/<id>.json` manifest beside the program it
 built (its name, version, author and the transports it needs) and seeds its
-settings form, so the moment it is switched on it sits on the Settings
-**Installed addons** page with the same switch, restart, own-connection option
-and config panel as the bundled ones, which each keep a page of their own beside
-it. Deleting it from the store takes the program and that manifest back, and
+settings form, so the moment it is switched on it is a full row on the store's
+**Addon manager** page - enable switch, restart, its own SSH and SFTP gates,
+an own-connection option where the author left the choice open, its settings
+form and a Desktop shortcut - while the addons that came inside the program each
+keep a page of their own in Settings. Deleting it from the store takes the
+program and that manifest back, and
 takes `addons/_data/<id>` with it unless you say otherwise - the switch on the
 store's Settings page for every delete, the check box beside the source at the
 top of the tab for this one - so a reinstall keeps your settings whenever that

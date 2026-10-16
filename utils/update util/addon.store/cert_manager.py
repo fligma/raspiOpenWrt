@@ -11,9 +11,10 @@ first and the web server restarted after.
 Nothing is installed or hardcoded: the folder, both file names, the subject,
 the alternative names, the key type, the lifetime and the follow-up commands
 all come from ``addons/_data/cert_manager/config.json``. That file is shown as a
-form under this addon's name in Settings > Addons, and it is plain JSON, so it
-can be edited anywhere. Every profile on every device can have its own, because
-the addon only ever asks the device the *current profile* is connected to.
+form by **Edit settings** on this addon's row in the store's Addon manager page,
+and it is plain JSON, so it can be edited anywhere. Every profile on every device
+can have its own, because the addon only ever asks the device the *current
+profile* is connected to.
 
 The tab is built from a declarative spec and its buttons report back through
 ``on_widget``, so the same file works imported into the app and compiled into a

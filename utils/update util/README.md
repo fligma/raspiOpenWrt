@@ -177,9 +177,9 @@ the bundle). An addon reaches the same folder through `api.paths.assets`.
 
 ## Modules
 
-Ten files hold the app: one is the entry point, three are the contract an addon
+Eleven files hold the app: one is the entry point, three are the contract an addon
 imports and keep their names because a compiled addon reads them by name, and
-the six that make the window itself live in the `core/` package, one per layer.
+the seven that make the window itself live in the `core/` package, one per layer.
 
 | Module | Holds |
 | --- | --- |
@@ -192,6 +192,7 @@ the six that make the window itself live in the `core/` package, one per layer.
 | `core/net.py` | `SharedConnection` - the app's one SSH session with its SFTP channel and the shell channels opened on it - plus path safety and the background worker threads, and `TerminalScreen`, the xterm-style emulator the SSH tab shows (escape-sequence parser, cell grid, key encoding) |
 | `core/views.py` | The three device tabs: `BrowserMixin` (embedded web tabs and the HTTPS certificate switch), `MainConnectionMixin` (the app's one main connection - the Connect/Disconnect pair, the `main_connected` flag, both status dots and the connected/disconnected events, Berry owning the file views) and `TerminalMixin` (wiring of the terminal, quick commands, reboot watch) |
 | `core/addon.py` | The addon runtime - discovery, loading, enable/disable, events, the Settings pages with each addon's config panel, the executable-addon bridge and its callback tokens - and the Addon Dev tab, the templates, the build, the install and the metadata reader |
+| `core/popout.py` | An addon's tabs in a window of their own: `PopoutWindow` and its header, the only code that moves a page out of the main bar and back (`pop_out`, `dock_back`, `apply_popout`), the window's place and size kept in the profile's addon record, the Desktop link written and removed (`write_shortcut`, `remove_shortcut`) and `PopoutHost` - the stand-in window, its menus and its status line - for a program started with `--popout <id>` |
 | `core/window.py` | `BerryManager` - menu, tab shell, connection panel, Settings tab, profiles and credentials, dialog-driven menu actions, log, shutdown |
 
 The three device tabs are mixins (`BrowserMixin`, `MainConnectionMixin`,
@@ -242,7 +243,9 @@ field is cleared and a stored credential is picked up again.
 Settings is a tab bar of its own, one page per subject: **Connection**,
 **Startup & defaults** and **Custom tabs**, then a page for every addon that came
 inside the program and any page an addon built for itself, and last a single
-**Installed addons** page for everything added afterwards. Each page scrolls on
+**Installed addons** page for the addons that ship with the program only - what
+was installed later is managed on the store's **Addon manager** page instead (see
+[The Berry addon store](#the-berry-addon-store)). Each page scrolls on
 its own, so a section only ever shows the
 options that belong to it, and **Apply settings** sits under the bar and applies
 the whole of it whichever page is showing. The **SSH terminal** options live on
@@ -255,7 +258,9 @@ line goes and addons are refused SFTP work. Neither switch opens or closes
 anything by itself: the app keeps **one main connection** - a single SSH session
 that carries SFTP with it - and these two are gates over the parts of it. Each is
 only the app-wide half of the gate: every addon also carries an **SSH** and an
-**SFTP** switch under its name on its own Settings page, and a transport reaches
+**SFTP** switch under its name on its own row - on its Settings page when it came
+inside the program, on its Addon manager row when it was installed later - and a
+transport reaches
 the addon only when both are on. The **Custom tabs** page is always shown. The
 file tab is no longer built into the app: the bundled **Berry** addon browses
 files over this connection, and its on/off switch is on **Berry**'s own Settings
@@ -279,7 +284,8 @@ session nor an addon's own.
 The pages of the Settings bar, and what each holds:
 
 - **Connection** - the connection panel with its **SSH terminal** and
-  **File transfer (SFTP)** blocks, and **Connection status** (folded away until
+  **File transfer (SFTP)** blocks, the **GitHub token** box under them, and
+  **Connection status** (folded away until
   you open it)
   - Read-only, and nothing here is saved. The program's own **SSH** and **SFTP**
     indicators - the two dots that used to sit in the window header - are here
@@ -302,27 +308,50 @@ The pages of the Settings bar, and what each holds:
     an addon changes, so it is never a snapshot of when the page was opened. Both
     the dots and the whole block disappear when the two transports are switched
     off.
+  - **GitHub token** is the one token a profile has (`git_token`). A token buys
+    two things and the box says so: a private repository can be read, and
+    GitHub's rate limit becomes the authenticated one instead of the shared sixty
+    requests an hour. The field keeps what is typed into it the moment it is
+    left, written to the same profile file the remembered-password switch lives
+    in, and is dotted until **Show** is ticked; **Test** asks GitHub's own
+    `/rate_limit` - which costs no counted request - and answers with the
+    identity and the allowance the token gives, that the token was refused, or
+    that nothing was sent and so this is the anonymous answer. Addons hold no
+    token of their own in this version: `api.session.git_token()` answers a
+    profile's value only for the addons switched on for it on their Addon
+    manager row, so an empty field, or a field nobody is allowed to read, leaves
+    everything anonymous. A token an older copy kept on one addon's own settings
+    is lifted into this field the first time the new version loads the profile -
+    that addon's switch is turned on so it keeps fetching what it fetched before,
+    the old key is deleted, and the move is written to the log.
 - **Startup & defaults** (its own page)
   - Default tab shown at startup (only the currently visible tabs are listed; it
     falls back to the first visible tab when the stored one is gone)
   - **Remember tab order** - keep the tabs in the order you set them for the next
-    launch (`remember_tab_order`, `tab_order`), with the **Tab order** list under
-    it saying what that order is: one row per movable tab, left to right as the bar
-    shows them. Drag a row, or select one and press **Up**/**Down**, and the tabs
-    move on the bar the same moment and the order is written down then - there is
-    nothing left to remember to save, and the tab being looked at stays the tab
-    being looked at. **Reset to built-in order** puts them back the way the program
-    builds them and forgets the saved arrangement. The list goes grey while
+    launch (`remember_tab_order`, `tab_order`, `pinned_tab_order`), with the **Tab
+    order** list under it saying what that order is: one row per tab the user
+    places, left to right as the bar shows them, then a heading row - *Pinned at
+    the right edge* - with one row for each tab held there. Drag a row, or select
+    one and press **Up**/**Down**, and the tabs move on the bar the same moment and
+    the order is written down then - there is nothing left to remember to save, and
+    the tab being looked at stays the tab being looked at. The heading is not a tab
+    and cannot be picked up or dropped on: it divides the two runs, so a pinned row
+    changes places among the pinned rows only, and one dragged past the heading is
+    put back rather than obeyed, the list refilled to say what the bar really did.
+    **Reset to built-in order** puts both runs back the way the program builds them
+    and forgets the saved arrangement. The list goes grey while
     remembering is off, since with it off every launch starts from the built-in
     order whatever was dragged. A tab that arrives later - an addon switched on, a
-    web tab added - is not in the saved order and joins at the end of the row. The
-    gap and the pinned run at the right edge are deliberately not listed, so
-    furniture cannot be dragged into the middle of it by accident.
+    web tab added - is not in the saved order and joins at the end of its own run.
+    The empty gap tab is the one thing not listed, being neither a tab nor a place
+    to put one.
   - **Show the Addon Dev tab** - the addon index with its details, build and
     test, docs and log, and processes panes, pinned to the right edge and worn as
     a mark like the store's tab, and the Tools > Addon Dev entry that goes with it
-    (`addon_dev_enabled`). Off, the tab and the menu entry are gone; the
-    addons themselves are still switched on and off on their own Settings pages.
+    (`addon_dev_enabled`). The switch itself sits on the store's **Addon manager**
+    page rather than here, and moves the tab the moment it is ticked; the value is
+    still this profile's. Off, the tab and the menu entry are gone; the
+    addons themselves are still switched on and off on their own rows.
   - **Pop up notifications** - let the app raise a notice in the system's
     notification area as well as writing it to the status line: what an addon
     says through `api.ui.popup`, titled for the addon that spoke, and this
@@ -379,16 +408,23 @@ The pages of the Settings bar, and what each holds:
     rows: a **Rescan** that finds a
     shipped addon gives it a page, one that no longer finds it takes the page
     away, and a name changed in the manifest renames the tab.
-  - Everything that came in after the build shares the **Installed addons** page:
-    a hand-written `.py`, a program built by the Addon Dev tab, an addon the
-    store installed. At its top sits the addons folder path with **Open folder**,
-    **Open addon data** and **Rescan** beside it, and below that one row per
-    addon. A store install is not marked down for where it came from: it gets the
+  - Nothing that came in after the build is listed here any more: a hand-written
+    `.py`, a program built by the Addon Dev tab and an addon the store installed
+    are all managed on the store's **Addon manager** page, which holds their
+    enable switch, their **Force popout** and **use the global git token**
+    switches, their transport switches, their declared form and their buttons,
+    and lists only what is not shipped with the program. The addons folder line
+    stays on this page with **Open folder**, **Open addon data** and **Rescan**
+    beside it, and one button was added to it: **Open addon manager** starts the
+    store and moves it to that page, so an installed addon's switches are never
+    unreachable because the store happens to be switched off.
+  - A store install is not marked down for where it came from: it gets the
     same switch, the same *own connection* option (where
     its manifest declares `"connection": "both"`), its own SSH and SFTP switches
     and the same config panel as any other, because the store writes a manifest
     beside the program it built and seeds its settings folder before it is ever
-    started.
+    started - the page it shows them on is simply the store's rather than
+    Settings'.
 
 ### The tab bar
 
@@ -406,9 +442,13 @@ The bar holds two things at once: the row of tabs the user arranges, and a short
 run kept against the right edge. An empty, disabled *gap* tab soaks up whatever
 width is left over, which is what keeps the run after it - **Settings**, and every
 tab that asked to be pinned beside it - detached from the movable row instead of
-drifting at its end. Those tabs are window furniture: never dragged into the
-order, never written to `tab_order`, keeping their place while the tabs beside them
-come and go. Settings wears no caption, only the gear drawn for it
+drifting at its end. Those tabs are window furniture: they cannot be pulled out of
+the run or dropped in among the tabs the user laid out, and a drag that tries it is
+undone by the next pinning pass. What they are no longer is fixed in place: their
+order *along* the edge is the user's too, kept in `pinned_tab_order` beside
+`tab_order`, and the two runs are arranged and remembered one from the other, so
+dragging the store in front of the updater never disturbs the tabs beside them.
+Settings wears no caption, only the gear drawn for it
 (`core.ui.settings_tab_icon`), and an addon's tab does the same when it
 asks to be icon-only - the store's, the manager updater's and the certificate
 manager's all do (see
@@ -590,7 +630,8 @@ is applied when the window opens; nothing needs a restart.
 | `reboot_auto_watch` | Offer to watch for the device when a reboot command is sent |
 | `default_tab` | Tab selected when the window opens (defaults to Berry; falls back to the first visible tab) |
 | `remember_tab_order` | Keep the tabs in the order you set them, next time the app starts; off, every launch begins from the built-in order |
-| `tab_order` | That order, exactly as the Settings **Tab order** list shows it: the full name kept in each tab's data rather than the caption the bar has room for, and without the gap and the pinned run, which are never moved. `[]` means the built-in arrangement (SSH, the web tabs, then the addons) |
+| `tab_order` | That order, exactly as the Settings **Tab order** list shows it: the full name kept in each tab's data rather than the caption the bar has room for, and without the gap, which is not a tab. `[]` means the built-in arrangement (SSH, the web tabs, then the addons) |
+| `pinned_tab_order` | The same for the run held against the right edge - Settings and every tab pinned beside it, in the order they sit along it. A name the bar no longer has is skipped and a tab missing from the list joins at its end, so an addon switched off or gone cannot lose the rest of them their places |
 | `terminal_font_size` | SSH terminal font point size (before the interface zoom) |
 | `ui_zoom` | Interface density in percent, set by View > Zoom in/out (60-200, 100 as shipped) |
 | `theme` | Which `themes/<name>.theme` the window is drawn from, named without the suffix; set by View > Theme and Settings > Appearance, and a name with no file behind it falls back to `default` |
@@ -598,7 +639,7 @@ is applied when the window opens; nothing needs a restart.
 | `log_visible` | Show the log pane at the bottom of the window (View > Show log console) |
 | `terminal_history_limit` | Quick-command runs remembered in `command_history.json` |
 | `web_tabs` | List of embedded browser tabs (name, ip, port, path, scheme) |
-| `addons` | Per-addon record for this profile: `enabled`, `own_connection`, the addon's own `ssh_enabled` / `sftp_enabled` transport switches and the addon's `settings` |
+| `addons` | Per-addon record for this profile: `enabled`, `own_connection`, the addon's own `ssh_enabled` / `sftp_enabled` transport switches, the app's `popout` and `git_token` switches, what the addon saved as its `settings`, and - while any of its tabs is in a window of its own - `popout_geometry` and each tab's remembered `tab_slot` |
 | `ignore_cert_errors` | Load https pages whose certificate the embedded browser cannot verify |
 | `use_alt_icon` | Show `icon2.png` instead of `icon.png` in the toolbar |
 | `quick_commands` | Buttons shown above the terminal |
@@ -611,6 +652,7 @@ is applied when the window opens; nothing needs a restart.
 | `source` | The local checkout the Addon Dev tab builds from. A path that is not a folder on this machine is replaced on load, so a profile copied across computers still opens |
 | `trust_unknown_host` | Accept a host key never seen before instead of refusing the connection |
 | `remember_password` | Keep this profile's password between runs, in the operating system's credential store - never in the config file |
+| `git_token` | The profile's one GitHub personal access token, read by the addons switched on for it on their Addon manager row. Blank, everything reaches GitHub anonymously; a token an older copy kept on a single addon is lifted here on the first load, with the switch turned on for that addon and the old key deleted |
 | `web_port` | The dashboard port; offered to an addon as its starting value, and one of the three keys the first **Custom tabs** list is built from |
 | `web_path` | The dashboard's path on that port, and the other half of that same seeding |
 | `luci_url` | LuCI's full address, which the first `web_tabs` list takes its LuCI tab from |
@@ -646,6 +688,12 @@ mode the program asked for, and the terminal answers the "who are you / where
 is your cursor?" queries such programs wait for before they draw. The device
 is told the exact grid size, so resizing the window re-lays out a running
 `nano` live.
+
+Each character is painted in the cell it belongs to, so the cursor keeps up with
+the typing rather than trailing behind it: a line that runs off the right edge
+turns once, not once per character after it, and a glyph the font has to borrow
+from another face - box drawing, a tick, an ideograph - still sits on the grid
+instead of sliding the rest of the line sideways under it.
 
 Copy and paste are deliberately out of the shell's way: select with the mouse
 and press **Ctrl+Shift+C** to copy, **Ctrl+Shift+V** (or Shift+Insert) to
@@ -737,18 +785,28 @@ beside the `.exe`, but its source belongs to the build - see
 [Addons inside the built executable](#addons-inside-the-built-executable).
 
 Settings splits addons over its own tab bar: a page per addon that came inside
-the program, and one **Installed addons** page with a row for everything that
-came in after the build - a hand-written `.py`, a program built by the Addon Dev
-tab, and an addon the store installed. Each row carries the addon's enable
+the program, and the **Installed addons** page beside them. Since 2.0 that page
+holds the shipped addons only - the rows of everything else, a hand-written
+`.py`, a program built by the Addon Dev tab and an addon the store installed, are
+laid out on the store's **Addon manager** page instead.
+Both places write the same profile record, so a switch moved in
+one is the same switch seen in the other.
+The two places draw the same
+controls, because they read the same record: the addon's enable
 switch, its version and author, what it said about itself, a **Restart**
 button, an **own connection** switch where the addon's manifest declared
 `"connection": "both"` - that choice is the user's only where the author
 left it open - and
-a **Show tab** button when the addon opened one. A shipped addon gets the
+a **Show tab** button when the addon opened one. The Settings page holds them
+for the shipped addons only, and there each one gets the
 switch, its state and its config panel, plus **Show tab** while it has one - but
 no **Restart**: restarting reads the addon's file again, and that file is inside
 the program - and no **own connection**, which is the user's choice to make
-about an addon of theirs and not about the program's own. An addon that declared
+about an addon of theirs and not about the program's own. What the Settings page
+let go - a hand-written `.py`, a program built by the Addon Dev tab, an addon
+the store installed - is laid out on the store's **Addon manager** page instead,
+where **Restart**, **Edit settings** and **Desktop shortcut** join the same
+switches. An addon that declared
 `"connection": "own"`, or the default `"app"`, carries a plain label on its row
 naming the connection it uses instead of a switch: only a `"both"` addon leaves
 that choice to the user, and the label says *own connection* or *main
@@ -759,11 +817,19 @@ connection* instead, so a row never implies that an addon is waiting on a
 Under the addon's name sits its own row of switches, one per transport the
 manifest declared - **SSH** and **SFTP** - each followed by the dot that speaks
 for it, with the quiet line *connections this addon may use* beside them. The
-name is said once: a dot never repeats the label it stands next to. They are the
+name is said once: a dot never repeats the label it stands next to. A transport
+the manifest never named is not drawn at all rather than drawn and greyed: an
+addon that asked for SSH alone shows one gate, and one that asked for nothing
+shows none. On the Addon manager page a gate reaches the app by the name of its
+transport (`api.session.set_addon_transport`), and an answer for a transport the
+addon never asked for is refused, said in the status line, and put back. They are the
 addon's half of the app-wide gates in Settings > Connection: a transport is
 handed to the addon only while that switch and the app-wide one are both on, and
 the switches are shown whether or not the addon is running, so an addon can be
-limited before it is ever started.
+limited before it is ever started. The own-connection switch beside them is the
+one control of this group that is never hidden: where it is not the addon's to
+move it stays greyed, and the note under the form says which declaration left
+nothing to choose.
 They decide who may use a connection, never whether one is opened: the
 transports still travel on the app's one main session. The choice is stored per
 profile in `addons -> <id> -> ssh_enabled` and `sftp_enabled`, both on for an
@@ -805,9 +871,14 @@ Device page lists files over SFTP and runs chmod and find over SSH. The same
 information, spelled out in words rather than in colours, is listed per running
 addon in **Connection status** on the Settings **Connection** page.
 
-Beneath a row, when that addon keeps one, sits a **Config** panel: the settings
+Beneath a shipped addon's row, when that addon keeps
+one, sits a **Config** panel: the settings
 that belong to the installation rather than to a profile, edited as a form and
-stored as plain JSON in `addons/_data/<id>/config.json`. See
+stored as plain JSON in `addons/_data/<id>/config.json`. An addon listed on the
+store's **Addon manager** page keeps the same file and the same form by another
+door: its **Edit settings** button opens the form built from the fields that
+addon declared, and one that declared none but has a file gets the file as plain
+JSON. See
 [Each addon's own config file](#each-addons-own-config-file).
 
 An addon that crashes is on its own: every call is wrapped, the failure is
@@ -838,7 +909,8 @@ Run the app from a source checkout and one more tab can appear, **Addon Dev**,
 that works on the addon files themselves - the manifest, the log, the processes,
 a test script and a compile to a program of its own. It takes almost no room on
 the bar, being pinned at the right edge as a mark beside Settings. A built
-program can show it too: **Show the Addon Dev tab** in Settings says whether it
+program can show it too: **Show the Addon Dev tab**, on the store's **Addon
+manager** page beside the other addons, says whether it
 is there. See [The Addon Dev tab](#the-addon-dev-tab).
 
 ### Writing one
@@ -882,9 +954,10 @@ The object in `init` is the only door into the app:
 | Namespace | What it gives |
 | --- | --- |
 | `api.id`, `api.name`, `api.log(text)`, `api.error(text)` | identity and the shared log |
-| `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the four an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request), `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything), `addon_state(id)` (how that addon stands here - `installed`, `enabled` and `running` as one dict, read off the app's own records) and `set_addon_running(id, running)` (write the switch *and* load or stop the addon, answering with the same state dict) |
+| `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the four an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request), `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything), `addon_state(id)` (how that addon stands here - `installed`, `enabled` and `running` as one dict, read off the app's own records) and `set_addon_running(id, running)` (write the switch *and* load or stop the addon, answering with the same state dict). The Addon manager's own calls are here too, so that page is only a drawing of what the app keeps: `addons()` (every installed addon - id, name, version, author, `installed`/`enabled`/`running`/`bundled`, its kind, `requires`, its connection, the popout it declared and the one in force, its tab names and whether its window is open), `addon_card(id)` (one of those rows complete), `set_addon_popout(id, on)` / `addon_popout(id)`, `set_addon_git_token(id, on)`, `set_addon_shortcut(id, on)`, `show_addon_window(id)`, `app_setting(key)` (reads any profile setting) and `set_app_setting(key, value)` (writes only the handful an addon may touch - `addon_dev_enabled` - so nobody's connection details can be rewritten from an addon). The one GitHub token is read here: `git_token()` answers the profile's token for an addon switched on for it and `""` for one that is not or when the field is blank, and `github_headers()` hands back `{}` or the two headers `http.client` wants - `Authorization: token ...` with `X-GitHub-Api-Version` beside it |
 | `api.device` | SSH and SFTP over the app's one main connection, or a connection of the addon's own: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download`. Every call is refused unless the master switch, that transport's app-wide switch, the addon's own switch on its Settings page and that transport's switch on the same row are all on, the transport is listed under `"requires"`, and the connection it reaches is the one `"connection"` declares - which for an addon sharing the app's session also means that connection has to be open. A `terminal` leaf in one of the addon's own tabs is judged by exactly these gates too, only reached through `api.tabs.set_widget` instead of this namespace (see **Addons in other languages**) |
 | `api.tabs` | `add_web_tab`, `add_tab` - each taking `position`, `pinned` and `icon_only` - `close`, `rename`, `activate`, `names`, `exists`, `url`, `navigate`, `reload`, `view`, `widget`, `set_widget`, `widget_value`, `set_html`, `inject_css`, `inject_js`, `set_style`, `set_icon`, `icon`, `use_app_icon`, `set_pinned` |
+| `api.window` | the window this addon's tabs live in, when they live in one of its own: `popout(tab, on)` takes a tab out of the main bar into a top-level window or back into the slot it left, `popped(tab)` and `state(tab)` say where it stands, and while it is out the addon steers it - `open`, `close`, `raise_window`, `show(tab, on)`, `center`, `set_title`, `set_size`, `set_minimum`, `set_position`, `set_resizable`, `set_closable`, `set_always_on_top`, `set_style`, `set_icon`. `set_shortcut(on)` asks for a Desktop link that starts this one addon in a window of its own and `shortcut_path()` says where it is (see [Popout windows](#popout-windows-an-addon-in-a-window-of-its-own)) |
 | `api.theme` | the looks the window is drawn from, one JSON file each in `themes`: `name`, `names`, `exists`, `folder`, `read`, `raw`, `colors`, `color`, `tabs`, `metric`, `icon_px`, `chrome_px`, `shows_captions`, `shows_dots`, `groups`, `token_knobs`, `stylesheet`, `sheet_of`, `validate`, `templates`, `template_text`, `reference`, and the five that move them - `use`, `save`, `copy`, `rename`, `remove` |
 | `api.ui` | `information`, `warning`, `error`, `question`, `input(title, label, default, secret=False)` - one line of text, `None` when the box was cancelled, and `secret` draws dots while it is typed, `choose`, `popup(title, text)` - a notice the app raises for the addon, named for whoever raised it, `notify`, `progress_notice(title, text, value, maximum)` - a small card over the window's corner with a bar and its percentage, re-shown on every step of a long job and holding a moment before fading when it fills, `progress_notice_close()` - take that card away now, `menu_item`, `dialog`, `pick_color(title, initial)` - the colour wheel, answering `#rrggbb` or `""`, `pick_file(title, kind, filter, initial)` - a file box on this machine, `kind` being `open`, `save` or `folder` and nothing picked answering `""`, `set_setting_widget`, `window()` |
 | `api.events` | `on(name, callback)` (returns the unsubscribe callable), `off`, `names` |
@@ -898,7 +971,9 @@ The object in `init` is the only door into the app:
 The events are `startup`, `shutdown`, `sftp_connected`, `sftp_disconnected`,
 `ssh_connected`, `ssh_disconnected`, `operation_done`, `tab_changed`,
 `profile_changed`, `settings_applied`, `addon_enabled`, `addon_disabled`,
-`addon_config_changed`, `transport_changed` and `theme_changed`. A
+`addon_config_changed`, `transport_changed`, `theme_changed` and `window` - which
+carries the addon's own popout window, with its `tab` and the change in `event`
+(`opened`, `closing`, `closed`, `docked`, `undocked`, `resized`, `moved`). A
 `transport_changed` carries the `transport`, plus a `scope` of `"app"` or
 `"addon"` saying which switch moved and, for an addon's own, its `addon` id; an
 addon that shows a connection state of its own redraws from it. A `theme_changed`
@@ -989,12 +1064,22 @@ control's tool-tip and `placeholder` the greyed-out example.
 
 What the app then shows:
 
-- Under the addon's row in Settings, a **Config** group with one line
+- Under a shipped addon's row in Settings, a **Config** group with one line
   per declared field - or a raw JSON editor when the addon declared nothing, so
   any addon's file can still be edited from the window. **Save config** writes
   the file, **Reload** re-reads it, **Reset to defaults** puts back what the
   addon shipped, **Open file** hands it to the system's JSON handler. A key that
   is not in the form - added by hand in an editor - survives a save.
+- The same form, read from the same `fields.json`, is what **Edit settings**
+  opens on the row of an addon installed after the program was built. That button
+  asks the app for the description and the stored values
+  (`api.session.addon_config(id)`) and writes them back
+  (`set_addon_config(id, values)`), which keeps every key the form does not name
+  - a dotted `key` still nests, and a list or a multiline field still comes back
+  as a list. An addon with no declared fields and a file on disk is offered that
+  file as one box of JSON, refused with a word when it does not parse as one
+  object, and an addon with neither is told there is nothing to edit rather than
+  being shown an empty dialog.
 - The panel is folded away while the addon is switched off, with the rest of
   what the row holds: a stopped addon shows its name, its state and its note.
   The tidy form itself never depends on the addon's code being importable:
@@ -1128,8 +1213,10 @@ stays for an addon that would rather look like the program than like itself.
 Everything above puts an addon beside the app's tabs. `api.settings_pages` puts it
 *inside* Settings instead: a page of the app's own Settings bar, standing with
 **Connection**, **Startup & defaults** and the program's other categories -
-outside the shared **Installed addons** page, which keeps the switches and the form
-built from the addon's declared fields.
+outside the shared **Installed addons** page, which since 2.0 keeps the shipped
+addons' switches and the form built from their declared fields - an addon
+installed later holds its switches and its form on the store's **Addon manager**
+page instead.
 
 ```python
 api.settings_pages.add("planner", title="My planner", spec={
@@ -1162,6 +1249,73 @@ The template in **New addon...** builds one of these beside its tab, added or
 removed by a switch of its own in the addon's config, as the shape of an addon that
 has more to say than a tab holds.
 
+### Popout windows: an addon in a window of its own
+
+Most of an addon's work sits in a tab in the main window's bar. A **popout** takes
+one of its tabs out of that bar and puts it in a top-level window wearing the
+theme, the addon's name and its mark. It is the same widget rather than a second
+copy: one parent, one live state, the same `on_widget` calls, and a page an addon
+popped out and docked back again needs no rebuilding.
+
+Three things can say whether a tab lives in a window, and they are asked in that
+order:
+
+- the manifest's `"popout"`: `"always"` for an addon whose pages only ever live
+  in a window, `"never"` for one that only ever lives in the bar. A declared
+  answer is the addon's own, and the app's switch is greyed out beside a line
+  saying so rather than fighting it.
+- **Force popout**, the switch on that addon's row on the store's
+  [Addon manager](#the-berry-addon-store) page. It is offered only for an addon
+  that declared nothing, and it is kept in this profile's record
+  (`addons -> <id> -> popout`), so two profiles can run the same addon in two
+  places.
+- the addon itself, at any time, through `api.window.popout(tab, on)`.
+
+An addon that ships inside the program - Berry, the store, the manager updater,
+the theme manager - is never pushed out by the app's switch, since it has no row
+to put a switch on; only its own call can move its tabs.
+
+While a tab is out, the bar no longer holds it, so it drops out of the saved
+**Tab order** by itself and its slot is remembered in the record
+(`tab_slot`) for the way back. The window shows its own tab line only when the
+addon has more than one tab out, carries a **Dock back** button, and remembers its
+size and place per addon (`popout_geometry`). Closing it hides the window instead
+of destroying it: the addon keeps running, and the row's **Raise window** brings
+the window back. The rest of the frame is the addon's to steer through
+`api.window` - `popped`, `names`, `state`, `open`, `close`, `raise_window`,
+`show`, `center`,
+`set_title`, `set_size`, `set_minimum`, `set_position`, `set_resizable`,
+`set_closable`, `set_always_on_top`, `set_style` and `set_icon` - and what happens
+to it arrives as `window` events with the change in `event`.
+
+### A Desktop link that opens one addon
+
+`api.window.set_shortcut(True)`, or the **Desktop shortcut** button on the addon's
+Addon manager row, leaves a link on the Desktop - `Berry - <name>.lnk` on Windows,
+written through the shell's own `WScript.Shell` so it is a real shortcut with the
+addon's picture on it, and `berry-<id>.desktop` on Linux, filed in
+`~/.local/share/applications` with a copy beside the Desktop folder when that
+exists. Taking the switch back down deletes both. The Desktop is asked for, never
+guessed.
+
+The link starts this same program with `--popout <id>`, and that launch is
+deliberately small: no main window, no splash, no Settings, no profile picker,
+nothing else in the `addons` folder is read or started, and an addon asking for a
+neighbour through `api.peers` is told it is not running. The one addon gets its
+ordinary api, so anything it does - tabs, dialogs, its config, the theme - works
+as it does in the main window. What it cannot do is what the furniture it is not
+standing in would have done for it: a request for a Settings page or a pinned tab
+is answered with a refusal in its own log rather than a crash.
+
+The profile's connection is opened for such a launch only when the addon rides it:
+one on a connection of its own, or one that declared no `"requires"` at all, is
+given nothing, and **Connect at startup** is ignored either way - the window was
+asked for by name, so the app opens the main session for an addon that needs it
+and writes a line saying that is what it did. A transport switched off, app-wide
+or on that addon's own row, is said in the window rather than half-obeyed. An
+update started from a popout window relaunches as a popout window, because the
+restart carries the same arguments.
+
 ### Addons in other languages
 
 A program in the folder is started by the app and speaks one JSON object per
@@ -1191,6 +1345,7 @@ with a `kind`, and containers hold `children`:
 ```
 
 Kinds: `column`, `row`, `grid`, `form`, `group`, `scroll`, `splitter`, `tabs`,
+`overlay` (its own paragraph below),
 `label`, `button`, `line`, `multi`, `check`, `combo`, `list`, `tree`, `table`,
 `progress`, `spin`, `slider`, `spacer`, `image`, `web`, `color` (a hex line with
 the colour wheel behind its swatch) and `terminal` (its own paragraph below).
@@ -1262,6 +1417,50 @@ business with its own widget. `addon.store/multi_ssh.py` is the worked example:
 it adds a sub-page per session, puts one `terminal` in each, and asks for the
 password with `api.ui.input(..., secret=True)` every time rather than keeping one
 in a file.
+
+An `overlay` container is a stack rather than a row: its first child fills the
+area and every child after it floats over that, at a place given by its own
+`align` - `center`, `top`, `bottom`, `left` or `right`, defaulting to the middle.
+Nothing about it is special to the app; it is the shape a job's own view wants,
+so `Addon store` and `Berry Manager update` both put a `terminal` in the stack and
+float a card over it: while a download is working the container is switched to
+`visible`, the browsing panes beside it are switched off, and the addon's output
+prints across the background while the card in the middle names the addon or
+version being worked on, says which step it is at and carries a `progress` bar of
+its own. When the job ends the container goes back where it started and the
+panes come with it. The stack is not a mode the addon has to be told about
+either: `set_widget` answers `False` for an id the built tab does not hold, so a
+job started on an older layout finds no console to print on, keeps the browsing
+panes on screen and carries on regardless - which is why a view like this can be
+added to an addon without every copy of it having it.
+
+A `splitter` lays its children side by side, or one over another with
+`"vertical": True`, with a line between each pair that the user drags. `sizes`
+are shares rather than pixels - `[3, 1]` is three parts of the room to the first
+pane and one to the second - and the parts are kept as the window is resized,
+until somebody moves a line themselves, which is them saying they know better;
+the tab laying its panes out again takes the promise back up. A `column` or a
+`row` turns into the same thing on `"resizable": True`, so the change from a
+fixed stack to a movable one is one key. `"collapsed": True` on a child starts
+it folded away: all that shows of it is its line, which is dragged open or
+double-clicked, and which comes back at the share it was promised. A pane that
+was never given leave to fold cannot be dragged out of sight at all, so no table
+of words can be squeezed into nothing; `"collapsible": True` is the leave for
+one that is meant to be put away. From code the same folding is
+`set_widget(tab, id, "sizes", [3, 0])` - a `0` there is the folded pane - and
+`[3, 1]` to open it again, and `widget_value(tab, id, "panes")` reads the shares
+back with which panes are open, which is how the store and the updater keep
+their **show log** box in step with a line the user dragged.
+
+A table's columns are all dragged to a width of their own, and their headers
+moved across into a new order: `col_widths` pins starting widths, `stretch`
+names the column that takes what the others leave over - so the table fills its
+pane and still answers to a hand on its edge, which a stretched Qt column will
+not - and a column that was pinned nothing starts as wide as its own heading
+reads, so a tab does not open with a caption cut short. A pane too narrow for
+the whole row of them grows a bar to scroll rather than losing words, and
+double-clicking the stretching column's heading hands its slack back after it
+has been dragged by hand.
 
 An executable may also carry a `<id>.json` (or `addon.json`, `manifest.json`)
 next to it with `name`, `version`, `author`, `description` and, if it is not a
@@ -1335,10 +1534,11 @@ something to manage around that file, so one more tab, **Addon Dev**
 (Tools > Addon Dev, Ctrl+Shift+A), is pinned against the right edge beside
 Settings and worn as a mark - the four tiles of `assets/defaulttabicon.png` -
 like the store's tab and the updater's, in a source checkout and in a built
-program alike. It is window furniture rather than a page you laid out: it is
-never dragged into the row, never written to the saved tab order, and costs the
-other tabs no width, while its name stays in the tab's data for the tooltip and
-the start-tab picker. **Show the Addon Dev tab** in
+program alike. It is window furniture rather than a page you laid out: it is held
+in the run at the right edge, where it may change places among the other pinned
+tabs and nowhere else, and it costs the other tabs no width, while its name stays
+in the tab's data for the tooltip and the start-tab picker. **Show the Addon Dev
+tab** in
 Settings > Startup & defaults adds and removes it together with its menu entry;
 switching it off leaves the addons themselves untouched, only the page that
 works on their files goes away.
@@ -1385,6 +1585,14 @@ A table, four panes and the notes under them do not fit into a short window, so
 the whole tab sits in a scroll area: each part keeps the height it needs - the
 index as many lines as there are addons, an output view at least a dozen - and a
 window that cannot show all of it gains a scroll bar instead of clipping text.
+Where two of those parts are set beside each other - the source and compiled
+halves of **Build & test**, the reference over its log, the pane of docs beside
+the page showing one - the line between them drags, is drawn in the theme's own
+handle colour and wide enough to catch, and the shares it was opened at are kept
+as the window is resized until somebody moves the line. Every table on the tab
+can be dragged to a width column by column, and one of them - the words, the
+description, the pid line - takes whatever the rest leave over, so nothing sits
+in a column too narrow to read while none is cut short of its own heading.
 
 Details are written back where the app actually reads them: into the
 `ADDON = {` literal of the addon's own file when the file has one, and otherwise
@@ -1501,11 +1709,15 @@ documentation changes with it.
 ### The Berry addon store
 
 `addons/addon_store.py` is one more addon inside the program. Its **Addon
-store** tab is laid out like an app store rather than a spreadsheet: the
-catalogs of one or more GitHub repositories - `index.json` in each store folder,
-so the list of what can be had lives on GitHub and is never baked into a build -
-are read and put side by side, and the tab shows the addons as cards on the left
-with the whole story of whichever one is picked on the right. A card wears the
+store** tab carries two pages under a sub-bar of its own: **Addons**, the store
+as it has always been, and **Addon manager**, which since 2.0 is where the
+addons installed on this machine are dealt with - the page the app's Settings
+used to keep. Laid out like an app store rather than a spreadsheet, the first
+page reads the catalogs of one or more GitHub repositories - `index.json` in
+each store folder, so the list of what can be had lives on GitHub and is never
+baked into a build - and puts them side by side, showing the addons as cards on
+the left with the whole story of whichever one is picked on the right. A card
+wears the
 addon's picture, its name, its version and its author and a *new*, *update
 available* or *installed* mark; the pane beside it writes out the description,
 where the row came from - the source's `owner/repo`, the branch, tag or commit
@@ -1548,18 +1760,47 @@ downloaded, so the running program is not holding the file the new one replaces,
 and what its switch said beforehand is remembered; the program in `addons/` is
 replaced as the new one is copied in, and an install the store made as a
 one-file gives up its loose `.exe` to make room for the folder. The addon's
-`addons/_data/<id>/` settings are never touched, and its switch in Settings >
-Addons is put back exactly where it was once the new program lands - an addon
+`addons/_data/<id>/` settings are never touched, and its switch on the Addon
+manager is put back exactly where it was once the new program lands - an addon
 that was on comes back on with the rescan that ends the job, and one that was
 off stays off. A fresh install has no prior switch to honour and still lands
 switched off.
 
 An installed addon's row wears a check box in the store's own list: ticking it
 switches that addon on and unticking it stops it, the same record and the same
-load-or-stop that Settings > Addons performs, so an addon can be woken up from
-the store without leaving the tab. The box is drawn from the app's live answer
+load-or-stop the Addon manager performs, so an addon can be woken up from
+the catalog without leaving the tab. The box is drawn from the app's live answer
 (`api.session.addon_state`), not from a file the store keeps, and moving one
 while a job is working is put right by the job's own last repaint.
+
+The **Addon manager** page is the second one, and it is what the app's Settings
+page used to be: a table of the addons installed here that did not come inside
+the program - `Name`, `Version`, `Author`, `State`, with the same tick as the
+store list's - split from the pane under it by a draggable line. The rows come
+from one call, `api.session.addons()`, and shipped addons are left out because
+they keep their own pages in Settings. Picking a row fills in the six switches
+the app owns for it: **Run it**, which is the enable switch by another name;
+**Force popout**, which moves every tab it has into a window of its own and is
+greyed out when the addon's own manifest has already said (`popout: "always"`
+or `popout: "never"`) or when the addon came inside the program; **Use the
+global git token**, which decides whether this addon is handed the profile's one
+token at all; **Use SSH** and **Use SFTP**, one gate for each transport this
+addon's manifest asked for and no gate for one it never named, read from and
+written to the profile's `ssh_enabled` and `sftp_enabled`; and **Open a
+connection of its own**, offered only where the manifest left the choice open
+(`"connection": "both"`) and greyed with the reason everywhere it did not. A
+line under the form says in the row's own words what those
+answers mean for it, and the buttons do the rest: **Raise window** or **Show
+tab**, whichever the row's tabs make true, **Restart**, **Open folder**, **Open
+addon data**; **Edit settings**, which opens the form built from the fields this
+addon declared and writes the answer back to its own `config.json`; and
+**Desktop shortcut** - the same link as `api.window.set_shortcut`,
+and the button reads **Remove shortcut** once the file is there - and **Delete**,
+which honours the same *delete settings* answer as the store's own Delete
+button. **Show the Addon Dev tab** sits in this page's header with the count,
+because it is an addon setting like the rest of the page; it used to sit on the
+app's own Startup page, and switching it here shows or hides the tab at once
+rather than at the next start.
 
 An install is one job - of one addon or of ten - and the tab says what it is
 doing the whole way through:
@@ -1595,12 +1836,13 @@ doing the whole way through:
    the addon into the active profile as **switched off**, so nothing of it runs
    until you turn it on, and an update puts its switch back where it stood
    before the job stopped it;
-5. Settings is rescanned and its row appears on the **Installed addons**
-   page with a switch, its own SSH and SFTP switches, a config panel and -
-   where its manifest declared `"connection": "both"` - an *own connection*
-   option, like any other addon's, waiting to be turned on. The rescan reopens
-   whichever tab was showing when it started, so working in the store does not
-   throw the user somewhere else when it finishes.
+5. the app is rescanned and the addon's row appears on the store's **Addon
+   manager** page with a switch, its own SSH and SFTP switches, its **Edit
+   settings** button and - where its manifest declared
+   `"connection": "both"` - an *own connection* switch, like any other addon's,
+   waiting to be turned on. The
+   rescan reopens whichever page was showing when it started, so working in the
+   store does not throw the user somewhere else when it finishes.
 
 The whole of a job runs without holding the tab still, and it does not lean on
 the status line alone: every step also raises a small live card over the
@@ -1610,6 +1852,24 @@ installs creep by tenths of a tenth and the number never runs back. The card
 fills to hundred on the job's last line, holds a few seconds and fades; a job
 that ends bad closes it straight away and the status line says how far the
 batch got before it stopped.
+
+While the job is on, the tab shows it rather than the catalog. The store's spec
+stacks an `overlay` over its two browsing panes: a `terminal` as the background,
+printed with everything the build says - the test run, PyInstaller's own lines,
+the fetched files - and a card in the middle of it wearing that addon's picture,
+its name, the step it is at and a bar for its share of the batch. The panes go
+back the moment the job does. A batch of ten walks the card through ten names,
+one after another, so the addon being worked on is always the one being looked
+at.
+
+Under the two browsing panes the job's log starts folded away - the list and its
+detail are what the tab is for, and while a job runs its words are already on the
+console above. A **show log** box in the header pulls it back up to the third of
+the room it was promised, and the line between them drags, or answers a
+double-click, to the same end: the box is set from what the panes were last told
+to be, so whichever the user reached for is the one that reads true. The two
+panes beside it - the list, and the detail over it - divide the width in shares
+of their own and keep them as the window is resized until a hand moves a line.
 
 Step 4 also writes down what the addon's own source declared, which is what
 makes that row a full one before the program has ever run: a `<id>.json`
@@ -1635,8 +1895,11 @@ two happened, naming the folder it left behind when it left one. A reinstall
 after a delete that kept the folder therefore comes home to the settings it had.
 
 That manifest is also why an install is never filed among the bundled addons:
-`core.const.SHIPPED_ADDON_IDS` names the only five that came inside the
-program, and anything else is treated as the user's own.
+`core.const.SHIPPED_ADDON_IDS` names the four that came inside the
+program - `berry`, `addon_store`, `manager_update` and `theme_manager` - and
+anything else is treated as the user's own. It is also what decides that a
+shipped addon keeps its page in Settings, is never listed on the Addon
+manager, and cannot be forced into a popout window.
 
 Where the addons come from is a list rather than one repository, and **Sources...**
 on the tab is what edits it. The store starts with this program's own repository -
@@ -1662,9 +1925,11 @@ line and skipped rather than taking the others down with it. Which source a row 
 out of is kept with the entry, and is what the addon's file, its assets, its test and
 the modules it imports are fetched from, so an addon arrives with exactly what sat
 beside the catalog row naming it. The header chip at the top of the tab says where
-the list points: one source named in full, several named by the first and counted,
-and the token - shared by every source, for a private repository or when anonymous
-requests are refused - stays editable in that same config file. The same header
+the list points: one source named in full, several named by the first and counted.
+The token is no longer the store's own field: GitHub is reached with the one
+git token the profile keeps in Settings > Connection, and only for an addon
+whose **Use the global git token** switch is up - so a private repository is
+made reachable from one place, for every source at once. The same header
 holds the answer about settings for this session only: a **delete settings**
 check box beside the chip, drawn from `delete_config` and put back under it
 whenever the config is saved from Settings, so a page edit always wins and a
@@ -1757,22 +2022,32 @@ that had that one carries its settings across by itself (see
 
 It looks before it acts. One SSH command asks the connected host whether the
 served folder is there and how many files it holds, what `uci` says
-`uhttpd.berry.home` is, whether `python3` is on the path, and what comes back
-when the host is asked for its own page on the configured port. A page that
-answers as the dashboard lands the tab on **Status**; a missing folder, a port
-that says nothing or a page that belongs to something else lands it on the
-**Installer**, where the work is.
+`uhttpd.berry.home` is, **which of its `/www*` folders actually hold this
+dashboard's entry file** and **which uhttpd section serves which folder**, as
+well as whether `python3` is on the path and what comes back when the host is
+asked for its own page on the configured port. Every ask of that page carries its
+own seconds (`--connect-timeout`/`--max-time` on `curl`, `-T`/`-t 1` on busybox
+`wget`, one tool chosen for all the addresses, the body capped at a few
+kilobytes), because an address nobody answers used to cost the router's TCP
+patience - about two minutes - and the app gave up on the command first and handed
+the addon a `-1` that read as though the device had answered it. A command that
+still never comes back is now said as one, with the seconds it was given and the
+reason the app carried. A page that answers as the dashboard lands the tab on
+**Status**; a missing folder, a port that says nothing or a page that belongs to
+something else lands it on the **Installer**, where the work is. When the page's
+files are found under a folder other than the one the form names, the status line
+says which folder they are in and points at the button that moves them.
 
 | Button | What it does |
 | --- | --- |
 | **Re-check** | That one command again, and the tab rearranged around the answer |
-| **Check page** | `curl`, or busybox `wget`, against `127.0.0.1` and then the address in the connection panel, and says whether the dashboard answered |
+| **Check page** | `curl`, or busybox `wget`, against `127.0.0.1` and then the address in the connection panel, each ask bounded, and says whether the dashboard answered |
 | **Open dashboard** | The page in an embedded tab, following the profile's host |
 | **Fetch files** | Asks GitHub what is in that folder at that branch or tag, downloads it into `addons/_data/berry_web/staging/`, asks the device what it already has, and fills the plan table. Writes nothing. |
 | **Install** | The same, and then, after one confirmation that lists what will happen: back the folder up on the device, write the files, tidy away the leftovers if the config asks, write `css/theme.css` from the theme the app is wearing, set the uhttpd section up with `uci`, `chmod 755` the CGI entry, run the restart command, and ask the device for its own page |
 | **Read** / **Refresh** | `uci show uhttpd.<section>` and `/etc/config/uhttpd` into the **Raw file** page, read-only: the file is shown here, never written from here |
 | **Apply** | The options on the **Options** page, with `uci set` and one `uci commit`, then the read-back and the restart |
-| **Move folder to this name** | Renames the folder the server is using to the name in the form, points `uhttpd.<section>.home` at it, commits and restarts - `/www_rasconf` to `/www_berry` in one action |
+| **Move folder to this name** | The migration from `/www_rasconf` to `/www_berry` in one action. Where the files are now is read off the device - the folder `uhttpd.<section>.home` names, else the folder of whichever section serves one holding the entry file, else a folder holding that file with no section admitting to it - and that folder is renamed to the name in the form, `uhttpd.<section>.home` pointed at it (and the other section's home moved along with it, since its folder just changed name), committed and restarted. The new name is written back into `addons/_data/berry_web/config.json` and into the form, so a later install does not make the old folder again. Nothing is renamed and nothing is written when the device has not been asked, says nothing, or holds the page in a folder the router itself needs (`/www` among them). |
 | **Restart web server** | The configured restart command and nothing else |
 | **Save to config** | Keeps what is in the forms in `addons/_data/berry_web/config.json` |
 | **Reload from config** | Puts the saved values back into the forms |
@@ -1797,7 +2072,11 @@ costs one API call and a download.
   or two; untick it to write every file again whatever the device has.
 - `cgi-bin/hash.file` - the PIN the dashboard asks for - is on the keep list. It
   is never uploaded and never tidied away, because it is not in the repository
-  and belongs to the device.
+  and belongs to the device. Which is why a move is the way to change the served
+  folder's name: renaming the folder carries `hash.file` along with it, while an
+  install into a new folder leaves the PIN the user set in the old one and the
+  page falls back to the hash that ships in its source - so the login then takes
+  what everybody else's copy takes.
 - The file list comes from GitHub's Trees API and the bytes from
   `raw.githubusercontent.com`, over `http.client` with one connection reused per
   host, so nothing that is not already bundled is needed. Anonymous use of that
@@ -1818,7 +2097,10 @@ costs one API call and a download.
   section name unless it is a bare word, and every value goes into `uci` inside
   its own quotes. A move asks by name first and its script refuses outright when
   the new name is already taken, because a `mv` onto an existing folder would
-  bury the dashboard inside it rather than replace it.
+  bury the dashboard inside it rather than replace it; a folder the device needs
+  as itself is refused before anything is asked, and the rename works on the
+  folder, not on the path inside it, so a configured subfolder travels with the
+  files and is put back on the end of the setting.
 - The job runs one file per `api.schedule.after` tick, so the bar and the table
   move the whole way through. Each stage of the route - finding the files,
   downloading, asking the device, backing up, writing, tidying away, painting
@@ -1844,14 +2126,20 @@ costs one API call and a download.
 
 `addon.store/_tests/test_berry_web.py` drives the whole route without a device -
 the tab built by Qt (its three pages, the nested uhttpd notebook, the tables and
-the step flow), a canned answer from a host read back five different ways, which
-page each answer lands the tab on, the `uci` script and every refusal in front of
-it, the move, the settings carried across from the retired addon, the stylesheet
-made from a fixed set of colours, and the bar watched stage by stage. Both routes
-the files come by are checked too: this checkout walked as the dashboard, and a
-repository list cut down to what is installed, with the built-in list standing in
-when GitHub refuses - the one half that asks the real repository running only when
-this machine names a token for it.
+the step flow), a canned answer from a host read back six different ways (one of
+them a router holding the page under an older name, with no section of this
+addon's ever written), which page each answer lands the tab on, that every ask of
+the page is bounded and that the whole probe fits inside the seconds it is given,
+how a command that never came back is worded (no bare `-1` offered as the
+device's answer), the `uci` script and every refusal in front of it, the move -
+from the folder the device named, with the other section's home moved along, the
+new name written back to the config, and the router's own `/www` left alone - the
+settings carried across from the retired addon, the stylesheet made from a fixed
+set of colours, and the bar watched stage by stage. Both routes the files come by
+are checked too: this checkout walked as the dashboard, and a repository list cut
+down to what is installed, with the built-in list standing in when GitHub refuses
+- the one half that asks the real repository running only when this machine names
+a token for it.
 **Run test** in the Addon Dev tab runs it.
 
 ### Shipped addon: Berry file manager
@@ -2065,18 +2353,33 @@ app's own relaunch, and a refusal leaves this copy running until the user
 starts the new one themselves. A copy running from a source checkout is
 turned away with the reason - there is no single file of it to replace.
 
-The tab is a spec, and it is two panes over the job's log: the published
-versions newest first on the left, each row saying where it stands against this
-copy - *an update*, *this copy*, *a way back*, or *older than the floor*, in a
-colour of its own - and on the right the story of whichever one is picked: the
-release's own title, who published it and when, the seven letters of the commit
-it was made from, the words it was published with (the commit's message where
-the release wrote nothing), and the files it moved against the version before
-it, each line tinted by whether it was added, changed or removed. Two requests
-read the whole list whatever its length; a commit and a comparison belong to one
-version and are asked for only when its row is picked, then kept for the rest of
-the run, so clicking back and forth costs nothing. The header keeps the status
-line and an `owner/repo @ prefix*` chip saying where the tags come from, and
+The tab is a spec, and it is two panes over the job's log. Since 2.0 the left
+pane is not a flat list of every tag: the published versions are grouped into
+their **major lines** - `2.0`, `1.9`, `1.8` - newest line first, and each line is
+one button (`2.0  more`) until it is opened. Opening a line is what lays its
+hotfixes down as a dropdown, and it costs no request, because every tag was read
+in the one check; a pane therefore stands as the handful of lines rather than as
+all of their builds, and the line below the one this copy is on - which is the
+only line that opens by itself - is one click away rather than a scroll. An open
+line writes its heading as its number, how many builds it holds and where this
+copy sits against it (*this copy is on it*, *ahead of this copy*, *a way back*,
+*further back than 1.6.0, where going back stops*), and each dropdown entry names
+its version with the same marking beside it, since a dropdown only shows one
+entry at a time. Ten lines fit; older ones are said to be missing and left to the
+releases page under the tab. What sits where is also said a third way on the
+right: one coloured chip over the picked version's own story - the release's
+title, who published it and when, the seven letters of the commit it was cut
+from, the words it was published with (the commit's message where the release
+wrote nothing), and the files it moved against the version before it, each line
+tinted by whether it was added, changed or removed.
+That story is read on demand and cached: two requests answer for the whole list
+however long it is, while a commit and a comparison belong to one version and are
+asked for only when its row is picked, then kept for the rest of the run, so
+clicking back and forth costs nothing. A version nobody has picked yet says so in
+the pane rather than showing an empty box, and promises to fetch what it was for
+as soon as it is chosen - reading the account of every tag to draw a tab would be
+the slowest way to say nothing new. The header keeps the status line and an
+`owner/repo @ prefix*` chip saying where the tags come from, and
 below the panes **Check now**, **Install the picked version** and **Open
 releases page** (the repository's releases in an embedded tab) report through
 `on_widget`. It wears `assets/manager_updateicon.png` - the one name every
@@ -2085,14 +2388,63 @@ mark held in `TAB_ICON` when the file is missing, and it is pinned and
 icon-only like the store's, holding beside Settings instead of taking a place in
 the row of tabs.
 
+The log under the panes starts folded, for the same reason the store's does, and
+the same **show log** box in the header - or the drag and double-click of the
+line between them - opens it to its two parts in five; the version list, the
+story pane over its own notes, and the release's file list over the diff lines
+beside it are all divided by lines the user can move.
+
+A download is shown as the job it is. The store's own trick serves here too: an
+`overlay` stands in over the two panes while the bytes are coming, printing every
+step - the redirect followed, the bytes counted, the file moved into place - on a
+`terminal` background, with a card in the middle naming the version being fetched
+and counting its share of the download. The same steps and the same share go up in
+the app's floating notice at the corner of the screen, so the job can be followed
+from whichever tab the user is actually on: it fills to hundred and fades when the
+file lands, and is closed straight away when the job ends bad. The panes come back
+with the job's last line, and a copy of the addon whose tab was built without the
+view simply keeps the list on screen and takes its steps in the log, since the job
+does not care where its lines are printed.
+
 **Going back is offered as readily as going up**: the same one careful swap,
-one file for another, the config and the addons untouched - down to
-`min_version`, which starts at `1.6.0`. A program older than that predates how
-this addon stages a download and moves it into place, so a move that far back
-is refused before anything is fetched, and the refusal names the line so it can
-be moved. Going back asks a plainer question than going up does, and once the
-file has landed the list is re-placed against the version that is running now,
-without reading GitHub a second time.
+one file for another - down to `min_version`, which starts at `1.6.0`. A program
+older than that predates how this addon stages a download and moves it into
+place, so a move that far back is refused before anything is fetched, and the
+refusal names the line so it can be moved.
+
+Going up asks a yes or no; going back over a newer copy asks three things,
+because what is at risk is not the program but everything written down beside it.
+The dialog says which two versions are being swapped, whether the move reaches
+across a major line or is a hotfix on this one, and lists what may go wrong: a
+profile file the older copy cannot read, an addon installed against a newer api
+it will refuse to load, a theme key that does not exist yet. Three answers are
+put up for that, and nothing at all is fetched or written before one of them is
+given:
+
+- **Erase data and download** backs up `config/` and every addon's data folder
+  under `addons/_data/` - the shipped addons' among them, since their settings
+  were written by a person too - into `backup-before-<version>.zip` beside the
+  program, with the paths inside it starting at the program's folder so
+  unpacking it puts everything back where it was found. Then every addon the app
+  says did not come inside the program is stopped - a running addon holds its
+  own file open, so nothing would delete it - and taken away, along with
+  `config/` (the profiles and their addon records in it) and every `.theme`
+  somebody wrote, `default.theme` left where it is. The shipped four stay, and
+  so does this addon whatever the scan calls it, since the download that follows
+  is being run out of its very files. The zip is written first and its address
+  is logged whatever happens to the download after it, and the copy that starts
+  is a first-run one. No rescan is asked for: a rescan would shut this addon down
+  mid-download, and the program that starts after the swap reads the folder for
+  itself.
+- **Download with current setup** is the plain swap, leaving every written file
+  where it is and taking the risk the dialog just listed.
+- **Cancel** - or closing the box, which answers the same way - fetches nothing
+  and writes nothing, and says so on the status line.
+
+Once the file has landed the list is re-placed against the version that is
+running now, without reading GitHub a second time, and the restart question reads
+*Go back to it now?* rather than *Start the new one now?*. An erase says so in the
+job's last line, so the finish line is never read as "nothing else moved".
 
 **When it checks is config**: `check_startup` reads the tags once, a moment
 after the window is up, and `check_again` runs that read again on `check_minutes`
@@ -2101,13 +2453,20 @@ goes up through the app's own notifications - `api.ui.popup`, once
 per version while this copy runs, saying which version is out and what this copy
 is - so it does not have to be looked for on a tab nobody opened; `notify_found`
 turn that off and the tab's status line is the only place it is said. The
-repository, tag prefix, token, the floor and the check settings live in
+repository, tag prefix, the floor and the check settings live in
 `addons/_data/manager_update/config.json`, so pointing the update at a fork is a
 config edit, and a change to them re-points, re-times and re-checks without a
-restart. Its own published test, `addons/_tests/test_manager_update.py`, drives
+restart. The tab holds no token of its own: every request carries whatever
+`api.session.git_token()` answers with, which is the profile's one GitHub token
+while **Use the global git token** is up on this addon's row in the store's
+Addon manager, and nothing at all while it is off. Its own published test,
+`addons/_tests/test_manager_update.py`, drives
 every state of the check, the version list and its pane, the notices, the
-schedule, the asset and link picking, the byte sniffing, the swap and the whole
-job machine without a network, and the build runs it like every other addon's.
+schedule, the asset and link picking, the byte sniffing, the swap, the whole
+job machine and the view it puts over the tab - the card's name, the bar's share,
+the console's lines and the notice beside it, on a tab that has the pane and on a
+tab that has not - without a network, and the build runs it like every other
+addon's.
 
 ### Store addon: OpenWrt Log Viewer
 
@@ -2246,20 +2605,23 @@ app reads that copy as a set of *shipped* addons:
   file belongs to the build. Nothing writes to it: the Details form is read-only,
   **Save** is refused, and there is no **Restart** in its Settings row.
 - It is switched on and off from a Settings page of its own, beside the
-  **Connection** page - and the
+  **Connection** page - the
+  **Installed addons** page is the shipped addons only - and the
   choice stays per profile in `addons -> <id> -> enabled`. Its own settings are
   still written beside the `.exe`, in the writable `addons/_data/<id>/config.json`, so
   a shipped addon is configured per installation exactly like a dropped-in one.
+  A shipped addon is never listed on the store's Addon manager, never offered the
+  force-popout switch and never started as a popout of its own.
 - "Shipped" is decided by a stable list, `core.const.SHIPPED_ADDON_IDS`
   (`berry`, `addon_store`, `manager_update`, `theme_manager`),
   on top of the
   `builtin` flag, so a
   source checkout - where `HAS_BUILTIN_ADDONS` is off - still gives those addons
-  a Settings page of their own rather than a row on the **Installed addons**
+  a Settings page of their own rather than a row on the store's **Addon manager**
   page. The certificate, log, package and multi-ssh addons are not in that list:
   they live in `addon.store` and
   are installed from the store, which marks what it builds with an `origin` of
-  its own so the app puts it on the **Installed addons** page instead. The web
+  its own so the app gives it a row on the **Addon manager** instead. The web
   installer used to be in it; it is the store's **Berry web dashboard** now, and
   is named in `RETIRED_SHIPPED_ADDON_IDS` for that reason.
 - Two addons of one id cannot both be *the* addon called `mytool`, and a file in
@@ -2307,13 +2669,14 @@ build, but everything the *user's* side of the program wrote about it stays:
   whatever else it kept beside it;
 - a record in every profile under `addons -> <id>`, saying whether it was
   switched on, whether it ran on a connection of its own, which transports it
-  may use, and its own settings;
+  may use, whether its tabs were forced into a window of their own and where that
+  window stood, which slot each of its tabs held, and its own settings;
 - and, for the web installer, a `remote_root` naming the folder it installed
   into.
 
 A new version that simply drops the addon would leave all four behind, and the
-user would meet a stale row in Settings and a folder nothing reads. So a retired
-addon is named rather than forgotten. `core.const.RETIRED_SHIPPED_ADDON_IDS`
+user would meet a stale row on the Addon manager and a folder nothing reads. So
+a retired addon is named rather than forgotten. `core.const.RETIRED_SHIPPED_ADDON_IDS`
 lists the ids that used to ship, and `ADDON_ID_TRANSLATIONS` says which addon
 replaces each one - `web_installer` is answered by the store's `berry_web`. Two
 things read those tables:
@@ -2329,22 +2692,19 @@ things read those tables:
   folder goes. It returns the lines it acted on, which are logged as they are
   found, and touches nothing whose id it was not given.
 - `core.ui._normalize_addons` folds the profile's record the same way as
-  it is read: the retired id's switch and transports move onto the successor,
-  the successor's own record wins wherever both exist, and the retired key goes.
+  it is read: the retired id's switch, transports and popout answers move onto
+  the successor, the successor's own record wins wherever both exist, and the
+  retired key goes.
   `_translate_remote_root` follows it, rewriting only the folder that was the
   shipped default - `/www_rasconf` to `/www_berry` - because a path somebody
   chose themselves is theirs, not a leftover of a renamed addon.
 
 What the device holds is deliberately not swept. `/www_rasconf` is left serving
-until the user presses **Move folder to this name**, which renames it, points
-`uhttpd.<section>.home` at the new name and restarts - because a folder an
-upgrade renames on its own is a dashboard that stops answering, and the old one
-can always be renamed back.
-
-`addons/_tests/test_retire.py` runs both halves against a folder it builds and
-tears down: the sweep's moves and deletions, what it leaves alone, and the
-config translation - a retired record folded onto its successor, a default path
-moved, a chosen one kept.
+until the user presses **Move folder to this name**, which finds the folder the
+device really serves, renames it, points `uhttpd.<section>.home` - and the home
+of any other section that was serving that folder - at the new name and restarts,
+because a folder an upgrade renames on its own is a dashboard that stops
+answering, and the old one can always be renamed back.
 
 ## Logs
 

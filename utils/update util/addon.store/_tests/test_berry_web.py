@@ -112,6 +112,36 @@ OTHER = {"code": 0, "err": "", "out": (
     "B <html><head><title>LuCI</title></head>\n"
 )}
 
+#: The router as it stands before a move from an older name: the folder the form
+#: names is not there, this addon's section has never been written, the page's
+#: files sit under a folder of an older install, and a section of the router's
+#: own serves it. Exactly the shape a rename has to be able to read.
+ELDER = {"code": 0, "err": "", "out": (
+    "FOLDER no\n"
+    "FILES 0\n"
+    "HOME \n"
+    "SH uhttpd.lan.home='/www'\n"
+    f"SH uhttpd.rasconf.home='{OLD_ROOT}'\n"
+    f"SERVED {OLD_ROOT} 22\n"
+    "PY /usr/bin/python3\n"
+    "ANSWERED http://127.0.0.1:8989/cgi-bin/index.py\n"
+    "B <title>Berry - Dashboard</title>\n"
+)}
+
+#: A command the app gave up on. Nothing answered, so the number the addon is
+#: handed is one the app made up, and the reason is in ``err``.
+STALLED = {"code": -1, "out": "", "err": "Timeout opening channel: timed out"}
+
+#: A device with neither curl nor wget on it: the page could not be asked at all.
+NOFETCH = {"code": 0, "err": "", "out": (
+    "FOLDER yes\n"
+    "FILES 22\n"
+    "HOME /www_berry\n"
+    "PY /usr/bin/python3\n"
+    "NOFETCH\n"
+    "NOANSWER\n"
+)}
+
 
 def check(condition: object, text: str) -> None:
     """One thing the addon has to do; all of them are reported, not just the first."""
@@ -270,6 +300,35 @@ def test_the_check() -> None:
           f"a router with nothing on it is explained wrong: {bare}")
     check(bare["python3"] == "/usr/bin/python3", "python3 is missing from the table")
 
+    elder = berry_web.parse_check(ELDER)
+    check(elder["answered"] and elder["is_berry"],
+          f"a dashboard served from an older folder was not recognised: {elder}")
+    check(not elder["folder"], "the folder the form names was taken for the one there")
+    check(elder["served"] == [{"folder": OLD_ROOT, "files": 22}],
+          f"the folders holding the page were not read: {elder['served']}")
+    check(elder["sections"].get("rasconf") == OLD_ROOT
+          and elder["sections"].get("lan") == "/www",
+          f"which section serves what was not read: {elder['sections']}")
+    check(berry_web.elsewhere(elder, "/www_berry") == OLD_ROOT,
+          "the answer to \"mine is in /www_rasconf\" was not found")
+    check(not berry_web.elsewhere(elder, OLD_ROOT),
+          "the named folder was reported as somewhere else")
+    rows = {row["cells"][0]: row["cells"][1]
+            for row in berry_web.summary_rows(elder)}
+    check(OLD_ROOT in rows.get("Folders holding the page", ""),
+          f"the table does not say where the page's files are: {rows}")
+    check("rasconf" in rows.get("uhttpd serves", "")
+          and "/www" in rows.get("uhttpd serves", ""),
+          f"the table hides which section serves which folder: {rows}")
+
+    silent = berry_web.parse_check(NOFETCH)
+    check(silent["no_fetch"] and not silent["answered"],
+          f"a device with no fetch tool read as a page that refused: {silent}")
+    rows = {row["cells"][0]: row["cells"][1]
+            for row in berry_web.summary_rows(silent)}
+    check("curl" in rows.get("Asking the page", ""),
+          f"the missing tool is not said: {rows}")
+
 
 # --- two: where the tab opens once it has been told ---
 
@@ -409,6 +468,129 @@ def test_the_scripts() -> None:
     check("already" in str(api.last_set("status", "text")),
           f"the addon is silent about a move with nothing to do: "
           f"{api.last_set('status', 'text')!r}")
+    berry_web.shutdown()
+
+
+# --- three and a half: a check that can answer, and a move that knows where ---
+
+def test_the_probe() -> None:
+    """The two things 1.2 is: a check that cannot stall, and a rename that starts
+    from what the device said rather than from a setting it may never have had."""
+    print("\n3d. the check's own seconds")
+    paths = berry_web.job_paths(dict(berry_web.DEFAULTS))
+    script = berry_web.check_script(paths)
+    lines = script.splitlines()
+    check(any(line.startswith("WEBHOME=") for line in lines),
+          "the served folder is not named at the top of the script")
+    check(not any(line.startswith("HOME=") for line in lines),
+          "the script still re-assigns HOME, which curl reads a config off")
+    check("--connect-timeout" in script and "--max-time" in script,
+          "curl is asked for the page with no bound on it")
+    check(f"-T {berry_web.PROBE_ASK}" in script and "-t 1" in script,
+          "the wget fallback is still asked without a timeout - the one that "
+          "hung the check until the app gave up")
+    check("head -c" in script, "a page that streams forever would be read forever")
+    check("NOFETCH" in script,
+          "a device with neither curl nor wget is not said to be one")
+    check('SERVED $D' in script and "grep home=" in script,
+          "the device is never asked which of its folders holds the page")
+    check(script.count("for URL in") == 1, "the page is asked for twice over")
+
+    api = fresh(answer=LIVE)
+    urls = berry_web.page_urls(berry_web.job_paths(dict(berry_web.DEFAULTS)))
+    check(urls[0] == f"http://127.0.0.1:8989{paths['web_path']}",
+          f"the device is not asked to answer itself first: {urls}")
+    check(len(urls) <= 4, f"the device is asked {len(urls)} times over")
+    budget = len(urls) * berry_web.PROBE_ASK
+    check(budget < 45,
+          f"the probe's worst case is {budget}s, more than the 45s it is given")
+    berry_web.shutdown()
+
+    print("\n3e. what a command that never came back is said as")
+    said = berry_web._why_failed(STALLED, "asking the host what it has", 45)
+    check("-1" not in said,
+          f"the app's made-up number is shown as the device's answer: {said!r}")
+    check("never came back" in said and "45" in said and "Timeout" in said,
+          f"a stall is not said as one: {said!r}")
+    check("answered 2" in berry_web._why_failed({"code": 2, "err": ""}, "a step", 30),
+          "a real exit code is hidden")
+    check("No such file" in berry_web._why_failed(
+        {"code": 1, "err": "No such file or directory"}, "a step", 30),
+        "a device's own reason is thrown away")
+
+    api = fresh(answer=STALLED)
+    berry_web.check_device()
+    said = str(api.last_set("status", "text"))
+    check("answered -1" not in said,
+          f"the tab blames the device for the app's number: {said!r}")
+    check("never came back" in said, f"the tab does not say it waited: {said!r}")
+    check("Timeout" in said, f"the tab hides why: {said!r}")
+    berry_web.shutdown()
+
+    print("\n3f. a move that starts where the device really is")
+    api = fresh({"web_home": "/www_berry"})
+    berry_web.last_check.clear()
+    berry_web.move_home()
+    check(not api.commands, "a move ran on a device that had never been asked")
+    check("Re-check" in str(api.last_set("status", "text")),
+          f"nothing told anyone to look first: {api.last_set('status', 'text')!r}")
+    berry_web.shutdown()
+
+    api = fresh({"web_home": "/www_berry"})
+    berry_web.last_check.clear()
+    berry_web.last_check.update(berry_web.parse_check(BLANK))
+    berry_web.move_home()
+    check(not api.commands, "a router with nothing on it was offered a move")
+    check("no folder to move from" in str(api.last_set("status", "text")),
+          f"the empty device was not explained: {api.last_set('status', 'text')!r}")
+    berry_web.shutdown()
+
+    api = fresh({"web_home": "/www_berry"})
+    berry_web.last_check.clear()
+    berry_web.last_check.update({"served": [{"folder": "/www", "files": 40}],
+                                 "sections": {"lan": "/www"}, "home": ""})
+    berry_web.move_home()
+    check(not api.commands, "the router's own /www was moved out from under it")
+    check("own folder" in str(api.last_set("status", "text")),
+          f"refusing was not said: {api.last_set('status', 'text')!r}")
+    berry_web.shutdown()
+
+    api = fresh({"web_home": "/www_berry"})
+    berry_web.last_check.clear()
+    berry_web.last_check.update(berry_web.parse_check(ELDER))
+    berry_web.move_home()
+    moved = api.command_holding("mv ")
+    check(bool(moved), "the folder the device named was not moved")
+    script = moved[0] if moved else ""
+    check(f'OLD="{OLD_ROOT}"' in script and 'NEW="/www_berry"' in script,
+          f"the move renames the wrong folders: {script.splitlines()[:4]}")
+    check("uci set uhttpd.rasconf.home='/www_berry'" in script,
+          "the section that served the old folder was left naming a gone path")
+    check("uci set uhttpd.berry.home='/www_berry'" in script,
+          "this addon's own section was not written")
+    check("uci commit uhttpd" in script and "/etc/init.d/uhttpd restart" in script,
+          "the change was neither committed nor the server brought back up")
+    check('if [ -e "$NEW" ]' in script and "STOP" in script,
+          "the script does not refuse a name that is already taken")
+    pushed = api.last("config.update")
+    written = dict((pushed[1][0] if pushed and pushed[1] else pushed[2]) or {})
+    check(str(written.get("web_home") or "") == "/www_berry",
+          f"the new name was not kept in the settings: {written}")
+    check(str(api.last_set("web_home", "value")) == "/www_berry",
+          "the form still shows the folder that no longer exists")
+    berry_web.shutdown()
+
+    api = fresh({"web_home": "/www_berry", "subdir": "dash"})
+    berry_web.last_check.clear()
+    berry_web.last_check.update(berry_web.parse_check(ELDER))
+    berry_web.move_home()
+    moved = api.command_holding("mv ")
+    script = moved[0] if moved else ""
+    check(f'OLD="{OLD_ROOT}"' in script and 'NEW="/www_berry"' in script,
+          f"a subfolder made the rename work on the path inside it: "
+          f"{script.splitlines()[:4]}")
+    check("uci set uhttpd.berry.home='/www_berry/dash'" in script,
+          f"the setting lost the subfolder it serves: {script!r}")
     berry_web.shutdown()
 
 
@@ -835,6 +1017,11 @@ def github_token() -> str:
     is the one thing here that cannot be answered from the source. Anonymous
     requests are capped at sixty an hour for a machine, and a runner spends that
     on its own work, so the live ask is made with a token or not at all.
+
+    The addon has no token field of its own any more - a profile keeps the one
+    token and hands it over through ``api.session.git_token()`` - so the token
+    named here is put in where the addon reads it from, for the length of the one
+    ask, and the stubbed api has no session to answer it.
     """
     for name in ("BERRY_WEB_TEST_TOKEN", "GITHUB_TOKEN"):
         text = str(os.environ.get(name) or "").strip()
@@ -939,7 +1126,12 @@ def test_the_files() -> None:
         token = github_token()
         if token:
             berry_web.Fetcher.get = original
-            paths, said = read_tree({"token": token})
+            held = berry_web.profile_token
+            berry_web.profile_token = lambda: token
+            try:
+                paths, said = read_tree({})
+            finally:
+                berry_web.profile_token = held
             check({"cgi-bin/index.py", "css/theme.css"} <= set(paths)
                   and "README.md" not in paths,
                   f"the repository did not give the dashboard: {paths[:6]} "
@@ -978,6 +1170,7 @@ def main() -> int:
     # opened before any of it runs and shut after the last of it.
     test_the_check()
     test_the_scripts()
+    test_the_probe()
     test_the_bridge()
     test_the_theme()
     if app is not None:

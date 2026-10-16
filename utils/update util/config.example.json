@@ -35,6 +35,10 @@
         "SSH",
         "LuCI"
       ],
+      "pinned_tab_order": [
+        "Addon store",
+        "Manager update"
+      ],
       "terminal_font_size": 10,
       "ui_zoom": 100,
       "max_log_lines": 500,
