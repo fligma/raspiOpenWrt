@@ -131,7 +131,7 @@ from urllib.parse import quote
 from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_manifest_path,
                           addon_origin, config_get, connection_kind,
                           connection_words, default_icon_path, find_addon_picture,
-                          jsonable,
+                          icon_filename, jsonable,
                           merge_config, read_config_json, requires_list, write_config_json)
 
 ADDON = {
@@ -2463,21 +2463,62 @@ def _manifest_values(id_value: str, details: dict, entry: dict) -> dict:
     return jsonable(declared)
 
 
+def _keep_picture(id_value: str, entry: dict) -> None:
+    """Leave the addon's picture in ``addons/_data/<id>/``, where the app can read it.
+
+    A program built here carries its assets inside itself, so nothing on disk
+    beside it says what it looks like: the Addon Dev tab, the Settings row and the
+    addon's own tab mark would all fall back to the default picture for an addon
+    the catalog plainly has one of. Copied under the standard name - the id and
+    then ``icon.png`` - into the addon's own data folder, it answers for the app
+    (which searches that folder), for the addon (whose ``api.paths.data`` is
+    exactly it) and for the next update, which overwrites it. What is copied is
+    the staged asset when the download brought one, and the picture the store
+    fetched for its own catalog otherwise; neither being there is an addon that
+    simply wears the default, which is what it did before.
+    """
+    name = clean_id(id_value)
+    if not name:
+        return
+    standard = icon_filename(name)
+    source: Path | None = None
+    folder = staging() / "assets"
+    for wanted in (standard, one_line(entry.get("icon"))):
+        if wanted:
+            candidate = folder / wanted
+            if candidate.is_file():
+                source = candidate
+                break
+    if source is None:
+        cached = cached_icon(id_value)
+        source = Path(cached) if cached else None
+    if source is None:
+        return
+    target = addon_data_folder(id_value) / standard
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    except OSError as error:
+        note(f"{id_value}'s picture could not be kept beside its settings: {error}")
+
+
 def _describe(id_value: str, program: Path, details: dict, entry: dict) -> None:
     """Write down what an install is, beside it and in its own settings folder.
 
     Two files come of this: the manifest the app reads an addon's name, version
     and transports from before the program has run once, and the addon's
     ``fields.json`` - the form Settings shows while the addon is off, which a
-    running addon writes itself through ``api.config.declare``. An addon that is
-    installed is still installed when neither file can be written, so a failure
-    is said and nothing more.
+    running addon writes itself through ``api.config.declare``. The addon's
+    picture is put in the same folder for the same reason: it has to be readable
+    before the program runs. An addon that is installed is still installed when
+    none of this can be written, so a failure is said and nothing more.
     """
     manifest = _manifest_values(id_value, details, entry)
     try:
         write_config_json(program.parent / f"{clean_id(id_value)}.json", manifest)
     except OSError as error:
         note(f"{id_value}'s manifest could not be written beside it: {error}")
+    _keep_picture(id_value, entry)
     fields = [dict(item) for item in (details.get("fields") or [])
               if isinstance(item, dict) and item.get("key")]
     defaults = dict(details.get("defaults") or {})

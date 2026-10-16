@@ -2164,8 +2164,11 @@ class BerryManager(
             bool(self.app_config.get("tooltips_enabled", True)))
         self.tooltips_check.toggled.connect(self._on_tooltips_toggled)
         tips_form.addRow(self.tooltips_check)
-        self._settings_category("Appearance").addWidget(appearance_group)
-        self._settings_category("Appearance").addWidget(tips_group)
+        # One page holds both groups: _settings_category makes a page per call,
+        # so asking for "Appearance" twice would put a second one in the bar.
+        appearance_tab = self._settings_category("Appearance")
+        appearance_tab.addWidget(appearance_group)
+        appearance_tab.addWidget(tips_group)
         self._reload_theme_combo()
 
         tabs_category = QGroupBox("Custom tabs")

@@ -45,10 +45,10 @@ Three things get looked at:
   than a worker left holding the dying copy's unpacked folder;
 * what an install says about itself afterwards: the manifest beside the program
   that marks it as installed and names the transports it may use, the settings
-  form left in its ``_data`` folder for Settings to show, and the program, the
-  manifest and - when the two toggles say so - the settings folder that Delete
-  is allowed to take back, and the two things it is not: an addon the store did
-  not install, and this store's own folder.
+  form left in its ``_data`` folder for Settings to show, the picture left in the
+  same folder for the tabs and rows to wear, and - when the two toggles say so -
+  the settings folder that Delete is allowed to take back, and the two things it
+  is not: an addon the store did not install, and this store's own folder.
 
 No internet, no compiler and no device are needed. Run it from the Test panel,
 or::
@@ -2493,6 +2493,89 @@ def test_the_pictures(store: Any) -> None:
              f"{Path(str(dev.icon_choice(str(pic)))).name}")
 
 
+# --- twelve: the picture an install leaves where the app can read it ---
+
+def test_the_kept_picture(store: Any) -> None:
+    """The copy of an addon's picture an install keeps beside its settings.
+
+    A program built here carries its assets inside itself and its staging folder
+    is thrown away once it lands, so nothing on disk says what an installed addon
+    looks like. One copy in the addon's own ``addons/_data/<id>`` answers for the
+    app, which searches that folder for a row's mark, and for the addon, to which
+    that very folder is handed as ``api.paths.data`` - and it has to be written
+    even for an addon that declares no settings form at all, which is the case
+    that made the copy's place in ``_describe`` worth checking.
+    """
+    print("\n15. the picture an install leaves in the addon's data folder")
+    real_dir, real_entries, real_note = store.addons_dir, store.entries, store.note
+    saved_data = os.environ.get("RASCONF_ADDON_DATA")
+    said: list = []
+    try:
+        with tempfile.TemporaryDirectory() as box:
+            os.environ["RASCONF_ADDON_DATA"] = str(Path(box) / "data")
+            api = fresh(store)
+            store.addons_dir = lambda: Path(box) / "addons"
+            store.note = lambda text: said.append(str(text))
+            store.entries = store.parse_catalog(CATALOG)
+            hello = store.entries[0]
+            check(hello["icon"] == store.icon_filename(hello["id"]),
+                  f"the catalog row used here does not name the standard picture: "
+                  f"{hello['icon']!r}")
+            program = store.addons_dir() / hello["id"] / f"{hello['id']}.exe"
+            program.parent.mkdir(parents=True)
+            assets = store.staging() / "assets"
+            assets.mkdir(parents=True, exist_ok=True)
+            kept = store.addon_data_folder(hello["id"]) / hello["icon"]
+
+            # nothing staged and nothing cached: an addon that brought no picture
+            store._describe(hello["id"], program, {}, hello)
+            check(not kept.exists(),
+                  "an install with no picture anywhere wrote one anyway")
+            check((program.parent / f"{hello['id']}.json").is_file(),
+                  "the manifest beside the program was lost on the way")
+
+            # the staged asset is kept, under the name the rule uses
+            (assets / hello["icon"]).write_bytes(b"staged")
+            store._describe(hello["id"], program, {}, hello)
+            check(kept.is_file() and kept.read_bytes() == b"staged",
+                  "the staged asset was not kept beside the addon's settings")
+
+            # an asset the catalog names differently still lands under the rule
+            kept.unlink()
+            (assets / hello["icon"]).unlink()
+            (assets / "odd_name.png").write_bytes(b"odd")
+            store._describe(hello["id"], program, {}, {**hello, "icon": "odd_name.png"})
+            check(kept.is_file() and kept.read_bytes() == b"odd",
+                  "a picture the catalog named otherwise was not kept under the "
+                  "standard name")
+            (assets / "odd_name.png").unlink()
+
+            # with no asset at all the store's own cached picture answers
+            icons = Path(api.paths.data) / "icons"
+            icons.mkdir(parents=True, exist_ok=True)
+            (icons / f"{hello['id']}.png").write_bytes(b"cached")
+            store._describe(hello["id"], program, {}, hello)
+            check(kept.is_file() and kept.read_bytes() == b"cached",
+                  "the picture the store fetched for its catalog was not kept either")
+
+            # an id that names nothing is left alone, folder and all
+            data = store.addons_dir() / "_data"
+            before = sorted(one.name for one in data.iterdir())
+            store._keep_picture("", hello)
+            check(sorted(one.name for one in data.iterdir()) == before,
+                  "an id that names nothing still made somewhere for a picture")
+
+            # nothing about a picture stops an install: it is only said
+            check(not [text for text in said if "could not be kept" in text],
+                  f"a picture that was there was said to have failed: {said}")
+    finally:
+        store.addons_dir, store.entries, store.note = real_dir, real_entries, real_note
+        if saved_data is not None:
+            os.environ["RASCONF_ADDON_DATA"] = saved_data
+        else:
+            os.environ.pop("RASCONF_ADDON_DATA", None)
+
+
 # --- run it ---
 
 def main() -> int:
@@ -2527,6 +2610,7 @@ def main() -> int:
     test_the_manifest(store)
     test_the_child_env()
     test_the_pictures(store)
+    test_the_kept_picture(store)
 
     if FAILURES:
         print()

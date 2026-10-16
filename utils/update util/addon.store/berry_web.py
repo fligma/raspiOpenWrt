@@ -56,7 +56,10 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Berry web dashboard",
-    "version": "1.0",
+    # 1.1 is the same code as 1.0, put out again so the store offers an update:
+    # a program built before the launcher was repaired dies the moment it is
+    # started, and the only way to replace one is to install it afresh.
+    "version": "1.1",
     "author": "fligma",
     "description": "Looks for the Berry dashboard on the connected host and, when "
                    "it is not there, installs src/www_rasconf from GitHub over "

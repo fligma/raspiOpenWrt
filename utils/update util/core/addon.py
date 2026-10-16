@@ -2853,25 +2853,58 @@ def state_color(state: str) -> QBrush:
 _PICTURE_CACHE: dict[str, QIcon] = {}
 
 
+#: The addon store's id, whose own data folder keeps a copy of every picture it
+#: has downloaded for its catalog - the only copy of an installed addon's artwork
+#: on a machine where that addon arrived as a program.
+STORE_ADDON_ID = "addon_store"
+
+#: Endings an addon's picture may reasonably have been published with.
+PICTURE_SUFFIXES = (".png", ".ico", ".icns", ".svg", ".jpg", ".jpeg", ".webp")
+
+
+def _picture_names(row: dict) -> list[str]:
+    """Names besides the standard one this addon's picture may stand under.
+
+    Its manifest may declare a picture of its own, and the store's catalog cache
+    files one under the bare id with the ending it was published with - both are
+    worth a try before an addon is shown the default mark.
+    """
+    names: list[str] = []
+    declared = str((row.get("manifest") or {}).get("icon") or "").strip()
+    if declared:
+        names.append(declared)
+    plain = config_name(str(row.get("id") or ""))
+    names += [f"{plain}{suffix}" for suffix in PICTURE_SUFFIXES]
+    return names
+
+
 def addon_picture(row: dict) -> str:
     """The file this addon's picture stands in, or nothing when it brought none.
 
     An addon dropped in the folder keeps its artwork in an ``assets`` folder of its
     own; one that came with the program keeps it in the program's ``assets``, which
-    is also where a packaged build packs the artwork of every addon installed on
-    the machine. Both are tried, under the one name every addon uses, and what
-    answers to neither is shown the default rather than somebody else's picture.
+    is also where a packaged build packs the artwork of every addon shipped on the
+    machine. A program the store installed has neither: its pictures went inside
+    the build, where the app cannot read them. So its own ``addons/_data/<id>``
+    folder is searched as well - the store leaves the addon's picture there when it
+    installs it - and the copy the store downloaded for its own catalog is the last
+    place of the three. What answers to none of them is shown the default rather
+    than somebody else's picture.
     """
     addon_id = str(row.get("id") or "").strip()
     if not addon_id:
         return ""
+    extra = _picture_names(row)
     folders = []
     home = str(row.get("home") or "").strip()
     if home:
         folders.append(Path(home) / "assets")
     folders.append(ASSETS_DIR)
+    data = str(row.get("data") or "").strip() or str(addon_data_dir(addon_id))
+    folders += [Path(data), Path(data) / "assets", Path(data) / "icons"]
+    folders.append(ADDON_DATA_DIR / STORE_ADDON_ID / "icons")
     for folder in folders:
-        found = find_icon(folder, addon_id)
+        found = find_icon(folder, addon_id, *extra)
         if found:
             return found
     return default_icon_path(ASSETS_DIR)

@@ -477,12 +477,13 @@ def test_the_tab(app: Any) -> None:
 
 # --- seven: the mark beside the tab's label ---
 
-class _TwoFolders:
-    """A stand-in for ``api.paths`` that knows two assets folders and nothing else."""
+class _ThreeFolders:
+    """A stand-in for ``api.paths`` that knows the three places a picture may lie."""
 
-    def __init__(self, addon: Path, assets: Path) -> None:
+    def __init__(self, addon: Path, assets: Path, data: Path) -> None:
         self._addon = addon
         self._assets = assets
+        self._data = data
 
     @property
     def addon(self) -> Path:
@@ -492,13 +493,19 @@ class _TwoFolders:
     def assets(self) -> Path:
         return self._assets
 
+    @property
+    def data(self) -> Path:
+        return self._data
+
 
 def _check_the_lookup() -> None:
-    """That the one name is tried in both of the folders a picture may live in.
+    """That the one name is tried in every folder a picture may live in.
 
-    An installed addon carries its assets inside the program it was built into and
-    an addon being written sits beside its own source; the same file name has to
-    reach either, which is the whole of what ``find_addon_picture`` promises.
+    An addon being written keeps its assets beside its own source, a build packs
+    them flat into the program, and an addon installed as a program has neither of
+    those on disk - its picture is kept in its ``_data`` folder, where its
+    settings are. The same file name has to reach all three, which is the whole of
+    what ``find_addon_picture`` promises.
     """
     import shutil
     import tempfile
@@ -509,12 +516,15 @@ def _check_the_lookup() -> None:
     try:
         own = work / "addon" / "assets" / "cert_manager"
         program = work / "assets"
+        data = work / "_data" / "cert_manager"
         own.mkdir(parents=True)
         program.mkdir(parents=True)
+        data.mkdir(parents=True)
         name = cert_manager.TAB_ICON_FILE
         (own / name).write_bytes(b"own")
         (program / name).write_bytes(b"program")
-        paths = _TwoFolders(work / "addon", program)
+        (data / name).write_bytes(b"data")
+        paths = _ThreeFolders(work / "addon", program, data)
         check(addon_common.find_addon_picture(paths, "cert_manager")
               == str(own / name),
               "the addon's own assets folder does not win over the program's")
@@ -523,8 +533,16 @@ def _check_the_lookup() -> None:
               == str(program / name),
               "nothing is worn from the program's assets when the addon has none")
         (program / name).unlink()
+        check(addon_common.find_addon_picture(paths, "cert_manager")
+              == str(data / name),
+              "an addon installed as a program does not find the picture kept "
+              "beside its settings")
+        (data / name).unlink()
         check(addon_common.find_addon_picture(paths, "cert_manager") == "",
               "an addon with no picture anywhere was handed a path anyway")
+        gone = _ThreeFolders(work / "addon", work / "nowhere", work / "also_gone")
+        check(addon_common.find_addon_picture(gone, "cert_manager") == "",
+              "a folder that is not there was still read as holding a picture")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

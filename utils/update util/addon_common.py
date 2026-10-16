@@ -264,19 +264,23 @@ def find_icon(folder: Any, addon_id: str, *extra: str) -> str:
 def picture_folders(paths: Any, addon_id: str) -> list:
     """Every folder this addon's picture may live in, the likeliest first.
 
-    Two layouts are worth looking at, and both hold the same file name. A store
+    Three layouts are worth looking at, and all hold the same file name. A store
     addon keeps its pictures beside its own source, in
     ``addon.store/assets/<id>/`` - the folder the catalog is built from and the
     one a person drops artwork into without rebuilding anything. The program's
-    ``assets`` folder is the other: a shipped addon's picture lives there, and so
+    ``assets`` folder is the second: a shipped addon's picture lives there, and so
     does an installed one's, since a build made by the store packs the addon's
-    assets flat into the executable that ``paths.assets`` points at. A folder
-    that is not there is not a place to look, so a shipped addon - whose own
-    folder has no ``assets`` of it - simply goes on to the program's.
+    assets flat into the executable that ``paths.assets`` points at. The third is
+    the addon's own data folder, ``addons/_data/<id>/``: an addon installed as a
+    program has no readable source folder of its own, so its artwork is kept
+    where its settings are and both the addon and the app read it from there. A
+    folder that is not there is not a place to look, so a shipped addon - whose
+    own folder has no ``assets`` of it - simply goes on to the program's.
     """
     found: list[Path] = []
     for read in (lambda: Path(str(paths.addon)) / "assets" / config_name(addon_id),
-                 lambda: Path(str(paths.assets))):
+                 lambda: Path(str(paths.assets)),
+                 lambda: Path(str(paths.data))):
         try:
             folder = read()
         except (AttributeError, KeyError, OSError, TypeError, ValueError):

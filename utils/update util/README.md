@@ -1080,15 +1080,20 @@ package box), `addon.store/multi_ssh.py` (two shells, one behind the other,
 since more than one at a time is the whole point) and
 `addon.store/berry_web.py` (a berry lying on a page, inside a browser frame).
 
-Each of them looks for a real file first, and the search is one rule with two
+Each of them looks for a real file first, and the search is one rule with three
 places to look: the file named `{id}icon.png`, tried in the folder the addon's
 own source keeps its pictures in - `assets/<id>/` beside it, which is where a
-store addon's file is - and then in the program's `assets`. `berry` is therefore
-worn by `assets/berryicon.png` and `multi_ssh` by
-`addon.store/assets/multi_ssh/multi_sshicon.png`, with no addon naming its file
-anywhere in its source. `addon_common.find_addon_picture` is that lookup, and it
-is what closed the gap `find_icon` left open: `api.paths.assets` always answers
-with the *program's* folder, so a store addon's own picture was never found
+store addon's file is - then in the program's `assets`, and last in the addon's
+own data folder `addons/_data/<id>/`. That third place is what an addon
+**installed as a program** has left: its source and its assets folder were
+thrown away once the build finished, and the picture the build used is packed
+inside the executable, where nothing outside it can read the file. `berry` is
+therefore worn by `assets/berryicon.png`, `multi_ssh` by
+`addon.store/assets/multi_ssh/multi_sshicon.png` while it is still a source file,
+and an installed `berry_web` by `addons/_data/berry_web/berry_webicon.png`, with
+no addon naming its file anywhere in its source. `addon_common.find_addon_picture`
+is that lookup, and it is what closed the gap `find_icon` left open: `api.paths.assets`
+always answers with the *program's* folder, so a store addon's own picture was never found
 while the addon was being written - only inside the executable the store builds,
 which packs the assets flat. Nothing is tried under an older name now: the
 aliases the lookup used to keep (`updateicon.png`, `storeicon.png`,
@@ -1350,8 +1355,12 @@ The table on top is the runtime's own list - id, name, version, whether the
 addon is imported or running as a process (with its pid), whether it loaded or
 failed, and the file it came from - and every row wears the addon's own picture:
 the same `{id}icon.png` its store card and its tab wear, looked for in the
-`assets` folder beside the addon and then in the program's `assets`, with
-`assets/storedefaultaddon.png` for an addon that brought none. A *filter* box
+`assets` folder beside the addon, then in the program's `assets`, then in the
+addon's `addons/_data/<id>` (and the `assets` and `icons` folders inside it), and
+last among the pictures the store already fetched for its own catalog - which is
+how an addon installed before the store began leaving a copy beside its settings
+still wears its own mark rather than the default. `assets/storedefaultaddon.png`
+is what is left for an addon that brought no picture at all. A *filter* box
 over the list keeps the rows whose id, name, version, author, description or
 file answer to what is typed, and the line beside it counts the whole set - how
 many are running, how many failed, how many are off - so a list narrowed by a
@@ -1609,7 +1618,11 @@ manifest inside the program's folder - `name`, `version`, `author`,
 `ssh`/`sftp` transports `api.device` is allowed to hand it, the `connection`
 declaration saying whose connection it may use, and an `origin` mark
 saying the store put it there - and its `fields.json` form, with a `config.json`
-seeded from the addon's defaults, under `addons/_data/<id>`. Both are read
+seeded from the addon's defaults, under `addons/_data/<id>`. The addon's picture
+is copied into that same folder, under the standard `{id}icon.png` name, for the
+same reason the manifest is: the app has to be able to read it before the program
+has run, and the copy the build used is sealed inside the program and cleared
+with the staging folder. Both are read
 without importing or running any of the addon, since the source is parsed with
 `ast`; both are what **Delete** takes back together with the program. What
 Delete does with the addon's own `addons/_data/<id>` folder is a switch rather
