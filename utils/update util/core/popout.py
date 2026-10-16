@@ -427,6 +427,21 @@ def is_popped(manager: Any, addon: Any, name: str) -> bool:
     return bool(window is not None and window.has_page(name))
 
 
+def settle_bar(manager: Any) -> None:
+    """Ask the main window to re-pin its bar, when there is a bar to re-pin.
+
+    The bar keeps the room it does not use in an empty gap tab it remembers by
+    index, so every tab that leaves or joins the row to that gap's left shifts
+    what the remembered index points at. The window puts it right a tick later on
+    its own, which is soon enough for a tab a person opens and forgets and far too
+    late for a popout moving a whole addon's pages at once: in between, the real
+    tab that has slid into the stale index is drawn as wide as the gap is.
+    """
+    settle = getattr(getattr(manager, "win", None), "settle_tab_bar", None)
+    if callable(settle):
+        settle()
+
+
 def pop_out(manager: Any, addon: Any, name: str) -> bool:
     """Take one page out of the main bar and into the addon's window."""
     win = manager.win
@@ -468,6 +483,7 @@ def pop_out(manager: Any, addon: Any, name: str) -> bool:
     window.add_page(str(name), page, mark=mark, tip=tip)
     entry["popped"] = True
     window.show()
+    settle_bar(manager)
     manager.window_events(addon.id, "undocked", {"tab": str(name)})
     if callable(getattr(win, "sync_tab_transport_dots", None)):
         win.sync_tab_transport_dots()
@@ -524,6 +540,7 @@ def dock_back(manager: Any, addon: Any, name: str = "") -> bool:
         bar.setCurrentWidget(page)
     if not window.names():
         window.hide()
+    settle_bar(manager)
     if moved:
         manager.window_events(addon.id, "docked", {"tab": str(name) if name else ""})
     if callable(getattr(win, "sync_tab_transport_dots", None)):

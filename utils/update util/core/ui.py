@@ -2098,6 +2098,72 @@ class TabCloseButton(QToolButton):
         painter.drawLine(QPointF(left + mark, top), QPointF(left, top + mark))
 
 
+class TabPopoutButton(QToolButton):
+    """The mark worn by a tab that can leave the bar: an arrow out of a frame.
+
+    Only an addon's own tab gets one, and only while its window is switched on -
+    a tab that has been docked back is the one case where the way out is not
+    already taken, so the mark says "this one can go back to its window" without
+    sending the user to the store to find the switch again.
+
+    Painted rather than styled for the same reason as ``TabCloseButton``: the app
+    sheet gives every ``QToolButton`` padding and a border, and a mark this small
+    has no content rect left to draw a glyph into. It sits on the tab's *left* so
+    the right side stays the transport dots' and the close mark's.
+    """
+
+    NAME = "tabPopoutButton"   # what tells the dot pass and this one to spare it
+    SIDE = 18                  # the box's edge at 100% zoom
+    INK = "close_ink"          # the token the frame and arrow are drawn in
+    HOT = "accent"             # and the one they take up under the pointer
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName(self.NAME)
+        self.setAccessibleName("Pop out")
+        self.setAutoRaise(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Pop this tab out into its own window")
+
+    def sizeHint(self) -> QSize:
+        """The box at the zoom the window is drawn at; the tab holds its caption clear of it."""
+        side = zoom_size(self.SIDE)
+        return QSize(side, side)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def enterEvent(self, event: QEvent) -> None:
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event: QEvent) -> None:
+        super().leaveEvent(event)
+        self.update()
+
+    def paintEvent(self, _event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        box = min(self.width(), self.height())
+        pen = QPen(QColor(ui.color(
+            self.HOT if self.underMouse() or self.isDown() else self.INK)))
+        pen.setWidthF(max(1.4, box * 0.10))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        # The frame being left sits low and to the left, drawn as the smaller
+        # half of the box; the arrow starts inside it and ends past its corner,
+        # so the two read as one action rather than as two separate marks.
+        edge = box * 0.50
+        painter.drawRect(QRectF(box * 0.14, box * 0.36, edge, edge))
+        out = QPointF(box * 0.86, box * 0.16)
+        painter.drawLine(QPointF(box * 0.44, box * 0.56), out)
+        head = box * 0.22
+        painter.drawLine(QPointF(out.x() - head, out.y()), out)
+        painter.drawLine(QPointF(out.x(), out.y() + head), out)
+
+
 class ToggleSwitch(QCheckBox):
     """A pill-shaped on/off switch that replaces checkboxes in Settings,
     painted in the raspberry accent colours of the app theme."""

@@ -98,6 +98,7 @@ from core.ui import (
     RightPinnedTabBar,
     RightPinnedTabWidget,
     TabCloseButton,
+    TabPopoutButton,
     TabTransportDots,
     TRANSPORT_DOT,
     ToggleGroup,
@@ -289,6 +290,14 @@ class BerryManager(
     and popups are in core.ui, and the addons a profile runs are handled
     by the AddonManager in core.addon.
     """
+
+    #: This window has a bar of its own, so an addon whose page has been taken
+    #: out into a window has somewhere to come back to. ``core.popout`` asks
+    #: before it docks anything: a program launched as one addon's window
+    #: (``core.popout.PopoutHost``) carries the same two names as ``False`` and
+    #: is refused, since there is no bar behind it to return to.
+    is_main_window = True
+    can_dock_tabs = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -936,6 +945,18 @@ class BerryManager(
         self._stretch_tab_bar()
         # A tab that arrived or left is the order list's business too.
         self._refresh_tab_order_list()
+
+    def settle_tab_bar(self) -> None:
+        """Re-pin the gap and its run now, rather than on the next turn of the loop.
+
+        The bar holds its spare room in an empty gap tab and remembers that tab by
+        *index*, so a tab leaving or joining the row to the left of it shifts what
+        that index points at - and until the gap is pinned again, the real tab
+        that slid into the stale index is measured as the gap is: as wide as the
+        bar has room. A count change already schedules this one tick later; a
+        popout moves several tabs in a row and cannot wait between them.
+        """
+        self._repin_settings()
 
     def restore_tab_layout(self) -> None:
         """Put every tab back in its saved position and re-pin Settings (called after the addon manager reloads)."""
@@ -1593,8 +1614,76 @@ class BerryManager(
                 bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, dots)
         self._tab_dots = keep
 
+        # The dots and the pop-out mark are the two things that live inside a
+        # tab, and both answer to the same moments - a tab arrives, goes away or
+        # changes hands - so one pass refreshes the other rather than every
+        # caller having to remember both.
+        self.sync_tab_popout_buttons()
+
         if hasattr(bar, "refit"):
             bar.refit()
+
+    def _popout_tab_pages(self) -> dict[QWidget, Any]:
+        """The tabs standing in the bar that belong to an addon with a window on.
+
+        The interesting case is a page that has been docked back: everything else
+        such an addon owns is already out of the bar, and a tab the app owns -
+        the terminal, a browser tab, Settings - has no window to be popped into
+        and is not listed here at all.
+        """
+        pages: dict[QWidget, Any] = {}
+        manager = getattr(self, "addons", None)
+        if manager is None:
+            return pages
+        for addon in manager.addons:
+            if not addon.effective_popout:
+                continue
+            for entry in (addon.tabs or {}).values():
+                page = entry.get("page")
+                if page is not None and self.tabs.indexOf(page) >= 0:
+                    pages[page] = addon
+        return pages
+
+    def sync_tab_popout_buttons(self) -> None:
+        """Put a pop-out mark on the left of every tab that can leave the bar.
+
+        Rebuilt whole, the way :meth:`sync_tab_transport_dots` builds the dots -
+        ``setTabButton`` takes ownership of whatever it is handed, so the last
+        pass is held in a name of this window's own until the next one replaces
+        it. The mark goes on the tab's left because its right is where the
+        connection dots and a close mark already live.
+        """
+        wanted = self._popout_tab_pages()
+        bar = self.tabs.tabBar()
+        keep: list[TabPopoutButton] = []
+        for index in range(self.tabs.count()):
+            held = bar.tabButton(index, QTabBar.ButtonPosition.LeftSide)
+            if held is not None and held.objectName() != TabPopoutButton.NAME:
+                continue              # that slot is somebody else's to fill
+            addon = wanted.get(self.tabs.widget(index))
+            if addon is None:
+                if held is not None:
+                    bar.setTabButton(index, QTabBar.ButtonPosition.LeftSide, None)
+                continue
+            button = TabPopoutButton(bar)
+            button.clicked.connect(
+                lambda _=False, a=addon, p=self.tabs.widget(index):
+                self.pop_tab_out(a, p))
+            keep.append(button)
+            bar.setTabButton(index, QTabBar.ButtonPosition.LeftSide, button)
+        self._popout_buttons = keep
+        if hasattr(bar, "refit"):
+            bar.refit()
+
+    def pop_tab_out(self, addon: Any, page: QWidget) -> bool:
+        """Take one addon's tab out of the bar and into its window; the mark's press."""
+        manager = getattr(self, "addons", None)
+        if manager is None or addon is None:
+            return False
+        for name, entry in (addon.tabs or {}).items():
+            if entry.get("page") is page:
+                return bool(manager.pop_tab(str(addon.id), str(name)))
+        return False
 
     # Tab order
 

@@ -3455,7 +3455,7 @@ def _remove_tree(sftp: Any, directory: str) -> None:
 
 
 class UIAPI:
-    """Dialogs, the menu bar and the status line."""
+    """Dialogs, the menu bar, the status line and the clipboard."""
 
     def __init__(self, api: "AddonAPI") -> None:
         self._api = api
@@ -3493,6 +3493,62 @@ class UIAPI:
         mode = QLineEdit.EchoMode.Password if secret else QLineEdit.EchoMode.Normal
         text, accepted = QInputDialog.getText(self._win, self._titled(title), str(label), mode, str(default))
         return text if accepted else None
+
+    def copy(self, text: str) -> bool:
+        """Put ``text`` on the system clipboard; ``False`` when there is no clipboard here.
+
+        The one way an addon can hand something to the rest of the machine
+        without writing a file: a path, a command, a generated password. What
+        lands there replaces whatever was on it, which is why an addon that
+        copies a secret is given :meth:`clipboard_clear` to take it back with,
+        and why that call may be told what it put there first.
+        """
+        board = self._clipboard()
+        if board is None:
+            return False
+        try:
+            board.setText("" if text is None else str(text))
+            return True
+        except Exception:                        # a clipboard that refuses is said so
+            return False
+
+    def clipboard(self) -> str:
+        """What the clipboard holds as text; ``""`` when it holds nothing readable."""
+        board = self._clipboard()
+        if board is None:
+            return ""
+        try:
+            return str(board.text() or "")
+        except Exception:
+            return ""
+
+    def clipboard_clear(self, only_if: str = "") -> bool:
+        """Take the text off the clipboard again, and say whether it went.
+
+        ``only_if`` is the guard an addon that copies a secret needs: with it the
+        clipboard is emptied only while it still holds exactly those characters,
+        so a timer set to tidy a password away cannot wipe the paragraph
+        somebody copied afterwards. Without it, whatever is there is cleared.
+        """
+        board = self._clipboard()
+        if board is None:
+            return False
+        try:
+            if only_if and str(board.text() or "") != str(only_if):
+                return False
+            board.clear()
+            return True
+        except Exception:
+            return False
+
+    def _clipboard(self) -> Any:
+        """The system clipboard, or ``None`` when this process has no GUI to own one."""
+        from PyQt6.QtWidgets import QApplication
+
+        try:
+            return QApplication.clipboard()
+        except Exception:                        # no QApplication: no clipboard
+            return None
 
     def choose(self, items: list[str]) -> str | None:
         """A small menu at the mouse pointer; returns the picked entry."""

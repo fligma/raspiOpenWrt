@@ -53,6 +53,10 @@ SHIPPED = {
     # "both" so one session can be held open across a long transfer instead of
     # opened once per file.
     "berry_web": (["ssh", "sftp"], "both", "berry_webicon.png"),
+    # The vault. It reads and writes one file in its own data folder and never
+    # opens a transport, so it is the second shipped addon that must not ride the
+    # app's session - and the reason the connection panel says "none" at all.
+    "password_manager": ([], "none", "password_managericon.png"),
 }
 
 FAILURES: list[str] = []

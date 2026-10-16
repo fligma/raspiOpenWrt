@@ -959,7 +959,7 @@ The object in `init` is the only door into the app:
 | `api.tabs` | `add_web_tab`, `add_tab` - each taking `position`, `pinned` and `icon_only` - `close`, `rename`, `activate`, `names`, `exists`, `url`, `navigate`, `reload`, `view`, `widget`, `set_widget`, `widget_value`, `set_html`, `inject_css`, `inject_js`, `set_style`, `set_icon`, `icon`, `use_app_icon`, `set_pinned` |
 | `api.window` | the window this addon's tabs live in, when they live in one of its own: `popout(tab, on)` takes a tab out of the main bar into a top-level window or back into the slot it left, `popped(tab)` and `state(tab)` say where it stands, and while it is out the addon steers it - `open`, `close`, `raise_window`, `show(tab, on)`, `center`, `set_title`, `set_size`, `set_minimum`, `set_position`, `set_resizable`, `set_closable`, `set_always_on_top`, `set_style`, `set_icon`. `set_shortcut(on)` asks for a Desktop link that starts this one addon in a window of its own and `shortcut_path()` says where it is (see [Popout windows](#popout-windows-an-addon-in-a-window-of-its-own)) |
 | `api.theme` | the looks the window is drawn from, one JSON file each in `themes`: `name`, `names`, `exists`, `folder`, `read`, `raw`, `colors`, `color`, `tabs`, `metric`, `icon_px`, `chrome_px`, `shows_captions`, `shows_dots`, `groups`, `token_knobs`, `stylesheet`, `sheet_of`, `validate`, `templates`, `template_text`, `reference`, and the five that move them - `use`, `save`, `copy`, `rename`, `remove` |
-| `api.ui` | `information`, `warning`, `error`, `question`, `input(title, label, default, secret=False)` - one line of text, `None` when the box was cancelled, and `secret` draws dots while it is typed, `choose`, `popup(title, text)` - a notice the app raises for the addon, named for whoever raised it, `notify`, `progress_notice(title, text, value, maximum)` - a small card over the window's corner with a bar and its percentage, re-shown on every step of a long job and holding a moment before fading when it fills, `progress_notice_close()` - take that card away now, `menu_item`, `dialog`, `pick_color(title, initial)` - the colour wheel, answering `#rrggbb` or `""`, `pick_file(title, kind, filter, initial)` - a file box on this machine, `kind` being `open`, `save` or `folder` and nothing picked answering `""`, `set_setting_widget`, `window()` |
+| `api.ui` | `information`, `warning`, `error`, `question`, `input(title, label, default, secret=False)` - one line of text, `None` when the box was cancelled, and `secret` draws dots while it is typed, `choose`, `popup(title, text)` - a notice the app raises for the addon, named for whoever raised it, `notify`, `progress_notice(title, text, value, maximum)` - a small card over the window's corner with a bar and its percentage, re-shown on every step of a long job and holding a moment before fading when it fills, `progress_notice_close()` - take that card away now, `menu_item`, `dialog`, `pick_color(title, initial)` - the colour wheel, answering `#rrggbb` or `""`, `pick_file(title, kind, filter, initial)` - a file box on this machine, `kind` being `open`, `save` or `folder` and nothing picked answering `""`, `copy(text)` - one string onto the system clipboard, answering whether it got there, `clipboard()` - what is on it now, `clipboard_clear(only_if="")` - empty it, but only while what is on it is exactly `only_if`, so an addon that set a timer to wipe its own secret cannot erase what the user copied in the meantime, `set_setting_widget`, `window()` |
 | `api.events` | `on(name, callback)` (returns the unsubscribe callable), `off`, `names` |
 | `api.settings` | the addon's own saved dict, per profile: `all`, `get`, `set`, `update`, `pop`, `remove` |
 | `api.settings_pages` | a page of the app's own Settings window that the addon owns - `add`, `remove`, `names`, `exists`, `title`, `set_title`, `activate`, `widget`, `set_widget`, `widget_value`, and `set_icon`, which says a settings page wears no mark and answers False |
@@ -1279,7 +1279,10 @@ While a tab is out, the bar no longer holds it, so it drops out of the saved
 **Tab order** by itself and its slot is remembered in the record
 (`tab_slot`) for the way back. The window shows its own tab line only when the
 addon has more than one tab out, carries a **Dock back** button, and remembers its
-size and place per addon (`popout_geometry`). Closing it hides the window instead
+size and place per addon (`popout_geometry`). A tab that is in the bar while its
+addon's window is switched on wears a **pop out** mark on its left edge, and
+pressing it takes that one tab out - which is how a row the app popped as a whole
+is worked back tab by tab. Closing it hides the window instead
 of destroying it: the addon keeps running, and the row's **Raise window** brings
 the window back. The rest of the frame is the addon's to steer through
 `api.window` - `popped`, `names`, `state`, `open`, `close`, `raise_window`,
@@ -2584,6 +2587,100 @@ found by the rule like every other addon's, at
 that honours `add_page`, `remove_page` and `pages`, so the checks are about the
 tabs the addon really opens and shuts, and that no value it saved anywhere holds
 the password it was handed.
+
+### Store addon: Password manager
+
+`addon.store/password_manager.py` is the store's first addon that touches no
+transport at all: its manifest says `"requires": []` and `"connection":
+"none"`, which is why the connection panel has a *nothing to connect to* answer.
+Everything it keeps is one file in `addons/_data/password_manager/`, and the
+tab - pinned to the bar beside Settings as a mark, like the store's and the
+certificate's - is the only way in or out of it.
+
+The file is ciphertext. Its header is one small JSON object naming the scheme
+(`berry-vault`, `ctr-hmac-sha256`, `pbkdf2-hmac-sha256`), the round count, the
+salt, the nonce, the tag, and the payload; the entries are inside that payload
+and nowhere else. PBKDF2-HMAC-SHA256 stretches the master password to 64 bytes
+which are split into two keys on purpose - 32 for the keystream, 32 for the tag
+- and the mask is HMAC-SHA256 over the nonce and a counter, applied byte for
+byte, then sealed with a tag that is checked with
+`hmac.compare_digest` before a single byte of the plaintext is trusted. The
+header is fed into the tag as well as the body, so a file quietly re-stretched
+to a smaller `iterations` - the cheap way of making a guess fast - fails the
+same way a wrong password does. Encrypt-then-MAC is deliberate; so is staying
+inside the standard library, because a compiled addon cannot assume the store
+user has `cryptography` installed.
+
+That shape buys two things the tab leans on. `vault_header` reads the file with
+no password at all, so a locked tab can say *there is a vault here, written
+with N rounds* and refuse a file that is not a vault before a master password
+has been spent on it. And a wrong password is not a special case: it fails the
+tag, so one tampered byte anywhere - in the salt, the header, the ciphertext -
+is the same refusal, and a broken file is never mistaken for an empty vault.
+The test in `addon.store/_tests/test_password_manager.py` checks all of it
+against the bytes, with the round count dropped to 20000 so the whole run takes
+seconds rather than minutes.
+
+Unlocking holds the master password in memory and nothing else does: **Lock**,
+the idle clock, `shutdown()` and a refused unlock all leave it empty. That is
+what "unlocked for the session" means here - there is no keyfile, no saved
+hash, nothing that outlives the process, and reopening the vault asks again.
+The idle lock is `api.schedule.every` looked over every 15 seconds against
+`auto_lock_minutes`, where 0 says never; a press, a clicked row or a typed
+character resets the clock, and a shut vault is not re-locked every tick.
+
+The tab is a list and a form. The list is four columns - name, user, password,
+site - with a filter box beside it, and the password column holds bullets until
+**Show passwords** is ticked. A right-click on a row answers from
+`api.ui.choose` with the copies, **Put it back in the form** and **Delete this
+entry**. The form is name, user, password, site and a note, and the row's label
+is what a click hands back, so an addon-side map from label to `uid` is how a
+click becomes an entry - two entries genuinely named the same get
+`GitHub` and `GitHub (2)` rather than one of them being unreachable.
+
+The professional part is mostly refusals, and they are all the same one: a
+password that cannot be seen cannot be overwritten. The password box is only
+enabled while passwords are shown, so a stray keystroke cannot land in a field
+holding bullets; `password_from_form` answers the *saved* password while the
+box holds bullets, which is what lets **Save** change a note without touching a
+secret nobody looked at; the `changed` event from that box is ignored while
+hidden, because writing bullets into a QLineEdit moves `textChanged` too and a
+strength meter reading bullets would say somebody typed them; and **Generate**
+switches to showing whatever it drew, since a made-up password a person cannot
+read is one they cannot write down. Entries trim their name, user, site and
+note, and never a password - a space that was typed into a secret is part of it.
+
+Copying is where the three new `api.ui` calls are used. **Copy password** and
+the menu's copy go through `api.ui.copy`, then arm one `api.schedule.after`
+of `clipboard_clear_seconds` (default 20, and 0 means leave it) that calls
+`api.ui.clipboard_clear(only_if=<what it put there>)`. The guard is the app's,
+not the addon's, and it is the difference between a courtesy and a data loss:
+if the user copied something else while the timer ran, the wipe is refused and
+the clipboard line says it was left alone. Only a password is ever taken back
+off - a user name or an address that goes and sits in somebody's search box is
+not a leak, and wiping it would be a nuisance. Locking the vault wipes a copied
+password immediately rather than waiting for its own timer.
+
+| | |
+| --- | --- |
+| **Create vault / Unlock / Lock** | The one button that means both, named by whether the file exists; a new vault is typed twice, since a password asked for once cannot be checked against itself |
+| **Change master password** | Asks the old one, then the new one twice, and rewrites the file with a fresh salt and nonce - the entries never leave memory in the clear |
+| **Backup / Restore** | A timestamped copy of the vault file in `backups/`, which is already encrypted, so a backup is not a leak; `backups_keep` says how many, and 0 writes none |
+| **＋ New / Save / Revert / Delete** | The form, the vault and the file: **Revert** puts the picked entry back into the boxes, **Delete** asks first and says a backup still holds it |
+| **Generate** | A draw from `secrets`, at the length and the four character-class switches the tab itself carries, with the guess-work bar and its word beside it |
+
+The bar is an estimate and is labelled one: `length × log2(classes)` against 90
+bits, which rates a random draw and rates `correct horse battery staple` badly.
+It is said as an estimate rather than a verdict for that reason.
+
+`api.config.declare` gives it thirteen fields - the file's name, the bullets,
+`clipboard_clear_seconds`, `auto_lock_minutes`, `notify_on_copy`,
+`show_by_default`, the generator's length and four switches,
+`kdf_iterations` and `backups_keep` - and `kdf_iterations` is the one with a
+warning in its own hint: it is read when a vault is *written*, so changing it
+changes the next save and not the file on disk. Its picture is
+`addon.store/assets/password_manager/password_managericon.png`, drawn to the
+one `<id>icon.png` rule like every other addon's.
 
 ### Addons inside the built executable
 

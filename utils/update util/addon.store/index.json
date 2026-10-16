@@ -86,6 +86,21 @@
       ],
       "icon": "openwrt_package_managericon.png",
       "test": "test_openwrt_package_manager.py"
+    },
+    {
+      "id": "password_manager",
+      "name": "Password manager",
+      "version": "1.0",
+      "author": "fligma",
+      "description": "Keeps logins in one encrypted file on this computer - no device, no cloud - unlocked for the session with a master password, with a searchable list, bullets until you ask to see them, a generator, and a copied password taken back off the clipboard after the seconds you configured.",
+      "filename": "password_manager.py",
+      "requires": [],
+      "connection": "none",
+      "assets": [
+        "password_managericon.png"
+      ],
+      "icon": "password_managericon.png",
+      "test": "test_password_manager.py"
     }
   ]
 }

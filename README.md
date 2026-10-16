@@ -99,7 +99,7 @@ def init(api):
 widgets built from declarative specs, tab icons, sub-pages added while the tab
 is open, terminal leaves on connections of their own), `api.theme` (the looks the
 window is drawn from, read and written as files), `api.ui` (dialogs, menus,
-secret inputs, a colour wheel, a file box), `api.config`/`api.settings` (per-installation JSON file and
+secret inputs, a colour wheel, a file box, the clipboard), `api.config`/`api.settings` (per-installation JSON file and
 per-profile notes), `api.schedule`, `api.peers` (addons talking to each
 other) and `api.session`/`api.paths` make up the full surface - each is
 documented with examples in the app README's **Addons** chapter.
@@ -133,7 +133,10 @@ Everything else comes from that store - **Berry web dashboard** (the device-side
 page above, installed over SFTP with its uhttpd settings driven by `uci`),
 **Certificate manager**, **OpenWrt
 Log Viewer**, **OpenWrt Package Manager**, **Multi SSH** (any number of SSH
-sessions in sub-tabs, each on a connection of its own) - and an install is not a
+sessions in sub-tabs, each on a connection of its own) and **Password manager**
+(logins in one encrypted file on this computer, unlocked for the session, with a
+copied password taken back off the clipboard after the seconds you set) - and an
+install is not a
 second-class addon. The store writes an `addons/<id>.json` manifest beside the program it
 built (its name, version, author and the transports it needs) and seeds its
 settings form, so the moment it is switched on it is a full row on the store's

@@ -35,7 +35,10 @@ What is looked at:
   whitelist, ``api.session.git_token()`` following the per-addon switch, the two
   transport gates and the own-connection choice reaching the records they own,
   ``addon_config`` reading what an addon declared, Settings' **Open addon manager**
-  button starting the store and asking for its second page.
+  button starting the store and asking for its second page; and
+* the trip a tab makes: one page out of the bar through the mark it wears, the
+  way back through the window's own button, and the two names on the real window
+  that let either happen.
 
 Run it::
 
@@ -1013,6 +1016,99 @@ def test_the_button_in_settings() -> None:
           f"the failure was silent: {win.logs}")
 
 
+def test_the_window_moves() -> None:
+    print("\n31. one tab out of the bar, and the window's own button on the way back")
+    win, manager, addons = world(names=("hello",))
+    addon = addons["hello"]
+    notes = win.add("hello Notes")
+    addon.tabs["Notes"] = {"page": notes, "popped": False}
+    home = addon.tabs["Home"]["page"]
+    check(win.tabs.indexOf(home) == 0 and win.tabs.indexOf(notes) == 1,
+          f"the two tabs did not start side by side in the bar: {win.names()}")
+    check(manager.pop_tab("hello", "Home") is True,
+          "the mark on a tab could not send that one page to its window")
+    check(win.tabs.indexOf(home) < 0 and win.tabs.indexOf(notes) == 0,
+          f"popping one page took the addon's other one with it: {win.names()}")
+    window = manager.windows["hello"]
+    check(window.has_page("Home"),
+          "the page left the bar and no window is holding it")
+    window.dock_button.click()
+    check(win.tabs.indexOf(home) == 0 and not window.has_page("Home"),
+          "the window's Dock back left its page afloat instead of the bar's")
+    check(addon.tabs["Home"].get("popped") is False,
+          "the page came home and the addon still thinks it is away")
+    check(manager.slot_for("hello", "Home").get("slot") == 0,
+          f"the tab did not come back to the slot it left: "
+          f"{manager.slot_for('hello', 'Home')}")
+    check(manager.pop_tab("hello", "no such tab") is False,
+          "a page the addon does not own was reported as moved")
+
+    print("\n32. the real window says the two things core.popout asks, and the "
+          "bar settles when a tab leaves it")
+    import core.window as core_window
+    import core.popout as core_popout
+    from core.ui import TabPopoutButton
+
+    real = core_window.BerryManager
+    check(getattr(real, "is_main_window", False) is True,
+          "the application window never says it is the one with a bar, so "
+          "dock_back refuses every page and the window's button does nothing")
+    check(getattr(real, "can_dock_tabs", False) is True,
+          "the window does not carry the second name a popout asks for")
+    for name in ("settle_tab_bar", "sync_tab_popout_buttons", "pop_tab_out"):
+        check(callable(getattr(real, name, None)),
+              f"the window no longer carries {name}, which core.popout and the "
+              f"mark on a tab both reach for")
+    heard: list[str] = []
+
+    class Settling:
+        win = type("Bar", (), {"settle_tab_bar":
+                               lambda _self: heard.append("now")})()
+
+    core_popout.settle_bar(Settling())
+    check(heard == ["now"],
+          "a popout moved tabs without settling the bar it just changed")
+    core_popout.settle_bar(type("NoWin", (), {})())      # a host with no bar
+
+    print("\n33. the mark a tab wears, and what its press does")
+    from PyQt6.QtWidgets import QTabBar
+
+    class TabPass:
+        """The window's tab passes, on a stand-in holding a bar and a manager."""
+
+        _popout_tab_pages = real._popout_tab_pages
+        sync_tab_popout_buttons = real.sync_tab_popout_buttons
+        pop_tab_out = real.pop_tab_out
+
+        def __init__(self, window: Any, held: Any) -> None:
+            self.tabs = window.tabs
+            self.addons = held
+
+    win, manager, addons = world(names=("hello",))
+    addon = addons["hello"]
+    painter = TabPass(win, manager)
+    bar = win.tabs.tabBar()
+    page = addon.tabs["Home"]["page"]
+    index = win.tabs.indexOf(page)
+    painter.sync_tab_popout_buttons()
+    check(bar.tabButton(index, QTabBar.ButtonPosition.LeftSide) is None,
+          "a tab whose addon has no window on was given a way out anyway")
+    addon.popout_record = True
+    painter.sync_tab_popout_buttons()
+    mark = bar.tabButton(index, QTabBar.ButtonPosition.LeftSide)
+    check(mark is not None and mark.objectName() == TabPopoutButton.NAME,
+          "a tab of an addon with its window switched on wears no pop-out mark")
+    mark.click()
+    check(win.tabs.indexOf(page) < 0 and manager.windows["hello"].has_page("Home"),
+          "pressing the mark did not send that tab to its window")
+    addon.popout_record = False
+    win.tabs.addTab(page, "Home")
+    painter.sync_tab_popout_buttons()
+    check(bar.tabButton(win.tabs.indexOf(page),
+                        QTabBar.ButtonPosition.LeftSide) is None,
+          "the switch went off and the tab still offers to leave the bar")
+
+
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         # The Test pane wants it live; and a Windows console often speaks
@@ -1031,6 +1127,7 @@ def main() -> int:
     test_the_presses(store)
     test_the_rows_from_the_app()
     test_the_button_in_settings()
+    test_the_window_moves()
 
     if FAILURES:
         print()

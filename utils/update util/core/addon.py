@@ -1004,6 +1004,22 @@ class AddonManager:
             return False
         return core.popout.pop_out(self, addon, str(name))
 
+    def pop_tab(self, addon_id: str, name: str) -> bool:
+        """Take one named tab out into the addon's window; whether it moved.
+
+        The mark on the tab's own left edge asks for this. The switch on the
+        store's row decides where an addon's pages belong as a whole, and this is
+        the single-tab answer for somebody who has docked one page back and wants
+        it gone again - so it moves that page whether or not the rest have left.
+        """
+        addon = self.find(addon_id)
+        if addon is None:
+            return False
+        if not core.popout.pop_out(self, addon, str(name)):
+            return False
+        self.refresh_row(addon_id)
+        return True
+
     def recall_tab(self, addon_id: str, name: str) -> bool:
         """Put a tab back in the main bar before it is closed or deleted.
 
@@ -4859,7 +4875,10 @@ It wears the theme like the main window does, and the addon's name and mark as i
 title and icon. Its own tab bar shows only when the addon has more than one tab
 out. There is a **dock back** button, and closing the window hides it instead of
 destroying it: the addon keeps running, and the row's **Raise window** brings it
-back. Size and place are remembered per addon, and a tab that is out is simply not
+back. A tab still in the bar while the window is switched on wears a small
+**pop out** mark on its left edge, and pressing it takes that one tab out - which
+is how an addon the app popped as a whole is worked back tab by tab. Size and
+place are remembered per addon, and a tab that is out is simply not
 in the bar's saved order any more - which is how a popped tab stops being dragged
 about with the rest.
 
