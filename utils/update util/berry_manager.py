@@ -66,7 +66,11 @@ def main() -> int:
     # The cursor-following, fading tool-tip is the whole window's business, so
     # it goes on the application object once, before any window is built; the
     # bubble then wears the theme that was just resolved.
-    install_smart_tooltips(app)
+    tips = install_smart_tooltips(app)
+    # Read the Appearance switch before the window exists: a profile that keeps
+    # tool-tips off should not raise one while the splash is still on screen.
+    # The window applies the same key again once it is built.
+    tips.set_enabled(bool(boot_config.get("tooltips_enabled", True)))
     core.ui.show(boot_config)
 
     window = BerryManager()

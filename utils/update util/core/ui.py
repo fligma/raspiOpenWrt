@@ -720,6 +720,7 @@ def _normalize_values(config: dict) -> dict:
         "use_alt_icon",
         "system_notifications",
         "splash_enabled",
+        "tooltips_enabled",
         "log_visible",
         "sftp_enabled",
         "ssh_enabled",
@@ -2061,6 +2062,10 @@ class _TipBubble(QLabel):
                          | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        # The card walks the cursor, so it would otherwise end up under it: as
+        # transparent to input, the pointer keeps reporting the widget beneath,
+        # a click lands where the user aimed it, and the card never steals a tip.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade.setDuration(130)
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -2154,6 +2159,15 @@ class _SmartTip(QObject):
     in and walks along under the cursor, and the native tool-tip never appears.
     A widget with no text of its own is left to Qt, so menus and other built-in
     tips keep working.
+
+    Exactly one tip is on screen at a time, which is what the two paths make
+    awkward: Qt's own tip is raised by whatever this filter hands back, and a
+    child with no tool-tip of its own inherits its parent's - so hovering a
+    button inside a group box could raise the native tip while this keeper's
+    bubble was still up. Showing the bubble therefore takes the native one down
+    first, and a tip this keeper cannot serve dismisses the bubble instead of
+    overlapping it. Switched off, nothing is raised at all and no native tip is
+    let through either.
     """
 
     GAP = 16          # the bubble's corner sits this far off the pointer
@@ -2164,9 +2178,22 @@ class _SmartTip(QObject):
         self._bubble = _TipBubble()
         self._target = None
         self._region = None
+        self._on = True
         self._timer = QTimer(self._bubble)
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._tick)
+
+    # --- on and off ---
+
+    def enabled(self) -> bool:
+        """Whether tool-tips are being shown at all."""
+        return self._on
+
+    def set_enabled(self, on: bool) -> None:
+        """Show tool-tips, or hide every one of them - this bubble and Qt's."""
+        self._on = bool(on)
+        if not self._on:
+            self.dismiss()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self._bubble:
@@ -2181,8 +2208,17 @@ class _SmartTip(QObject):
         return False
 
     def _on_tooltip(self, watched: QObject, event: QEvent) -> bool:
+        if not self._on:
+            # Switched off means off: the native tip is stopped here too, or it
+            # would carry on appearing for everything this keeper used to draw.
+            self.dismiss()
+            return True
         text = self._text_for(watched, event)
         if not text:
+            # Qt may raise its own tip for this widget. Take the bubble down
+            # first, so the two are never on screen together.
+            if self.showing():
+                self.dismiss()
             return False
         self.show_at(text, QCursor.pos(), watched)
         return True
@@ -2194,7 +2230,14 @@ class _SmartTip(QObject):
             index = widget.tabAt(event.pos())
             return str(widget.tabToolTip(index) or "") if index >= 0 else ""
         getter = getattr(widget, "toolTip", None)
-        return str(getter() or "") if callable(getter) else ""
+        text = str(getter() or "") if callable(getter) else ""
+        if text:
+            return text
+        # What the event itself carries is the only other words worth showing:
+        # a tip set per item, or one Qt worked out for this widget. Riding the
+        # bubble keeps it a single tip; leaving it would let it arrive as the
+        # plain native one, beside any bubble already on screen.
+        return str(getattr(event, "text", lambda: "")() or "")
 
     def show_at(self, text: str, global_pos, target, region=None) -> None:
         """Fade the bubble in on ``text``, near ``global_pos``, tied to ``target``.
@@ -2203,6 +2246,9 @@ class _SmartTip(QObject):
         which part of the target still counts as hovering it - a group box shows
         its tip over the title words only.
         """
+        # Only one tip at a time, and it is this one: Qt's own may be sitting
+        # under the cursor already, raised by a widget this filter passed on.
+        QToolTip.hideText()
         self._target = target
         self._region = region
         self._bubble.show_tip(text)
@@ -2232,7 +2278,13 @@ class _SmartTip(QObject):
                 return
             pos = QCursor.pos()
             under = self._app.widgetAt(pos)
-            if under is None or not self._descendant(under, target):
+            if under is not None and under is not target \
+                    and self._descendant(under, self._bubble):
+                # The card, or its shadow, is what the pointer is over. It is
+                # transparent to input, so this is the window manager's doing
+                # and not the user's: hold the tip up and keep following.
+                pass
+            elif under is None or not self._descendant(under, target):
                 self.dismiss()
                 return
             if self._region is not None and not self._region(target, pos):
@@ -2243,17 +2295,69 @@ class _SmartTip(QObject):
             self.dismiss()
 
     def _place(self, pos) -> None:
+        """Put the card beside the pointer, off whatever it can avoid covering.
+
+        A tip that sits on the control being pointed at is worse than no tip: it
+        hides the thing the pointer is on and the words beside it. So the four
+        corners the card could take are looked over in the usual order and the
+        first that fits the screen and leaves the target widget untouched wins;
+        failing that the first that merely fits is used. The order is fixed
+        rather than the smallest overlap, because the card is re-placed every
+        few dozen milliseconds and a choice that moves between corners as the
+        pointer travels reads as a jump rather than as care.
+        """
         bubble = self._bubble
         size = bubble.size()
         screen = self._app.screenAt(pos) or self._app.primaryScreen()
         area = screen.availableGeometry()
-        x = pos.x() + zoom_size(self.GAP)
-        y = pos.y() + zoom_size(self.GAP)
-        if x + size.width() > area.right():
-            x = pos.x() - size.width() - zoom_size(self.GAP)
-        if y + size.height() > area.bottom():
-            y = pos.y() - size.height() - zoom_size(self.GAP)
-        bubble.move(max(area.left(), x), max(area.top(), y))
+        gap = zoom_size(self.GAP)
+        clear = self._target_rect()
+        right = pos.x() + gap
+        left = pos.x() - size.width() - gap
+        below = pos.y() + gap
+        above = pos.y() - size.height() - gap
+        spots = ((right, below), (right, above), (left, below), (left, above))
+        cards = [QRect(x, y, size.width(), size.height()) for x, y in spots]
+        for card in cards:
+            if area.contains(card) and not self._covers(card, clear):
+                bubble.move(card.topLeft())
+                return
+        for card in cards:
+            if area.contains(card):
+                bubble.move(card.topLeft())
+                return
+        # Nothing fits - the card is by a screen edge. Keep it on screen at the
+        # usual place rather than push it off the display.
+        bubble.move(min(max(area.left(), right),
+                        max(area.left(), area.right() - size.width())),
+                    min(max(area.top(), below),
+                        max(area.top(), area.bottom() - size.height())))
+
+    @staticmethod
+    def _covers(card: QRect, clear: QRect | None) -> bool:
+        """Whether the card would sit on the widget being pointed at.
+
+        ``QRect`` has no ``area()`` to ask, and a corner that misses the widget
+        hands back a null rectangle, so the sides of the overlap are read with
+        the sign taken off: nothing overlapping is zero. A widget too big for
+        the card to get round still counts as covered - there is no corner that
+        does not touch it - and the caller falls back to the plain ordering.
+        """
+        if clear is None:
+            return False
+        overlap = card.intersected(clear)
+        return max(0, overlap.width()) * max(0, overlap.height()) > 0
+
+    def _target_rect(self) -> QRect | None:
+        """Where the widget being pointed at sits on the desktop, or nothing."""
+        target = self._target
+        if target is None:
+            return None
+        try:
+            top = target.mapToGlobal(QPoint(0, 0))
+            return QRect(top.x(), top.y(), target.width(), target.height())
+        except RuntimeError:                # the widget went away mid-hover
+            return None
 
     @staticmethod
     def _descendant(widget, ancestor) -> bool:
@@ -2283,6 +2387,25 @@ def install_smart_tooltips(app: QApplication) -> "_SmartTip":
 def smart_tip() -> "_SmartTip | None":
     """The tool-tip keeper, if one has been installed."""
     return _SMART_TIP
+
+
+def set_tooltips_enabled(on: bool) -> bool:
+    """Show tool-tips, or hide them; says whether there was a keeper to ask.
+
+    Off stops the bubble and the native ``QToolTip`` both, so the switch in
+    Settings means the same thing over every widget in the window.
+    """
+    engine = _SMART_TIP
+    if engine is None:
+        return False
+    engine.set_enabled(bool(on))
+    return True
+
+
+def tooltips_enabled() -> bool:
+    """Whether tool-tips are being shown; True when no keeper is installed."""
+    engine = _SMART_TIP
+    return True if engine is None else engine.enabled()
 
 
 class ProgressNotice(QFrame):
@@ -2413,6 +2536,10 @@ class _TitleTip(QObject):
         # global one the tool-tip wants is the box's own mapping of it.
         where = event.pos()
         engine = _SMART_TIP
+        if engine is not None and not engine.enabled():
+            # Tool-tips are switched off in Appearance: a title note goes with
+            # them, rather than arriving as the native tip behind their back.
+            return True
         if self._over_title(watched, where):
             if engine is not None:
                 engine.show_at(self.text, QCursor.pos(), watched,

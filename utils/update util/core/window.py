@@ -103,9 +103,12 @@ from core.ui import (
     ToggleSwitch,
     refresh_theme_styles,
     settings_tab_icon,
+    default_tab_icon,
     label_tab,
+    set_tooltips_enabled,
     tab_caption,
     tip_on_title,
+    tooltips_enabled,
     transport_dot,
 )
 
@@ -114,6 +117,12 @@ from core.ui import (
 #: it by this name so the menu can jump straight to the editor. The addon spells
 #: the same words out in its own file.
 THEME_MANAGER_TAB = "Theme Manager"
+
+
+#: The caption the Addon Dev tab is known by. It usually wears no text on the
+#: bar at all (see :meth:`MainWindow.ensure_addon_dev_tab`), so this is the one
+#: place the name is spelled out for the menu entry and the pinning alike.
+ADDON_DEV_TAB = "Addon Dev"
 
 
 #: The two logos read off disk, kept by file so a zoom step or an icon toggle
@@ -338,7 +347,7 @@ class BerryManager(
         self.action_edit_quick.triggered.connect(self.edit_quick_commands)
         tools_menu.addAction(self.action_edit_quick)
         tools_menu.addSeparator()
-        self.action_addon_dev = QAction("Addon Dev", self)
+        self.action_addon_dev = QAction(ADDON_DEV_TAB, self)
         self.action_addon_dev.setShortcut(QKeySequence("Ctrl+Shift+A"))
         self.action_addon_dev.triggered.connect(self.show_addon_dev)
         tools_menu.addAction(self.action_addon_dev)
@@ -497,11 +506,13 @@ class BerryManager(
         self.build_settings_tab()
 
         self.addon_dev = None
-        self.ensure_addon_dev_tab()
 
         self._gap_page = QWidget()
         self.tabs.addTab(self._gap_page, "")
         self.tabs.tabBar().setTabEnabled(self.tabs.indexOf(self._gap_page), False)
+        # Added only now: a pinned tab belongs to the run beside Settings, and
+        # that run does not exist until the gap does (see pin_tab).
+        self.ensure_addon_dev_tab()
         self._sync_pinned_settings()
         self._stretch_tab_bar()
 
@@ -815,16 +826,29 @@ class BerryManager(
         return bool(self.app_config.get("addon_dev_enabled", True))
 
     def ensure_addon_dev_tab(self) -> None:
-        """Add or drop the Addon Dev tab to match the Settings switch; off keeps the widget alive but hidden."""
+        """Add or drop the Addon Dev tab to match the Settings switch; off keeps the widget alive but hidden.
+
+        The tab is furniture rather than a page the user arranged: it pins to the
+        run at the right edge and shows only its mark there, like the store and
+        the updater do. Its name still lives in the tab's data, so the start-tab
+        picker, the tooltip and any lookup by caption keep finding it.
+        """
         want = self.addon_dev_wanted()
         if want and self.addon_dev is None:
             self.addon_dev = AddonDevWidget(self)
         if self.addon_dev is not None:
             index = self.tabs.indexOf(self.addon_dev)
             if want and index == -1:
-                self.tabs.insertTab(self._content_insert_index(), self.addon_dev, "Addon Dev")
+                self.tabs.insertTab(self._content_insert_index(),
+                                    self.addon_dev, ADDON_DEV_TAB)
+                self.tabs.tabBar().setTabIcon(
+                    self.tabs.indexOf(self.addon_dev), default_tab_icon())
+                self.pin_tab(self.addon_dev, ADDON_DEV_TAB, icon_only=True)
             elif not want and index != -1:
-                self.tabs.removeTab(index)
+                # Unpinning moves the rest of the run back, so the index taken
+                # before the move is not the one this tab sits at now.
+                self.unpin_tab(self.addon_dev)
+                self.tabs.removeTab(self.tabs.indexOf(self.addon_dev))
         self.action_addon_dev.setVisible(want)
         self._reload_default_tab_combo(select=self.app_config.get("default_tab", "Berry"))
 
@@ -833,9 +857,32 @@ class BerryManager(
         self.ensure_main_tabs()
         self.ensure_addon_dev_tab()
         self.apply_log_console_visibility()
+        self.apply_tooltip_switch()
         self._reload_default_tab_combo(select=self.app_config.get("default_tab", "Berry"))
         self._select_default_tab()
         self.rebuild_quick_bar()
+
+    def apply_tooltip_switch(self) -> None:
+        """Let the Appearance switch have its say over tool-tips, now.
+
+        Nothing is saved here: the keeper is showing tips or it is not, and a
+        profile that switched them off gets them off the moment it is loaded.
+        """
+        wanted = bool(self.app_config.get("tooltips_enabled", True))
+        before = tooltips_enabled()
+        if not set_tooltips_enabled(wanted):
+            return
+        if before != wanted:
+            self.log("tool-tips " + ("are being shown again" if wanted
+                                     else "will not be shown"))
+
+    def _on_tooltips_toggled(self, _checked: bool = False) -> None:
+        """Write and apply the tool-tip switch as it is moved, without waiting
+        for Apply: it is a matter of what the window shows, not of anything that
+        has to be rebuilt."""
+        self.app_config["tooltips_enabled"] = self.tooltips_check.isChecked()
+        self.save_app_config()
+        self.apply_tooltip_switch()
 
     def _icon_path(self, filename: str) -> Path | None:
         """Resolve a shipped icon from the assets folder."""
@@ -2095,7 +2142,30 @@ class BerryManager(
         self.theme_note.setStyleSheet("color: #aaaaaa;")
         self.theme_note.setWordWrap(True)
         appearance_form.addRow(self.theme_note)
+
+        # Tool-tips are drawn by the app rather than by Qt, so the switch is the
+        # app's to honour: off stops the bubble and the native tip both.
+        tips_group = QGroupBox("Tool-tips")
+        tip_on_title(tips_group,
+            "The notes the window writes for its own controls. They are drawn "
+            "by Berry Manager rather than by the toolkit, so this switch asks "
+            "the program to stop drawing them - every tip, wherever it comes "
+            "from, including an addon's.")
+        tips_form = QFormLayout(tips_group)
+        tips_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.tooltips_check = ToggleSwitch("Show tool-tips")
+        self.tooltips_check.setToolTip(
+            "The note that fades in beside the pointer over a control and "
+            "follows it: what a button does, why a switch is worth moving, the "
+            "whole of a word the interface had to shorten. Switching this off "
+            "takes every one of them away, and nothing appears as the pointer "
+            "moves about. The choice is kept in the profile.")
+        self.tooltips_check.setChecked(
+            bool(self.app_config.get("tooltips_enabled", True)))
+        self.tooltips_check.toggled.connect(self._on_tooltips_toggled)
+        tips_form.addRow(self.tooltips_check)
         self._settings_category("Appearance").addWidget(appearance_group)
+        self._settings_category("Appearance").addWidget(tips_group)
         self._reload_theme_combo()
 
         tabs_category = QGroupBox("Custom tabs")
@@ -2181,6 +2251,7 @@ class BerryManager(
         self.app_config["addon_dev_enabled"] = self.addon_dev_check.isChecked()
         self.app_config["system_notifications"] = self.notify_check.isChecked()
         self.app_config["splash_enabled"] = self.splash_check.isChecked()
+        self.app_config["tooltips_enabled"] = self.tooltips_check.isChecked()
         self.app_config["remember_tab_order"] = self.tab_order_check.isChecked()
         self.save_app_config()
         self.apply_runtime_settings()
@@ -2314,6 +2385,10 @@ class BerryManager(
         self.splash_check.blockSignals(True)
         self.splash_check.setChecked(bool(cfg.get("splash_enabled", True)))
         self.splash_check.blockSignals(False)
+
+        self.tooltips_check.blockSignals(True)
+        self.tooltips_check.setChecked(bool(cfg.get("tooltips_enabled", True)))
+        self.tooltips_check.blockSignals(False)
 
         set_cert_bypass(bool(cfg.get("ignore_cert_errors")))
         self._update_cert_bypass_state()

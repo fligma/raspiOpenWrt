@@ -318,8 +318,9 @@ The pages of the Settings bar, and what each holds:
     web tab added - is not in the saved order and joins at the end of the row. The
     gap and the pinned run at the right edge are deliberately not listed, so
     furniture cannot be dragged into the middle of it by accident.
-  - **Show the Addon Dev tab** - the addon index with its details, test and
-    compile panels, and the Tools > Addon Dev entry that goes with it
+  - **Show the Addon Dev tab** - the addon index with its details, build and
+    test, docs and log, and processes panes, pinned to the right edge and worn as
+    a mark like the store's tab, and the Tools > Addon Dev entry that goes with it
     (`addon_dev_enabled`). Off, the tab and the menu entry are gone; the
     addons themselves are still switched on and off on their own Settings pages.
   - **Pop up notifications** - let the app raise a notice in the system's
@@ -411,9 +412,13 @@ come and go. Settings wears no caption, only the gear drawn for it
 (`core.ui.settings_tab_icon`), and an addon's tab does the same when it
 asks to be icon-only - the store's, the manager updater's and the certificate
 manager's all do (see
-[Tabs an addon owns](#tabs-an-addon-owns)). A tab that shows no name has not lost
-it: the full name lives in the tab's own data, which is what its tooltip says,
-what the start-tab picker lists and what the saved order is written in.
+[Tabs an addon owns](#tabs-an-addon-owns)). The Addon Dev tab is pinned and
+icon-only too, put there by the window itself rather than by an addon, and it
+wears the four tiles of `defaulttabicon.png` that stand for any tab coming
+without a mark of its own (`core.ui.default_tab_icon`). A tab that shows no name
+has not lost it: the full name lives in the tab's own data, which is what its
+tooltip says, what the start-tab picker lists and what the saved order is
+written in.
 
 Widths are worked out rather than left to Qt. Every movable tab is measured at the
 width of the widest, so the row reads as a set of equal capsules; when their total
@@ -464,6 +469,16 @@ buttons. Both go through `apply_theme`, which rebuilds the sheet, re-applies the
 zoom, saves the config and sends `theme_changed` - nothing needs a restart. A name
 with no file behind it draws the default, and the status line says so instead of
 quietly showing something else.
+
+Under the theme sits **Show tool-tips** (`tooltips_enabled`, on as shipped). The
+note that fades in beside the pointer is drawn by the app rather than by the
+toolkit - one card that follows the pointer, holding four wrapped lines, and
+never two on screen at a time: showing the card takes Qt's own plain tip down
+first, and a tip the card cannot serve lets it appear alone instead of beside a
+fading card. The card is transparent to the pointer and picks the corner that
+leaves the control being hovered uncovered, so it never sits on the thing it is
+explaining. Switched off, none of them appear: not the card, not a group box's
+title note, not Qt's own.
 
 A file is checked on the way in. `validate` answers one line per problem - a colour
 that is not a colour, a token the interface does not have, a knob outside 0-200 px,
@@ -566,9 +581,10 @@ is applied when the window opens; nothing needs a restart.
 | `auto_connect` | Open the main connection (SSH and SFTP together) when the app starts; the one startup switch, and nothing opens while both transports are off |
 | `sftp_enabled` | App-wide SFTP gate: its options show, and addons and the device API may use SFTP, only while it is on - and only while the addon's own SFTP switch is on too |
 | `ssh_enabled` | App-wide SSH gate and SSH tab visibility: off, the terminal tab is gone and addons are refused SSH work, whatever their own switch says |
-| `addon_dev_enabled` | Show the Addon Dev tab and its Tools menu entry |
+| `addon_dev_enabled` | Show the Addon Dev tab - pinned and icon-only, at the right edge - and its Tools menu entry |
 | `system_notifications` | Allow notices in the system's notification area - an addon's `api.ui.popup` and this program's own news, such as an update being available. Off, those words reach the status line and the log only |
 | `splash_enabled` | Show the startup splash while the window is built - the frameless, themed card with the logo, the boot step being loaded and a percentage (see `core.ui`). Off, the program opens with nothing on screen until the window appears |
+| `tooltips_enabled` | Show the tool-tip that fades in beside the pointer over a control (see `core.ui._SmartTip`). Off, no tool-tip appears anywhere in the window - the card, a group box's title note and Qt's own plain tip all go quiet |
 | `reboot_wait_seconds` | Downtime allowed for a reboot before the first reconnect attempt (0-600) |
 | `reboot_retry_interval` | Seconds between reconnect attempts until the device answers (1-300) |
 | `reboot_auto_watch` | Offer to watch for the device when a reboot command is sent |
@@ -798,11 +814,32 @@ An addon that crashes is on its own: every call is wrapped, the failure is
 written to the log and shown in red on its Settings row, and the rest of the
 app carries on.
 
-Run the app from a source checkout and one more tab appears, **Addon Dev**,
+An addon that crashes *while coming up* is the one failure the wrapping cannot
+absorb, so the loader keeps its own count. A program addon that stops within
+seconds of being spawned - a launcher naming a module that was never bundled,
+a half-written build - says nothing and leaves nothing behind, and every read of
+the addons folder spawns it again: one machine showed the same crash nine times
+in twenty seconds. Three starts that die inside a minute of beginning and the
+app stops starting that addon by itself, and its row says what it stopped doing
+and why. Pressing **Restart**, or switching the addon on, lifts the count at
+once, and a minute of its own clears it, so a file fixed in an editor is retried
+without anyone asking. An addon that ran and then closed on its own terms is not
+a crash and wipes its count clean.
+
+The same rule is applied to who gets reloaded. Reading the addons folder again
+stops and starts everything in it - the tabs come down, the Settings rows are
+rebuilt and an addon holding a session loses it - so that is done only at
+startup and when **Rescan** is pressed. Changing one addon's manifest, choosing
+whether its source or its compiled program runs, creating a new addon and
+finishing a compile all touch one file, and each of them reloads that one addon
+and leaves its neighbours running.
+
+Run the app from a source checkout and one more tab can appear, **Addon Dev**,
 that works on the addon files themselves - the manifest, the log, the processes,
-a test script and a compile to a program of its own. A built program can show it
-too: **Show the Addon Dev tab** in Settings says whether it is there. See
-[The Addon Dev tab](#the-addon-dev-tab).
+a test script and a compile to a program of its own. It takes almost no room on
+the bar, being pinned at the right edge as a mark beside Settings. A built
+program can show it too: **Show the Addon Dev tab** in Settings says whether it
+is there. See [The Addon Dev tab](#the-addon-dev-tab).
 
 ### Writing one
 
@@ -1290,38 +1327,52 @@ leaves its file untouched on disk.
 
 As long as an addon is a `.py` file rather than a program built from it there is
 something to manage around that file, so one more tab, **Addon Dev**
-(Tools > Addon Dev, Ctrl+Shift+A), sits in front of Settings - in a source
-checkout and in a built program alike. **Show the Addon Dev tab** in
+(Tools > Addon Dev, Ctrl+Shift+A), is pinned against the right edge beside
+Settings and worn as a mark - the four tiles of `assets/defaulttabicon.png` -
+like the store's tab and the updater's, in a source checkout and in a built
+program alike. It is window furniture rather than a page you laid out: it is
+never dragged into the row, never written to the saved tab order, and costs the
+other tabs no width, while its name stays in the tab's data for the tooltip and
+the start-tab picker. **Show the Addon Dev tab** in
 Settings > Startup & defaults adds and removes it together with its menu entry;
 switching it off leaves the addons themselves untouched, only the page that
 works on their files goes away.
 
 What the built program cannot do, it says rather than tries: the addons that
 came inside the `.exe` are listed and their source is shown as it is, with every
-field read-only, and **Compile**/**Test** explain that there is nothing to build
-with until a Python interpreter is found on the path. The modules an addon
+field read-only, and the **Build & test** pane explains that there is nothing to
+build with until a Python interpreter is found on the path. The modules an addon
 imports are no longer such a reason: a build made by the current workflow
 carries a plain copy of them, and one that does not is pointed at the addon
 store, which fetches them.
 
 The table on top is the runtime's own list - id, name, version, whether the
 addon is imported or running as a process (with its pid), whether it loaded or
-failed, and the file it came from. Beside it: **Restart**, **Show tab**, **Open
-source**, **Rescan**, **New addon...**, **Open folder** and the same **Enabled**
-switch Settings has. Everything below it works on the selected row, and the
-refresh timer only updates what changes by itself, so a half-typed manifest is
-never overruled while you are writing it.
+failed, and the file it came from - and every row wears the addon's own picture:
+the same `{id}icon.png` its store card and its tab wear, looked for in the
+`assets` folder beside the addon and then in the program's `assets`, with
+`assets/storedefaultaddon.png` for an addon that brought none. A *filter* box
+over the list keeps the rows whose id, name, version, author, description or
+file answer to what is typed, and the line beside it counts the whole set - how
+many are running, how many failed, how many are off - so a list narrowed by a
+filter is never mistaken for an empty folder. Under the table sit the four
+actions that concern the folder rather than one addon: **Rescan**, **New
+addon...**, **Open folder** and **Docs**. What is done to the selected addon -
+the same **Enabled** switch Settings has, **Restart**, **Show tab**, **Open
+source** - is at the head of its Details pane, beside its picture and its name.
+The refresh timer only writes over the cells that changed and rebuilds the rows
+solely when the list itself changed, so a half-typed manifest is never overruled
+while you are writing it and a row does not jump under the pointer every two
+seconds.
 
 | Pane | What it is for |
 | --- | --- |
-| **Details** | The manifest - name, version, author, description, notes, api - edited as a form, and below it the raw JSON of `addons/_data/<id>/config.json` with Save, Reload and Open. |
-| **Compile** | The source/compiled choice for this id, the PyInstaller options, **Compile addon**, **Cancel**, **Clean staging** and the build output. |
-| **Test** | `addons/_tests/test_<id>.py`: **Create test script** writes it from the template, **Run test** runs it as its own process and shows its output and result. |
-| **Docs** | The API reference and the guides, with a *find* box over them: it searches names, summaries, signatures and guide text at once, and every page is opened by the list beside it. **Build guide** on the Compile pane and **Testing guide** on the Test pane jump into the page that explains what each of them does. |
-| **Log** | The lines this addon wrote with `api.log`, taken from `berry_manager.log`, with a text filter, an *errors only* filter and *follow*. |
+| **Details** | The addon picked above, at the head of the pane: its picture and name, the **Enabled** switch, **Restart**, **Show tab** and **Open source**. Below that the manifest - name, version, author, description, notes, api - edited as a form, and below it the raw JSON of `addons/_data/<id>/config.json` with Save, Reload and Open. |
+| **Build & test** | The two halves of one job side by side, since a check and the release it earns belong together. Left: the source/compiled choice for this id, the PyInstaller options, **Compile addon**, **Cancel**, **Clean staging** and the build output. Right: `addons/_tests/test_<id>.py` - **Create test script** writes it from the template, **Run test** runs it as its own process and shows its output and result, and **Test, then compile** runs the test and starts the build only when it passes, which is the gate the store puts up before publishing. **Build guide** and **Testing guide** jump into the page that explains each half. |
+| **Docs & log** | The API reference and the guides, with a *find* box over them: it searches names, summaries, signatures and guide text at once, and every page is opened by the list beside it. Under the reference, the lines this addon wrote with `api.log`, taken from `berry_manager.log`, with a text filter, an *errors only* filter and *follow*. |
 | **Processes** | The pid, state, exit code, uptime, request count and command line of every addon running as a program; and what the app holds for the imported ones - their tabs, timers, menu entries and event names, plus the threads serving them. |
 
-A table, six panes and the notes under them do not fit into a short window, so
+A table, four panes and the notes under them do not fit into a short window, so
 the whole tab sits in a scroll area: each part keeps the height it needs - the
 index as many lines as there are addons, an output view at least a dozen - and a
 window that cannot show all of it gains a scroll bar instead of clipping text.
@@ -1389,10 +1440,18 @@ analysis cache, so every build would start cold and re-read every module the
 last build already worked out - and nothing stale can ride in, because each
 build stages inside the one folder named for it - the dev tab's
 `addons/_build/<id>`, the store's same-shaped folder under its `root=` - and
-the caller empties that folder before it starts. PyInstaller
+the caller empties that folder before it starts. The launcher has to name every
+module it uses, including `addon_client`, because a frozen program is built from
+what its source visibly imports: a name that survives only by the bootloader
+happening to leave it in `__main__` is both a `NameError` the moment the program
+starts and a module left out of the build altogether. That is a mistake a person
+cannot see by running the app - the launcher is text inside a template, and only
+a compiled addon ever executes it - so `tools/check_names.py` fills the three
+templates the tab writes in and reads the result for names that do not exist,
+which is what catches it before a build ships. PyInstaller
 is **not** needed to run the app - only to build an addon, and it has to be
 installed in the interpreter the source runs from
-(`python -m pip install pyinstaller`); the Compile pane says so, with the exact
+(`python -m pip install pyinstaller`); the Build & test pane says so, with the exact
 command, instead of failing.
 
 `addons/_build` and the programs a build leaves in `addons` are Git-ignored, the
@@ -1403,12 +1462,13 @@ you write into it afterwards is source.
 A built program keeps the id of the file it came from, and only one of the two
 can be *the* addon called `mytool`, so the choice is recorded per addon in
 `config/_build.json` (`prefer`: `source` or `compiled`, with the date,
-path and options of the last build). The radios at the top of the Compile pane
-set it, the losing copy stays visible in the row's *alternatives*, and a rescan
-starts the one you chose. Because a compiled addon imports only
+path and options of the last build). The radios at the top of the Build & test pane
+set it, the losing copy stays visible in the row's *alternatives*, and moving a
+radio reloads that one addon rather than the whole folder (see the loading rules
+above). Because a compiled addon imports only
 `addon_common`, a build needs neither PyQt6 nor paramiko in it.
 
-The Docs pane exists so that an author never has to leave the window to find out
+The Docs & log pane exists so that an author never has to leave the window to find out
 what a call does, and never has to trust a document that was written once. The
 reference is read off the running app: `addon_api` is walked at run time and every
 namespace, every public call, its signature and the first line of its docstring

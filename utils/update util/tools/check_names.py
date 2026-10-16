@@ -18,6 +18,13 @@ that never reached it::
 That is visible without running anything, so it is looked for that way here,
 before either program is built and long before either is published.
 
+The files the Addon Dev tab writes are read the same way once they are filled
+in. A ``string.Template`` is text to an editor and text to ``ast``, so a name
+missing from the launcher it renders stays invisible until a compiled addon dies
+on the spot with a ``NameError`` - which is what happened when the launcher lost
+its imports and every built addon failed with it. Rendering the template and
+reading the result costs nothing and sees it.
+
 Run from anywhere::
 
     pip install pyflakes
@@ -28,8 +35,11 @@ Run from anywhere::
 from __future__ import annotations
 
 import io
+import os
 import sys
 from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")      # templates, no window
 
 #: Folders that hold nothing the program runs from.
 SKIP_DIRS = {"__pycache__", ".venv", ".git", "node_modules", "_build",
@@ -43,6 +53,16 @@ FATAL_MARKS = ("undefined name", "does not exist", "syntax error",
                "unterminated", "duplicate argument", "starred")
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: The three templates the Addon Dev tab hands an author, filled with a probe
+#: addon; each is read for names afterwards.
+TEMPLATE_PROBES = (
+    ("_ADDON_SOURCE", {"id": "probe", "name": "Probe", "title": "Probe",
+                        "tab": "Probe", "menu": "Probe", "version": "1.0",
+                        "author": "author", "description": "a probe addon"}),
+    ("_TEST_SOURCE", {"id": "probe", "tab": "Probe"}),
+    ("_LAUNCHER", {"id": "probe", "module": "probe"}),
+)
 
 
 def sources(arguments: list[str]) -> list[Path]:
@@ -63,10 +83,50 @@ def sources(arguments: list[str]) -> list[Path]:
     return found
 
 
+def fatal_lines(text: str, label: str) -> list[str]:
+    """What pyflakes says about ``text`` that means it cannot run as it stands."""
+    from pyflakes.api import check
+    from pyflakes.reporter import Reporter
+
+    printed, errors = io.StringIO(), io.StringIO()
+    check(text + "\n", label, Reporter(printed, errors))
+    return [line for line in printed.getvalue().splitlines()
+            + errors.getvalue().splitlines()
+            if any(mark in line for mark in FATAL_MARKS)]
+
+
+def rendered_templates() -> list[str]:
+    """Names missing from the files the Addon Dev tab writes, once filled in.
+
+    Quiet when the app's own modules cannot be imported here at all: that is a
+    checkout with something wrong in it, which the pass over the real files has
+    already said about.
+    """
+    sys.path.insert(0, str(ROOT))
+    try:
+        import core.addon as addon_module
+    except Exception as error:                       # noqa: BLE001 - optional
+        print(f"  note: templates were not read (the app did not import: {error})")
+        return []
+    bad: list[str] = []
+    for name, fields in TEMPLATE_PROBES:
+        template = getattr(addon_module, name, None)
+        if template is None:
+            bad.append(f"core/addon.py has no {name} to fill in")
+            continue
+        try:
+            source = template.substitute(**fields)
+        except (KeyError, ValueError) as error:
+            bad.append(f"{name}: cannot be filled in ({error})")
+            continue
+        bad += [f"{name} renders: {line}" for line in
+                fatal_lines(source, f"<{name}>")]
+    return bad
+
+
 def main(arguments: list[str]) -> int:
     try:
-        from pyflakes.api import check
-        from pyflakes.reporter import Reporter
+        from pyflakes.api import check                 # noqa: F401 - presence only
     except ImportError:
         print("pyflakes is not installed here; run: pip install pyflakes")
         return 2
@@ -79,19 +139,19 @@ def main(arguments: list[str]) -> int:
         except (OSError, UnicodeDecodeError) as error:
             bad.append(f"{path}: cannot be read: {error}")
             continue
-        printed, errors = io.StringIO(), io.StringIO()
-        check(text + "\n", str(path), Reporter(printed, errors))
-        for line in printed.getvalue().splitlines() + errors.getvalue().splitlines():
-            if any(mark in line for mark in FATAL_MARKS):
-                # The app's own folder is left off the reported name, so the
-                # line reads the way a traceback does from the working folder.
-                try:
-                    line = line.replace(str(path), str(path.relative_to(ROOT)))
-                except ValueError:
-                    pass
-                bad.append(line)
+        for line in fatal_lines(text, str(path)):
+            # The app's own folder is left off the reported name, so the
+            # line reads the way a traceback does from the working folder.
+            try:
+                line = line.replace(str(path), str(path.relative_to(ROOT)))
+            except ValueError:
+                pass
+            bad.append(line)
 
-    print(f"checked {len(files)} module(s) for names that do not exist")
+    bad += rendered_templates()
+
+    print(f"checked {len(files)} module(s) and "
+          f"{len(TEMPLATE_PROBES)} template(s) for names that do not exist")
     for line in bad:
         print(f"  {line}")
     if bad:

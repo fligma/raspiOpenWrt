@@ -53,8 +53,8 @@ import time
 import traceback
 from typing import Any, Callable
 
-from PyQt6.QtCore import (QCoreApplication, QEventLoop, QObject, Qt, QTimer, QUrl,
-                          pyqtSignal)
+from PyQt6.QtCore import (QCoreApplication, QEventLoop, QObject, QSize, Qt, QTimer,
+                          QUrl, pyqtSignal)
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -626,9 +626,12 @@ class ProcessBridge:
                         self.addon.id, f"bad message: {e}", warning=True))
         code = None if self.proc is None else self.proc.poll()
         if not self.stopping:
-            self._ui(lambda c=code: self.mgr.log(
-                self.addon.id, f"the addon process ended (exit {c})", warning=True))
-            self._ui(lambda: self.mgr.mark_stopped(self.addon))
+            # One message, not two: the saying and the counting belong together
+            # so a death cannot be logged and then forgotten by the breaker.
+            seconds = round(time.monotonic() - self.started_at, 1) \
+                if self.started_at else 0.0
+            addon = self.addon
+            self._ui(lambda: self.mgr.note_exit(addon, code, seconds))
 
     def _handle(self, text: str) -> None:
         if not text.startswith("{"):
@@ -822,6 +825,22 @@ class AddonManager:
         "transport_changed", "theme_changed",
     )
 
+    #: How an addon that dies on the way up is kept from dying forever.
+    #:
+    #: A process addon that cannot come up at all - a launcher naming a module
+    #: that was never bundled, a half-written build - stops within a second of
+    #: being spawned, and anything that reads the addons folder again spawns it
+    #: again. One such machine showed the same crash nine times in twenty
+    #: seconds. So a start that ends almost immediately is counted, and once
+    #: ``CRASH_LIMIT`` of them fall inside ``CRASH_WINDOW`` the app stops
+    #: starting it by itself and says so on the row. A run that got properly
+    #: under way, or an orderly exit 0, is not a crash and wipes the count; and
+    #: the window is short enough that a file fixed in an editor is retried on
+    #: its own a minute later, or at once when Restart is pressed.
+    CRASH_WINDOW = 60.0     # how long a death is remembered
+    CRASH_LIMIT = 3         # this many on the way up is the last of them
+    CRASH_QUICK = 10.0      # shorter than this and it never really started
+
     def __init__(self, window: Any) -> None:
         self.win = window
         self.bus = _Bus(lambda text: self.log("", text, warning=True))
@@ -838,6 +857,8 @@ class AddonManager:
         self.dot_refs: dict[str, dict] = {}         # id -> transport -> its dot
         self.config_panels: dict[str, tuple] = {}   # id -> editor, per file
         self._started = False
+        # id -> when its starts died on the way up; see CRASH_LIMIT.
+        self._crashes: dict[str, list[float]] = {}
         # Nothing is read or started here; call reload() once the interface is up.
 
     @property
@@ -978,12 +999,16 @@ class AddonManager:
         return str(build_mark(addon_id).get("prefer") or "source").lower()
 
     def set_preferred_kind(self, addon_id: str, kind: str) -> None:
-        """Record which of the two copies ``scan`` should keep, then rescan."""
+        """Record which of the two copies runs, then bring that one back.
+
+        Only this id's file was chosen, so only this id is reloaded: every other
+        addon keeps its process, its tabs and its open connection.
+        """
         wanted = "compiled" if str(kind).lower() in ("compiled", "program", "exe",
                                                      "process") else "source"
         record = build_mark(addon_id)
         write_build_mark(addon_id, {**record, "prefer": wanted})
-        self.reload()
+        self.reload_one(addon_id)
 
     def loaded(self) -> list[Addon]:
         return [addon for addon in self.addons if addon.loaded]
@@ -1072,22 +1097,7 @@ class AddonManager:
             self.unload(addon)
         discovered = self.scan()
         for addon in discovered:
-            record = self.record_for(addon.id)
-            addon.enabled = bool(record.get("enabled", False))
-            # Each transport needs its app-wide gate and this addon's own.
-            addon.ssh_enabled = bool(record.get("ssh_enabled", True))
-            addon.sftp_enabled = bool(record.get("sftp_enabled", True))
-            # Bundled addons are pinned to the main connection.
-            addon.own_connection = (
-                bool(record.get("own_connection", False)) and not addon.is_bundled)
-            if addon.own_connection and "connection" not in (addon.manifest or {}):
-                # An install from before the "connection" declaration, which the
-                # profile had moved onto a connection of its own, keeps that
-                # choice: undeclared plus an own switch means it may use both.
-                addon.connection = "both"
-                self.log(addon.id, "no \"connection\" in its manifest, but the "
-                           "profile had it on its own connection: treated as "
-                           "\"both\"", warning=True)
+            self.apply_record(addon)
             previous = keep.get(addon.id)
             if previous is not None and previous.loaded:
                 # Same id still on: tear the old one down so new code runs.
@@ -1099,6 +1109,63 @@ class AddonManager:
             core.ui.addon_step(number, len(wanted),
                                       addon.name or addon.id)
             self.load(addon)
+        self.refresh_rows()
+        self._restore_window_tabs()
+        self._reactivate_tab(active)
+
+    def apply_record(self, addon: Addon) -> None:
+        """Put the profile's stored switches onto one discovered addon."""
+        record = self.record_for(addon.id)
+        addon.enabled = bool(record.get("enabled", False))
+        # Each transport needs its app-wide gate and this addon's own.
+        addon.ssh_enabled = bool(record.get("ssh_enabled", True))
+        addon.sftp_enabled = bool(record.get("sftp_enabled", True))
+        # Bundled addons are pinned to the main connection.
+        addon.own_connection = (
+            bool(record.get("own_connection", False)) and not addon.is_bundled)
+        if addon.own_connection and "connection" not in (addon.manifest or {}):
+            # An install from before the "connection" declaration, which the
+            # profile had moved onto a connection of its own, keeps that
+            # choice: undeclared plus an own switch means it may use both.
+            addon.connection = "both"
+            self.log(addon.id, "no \"connection\" in its manifest, but the "
+                       "profile had it on its own connection: treated as "
+                       "\"both\"", warning=True)
+
+    def reload_one(self, addon_id: str) -> None:
+        """Bring one addon back from its file and leave every other one running.
+
+        :meth:`reload` is a whole-world job: it shuts every addon down, reads the
+        folder, and starts each enabled one again, taking its tabs and its Settings
+        rows with it. That is what a boot and a deliberate rescan want, and nothing
+        else. Moving a source/compiled radio, saving a manifest or compiling one
+        addon touches one file, and paying for it with a restart of the store, the
+        terminal addon and everything else is both slow and visible - an addon
+        holding a session loses it. So those callers name the addon they changed
+        and this re-discovers only that id: the folder is read again, because that
+        is cheap, but only the named record is replaced, unloaded and started.
+        """
+        addon_id = str(addon_id)
+        active = self._active_tab()
+        for addon in [item for item in self.addons if item.id == addon_id]:
+            self.unload(addon, reason="reloaded")
+        # scan() settles which of two same-id copies runs, and rebuilds the
+        # shadowed ones, so a changed build mark is honoured here exactly as it
+        # is across a full rescan.
+        discovered = self.scan()
+        retained = {item.id: item for item in self.addons if item.id != addon_id}
+        # The folder's order is kept, so the Settings rows do not shuffle; every
+        # other addon is put back object for object, with its process, its tabs
+        # and its loaded flag still its own.
+        self.addons = [retained.get(item.id, item) for item in discovered]
+        gone = {item.id for item in discovered}
+        self.addons += [item for item in retained.values()
+                        if item.id not in gone]
+        keeper = self.find(addon_id)
+        if keeper is not None:
+            self.apply_record(keeper)
+            if keeper.enabled:
+                self.load(keeper)
         self.refresh_rows()
         self._restore_window_tabs()
         self._reactivate_tab(active)
@@ -1218,6 +1285,12 @@ class AddonManager:
     def load(self, addon: Addon) -> bool:
         if addon.loaded:
             return True
+        if self.crash_halted(addon.id):
+            # The breaker is on. The row carries the reason; the log does not,
+            # because a rescan that walks every addon would else say it again.
+            addon.loaded = False
+            self.refresh_row(addon.id)
+            return False
         addon.error = ""
         addon.manifest = self.read_manifest(addon)
         self.apply_manifest(addon, addon.manifest)
@@ -1376,6 +1449,61 @@ class AddonManager:
         self._clean(addon)
         self.refresh_row(addon.id)
 
+    # --- the crash breaker ---
+
+    def _tally(self, addon_id: str) -> list[float]:
+        """This addon's still-recent deaths, with the older ones dropped.
+
+        Reading the list prunes it, so a count is only ever as old as
+        :attr:`CRASH_WINDOW` and a fixed file is retried without anyone asking.
+        """
+        stamps = [stamp for stamp in self._crashes.get(addon_id, [])
+                  if time.monotonic() - stamp < self.CRASH_WINDOW]
+        if stamps:
+            self._crashes[addon_id] = stamps
+        else:
+            self._crashes.pop(addon_id, None)
+        return stamps
+
+    def crashes(self, addon_id: str) -> int:
+        """How many starts of this addon died on the way up just now."""
+        return len(self._tally(str(addon_id)))
+
+    def crash_halted(self, addon_id: str) -> bool:
+        """Whether the app has stopped starting this addon by itself."""
+        return len(self._tally(str(addon_id))) >= self.CRASH_LIMIT
+
+    def clear_crashes(self, addon_id: str) -> None:
+        """Forget the deaths: the addon was asked for by name, or has run."""
+        self._crashes.pop(str(addon_id), None)
+
+    def note_exit(self, addon: Addon, code: Any, seconds: float) -> None:
+        """One process addon's ending, counted when it never got going.
+
+        Called from the reader thread through the bus, so this is the single
+        place a death is turned into a log line, a stopped row and - if it looks
+        like a crash on the way up rather than a shutdown - a strike.
+        """
+        self.log(addon.id, f"the addon process ended (exit {code})",
+                 warning=code != 0)
+        self.mark_stopped(addon)
+        if code == 0 and seconds >= self.CRASH_QUICK:
+            # It ran and closed on its own terms; whatever it died of before
+            # was the older file, so the count starts over.
+            self.clear_crashes(addon.id)
+            return
+        stamps = self._tally(addon.id)
+        stamps.append(time.monotonic())
+        self._crashes[addon.id] = stamps
+        if len(stamps) < self.CRASH_LIMIT:
+            return
+        addon.error = (f"not started again: {len(stamps)} runs ended within "
+                       f"{int(self.CRASH_WINDOW)}s of beginning")
+        addon.notes = ("it is failing as it comes up, so the app has stopped "
+                       "restarting it; press Restart when the file is fixed")
+        self.refresh_row(addon.id)
+        self.log(addon.id, f"{addon.error} - {addon.notes}", warning=True)
+
     def shutdown_all(self) -> None:
         for addon in self.loaded():
             try:
@@ -1400,6 +1528,8 @@ class AddonManager:
         addon.enabled = bool(enabled)
         self.save_records()
         if enabled:
+            # Switching it on is a fresh ask for this addon, deaths and all.
+            self.clear_crashes(addon_id)
             if self.load(addon):
                 self.notify("addon_enabled", {"addon": addon_id})
                 # A tab switched on mid-session lands at the bar's end; put back.
@@ -1472,6 +1602,8 @@ class AddonManager:
         addon = self.find(addon_id)
         if addon is None:
             return
+        # Asked for by name, so the breaker is lifted whatever it was doing.
+        self.clear_crashes(addon_id)
         was_enabled = addon.enabled
         self.unload(addon, reason="restarted")
         addon.enabled = was_enabled
@@ -2476,39 +2608,37 @@ def _write_config_value(widget: QWidget, field: dict, value: Any) -> None:
 # build carries a plain copy of them; a program built without that copy says so
 # rather than start something that cannot finish.
 #
-# Six things live here:
+# Four panes live here, each one a way of looking at the addon picked above:
 #
 # Details
-#     The manifest - name, version, author, description, api - edited in a form
-#     and written back where it belongs: into the ``ADDON = {`` literal of the
-#     addon's own file when it has one, otherwise into the ``<id>.json`` manifest
-#     beside it. Below that, a plain-text editor for ``addons/_data/<id>/config.json``.
+#     The switches for this one addon (enable, restart, jump to its tab, open its
+#     source) and the manifest - name, version, author, description, api - edited
+#     in a form and written back where it belongs: into the ``ADDON = {`` literal
+#     of the addon's own file when it has one, otherwise into the ``<id>.json``
+#     manifest beside it. Below that, a plain-text editor for
+#     ``addons/_data/<id>/config.json``.
 #
-# Run
-#     The switches the Settings tab also has (enable, restart, show its tab,
-#     rescan) plus the choice that only matters once an addon has been compiled:
-#     run the source or run the program built from it.
+# Build & test
+#     PyInstaller and the test script, side by side, since one leads to the
+#     other: ``addons/_tests/test_<id>.py`` is written from a template and run as
+#     its own process using :mod:`addon_client`'s recording stub, so an addon can
+#     be checked without a device and without opening a window; a build is started
+#     for one addon with a generated launcher, staging in ``addons/_build/<id>``
+#     and putting the result at ``addons/<id>.exe`` (or an extension-less
+#     executable on Linux) so the runtime finds it as the same addon. The choice
+#     that only matters once an addon has been compiled - run the source or run
+#     the program built from it - is at the top of this pane too.
 #
-# Compile
-#     PyInstaller, started for one addon with a generated launcher, staging in
-#     ``addons/_build/<id>`` and putting the result at ``addons/<id>.exe`` (or an
-#     extension-less executable on Linux) so the runtime finds it as the same addon.
+# Docs & log
+#     The API reference and the guides above, the addon's own lines out of the
+#     app log below. Every method, property and one-line summary in the reference
+#     is read off the protocol module as it runs, so the panel cannot describe an
+#     API the app no longer has.
 #
-# Test
-#     ``addons/_tests/test_<id>.py``, written from a template and run as its own
-#     process. It uses :mod:`addon_client`'s recording stub, so an addon can be
-#     checked without a device and without opening a window.
-#
-# Docs
-#     The API reference and the guides. Every method, property and one-line
-#     summary in it is read off the protocol module as it runs, so the panel
-#     cannot describe an API the app no longer has.
-#
-# Log / Processes
-#     The addon's own lines out of the app log, and what is running: the child
-#     process of every process addon (pid, state, exit code, command, uptime) and
-#     everything the app created for the in-process ones - tabs, timers, menu
-#     entries, event listeners and threads.
+# Processes
+#     What is running: the child process of every process addon (pid, state, exit
+#     code, command, uptime) and everything the app created for the in-process
+#     ones - tabs, timers, menu entries, event listeners and threads.
 #
 # Nothing here can take the window down: the file writes are guarded, PyInstaller
 # and the test script run in their own processes, and every refresh reads the
@@ -2524,7 +2654,8 @@ from string import Template
 import struct
 import tempfile
 
-from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont, QHideEvent, QShowEvent
+from PyQt6.QtGui import (QBrush, QColor, QDesktopServices, QFont, QHideEvent,
+                         QPixmap, QShowEvent)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -2559,6 +2690,8 @@ from addon_common import (
     addon_config_path,
     build_mark,
     config_name,
+    default_icon_path,
+    find_icon,
     jsonable,
     kill_process_tree,
     popen_tree,
@@ -2572,6 +2705,7 @@ from core.const import (
     ADDON_EXECUTABLE_SUFFIX,
     ADDON_TEST_DIR,
     ADDONS_DIR,
+    ASSETS_DIR,
     BASE_DIR,
     HARNESS_DIR,
     HARNESS_FILES,
@@ -2580,6 +2714,7 @@ from core.const import (
     LOG_FILE,
     PROJECT_GITHUB_URL,
     find_asset,
+    zoom_size,
 )
 
 #: How wide the branches of the Docs tree are drawn, and how far their lines are
@@ -2593,6 +2728,9 @@ REFRESH_MS = 2000
 #: One line per row, and the rows the index shows before it scrolls itself.
 ROW_H = 30
 MAX_ROWS = 12
+
+#: The addon's own picture, beside its name in the index.
+LIST_ICON = 22
 
 #: Floors for the panes; the tab scrolls rather than clipping text.
 PANES_MIN_H = 380
@@ -2708,6 +2846,47 @@ def fit_rows(table: QTableWidget, cap: int = MAX_ROWS) -> None:
 def state_color(state: str) -> QBrush:
     """The brush for a word in the state column."""
     return QBrush(QColor(STATE_COLORS.get(str(state), "#e0e0e0")))
+
+
+#: The pictures already read, by file: the index is redrawn as often as it can
+#: change, and decoding the same PNG every two seconds buys nothing.
+_PICTURE_CACHE: dict[str, QIcon] = {}
+
+
+def addon_picture(row: dict) -> str:
+    """The file this addon's picture stands in, or nothing when it brought none.
+
+    An addon dropped in the folder keeps its artwork in an ``assets`` folder of its
+    own; one that came with the program keeps it in the program's ``assets``, which
+    is also where a packaged build packs the artwork of every addon installed on
+    the machine. Both are tried, under the one name every addon uses, and what
+    answers to neither is shown the default rather than somebody else's picture.
+    """
+    addon_id = str(row.get("id") or "").strip()
+    if not addon_id:
+        return ""
+    folders = []
+    home = str(row.get("home") or "").strip()
+    if home:
+        folders.append(Path(home) / "assets")
+    folders.append(ASSETS_DIR)
+    for folder in folders:
+        found = find_icon(folder, addon_id)
+        if found:
+            return found
+    return default_icon_path(ASSETS_DIR)
+
+
+def addon_icon(row: dict) -> QIcon:
+    """The mark for one row of the index, made once per file and remembered."""
+    path = addon_picture(row)
+    if not path:
+        return QIcon()
+    icon = _PICTURE_CACHE.get(path)
+    if icon is None:
+        icon = QIcon(path)
+        _PICTURE_CACHE[path] = icon
+    return icon
 
 
 # --- reading and writing a manifest ---
@@ -3280,12 +3459,15 @@ What the app answers is the test's to decide: ``api.answer("device.run", {"code"
 makes a command look as if it failed, and ``api.asked("tabs.add_tab", "spec")``
 reads back the spec the addon handed the app.
 
-Run it from the Test panel, or on the command line::
+Run it from the Build & test pane, or on the command line::
 
     python addons/_tests/test_$id.py
 """
 
 
+from __future__ import annotations
+
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -3430,6 +3612,12 @@ if __name__ == "__main__":
 _LAUNCHER = Template('''#!/usr/bin/env python3
 """Runs $id as its own program. Written by the Addon Dev tab; do not edit."""
 
+# Every name used below has to be named here. A frozen program is built from
+# what this file visibly imports, so a module that is only reached by luck -
+# left in __main__ by the bootloader - is both an undefined name at run time
+# and missing from the build altogether.
+import os
+import sys
 
 for _descriptor, _mode in ((1, "w"), (2, "w")):
     # A --windowed build has no streams; reopen the pipe rather than lose it.
@@ -3439,6 +3627,8 @@ for _descriptor, _mode in ((1, "w"), (2, "w")):
         except OSError:
             continue
         setattr(sys, "stdout" if _descriptor == 1 else "stderr", stream)
+
+import addon_client
 
 import $module as addon
 
@@ -4047,8 +4237,8 @@ app and as a program of its own.
 - ``addons`` - the addon's file, and the program built from it.
 - ``addons/_data/<id>`` - its ``config.json``, shared by every profile.
 - ``addons/_tests`` - its test script.
-- ``config/berry_manager.log`` - what ``api.log`` writes; the Log pane above
-  filters it to this one addon.
+- ``config/berry_manager.log`` - what ``api.log`` writes; the log under this
+  panel's reference filters it to this one addon.
 
 The reference in this panel is read off the running ``addon_api`` module, so it
 cannot describe an API this program does not have.
@@ -4758,7 +4948,7 @@ def api_counts() -> tuple[int, int]:
 # --- the tab itself ---
 
 class AddonDevWidget(QWidget):
-    """The Addon Dev panel: one addon selected at a time, six views of it."""
+    """The Addon Dev panel: one addon selected at a time, four views of it."""
 
     #: What 'find' in the Docs pane reads beyond the row's own label: the key,
     #: the summary and the call, kept in one lower-case string per row.
@@ -4772,12 +4962,19 @@ class AddonDevWidget(QWidget):
         self.build: _Stream | None = None
         self.test: _Stream | None = None
         self._loading = False
+        # Set by 'Test, then compile' to the addon the test was started for, and
+        # cleared by whatever the test ends with: a build may only start once that
+        # addon's own test has passed.
+        self._then_build = ""
+        # What the index holds, so a refresh can tell a changed list from the same
+        # list with a cell or two different (see refresh).
+        self._shown_ids: list[str] = []
         # The Docs tree, by the key each line carries, and the folds the tree had
         # before 'find' opened them. Both are filled by _fill_docs.
         self._docs_items: dict[str, QTreeWidgetItem] = {}
         self._docs_folds: dict[str, bool] | None = None
 
-        # A table, five panes and many notes do not fit a short window, so all
+        # A table, four panes and many notes do not fit a short window, so all
         # of it lives in one scroll area and takes the height it needs.
         self.body = QWidget()
         root = QVBoxLayout(self.body)
@@ -4788,10 +4985,8 @@ class AddonDevWidget(QWidget):
         self.panes = QTabWidget()
         self.panes.setMinimumHeight(PANES_MIN_H)
         self.panes.addTab(self._build_details(), "Details")
-        self.panes.addTab(self._build_compile(), "Compile")
-        self.panes.addTab(self._build_test(), "Test")
-        self.panes.addTab(self._build_docs(), "Docs")
-        self.panes.addTab(self._build_log(), "Log")
+        self.panes.addTab(self._build_build(), "Build & test")
+        self.panes.addTab(self._build_docs(), "Docs & log")
         self.panes.addTab(self._build_processes(), "Processes")
         root.addWidget(self.panes, 1)
 
@@ -4829,28 +5024,38 @@ class AddonDevWidget(QWidget):
     # --- the widgets ---
 
     def _build_index(self) -> QWidget:
+        """The list on top: every addon in the folder, and the few actions that
+        concern the folder rather than the one addon picked."""
         holder = QWidget()
         column = QVBoxLayout(holder)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(6)
 
+        line = QHBoxLayout()
+        line.setSpacing(6)
+        self.index_filter = QLineEdit()
+        self.index_filter.setPlaceholderText("filter")
+        self.index_filter.setClearButtonEnabled(True)
+        self.index_filter.setToolTip(
+            "Show only the addons whose name, id, version, author, description or "
+            "file answers to what is typed here. Every word has to turn up; the "
+            "counts beside this box always speak for all of them.")
+        self.index_filter.textChanged.connect(lambda _=False: self.refresh())
+        line.addWidget(self.index_filter, 1)
+        self.count_note = note_label(QLabel(""))
+        line.addWidget(self.count_note)
+        column.addLayout(line)
+
         self.table = make_table(
-            ["Addon", "Name", "Version", "Runs", "State", "Source"],
+            ["Addon", "Name", "Version", "Runs", "State", "Where"],
             stretch=1, widths={5: 260})
+        self.table.setIconSize(QSize(zoom_size(LIST_ICON), zoom_size(LIST_ICON)))
         self.table.itemSelectionChanged.connect(self._selected_row)
         fit_rows(self.table)
         column.addWidget(self.table, 0)
 
         row = QHBoxLayout()
-        self.enabled_switch = QCheckBox("Enabled")
-        self.enabled_switch.setToolTip(
-            "The same switch as Settings > Addons: it starts the addon and keeps "
-            "its tabs, or stops it and takes them away")
-        self.enabled_switch.toggled.connect(self._set_enabled)
         for text, tip, slot in (
-            ("Restart", "Load the file again, without restarting the app", self.mgr_restart),
-            ("Show tab", "Jump to the tab this addon added", self.show_tab),
-            ("Open source", "Edit the addon file itself", self.open_source),
             ("Rescan", "Read the addons folder again", self.rescan),
             ("New addon...", "Write a new addon, with a header and a test script",
              self.new_addon),
@@ -4861,8 +5066,9 @@ class AddonDevWidget(QWidget):
             button = QPushButton(text)
             button.setToolTip(tip)
             button.clicked.connect(slot)
+            if text == "New addon...":
+                button.setObjectName("primaryAction")
             row.addWidget(button)
-        row.addWidget(self.enabled_switch)
         row.addStretch(1)
         self.state_note = QLabel("")
         self.state_note.setStyleSheet("color: #8f8f8f;")
@@ -4876,6 +5082,40 @@ class AddonDevWidget(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
+        run = QGroupBox("This addon")
+        tip_on_title(run,
+                     "The doing part of the addon picked above, gathered where its "
+                     "details are read: switch it on or off, load its file again, "
+                     "come to the tab it opened, or edit the source it runs from. "
+                     "Settings > Addons has the same switches for every addon at once.")
+        line = QHBoxLayout(run)
+        line.setContentsMargins(14, 10, 12, 8)
+        line.setSpacing(10)
+        self.details_mark = QLabel()
+        side = zoom_size(LIST_ICON)
+        self.details_mark.setFixedSize(QSize(side, side))
+        line.addWidget(self.details_mark)
+        self.id_label = QLabel("-")
+        self.id_label.setStyleSheet("font-weight: bold;")
+        line.addWidget(self.id_label)
+        line.addStretch(1)
+        self.enabled_switch = QCheckBox("Enabled")
+        self.enabled_switch.setToolTip(
+            "The same switch as Settings > Addons: it starts the addon and keeps "
+            "its tabs, or stops it and takes them away")
+        self.enabled_switch.toggled.connect(self._set_enabled)
+        line.addWidget(self.enabled_switch)
+        for text, tip, slot in (
+            ("Restart", "Load the file again, without restarting the app", self.mgr_restart),
+            ("Show tab", "Jump to the tab this addon added", self.show_tab),
+            ("Open source", "Edit the addon file itself", self.open_source),
+        ):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            line.addWidget(button)
+        layout.addWidget(run)
+
         box = QGroupBox("Addon details")
         tip_on_title(box,
                      "The manifest the app shows in Settings > Addons. It is saved "
@@ -4888,8 +5128,6 @@ class AddonDevWidget(QWidget):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(6)
-        self.id_label = QLabel("-")
-        self.id_label.setStyleSheet("color: #aaaaaa;")
         self.name_input = QLineEdit()
         self.version_input = QLineEdit()
         self.author_input = QLineEdit()
@@ -4958,6 +5196,7 @@ class AddonDevWidget(QWidget):
         return page
 
     def _build_compile(self) -> QWidget:
+        """The left half of the Build & test pane: which copy runs, and PyInstaller."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -5056,6 +5295,7 @@ class AddonDevWidget(QWidget):
         return page
 
     def _build_test(self) -> QWidget:
+        """The right half of the Build & test pane: the addon's own test script."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -5080,6 +5320,12 @@ class AddonDevWidget(QWidget):
         self.run_test_button.setObjectName("primaryAction")
         self.run_test_button.setToolTip("Run it with this interpreter and show its output")
         self.run_test_button.clicked.connect(self.run_test)
+        self.then_compile_button = QPushButton("Test, then compile")
+        self.then_compile_button.setToolTip(
+            "Run the test and start PyInstaller only if it passes - the gate the "
+            "store puts in front of publishing a compiled addon, so a build made "
+            "here is a build that could be shipped")
+        self.then_compile_button.clicked.connect(self.run_test_then_build)
         self.open_test_button = QPushButton("Open test")
         self.open_test_button.setToolTip("Edit it outside Berry Manager")
         self.open_test_button.clicked.connect(self.open_test)
@@ -5091,8 +5337,8 @@ class AddonDevWidget(QWidget):
             "What the stub records, and the checks a test script should make")
         self.test_guide_button.clicked.connect(lambda: self._open_guide("test"))
         for button in (self.create_test_button, self.run_test_button,
-                       self.open_test_button, self.test_folder_button,
-                       self.test_guide_button):
+                       self.then_compile_button, self.open_test_button,
+                       self.test_folder_button, self.test_guide_button):
             row.addWidget(button)
         row.addStretch(1)
         self.test_note = QLabel("")
@@ -5105,10 +5351,29 @@ class AddonDevWidget(QWidget):
         layout.addWidget(self.test_log, 1)
         return page
 
-    def _build_log(self) -> QWidget:
+    def _build_build(self) -> QWidget:
+        """Build and test as one pane: a check and the release it earns belong
+        side by side, not two tabs apart."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+        note = note_label(QLabel(
+            "The test is the gate: a compiled addon is only as good as the script "
+            "that drives it, and 'Test, then compile' keeps them in that order."))
+        layout.addWidget(note)
+        split = QSplitter()
+        split.addWidget(self._build_compile())
+        split.addWidget(self._build_test())
+        split.setSizes([520, 520])
+        layout.addWidget(split, 1)
+        return page
+
+    def _build_log(self) -> QWidget:
+        """The lower half of the Docs & log pane: this addon's own lines."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         row = QHBoxLayout()
         row.addWidget(QLabel("filter"))
@@ -5176,13 +5441,28 @@ class AddonDevWidget(QWidget):
         layout.addWidget(second, 1)
         return page
 
-    # --- docs: the guides and the reference generated from the code ---
-
     def _build_docs(self) -> QWidget:
+        """Docs and log as one pane: the reference to read, and under it the lines
+        the addon being read about actually wrote."""
         page = QWidget()
         self.docs_pane = page
         layout = QVBoxLayout(page)
         layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self._build_docs_side())
+        split.addWidget(self._build_log())
+        split.setSizes([440, 240])
+        layout.addWidget(split, 1)
+        return page
+
+    # --- docs: the guides and the reference generated from the code ---
+
+    def _build_docs_side(self) -> QWidget:
+        """The upper half of that pane: the tree down the left, the page it opens."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
         pages, entries = api_counts()
@@ -5373,8 +5653,8 @@ class AddonDevWidget(QWidget):
         self._render_docs(self._branch_key(current))
 
     def _open_guide(self, key: str) -> None:
-        """Come to the Docs pane and show one guide: the way a Test or Compile
-        pane hands a developer the page that explains it."""
+        """Come to the Docs & log pane and show one guide: the way the Build &
+        test pane hands a developer the page that explains it."""
         self.panes.setCurrentWidget(self.docs_pane)
         self.docs_filter.blockSignals(True)
         self.docs_filter.setText("")
@@ -5507,39 +5787,106 @@ class AddonDevWidget(QWidget):
         return self.mgr.find(self.selected)
 
     def refresh(self) -> None:
-        """Re-read the runtime, keeping the selection where it was."""
+        """Re-read the runtime, keeping the selection and the scroll where they were.
+
+        Only a list that changed in length or order is rebuilt. Handing Qt brand-new
+        cells for every row every two seconds moves the selection anchor, so the row
+        a person is reading flickers and a click can land on something else; the
+        common case is the same addons, with a word or two changed.
+        """
         wanted = self.selected
         rows = self.mgr.describe_all()
+        self.count_note.setText(self._counts_text(rows))
+        shown = self._visible_rows(rows)
+        ids = [row["id"] for row in shown]
+        rebuild = ids != self._shown_ids
         self.table.blockSignals(True)
-        self.table.setRowCount(len(rows))
-        for index, row in enumerate(rows):
-            process = row.get("process") or {}
-            state = "failed" if row["error"] else ("running" if row["loaded"] else "off")
-            runs = ("process" if row["kind"] == "process" else "imported")
-            if row.get("builtin"):
-                # Came with the program, not dropped in.
-                runs += " shipped"
-            if process:
-                runs += f" pid {process.get('pid') or '?'}"
-            values = (row["id"], row["name"], row["version"], runs, state,
-                      row["source"])
-            for column, text in enumerate(values):
-                item = QTableWidgetItem(str(text))
-                if column == 4:
-                    item.setForeground(state_color(state))
-                if column == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, row["id"])
-                self.table.setItem(index, column, item)
-        self.table.blockSignals(False)
+        try:
+            if rebuild:
+                self.table.clearContents()
+                self.table.setRowCount(len(ids))
+                self._shown_ids = ids
+            for index, row in enumerate(shown):
+                self._fill_row(index, row, rebuild)
+        finally:
+            self.table.blockSignals(False)
         fit_rows(self.table)
-        target = wanted if any(row["id"] == wanted for row in rows) \
-            else (rows[0]["id"] if rows else "")
+        target = wanted if wanted in ids else (ids[0] if ids else "")
         if target and target == self.selected:
             # Same addon: only the parts that change on their own are touched.
             self.touch()
         else:
             self.select(target)
         self.refresh_processes(rows)
+
+    def _visible_rows(self, rows: list[dict]) -> list[dict]:
+        """The addons the filter box allows, in the order the runtime lists them.
+
+        Every word typed has to turn up somewhere in the row - id, name, version,
+        author, description or the file it runs from - which is the same rule the
+        Docs filter above the reference follows.
+        """
+        words = str(self.index_filter.text() or "").strip().casefold().split()
+        if not words:
+            return list(rows)
+        kept = []
+        for row in rows:
+            haystack = " ".join(str(row.get(key) or "") for key in (
+                "id", "name", "version", "author", "description",
+                "source")).casefold()
+            if all(word in haystack for word in words):
+                kept.append(row)
+        return kept
+
+    @staticmethod
+    def _counts_text(rows: list[dict]) -> str:
+        """The one line over the list: how many addons there are, and how they stand."""
+        if not rows:
+            return "no addons in the folder"
+        running = sum(1 for row in rows if row["loaded"] and not row["error"])
+        failed = sum(1 for row in rows if row["error"])
+        parts = [f"{len(rows)} addon" + ("s" if len(rows) != 1 else ""),
+                 f"{running} running"]
+        if failed:
+            parts.append(f"{failed} failed")
+        parts.append(f"{len(rows) - running - failed} off")
+        return " \u00b7 ".join(parts)
+
+    @staticmethod
+    def _row_values(row: dict) -> tuple:
+        """The six words one row of the index shows, in their columns."""
+        process = row.get("process") or {}
+        state = "failed" if row["error"] else ("running" if row["loaded"] else "off")
+        runs = ("process" if row["kind"] == "process" else "imported")
+        if row.get("builtin"):
+            # Came with the program, not dropped in.
+            runs += " shipped"
+        if process:
+            runs += f" pid {process.get('pid') or '?'}"
+        return (row["id"], row["name"], row["version"], runs, state,
+                _display_path(row["source"]))
+
+    def _fill_row(self, index: int, row: dict, fresh: bool) -> None:
+        """One row of the index: the addon's picture, its words, its state colour.
+
+        ``fresh`` says the table holds nothing for this row yet; otherwise the
+        existing cells are kept and only the text that really differs is written.
+        """
+        mark = addon_icon(row)
+        for column, text in enumerate(self._row_values(row)):
+            item = None if fresh else self.table.item(index, column)
+            if item is None:
+                item = QTableWidgetItem()
+                self.table.setItem(index, column, item)
+            if item.text() != str(text):
+                item.setText(str(text))
+            if column == 0:
+                # The id travels as data, not as the text in the cell.
+                item.setData(Qt.ItemDataRole.UserRole, row["id"])
+                if not mark.isNull():
+                    item.setIcon(mark)
+            elif column == 4:
+                item.setForeground(state_color(str(text)))
 
     def touch(self) -> None:
         addon = self.current()
@@ -5594,6 +5941,7 @@ class AddonDevWidget(QWidget):
                 f"{info['id']} - {human_size(info['size'])}, "
                 f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(info['modified']))}")
             self.id_label.setText(f"{info['name']}  ({info['id']})")
+            self._show_mark(info)
             self.enabled_switch.blockSignals(True)
             self.enabled_switch.setChecked(bool(info["enabled"]))
             self.enabled_switch.blockSignals(False)
@@ -5622,8 +5970,16 @@ class AddonDevWidget(QWidget):
         finally:
             self._loading = False
 
+    def _show_mark(self, info: dict) -> None:
+        """The addon's picture, at the head of the Details pane as well as in the
+        list: the same file the store card and its own tab wear."""
+        icon = addon_icon(info)
+        side = self.details_mark.width()
+        self.details_mark.setPixmap(
+            icon.pixmap(QSize(side, side)) if not icon.isNull() else QPixmap())
+
     def _load_run_panels(self, info: dict, addon: Any) -> None:
-        """The parts of the Run and Compile panels that depend on what is there."""
+        """The parts of the Build & test pane that depend on what is there."""
         shipped = bool(info.get("builtin"))
         copies = {str(item["kind"]): item for item in
                   [dict(kind=info["kind"], source=info["source"])] + list(info["alternatives"])}
@@ -5679,6 +6035,8 @@ class AddonDevWidget(QWidget):
             why_run = "" if path.is_file() else "write the test script first"
         self.create_test_button.setEnabled(bool(modules) and not testing)
         self.run_test_button.setEnabled(not why_run and not testing)
+        self.then_compile_button.setEnabled(
+            not why_run and not testing and can_build and not busy)
         if why_run and not testing:
             self.test_note.setText(why_run)
             self.test_note.setStyleSheet("color: #8f8f8f;")
@@ -5696,12 +6054,15 @@ class AddonDevWidget(QWidget):
                 f"({info['build'].get('path', '-')}), preferred: {info['prefer']}")
 
     def _clear_panels(self) -> None:
-        self.state_note.setText("nothing in the addons folder")
+        self.state_note.setText(
+            "no addon answers to that filter" if self.index_filter.text().strip()
+            else "nothing in the addons folder")
         for field in (self.name_input, self.version_input, self.author_input,
                       self.description_input, self.notes_input, self.api_input,
                       self.hidden_input):
             field.setText("")
         self.id_label.setText("-")
+        self.details_mark.clear()
         self.target_note.setText("Pick an addon above.")
         self.config_path.setText("")
         self.config_edit.setPlainText("")
@@ -5732,7 +6093,8 @@ class AddonDevWidget(QWidget):
             return
         self.say_details(f"saved {target.name}")
         self.mgr.win.log(f"[addons] manifest of {addon.id} saved to {target}")
-        self.mgr.reload()
+        # One file changed, so one addon comes back; the rest keep running.
+        self.mgr.reload_one(addon.id)
 
     def say_details(self, text: str, bad: bool = False) -> None:
         self.details_note.setText(text)
@@ -5845,7 +6207,7 @@ class AddonDevWidget(QWidget):
         except OSError as error:
             QMessageBox.warning(self, "Could not write the addon", str(error))
             return
-        self.mgr.reload()
+        self.mgr.reload_one(values["id"])
         self.select(values["id"])
         self.refresh()
         if values["run"]:
@@ -5916,8 +6278,26 @@ class AddonDevWidget(QWidget):
         self.test.start()
         self._watch_streams()
         self.run_test_button.setEnabled(False)
+        self.then_compile_button.setEnabled(False)
         self.test_note.setText("running...")
         self.test_note.setStyleSheet("color: #8f8f8f;")
+
+    def run_test_then_build(self) -> None:
+        """The store's order of business: run the test, and compile only on a pass.
+
+        Nothing else in the tab enforces it - a person may still build straight
+        away - but an addon published from here is not compiled until its own test
+        has passed, so the same rule here costs nothing and keeps the two honest.
+        """
+        self._then_build = str(self.selected or "")
+        if not self._then_build:
+            return
+        self.run_test()
+        if self.test is None or not self.test.running():
+            # It never started: no answer is coming, so nothing may be chained to it.
+            self._then_build = ""
+            self.build_note.setText("no build: the test did not start")
+            self.build_note.setStyleSheet("color: #ffb020;")
 
     def open_test(self) -> None:
         addon = self.current()
@@ -6045,7 +6425,7 @@ class AddonDevWidget(QWidget):
             "prefer": "compiled" if self.prefer_check.isChecked()
                       else previous.get("prefer", "source"),
         })
-        self.mgr.reload()
+        self.mgr.reload_one(identifier)
         self.refresh()
         self.build_log.appendPlainText(f"\n{target} is ready")
         self.build_note.setText(f"wrote {target.name}")
@@ -6055,6 +6435,19 @@ class AddonDevWidget(QWidget):
         ok = stream.code == 0
         self.test_note.setText("passed" if ok else f"failed (code {stream.code})")
         self.test_note.setStyleSheet("color: #23d18b;" if ok else "color: #ffb020;")
+        if not self._then_build:
+            return
+        wanted, self._then_build = self._then_build, ""
+        if not ok:
+            self.build_note.setText("not started: the test did not pass")
+            self.build_note.setStyleSheet("color: #ffb020;")
+        elif wanted != self.selected:
+            # The person has moved on to another addon while it ran; a build of
+            # that one instead would be nothing but a surprise.
+            self.build_note.setText("not started: another addon is picked now")
+            self.build_note.setStyleSheet("color: #ffb020;")
+        else:
+            self.compile_addon()
 
     # --- log and processes ---
 

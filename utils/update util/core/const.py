@@ -50,7 +50,7 @@ def find_asset(filename: str) -> Path | None:
 #: The program's own version, the one the About dialog shows and the update
 #: addon compares against the tags published on GitHub (``berry`` + this).
 #: One line to change per release, everything else reads it from here.
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 UPDATE_TAG_PREFIX = "berry"
 
 # --- file names and fixed identifiers ---
@@ -204,6 +204,11 @@ DEFAULT_APP_CONFIG = {
     # the theme in force. Off, the program opens with nothing on screen until
     # the window itself appears. See core.ui.
     "splash_enabled": True,
+    # The notes the window writes beside the pointer over its own controls,
+    # drawn by core.ui rather than by Qt. Off stops every tool-tip: the
+    # cursor-following bubble, a group box's title note and the plain native
+    # tip alike. See core.ui._SmartTip.
+    "tooltips_enabled": True,
     # Per-transport gates, each with its own switch in Settings >
     # Connection. Off, the transport's controls go away and
     # api.device refuses that transport to every addon (see the
