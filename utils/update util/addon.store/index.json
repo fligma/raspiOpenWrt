@@ -3,7 +3,7 @@
     {
       "id": "berry_web",
       "name": "Berry web dashboard",
-      "version": "1.3",
+      "version": "1.4",
       "author": "fligma",
       "description": "Looks for the Berry dashboard on the connected host and, when it is not there, installs src/www_rasconf from GitHub over SFTP: a backup, the files, the theme this program is wearing, the uhttpd section written with uci, the exec bit on the CGI entry, a restart and a check that the page answers. Also views and edits those options, finds which folder on the device holds the page, and can move that one to /www_berry - an install left in /www_rasconf by an older setup included.",
       "filename": "berry_web.py",
@@ -16,12 +16,13 @@
         "berry_webicon.png"
       ],
       "icon": "berry_webicon.png",
-      "test": "test_berry_web.py"
+      "test": "test_berry_web.py",
+      "status": "updated"
     },
     {
       "id": "cert_manager",
       "name": "Certificate manager",
-      "version": "1.4",
+      "version": "1.5",
       "author": "fligma",
       "description": "Shows the certificate on the device as a tidy summary or the raw openssl text, and reissues the .crt and .key over SSH, with the subject, paths and follow-up commands kept in addons/_data/cert_manager/config.json.",
       "filename": "cert_manager.py",
@@ -33,12 +34,13 @@
         "cert_managericon.png"
       ],
       "icon": "cert_managericon.png",
-      "test": "test_cert_manager.py"
+      "test": "test_cert_manager.py",
+      "status": "updated"
     },
     {
       "id": "multi_ssh",
       "name": "Multi SSH",
-      "version": "1.1",
+      "version": "1.2",
       "author": "fligma",
       "description": "Opens as many SSH sessions as you like in sub-tabs, each on a connection of its own, with quickstart entries that ask only for a password and one field that types a command into every session at once.",
       "filename": "multi_ssh.py",
@@ -50,12 +52,13 @@
         "multi_sshicon.png"
       ],
       "icon": "multi_sshicon.png",
-      "test": "test_multi_ssh.py"
+      "test": "test_multi_ssh.py",
+      "status": "updated"
     },
     {
       "id": "openwrt_logs",
       "name": "OpenWrt Log Viewer",
-      "version": "3.0",
+      "version": "3.1",
       "author": "fligma",
       "description": "a single-device log viewer and a multi-device view, colour-coded connections, the log in time order. The search highlights or filters the matching lines.",
       "filename": "openwrt_logs.py",
@@ -67,12 +70,13 @@
         "openwrt_logsicon.png"
       ],
       "icon": "openwrt_logsicon.png",
-      "test": "test_openwrt_logs.py"
+      "test": "test_openwrt_logs.py",
+      "status": "updated"
     },
     {
       "id": "openwrt_package_manager",
       "name": "OpenWrt Package Manager",
-      "version": "1.4",
+      "version": "1.5",
       "author": "fligma",
       "description": "Audits installed OpenWrt packages and manages software installation via apk or opkg.",
       "filename": "openwrt_package_manager.py",
@@ -85,12 +89,13 @@
         "openwrt_package_managericon.png"
       ],
       "icon": "openwrt_package_managericon.png",
-      "test": "test_openwrt_package_manager.py"
+      "test": "test_openwrt_package_manager.py",
+      "status": "updated"
     },
     {
       "id": "password_manager",
       "name": "Password manager",
-      "version": "1.0",
+      "version": "1.1",
       "author": "fligma",
       "description": "Keeps logins in one encrypted file on this computer - no device, no cloud - unlocked for the session with a master password, with a searchable list, bullets until you ask to see them, a generator, and a copied password taken back off the clipboard after the seconds you configured.",
       "filename": "password_manager.py",
@@ -100,7 +105,8 @@
         "password_managericon.png"
       ],
       "icon": "password_managericon.png",
-      "test": "test_password_manager.py"
+      "test": "test_password_manager.py",
+      "status": "updated"
     }
   ]
 }

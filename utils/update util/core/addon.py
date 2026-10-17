@@ -1610,6 +1610,13 @@ class AddonManager:
 
     def _clean(self, addon: Addon) -> None:
         """Undo everything the app created on this addon's behalf."""
+        # A job that was holding the tab bar down leaves with the addon that
+        # asked for it; a bar still locked by a stopped addon is a bar that
+        # answers to nobody.
+        try:
+            self.win.set_tabs_locked(False)
+        except Exception:
+            pass
         if addon.api is not None:
             for name in list(addon.tabs):
                 try:
@@ -4693,7 +4700,8 @@ Anything with an ``id`` can be read and written afterwards with
 The property names are the spec's own: ``text``, ``value``, ``rows``,
 ``items``, ``clear``, ``append``, ``placeholder``, ``tooltip``, ``style``,
 ``enabled``, ``visible``, ``checked``, ``highlight``, ``maximum``, ``format``,
-``current``, ``font_size``.
+``current``, ``font_size``, and for a ``tabs`` container ``locked``,
+``tab_colors``, ``add_page`` and ``remove_page``.
 
 An ``image`` leaf is a picture of its own: ``size`` caps how far it may measure
 in either direction (at the interface zoom), and its ``value`` - or
@@ -4781,6 +4789,24 @@ away by index or by caption, and [widget_value](api:tabs.widget_value) with
 page does needs no cleaning up: taking the page away drops its controls out of
 the tab's registry, and closes any terminal sitting on it.
 
+Since the pages are usually one thing per whatever-is-listed, a container names
+what is picked: put ``"changed"`` in its ``on`` list and every move of its
+sub-bar arrives in ``on_widget`` with the new ``index`` and that page's
+``text``, which is how a page built per addon knows which addon it is showing -
+no second lookup, and no keeping a list in step with Qt's own.
+
+``set_widget(tab, id, "tab_colors", ["", "#8f8f8f"])`` paints one caption per
+page, an empty entry leaving it as the theme draws it. This is how a sub-tab for
+a switched-off addon is greyed out: greying a caption rather than disabling the
+tab keeps it clickable, so the person can still open it and read what is off and
+change it - ``setTabEnabled`` would only hide the answer.
+
+``set_widget(tab, id, "locked", True)`` holds the container on the page it is
+showing, and ``False`` lets it move again. While it holds, a click on its own
+sub-bar does nothing at all, and neither does the wheel or a keyboard nudge; a
+page change asked for by code is put straight back too. "locked": True in the
+spec itself starts it held.
+
 ## A terminal of your own
 
 A ``terminal`` leaf is the app's own terminal screen - the widget that draws the
@@ -4840,6 +4866,15 @@ in the middle of it. The stack starts hidden and is switched on with
 not hold, the same code is safe on a copy whose layout was built before the view
 existed: it keeps the browsing panes on screen and writes its steps to its log
 instead.
+
+A job shown this way is worth holding the tab bar against, or the person clicks
+to another tab and leaves the card with nowhere to be read while the work
+continues behind it. [api.tabs.lock(True)](api:tabs.lock) holds the window's bar
+and ``api.tabs.lock(False)`` lets it go; a ``tabs`` container in the same tab is
+held with its own ``locked`` property, so both the bar the user arranged and the
+tab's own sub-bar can be shut for the length of a download. Letting go is not
+only the addon's job - stopping the addon releases the window's bar, so a job
+that dies halfway cannot leave the tabs frozen.
 """),
 
     ("popout", "A window of its own", """
@@ -4937,22 +4972,33 @@ the detail is one click away.
 
 ## A job that is worth watching
 
-[progress_notice](api:ui.progress_notice) is the other kind of news: a small card
-over the window's corner holding one line of text and a bar with its percentage,
-painted by the app and needing nothing from the addon but the calls.
+A long job's progress belongs inside the addon's own tab, not floating over the
+window. What the app used to raise - a small card pinned to the window's corner,
+rising above other programs and staying put when the window was moved - turned
+out to be the worst of both: it did not travel with the app it was reporting
+for, and it hid the moment the app was minimised, which is exactly when a card
+is meant to be read. It is gone, and nothing in the API replaces it. What is
+left is honest about where a job's news lives:
 
-    api.ui.progress_notice("My addon", f"working on {name}", done, total)
+- the tab's status line, for one line that outlives the job;
+- the tab's own log, for the steps; and
+- the job's card, a ``terminal`` under an ``overlay`` with the bar in the middle
+  of it, which is where a person watching the work looks (see
+  [Tabs, pinned and plain](guide:tabs)).
 
-Each step re-shows the same card rather than raising another, so a long job reads
-as one thing moving along instead of a stack of toasts; it never covers the whole
-window and never needs closing. Fill it to the end on the job's last line and it
-holds a moment and fades; [progress_notice_close](api:ui.progress_notice_close)
-takes it away at once, which is what a job that failed should do - leaving a bar
-half full over the window saying nothing is worse than saying it stopped.
+    api.tabs.set_widget("My addon", "jobpane", "visible", True)
+    api.tabs.set_widget("My addon", "jobbar", "value", done * 100 // total)
 
-The card is for the percentage; what the job is doing belongs on the tab, and a
-``terminal`` under an ``overlay`` is the plainest way to show it (see
-[Tabs, pinned and plain](guide:tabs)).
+Show the card while the job runs, hide it on the last line whether the job
+ended well or badly, and put the ending on the status line as well - a job
+that failed quietly behind a card nobody is looking at is the one thing a
+progress view exists to prevent. Holding the tab bar for the length of the job
+is the other half of that: see [A view for a long job](guide:tabs).
+
+[popup](api:ui.popup) stays for the news worth raising even with the tab closed -
+a job that finished while the person was somewhere else, a device that stopped
+answering, an update that arrived. It is one line and it leaves, which is what a
+notice should be.
 
 ## Wearing a picture
 
@@ -5238,10 +5284,10 @@ and an asset that will not download is said and left out of the install.
 The store reads one or more GitHub repositories, each with an ``index.json`` in
 its store folder:
 
-- ``tools/gen_addon_store_index.py`` writes the index from the addons in a
+- ``buildtools.py gen-addon-store-index`` writes the index from the addons in a
   checkout - their manifests, their icons, their test scripts.
 - ``addons/_data/<id>/config.json`` and ``fields.json`` travel with the file, so
-  the addon's row on the store's Addon manager can show its settings form before
+  the addon's tab on the store's Addon manager can show its settings form before
   the program has ever run.
 - A source is a repository: owner, repository, branch or tag, and the store
   folder inside it. **Sources...** on the store's tab adds one, puts it first or

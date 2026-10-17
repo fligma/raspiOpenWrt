@@ -11,21 +11,22 @@ fake window, offscreen, with no device and no Desktop.
 
 What is looked at:
 
-* the spec: the store's tab is now two pages under one sub-bar, the first page
-  still carries every widget id it always had, and the second is the manager's
-  table, its six switches, its seven buttons and its Addon Dev check;
-* what the page shows: the addons that did not come inside the program and
-  nothing else, one row each, in the order the app named them, with a tick that
-  is that addon's own enable switch and a State cell that says where its tabs
-  are;
-* what a picked row fills in: every switch read from the row, the force-popout
-  one greyed - never hidden - for an addon whose manifest spoke or which came with
-  the program, a transport switch hidden when the manifest never named that
-  transport, and the own-connection one greyed for an addon that has no choice to
-  make;
-* what a press does: each of the six switches, the row's tick and the dev-tab
-  check go through the app's api by name, a refusal is said on the status line
-  rather than swallowed, and the table is painted again either way;
+* the spec: the store's tab is two pages under one sub-bar, the first page still
+  carries every widget id it always had, and the second is a header over a bar of
+  its own - one tab per addon, holding that addon's switches, its buttons, its
+  heading and its own picture, with the Addon Dev check in the header;
+* what the bar shows: the addons that did not come inside the program and nothing
+  else, one page each, in the order the app named them, the first one open, and a
+  caption drawn grey for an addon that is switched off rather than a tab taken
+  away - the page saying it is off is the page that switches it back on;
+* what a page holds: every switch read from its own row, the force-popout and
+  own-connection ones greyed for an addon whose manifest spoke or which came with
+  the program, a transport switch not drawn at all when the manifest never named
+  that transport, and the buttons worded for what they would do to that addon;
+* what a press does: each of the six switches and the dev-tab check go through the
+  app's api by name, the addon they belong to read back out of the slug its own
+  control ids carry, a refusal is said on the status line rather than swallowed,
+  and the pages are laid out again either way;
 * the settings button: the form is built from the keys the app says the addon
   declared, the dialog's answers are converted back to the shapes the file keeps,
   a dialog closed with Cancel writes nothing, and an addon with no keys and no
@@ -67,6 +68,10 @@ from addon_api import AddonAPI                               # noqa: E402
 SOURCE = ROOT / "addons" / "addon_store.py"
 FAILURES: list[str] = []
 _QT_APP: Any = None
+
+#: The folders the page asked to be shown, in place of the machine's own file
+#: browser: a test that opened Explorer on every run would be a bad neighbour.
+REVEALED: list[str] = []
 
 #: One addon that came inside the program, one dropped in by hand, one the store
 #: installed and popped out, one that failed to start, and one that left the
@@ -157,11 +162,16 @@ PAGE_ONE_IDS = ("status", "source", "delcfg", "showlog", "filter", "count",
                 "jobname", "jobstep", "jobbar", "log",
                 "refresh", "install", "update", "delete", "sources")
 
-MANAGER_IDS = ("managerstatus", "managercount", "devtab", "managed",
-               "managerpane", "mg_enable", "mg_popout", "mg_token",
-               "mg_ssh", "mg_sftp", "mg_own", "mg_note",
-               "mg_window", "mg_restart", "mg_folder", "mg_data",
-               "mg_config", "mg_shortcut", "mg_delete")
+#: The header's ids, which belong to the page rather than to any one addon. The
+#: controls under them are named per addon and are built with ``store.mid``.
+HEADER_IDS = ("managerstatus", "managercount", "devtab", "managetabs")
+
+#: The shared name of every control an addon's own page carries, joined to that
+#: addon's slug with ``store.mid``.
+PAGE_IDS = ("mg_icon", "mg_name", "mg_sub", "mg_note",
+            "mg_enable", "mg_popout", "mg_token", "mg_ssh", "mg_sftp", "mg_own",
+            "mg_window", "mg_restart", "mg_folder", "mg_data",
+            "mg_config", "mg_shortcut", "mg_delete")
 
 
 def check(condition: object, text: str) -> None:
@@ -217,6 +227,8 @@ def fresh(store: Any, rows: list[dict] | None = None,
           answers: dict[str, Any] | None = None) -> Any:
     """The addon on a stub api, its catalog patched so nothing reaches GitHub."""
     store.load_catalog = lambda values: []
+    store.reveal = lambda path: REVEALED.append(str(path))
+    del REVEALED[:]
     api = addon_client.StubAPI(addon_id="addon_store")
     api.answer("session.addons", list(rows if rows is not None else ROWS))
     for method, value in (answers or {}).items():
@@ -257,6 +269,81 @@ def spec_leaves(spec: dict) -> dict:
             if isinstance(leaf, dict) and leaf.get("id")}
 
 
+def texts_in(spec: Any) -> list[str]:
+    """Every piece of text one page of the spec writes down as its own."""
+    found: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in ("text", "label", "value"):
+                if isinstance(node.get(key), str):
+                    found.append(node[key])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                walk(value)
+
+    walk(spec)
+    return found
+
+
+def kinds_in(spec: Any) -> list[str]:
+    """Every container and leaf kind one page of the spec is built out of."""
+    found: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("kind"):
+                found.append(str(node["kind"]))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                walk(value)
+
+    walk(spec)
+    return found
+
+
+def added_pages(api: Any, store: Any) -> list[dict]:
+    """The pages the manager's bar was handed on this run, in order.
+
+    The pages are not in the tab's spec - they are built from the app's record
+    through ``add_page`` - so what the bar was given is read out of the calls.
+    """
+    found: list[dict] = []
+    for where, arguments, _named in api.calls:
+        if (where == "tabs.set_widget" and len(arguments) >= 4
+                and arguments[1] == store.MANAGER_TABS
+                and arguments[2] == "add_page"
+                and isinstance(arguments[3], dict)):
+            found.append(arguments[3])
+    return found
+
+
+def page_of(api: Any, store: Any, slug: str) -> dict:
+    """The page laid down for one addon's slug, or nothing when there is none."""
+    wanted = store.mid("mg_name", slug)
+    for page in added_pages(api, store):
+        if spec_of(page.get("spec") or {}, wanted) is not None:
+            return page.get("spec") or {}
+    return {}
+
+
+def row_of(store: Any, addon_id: str) -> dict:
+    """One of the five shapes a profile is answered with, by its id."""
+    for one in ROWS:
+        if one["id"] == addon_id:
+            return one
+    raise KeyError(addon_id)
+
+
+def leaf_of(store: Any, page: dict, base: str, slug: str) -> dict:
+    """One control of one addon's page, by the shared name it is drawn under."""
+    return spec_of(page, store.mid(base, slug)) or {}
+
+
 # --- one: the spec ---
 
 def test_the_spec(store: Any) -> None:
@@ -283,54 +370,86 @@ def test_the_spec(store: Any) -> None:
                        f"{missing}")
     check(first.count("list") == 1 and first.count("log") == 1,
           f"the list or the log is drawn twice: {first}")
-    check("managed" not in first,
-          "the manager's table is on the store's page, where the ids would clash")
+    check("managed" not in first and "managerpane" not in first,
+          "an addon page of the old table model is still on the store's page")
 
-    print("\n3. the manager's page is a table, six switches and seven buttons")
+    print("\n3. the manager's page is a header over a bar of its own")
     second = ids_in(pages[1])
-    missing = [one for one in MANAGER_IDS if one not in second]
+    missing = [one for one in HEADER_IDS if one not in second]
     check(not missing, f"the Addon manager page is missing its own controls: "
                        f"{missing}")
-    table = spec_of(pages[1], "managed") or {}
-    check(table.get("kind") == "table"
-          and list(table.get("columns") or []) == list(store.MANAGER_COLUMNS)
-          and table.get("checkbox") == 0 and table.get("multi") is True
-          and table.get("on") == ["selected", "toggled"],
-          f"the manager's table is not the picked-and-ticked one it promised: "
-          f"{table}")
+    bar = spec_of(pages[1], store.MANAGER_TABS) or {}
+    check(bar.get("kind") == "tabs" and list(bar.get("children") or []) == []
+          and bar.get("on") == ["changed"],
+          f"the manager's own bar is not an empty one that reports being moved: "
+          f"{bar}")
+    check("grey" in str(bar.get("tooltip") or ""),
+          f"the bar does not say what a grey caption means: "
+          f"{bar.get('tooltip')!r}")
+    check(kinds_in(pages[1]).count("table") == 0
+          and kinds_in(pages[1]).count("tabs") == 1,
+          f"the manager's page is not one bar and no table: {kinds_in(pages[1])}")
+    check(len([one for one in second if one in PAGE_IDS]) == 0,
+          f"a page's controls are drawn in the header, where one would be every "
+          f"addon's at once: {second}")
+    check((spec_of(pages[1], "devtab") or {}).get("on") == ["toggled"],
+          "the Addon Dev check reports nothing when it is moved")
+
+    print("\n4. an addon's page is its own switches, its own buttons, its own words")
+    hello = store.manager_page(row_of(store, "hello"), "hello")
+    check(hello.get("kind") == "scroll",
+          f"an addon's page is not the scrollable column it was said to be: "
+          f"{hello.get('kind')!r}")
+    ids = ids_in(hello)
+    expected = [store.mid(one, "hello") for one in
+                ("mg_icon", "mg_name", "mg_sub", "mg_enable", "mg_popout",
+                 "mg_token", "mg_sftp", "mg_own", "mg_note")]
+    expected += [store.mid(one, "hello") for one, _text in store.MANAGER_BUTTONS]
+    missing = [one for one in expected if one not in ids]
+    check(not missing, f"the page is missing what it promises to hold: {missing}")
+    order = [store.split_mid(one)[0] for one in ids
+             if store.split_mid(one)[0] in store.MANAGER_SWITCHES]
+    check(order == ["mg_enable", "mg_popout", "mg_token", "mg_sftp", "mg_own"],
+          f"Hello's switches are not its three, its one declared transport and its "
+          f"own connection, in order: {order}")
+    check(store.mid("mg_ssh", "hello") not in ids,
+          "a gate was drawn for a transport the manifest never named")
+    check(store.MANAGER_HEADING in texts_in(hello),
+          "the page does not head its switches with what they are")
     for ident, label in (("mg_enable", "Run it"), ("mg_popout", "Force popout"),
                          ("mg_token", "Use the global git token"),
-                         ("mg_ssh", "Use SSH"), ("mg_sftp", "Use SFTP"),
+                         ("mg_sftp", "Use SFTP"),
                          ("mg_own", "Open a connection of its own")):
-        leaf = spec_of(pages[1], ident) or {}
+        leaf = spec_of(hello, store.mid(ident, "hello")) or {}
         check(leaf.get("kind") == "check" and leaf.get("label") == label
               and leaf.get("on") == ["toggled"],
               f"the {ident} switch is not a check that reports being moved: {leaf}")
-    for ident in ("mg_ssh", "mg_sftp"):
-        check((spec_of(pages[1], ident) or {}).get("visible") is False,
-              f"{ident} is drawn before a row says the addon asked for that "
-              f"transport")
-    check((spec_of(pages[1], "mg_own") or {}).get("visible") is None,
-          "the own-connection switch is hidden rather than greyed when it is not "
-          "this addon's to move")
-    buttons = spec_of(pages[1], "mg_window")
-    check(isinstance(buttons, dict), "the manager's buttons are not in its spec")
-    for ident, _text in store.MANAGER_BUTTONS:
-        check(spec_of(pages[1], ident) is not None,
-              f"the {ident} button was promised and never drawn")
-    check((spec_of(pages[1], "devtab") or {}).get("on") == ["toggled"],
-          "the Addon Dev check reports nothing when it is moved")
-    pane = spec_of(pages[1], store.MANAGER_PANE) or {}
-    check(pane.get("kind") == "splitter" and pane.get("vertical") is True
-          and list(pane.get("sizes") or []) == list(store.MANAGER_SHARE),
-          f"the table and the switches under it are not in a draggable split: "
-          f"{pane}")
+    buttons = [store.split_mid(one)[0] for one in ids
+               if store.split_mid(one)[0] in store.MANAGER_IDS]
+    check(buttons == [one for one, _text in store.MANAGER_BUTTONS],
+          f"the page's seven buttons are not all there, or not in order: {buttons}")
+    floaty = store.manager_page(row_of(store, "floaty"), "floaty")
+    check((spec_of(floaty, store.mid("mg_window", "floaty")) or {}).get("text")
+          == "Raise window",
+          f"a popped-out addon's first button is not named for the window: "
+          f"{spec_of(floaty, store.mid('mg_window', 'floaty'))}")
+    check((spec_of(floaty, store.mid("mg_shortcut", "floaty")) or {}).get("text")
+          == "Remove shortcut",
+          "an addon that already has a Desktop link offers to write another")
+    check((spec_of(hello, store.mid("mg_window", "hello")) or {}).get("text")
+          == "Show tab" and (spec_of(hello, store.mid("mg_shortcut", "hello"))
+                             or {}).get("text") == "Desktop shortcut",
+          "an addon with no window and no link is offered the other words")
+    check(store.manager_slug(row_of(store, "hello")) == "hello"
+          and store.split_mid(store.mid("mg_enable", "hello"))
+          == ("mg_enable", "hello"),
+          "the slug a page's ids carry does not read back as the addon it names")
 
-    print("\n4. and Qt really builds both pages out of that spec")
+    print("\n5. and Qt really builds both pages, and two addons' pages are not one")
     try:
         import addon_api
         from PyQt6.QtWidgets import (QApplication, QCheckBox, QPlainTextEdit,
-                                     QTabWidget, QTreeWidget)
+                                     QPushButton, QTabWidget, QTreeWidget)
 
         global _QT_APP
         _QT_APP = QApplication.instance() or QApplication([])
@@ -346,74 +465,131 @@ def test_the_spec(store: Any) -> None:
               and [bar.tabText(index) for index in range(bar.count())]
               == [store.PAGE_ADDONS, store.PAGE_MANAGER],
               f"the sub-bar does not carry the two pages: {bar.count()}")
-    for ident in ("list", "managed"):
-        check(isinstance(registry.get(ident), QTreeWidget),
-              f"the page built no table called {ident}: {registry.get(ident)!r}")
+    inner = registry.get(store.MANAGER_TABS)
+    check(isinstance(inner, QTabWidget) and inner.count() == 0,
+          f"the manager's bar was built with pages in it rather than waiting for "
+          f"the app to answer: {inner!r}")
+    check(isinstance(registry.get("list"), QTreeWidget),
+          "the store's own list is no longer the table it was")
+    check("managed" not in registry and "managerpane" not in registry,
+          "the old table and its splitter are still being built")
     check(isinstance(registry.get("log"), QPlainTextEdit),
           f"the job's log is not the folded box it was said to be: "
           f"{registry.get('log')!r}")
-    for ident in store.MANAGER_SWITCHES + ("devtab",):
-        check(isinstance(registry.get(ident), QCheckBox),
-              f"{ident} is not a check box a switch can be drawn on: "
-              f"{registry.get(ident)!r}")
-    managed = registry.get("managed")
-    if isinstance(managed, QTreeWidget):
-        labels = [managed.headerItem().text(column)
-                  for column in range(managed.columnCount())]
-        check(labels == list(store.MANAGER_COLUMNS),
-              f"the manager's columns are not in the promised order: {labels}")
+    check(isinstance(registry.get("devtab"), QCheckBox),
+          f"the header's Addon Dev check is not a check box: "
+          f"{registry.get('devtab')!r}")
+    # Two addons' pages built together: every control is the one page's own,
+    # because all the pages share the tab's one registry.
+    pair = {"kind": "row", "children": [
+        store.manager_page(row_of(store, "hello"), "hello"),
+        store.manager_page(row_of(store, "floaty"), "floaty")]}
+    _body2, both = addon_api.build_spec(pair)
+    for base in ("mg_enable", "mg_popout", "mg_token", "mg_own"):
+        left = both.get(store.mid(base, "hello"))
+        right = both.get(store.mid(base, "floaty"))
+        check(isinstance(left, QCheckBox) and isinstance(right, QCheckBox)
+              and left is not right,
+              f"{base} is not a check box of its own on each page: {right!r}")
+    check(isinstance(both.get(store.mid("mg_sftp", "hello")), QCheckBox),
+          "Hello's one declared transport came with no gate of its own")
+    for base, _text in store.MANAGER_BUTTONS:
+        left = both.get(store.mid(base, "hello"))
+        right = both.get(store.mid(base, "floaty"))
+        check(isinstance(left, QPushButton) and isinstance(right, QPushButton)
+              and left is not right,
+              f"{base} is one button shared by two pages: {left!r} / {right!r}")
+    check(both.get(store.mid("mg_ssh", "hello")) is None,
+          "Qt built a gate the spec never asked for")
 
 
 # --- two: what the page lists ---
 
 def test_the_list(store: Any) -> None:
-    print("\n5. the page lists what did not come inside the program, and only that")
+    print("\n6. one tab per addon the program did not ship, in the app's order")
     api = fresh(store)
     store.refresh_manager()
-    rows = prop(api, "managed", "rows") or []
-    captions = [row["cells"][0] for row in rows]
+    captions = [one.get("label") for one in added_pages(api, store)]
     check(captions == ["Hello", "Floaty", "Broken", "Choicey"],
-          f"the table is not the addons the program did not ship: {captions}")
-    check(all(not row.get("settings_page") for row in store.managed),
-          "a shipped addon was taken into the list the switches are for")
+          f"the bar is not the addons the program did not ship: {captions}")
+    check(len(store.managed) == 4
+          and all(not row.get("settings_page") for row in store.managed),
+          "a shipped addon was taken into the bar the switches are for")
     check(store.manager_caption({"id": "berry", "name": "Berry"}) == "Berry",
           "a caption was built for an addon the page does not carry")
     check(str(prop(api, "managercount", "text")) == "4 managed",
           f"the count chip says something else: {prop(api, 'managercount', 'text')!r}")
+    check(prop(api, store.MANAGER_TABS, "current") == 0,
+          f"the bar was not left on the first addon's page: "
+          f"{prop(api, store.MANAGER_TABS, 'current')!r}")
+    check(prop(api, store.MANAGER_TABS, "tab_colors") == [""] * 4,
+          f"every caption was drawn as though it were switched off: "
+          f"{prop(api, store.MANAGER_TABS, 'tab_colors')!r}")
 
-    print("\n6. a row says what it is, where its tabs are, and whether it is on")
-    states = [row["cells"][3] for row in rows]
-    check(states[0] == "running",
-          f"a running addon is not said to be running: {states[0]!r}")
-    check("\u25b8 in its window" in states[1] and "running" in states[1],
-          f"an addon in a window of its own is not said to be: {states[1]!r}")
-    check("failed to start" in states[2],
-          f"an addon that would not start is not said so: {states[2]!r}")
-    check(states[3] == "not running",
+    print("\n7. a page says what its addon is, where its tabs are, and whether it is on")
+    subs = {slug: str((spec_of(page_of(api, store, slug),
+                              store.mid("mg_sub", slug)) or {}).get("text"))
+            for slug in ("hello", "floaty", "broken", "choicey")}
+    check(str((spec_of(page_of(api, store, "hello"),
+                       store.mid("mg_name", "hello")) or {}).get("text")) == "Hello",
+          "a page does not name its own addon at the top")
+    check("1.0" in subs["hello"] and "fligma" in subs["hello"]
+          and "running" in subs["hello"],
+          f"Hello's page does not say what it is and how it stands: {subs['hello']!r}")
+    check("\u25b8 in its window" in subs["floaty"] and "someone" in subs["floaty"],
+          f"an addon in a window of its own is not said to be: {subs['floaty']!r}")
+    check("failed to start" in subs["broken"] and "no author" in subs["broken"],
+          f"an addon that would not start is not said so: {subs['broken']!r}")
+    check("not running" in subs["choicey"],
           f"an installed addon that is switched on but idle is not said so: "
-          f"{states[3]!r}")
-    check([row["check"] for row in rows] == [True, True, True, True],
-          f"a row's tick is not its addon's enable switch: "
-          f"{[row['check'] for row in rows]}")
-    check(rows[2]["cells"][2] == "-" and rows[1]["cells"][2] == "someone",
-          f"an author was dropped or invented: {[row['cells'][2] for row in rows]}")
-    check(all(row.get("color") for row in rows),
-          "a row was painted with no colour of its own")
+          f"{subs['choicey']!r}")
+    for slug in ("hello", "floaty", "broken", "choicey"):
+        check(prop(api, store.mid("mg_icon", slug), "image") is not None,
+              f"{slug}'s page was laid down and never given a picture")
 
-    print("\n7. with nothing installed the page says so, and asks for nothing")
+    print("\n8. an addon that is switched off keeps its tab, drawn grey")
+    api = fresh(store, rows=[{**ROWS[1], "enabled": False, "running": False},
+                             ROWS[2]])
+    store.refresh_manager()
+    check(len(added_pages(api, store)) == 2,
+          "an addon that is switched off lost the very tab that switches it back on")
+    check(prop(api, store.MANAGER_TABS, "tab_colors") == [store._STATE_OFF, ""],
+          f"a switched-off addon's caption is not the grey it was promised: "
+          f"{prop(api, store.MANAGER_TABS, 'tab_colors')!r}")
+    page = page_of(api, store, "hello")
+    check((spec_of(page, store.mid("mg_enable", "hello")) or {}).get("checked")
+          is False, "the page of an addon that is off still says it is running")
+    check("switched off" in str((spec_of(page, store.mid("mg_sub", "hello"))
+                                 or {}).get("text")),
+          "an addon that is off is not said so on its own page")
+    check("switched off" in manager_status(api),
+          f"the header does not say how the open page's addon stands: "
+          f"{manager_status(api)!r}")
+    check(str(prop(api, "managercount", "text")) == "2 managed",
+          f"an off addon was left out of the count: "
+          f"{prop(api, 'managercount', 'text')!r}")
+
+    print("\n9. with nothing installed the bar is empty, and a page says so")
     api = fresh(store, rows=[ROWS[0]])
     store.refresh_manager()
-    check(not (prop(api, "managed", "rows") or []),
-          "a profile that ships everything still drew a row")
+    check(not added_pages(api, store),
+          "a profile that ships everything still laid down a page")
     check(str(prop(api, "managercount", "text")) == "nothing installed",
-          f"an empty list was counted as something: "
+          f"an empty bar was counted as something: "
           f"{prop(api, 'managercount', 'text')!r}")
+    check("Nothing installed outside the program." in manager_status(api),
+          f"an empty bar said nothing: {manager_status(api)!r}")
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_restart", "clicked", {})
-    check("pick an addon" in manager_status(api),
-          f"a button with no row picked did not say so: {manager_status(api)!r}")
+    store.on_widget(store.TAB, store.mid("mg_restart", "hello"), "clicked", {})
+    check("open one of the addon tabs first" in manager_status(api),
+          f"a button with no addon behind it did not say so: {manager_status(api)!r}")
+    api.calls.clear()
+    store.on_widget(store.TAB, store.mid("mg_folder", "hello"), "clicked", {})
+    check(len(REVEALED) == 1 and not manager_status(api).startswith("open one"),
+          f"the one button that needs no addon was refused with them: "
+          f"{manager_status(api)!r}")
 
-    print("\n8. the Addon Dev check in the header reads the app's own answer")
+    print("\n10. the Addon Dev check in the header reads the app's own answer")
     api = fresh(store, answers={"session.app_setting": False})
     store.refresh_manager()
     check(prop(api, "devtab", "checked") is False,
@@ -428,87 +604,127 @@ def test_the_list(store: Any) -> None:
 # --- three: what a press does ---
 
 def test_the_presses(store: Any) -> None:
-    print("\n9. picking a row fills in its six switches and its buttons")
+    print("\n11. an addon's switches are on screen the moment its page opens")
     api = fresh(store)
     store.refresh_manager()
-    api.calls.clear()
-    store.on_widget(store.TAB, "managed", "selected", {"text": "Floaty"})
-    check(prop(api, "mg_enable", "checked") is True
-          and prop(api, "mg_popout", "checked") is True
-          and prop(api, "mg_token", "checked") is False,
-          f"the switches do not read the row: {prop(api, 'mg_enable', 'checked')} / "
-          f"{prop(api, 'mg_popout', 'checked')} / {prop(api, 'mg_token', 'checked')}")
-    check(prop(api, "mg_popout", "enabled") is True,
-          "a silent addon was offered no force-popout switch")
-    check(prop(api, "mg_window", "text") == "Raise window"
-          and prop(api, "mg_shortcut", "text") == "Remove shortcut",
-          f"the buttons are not named for what they would do: "
-          f"{prop(api, 'mg_window', 'text')!r} / {prop(api, 'mg_shortcut', 'text')!r}")
-    check("window of their own" in str(prop(api, "mg_note", "text")),
-          f"the note does not say where its tabs are: {prop(api, 'mg_note', 'text')!r}")
-    check("Berry - floaty.lnk" in str(prop(api, "mg_note", "text")),
+    page = page_of(api, store, "floaty")
+    check(leaf_of(store, page, "mg_enable", "floaty").get("checked") is True
+          and leaf_of(store, page, "mg_popout", "floaty").get("checked") is True
+          and leaf_of(store, page, "mg_token", "floaty").get("checked") is False,
+          "the switches on the page do not read that addon's own record")
+    check(leaf_of(store, page, "mg_popout", "floaty").get("enabled") is True,
+          "an addon that may be popped out was drawn without a live switch")
+    note = str(leaf_of(store, page, "mg_note", "floaty").get("text"))
+    check("window of their own" in note,
+          f"the note does not say where its tabs are: {note!r}")
+    check("Berry - floaty.lnk" in note,
           "the note says nothing about the Desktop link that is already there")
-    check(prop(api, "mg_ssh", "visible") is False
-          and prop(api, "mg_sftp", "visible") is False,
-          "a gate was shown for an addon whose manifest asked for no transport")
-    check(prop(api, "mg_own", "enabled") is False,
+    ids = ids_in(page)
+    check(store.mid("mg_ssh", "floaty") not in ids
+          and store.mid("mg_sftp", "floaty") not in ids,
+          "a gate was drawn for an addon whose manifest asked for no transport")
+    check(leaf_of(store, page, "mg_own", "floaty").get("enabled") is False,
           "an addon that declared no choice of connection was offered the switch")
+    check(leaf_of(store, page, "mg_window", "floaty").get("text") == "Raise window",
+          f"the page's first button is not worded for the addon it belongs to: "
+          f"{leaf_of(store, page, 'mg_window', 'floaty')}")
+    check(manager_status(api).startswith("Hello"),
+          f"the page that opens by default is not the first addon's: "
+          f"{manager_status(api)!r}")
 
-    print("\n10. a switch the addon cannot be given is greyed, and said why")
-    api.calls.clear()
-    store.on_widget(store.TAB, "managed", "selected", {"text": "Broken"})
-    check(prop(api, "mg_popout", "enabled") is False,
+    print("\n12. a switch the addon cannot be given is greyed, and said why")
+    page = page_of(api, store, "broken")
+    check(leaf_of(store, page, "mg_popout", "broken").get("enabled") is False,
           "an addon whose manifest spoke was offered the app's switch anyway")
-    check("manifest" in str(prop(api, "mg_note", "text")),
-          f"the greyed switch was not explained: {prop(api, 'mg_note', 'text')!r}")
-    check(prop(api, "mg_ssh", "visible") is True
-          and prop(api, "mg_ssh", "enabled") is True,
-          "the one transport this addon did ask for was left without a gate")
-    check(prop(api, "mg_sftp", "visible") is False
-          and prop(api, "mg_sftp", "enabled") is False,
+    note = str(leaf_of(store, page, "mg_note", "broken").get("text"))
+    check("manifest" in note, f"the greyed switch was not explained: {note!r}")
+    gate = leaf_of(store, page, "mg_ssh", "broken")
+    check(gate.get("kind") == "check" and gate.get("checked") is True
+          and "enabled" not in gate,
+          f"the one transport this addon did ask for was left without a live gate: "
+          f"{gate}")
+    check(store.mid("mg_sftp", "broken") not in ids_in(page),
           "a transport the manifest never named was drawn as a switch anyway")
-    check(prop(api, "mg_own", "enabled") is False,
+    check(leaf_of(store, page, "mg_own", "broken").get("enabled") is False,
           'an addon that said "connection": "app" was offered the own-connection '
           "switch")
-    check("over SSH" in str(prop(api, "mg_note", "text"))
-          and "not here to choose" in str(prop(api, "mg_note", "text")),
-          f"the note does not say what the gates gate: "
-          f"{prop(api, 'mg_note', 'text')!r}")
+    check("over SSH" in note and "not here to choose" in note,
+          f"the note does not say what the gates gate: {note!r}")
 
-    print("\n11. each of the app's own three switches goes through the app, by name")
+    print("\n13. opening a tab says which addon is looked at, and a repaint is dropped")
     api = fresh(store)
     store.refresh_manager()
-    store.on_widget(store.TAB, "managed", "selected", {"text": "Hello"})
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_enable", "toggled", {"checked": False})
+    store.on_widget(store.TAB, store.MANAGER_TABS, "changed",
+                    {"index": 2, "text": "Broken"})
+    check(manager_status(api).startswith("Broken")
+          and "failed to start" in manager_status(api),
+          f"opening a page said nothing about its addon: {manager_status(api)!r}")
+    check(store.manager_picked == "broken",
+          f"the open page is not the one whose place on the bar was read: "
+          f"{store.manager_picked!r}")
+    store.on_widget(store.TAB, store.MANAGER_TABS, "changed", {"text": "Floaty"})
+    check(store.manager_picked == "floaty",
+          "a page named by its caption rather than its place was not found")
+    check(not api.called("session.addons"),
+          "moving about the bar asked the app again instead of reading the page "
+          "it had already drawn")
+    api.calls.clear()
+    store.manager_building = True
+    store.on_widget(store.TAB, store.MANAGER_TABS, "changed",
+                    {"index": 0, "text": "Hello"})
+    check(not api.called("tabs.set_widget"),
+          "the rebuild's own tab change was reported as a person clicking about")
+    store.manager_building = False
+    api.calls.clear()
+    store.manager_action("mg_restart")
+    check(asked(api, "session.set_addon_running", "addon_id") == "floaty",
+          f"a button with no slug to go on did not work on the tab that is open: "
+          f"{api.last('session.set_addon_running')}")
+
+    print("\n14. each of the app's own three switches goes through the app, by name")
+    api = fresh(store, answers={"session.set_addon_popout": True,
+                                "session.set_addon_git_token": True})
+    store.refresh_manager()
+    api.calls.clear()
+    store.on_widget(store.TAB, store.mid("mg_enable", "hello"), "toggled",
+                    {"checked": False})
     check(asked(api, "session.set_addon_running", "addon_id") == "hello"
           and asked(api, "session.set_addon_running", "running") is False,
           f"the enable switch did not reach the app for this addon: "
           f"{api.last('session.set_addon_running')}")
-    store.on_widget(store.TAB, "mg_popout", "toggled", {"checked": True})
+    check("switched hello off" in manager_status(api),
+          f"the switch was moved and nothing was said: {manager_status(api)!r}")
+    check(len(added_pages(api, store)) == 4,
+          "the pages were not laid out again after a switch moved")
+    store.on_widget(store.TAB, store.mid("mg_popout", "hello"), "toggled",
+                    {"checked": True})
     check(asked(api, "session.set_addon_popout", "addon_id") == "hello"
           and asked(api, "session.set_addon_popout", "on") is True,
           "the force-popout switch never reached the app")
-    store.on_widget(store.TAB, "mg_token", "toggled", {"checked": False})
-    check(asked(api, "session.set_addon_git_token", "addon_id") == "hello"
-          and asked(api, "session.set_addon_git_token", "on") is False,
-          "the token switch never reached the app")
+    store.on_widget(store.TAB, store.mid("mg_token", "floaty"), "toggled",
+                    {"checked": False})
+    check(asked(api, "session.set_addon_git_token", "addon_id") == "floaty",
+          "a switch on one page was answered for the addon whose tab happens to "
+          "be open")
     check(api.called("tabs.activate"),
           "an addon woken up from this page was left holding the screen")
 
-    print("\n12. the transport gates are the addon's own, named by their transport")
+    print("\n15. the transport gates are the addon's own, named by their transport")
     api = fresh(store, answers={"session.set_addon_transport": True})
     store.refresh_manager()
-    store.on_widget(store.TAB, "managed", "selected", {"text": "Choicey"})
-    check(prop(api, "mg_ssh", "visible") is True
-          and prop(api, "mg_sftp", "visible") is True,
+    page = page_of(api, store, "choicey")
+    check(leaf_of(store, page, "mg_ssh", "choicey").get("kind") == "check"
+          and leaf_of(store, page, "mg_sftp", "choicey").get("kind") == "check",
           "an addon that asked for both transports was shown neither gate")
-    check(prop(api, "mg_ssh", "checked") is True
-          and prop(api, "mg_sftp", "checked") is False,
+    check(leaf_of(store, page, "mg_ssh", "choicey").get("checked") is True
+          and leaf_of(store, page, "mg_sftp", "choicey").get("checked") is False,
           f"a gate the record holds shut is drawn open: "
-          f"{prop(api, 'mg_ssh', 'checked')} / {prop(api, 'mg_sftp', 'checked')}")
+          f"{leaf_of(store, page, 'mg_ssh', 'choicey')} / "
+          f"{leaf_of(store, page, 'mg_sftp', 'choicey')}")
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_sftp", "toggled", {"checked": True})
+    store.on_widget(store.TAB, store.mid("mg_sftp", "choicey"), "toggled",
+                    {"checked": True})
     check(asked(api, "session.set_addon_transport", "addon_id") == "choicey"
           and asked(api, "session.set_addon_transport", "transport") == "sftp"
           and asked(api, "session.set_addon_transport", "on") is True,
@@ -516,84 +732,73 @@ def test_the_presses(store: Any) -> None:
           f"{api.last('session.set_addon_transport')}")
     check("may use SFTP again" in manager_status(api),
           f"an opened gate was not said: {manager_status(api)!r}")
-    store.on_widget(store.TAB, "mg_ssh", "toggled", {"checked": False})
+    store.on_widget(store.TAB, store.mid("mg_ssh", "choicey"), "toggled",
+                    {"checked": False})
     check(asked(api, "session.set_addon_transport", "transport") == "ssh"
           and asked(api, "session.set_addon_transport", "on") is False,
           "the SSH gate went somewhere other than the app's record")
     check("is refused SSH" in manager_status(api),
           f"a shut gate was not said: {manager_status(api)!r}")
 
-    print("\n13. a gate the app will not move is said, and the table painted again")
-    api.answer("session.set_addon_transport", False)
-    api.calls.clear()
-    store.on_widget(store.TAB, "mg_sftp", "toggled", {"checked": True})
-    check("has no SFTP switch to move" in manager_status(api),
-          f"a refused gate went quietly: {manager_status(api)!r}")
-    check(prop(api, "managed", "rows") is not None,
-          "the table was left standing after a gate was refused")
-
-    print("\n14. the own-connection switch belongs to the addon that may ride either")
-    api = fresh(store, answers={"session.set_addon_own_connection": True})
+    print("\n16. the own-connection switch belongs to the addon that may ride either")
+    api = fresh(store, answers={"session.set_addon_own_connection": True,
+                                "session.set_addon_transport": True})
     store.refresh_manager()
-    store.on_widget(store.TAB, "managed", "selected", {"text": "Choicey"})
-    check(prop(api, "mg_own", "enabled") is True
-          and prop(api, "mg_own", "checked") is False,
-          f"the choice a 'both' addon has not taken is not drawn as its own: "
-          f"{prop(api, 'mg_own', 'enabled')} / {prop(api, 'mg_own', 'checked')}")
-    check("either connection" in str(prop(api, "mg_note", "text")),
-          f"the switch that is the addon's was not explained: "
-          f"{prop(api, 'mg_note', 'text')!r}")
+    page = page_of(api, store, "choicey")
+    check(leaf_of(store, page, "mg_own", "choicey").get("enabled") is True
+          and leaf_of(store, page, "mg_own", "choicey").get("checked") is False,
+          "the choice a 'both' addon has not taken is not drawn as its own")
+    check("either connection" in str(leaf_of(store, page, "mg_note", "choicey")
+                                     .get("text")),
+          "the switch that is the addon's was not explained")
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_own", "toggled", {"checked": True})
+    store.on_widget(store.TAB, store.mid("mg_own", "choicey"), "toggled",
+                    {"checked": True})
     check(asked(api, "session.set_addon_own_connection", "addon_id") == "choicey"
           and asked(api, "session.set_addon_own_connection", "on") is True,
           f"the own-connection switch never reached the app: "
           f"{api.last('session.set_addon_own_connection')}")
     check("connection of its own" in manager_status(api),
           f"a fresh connection was not said: {manager_status(api)!r}")
-    api.answer("session.set_addon_own_connection", False)
-    api.calls.clear()
-    store.on_widget(store.TAB, "mg_own", "toggled", {"checked": False})
-    check("no own-connection switch" in manager_status(api),
-          f"a refused connection went quietly: {manager_status(api)!r}")
-    check(prop(api, "managed", "rows") is not None,
-          "the table was not painted again after the refusal")
 
-    print("\n15. the row's tick is the same switch as the one under the table")
+    print("\n17. a switch the app will not move is said, and the pages laid out again")
     api = fresh(store)
     store.refresh_manager()
+    api.answer("session.set_addon_transport", False)
     api.calls.clear()
-    store.on_widget(store.TAB, "managed", "toggled", {"text": "Hello",
-                                                      "checked": False})
-    check(asked(api, "session.set_addon_running", "addon_id") == "hello"
-          and asked(api, "session.set_addon_running", "running") is False,
-          "the row's tick went somewhere other than the app's enable switch")
-    check(prop(api, "mg_popout", "checked") is not None,
-          "ticking a row left the switches under it standing for nothing")
-
-    print("\n16. a switch the app refuses is said, and the table is painted again")
-    api = fresh(store)
-    store.refresh_manager()
-    store.on_widget(store.TAB, "managed", "selected", {"text": "Floaty"})
+    store.on_widget(store.TAB, store.mid("mg_sftp", "choicey"), "toggled",
+                    {"checked": True})
+    check("has no SFTP switch to move" in manager_status(api),
+          f"a refused gate went quietly: {manager_status(api)!r}")
+    check(len(added_pages(api, store)) == 4,
+          "the pages were left standing after a gate was refused")
     api.answer("session.set_addon_popout", False)
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_popout", "toggled", {"checked": False})
+    store.on_widget(store.TAB, store.mid("mg_popout", "floaty"), "toggled",
+                    {"checked": False})
     check("no force-popout switch" in manager_status(api),
           f"a refused switch went quietly: {manager_status(api)!r}")
-    check(prop(api, "managed", "rows") is not None,
-          "the table was not painted again after the refusal")
+    check(len(added_pages(api, store)) == 4,
+          "the pages were not laid out again after the refusal")
+    api.answer("session.set_addon_own_connection", False)
+    api.calls.clear()
+    store.on_widget(store.TAB, store.mid("mg_own", "choicey"), "toggled",
+                    {"checked": False})
+    check("no own-connection switch" in manager_status(api),
+          f"a refused connection went quietly: {manager_status(api)!r}")
+    check(len(added_pages(api, store)) == 4,
+          "the pages were not laid out again after that refusal either")
 
-    print("\n17. Edit settings opens the form the addon declared, and writes what "
+    print("\n18. Edit settings opens the form the addon declared, and writes what "
           "is typed into it")
     api = fresh(store, answers={"session.addon_config": CONFIG_CARD,
                                 "ui.dialog": CONFIG_REPLY,
                                 "session.set_addon_config": CONFIG_WRITTEN})
     store.refresh_manager()
-    store.on_widget(store.TAB, "managed", "selected", {"text": "Hello"})
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_config", "clicked", {})
+    store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
     check(asked(api, "session.addon_config", "addon_id") == "hello",
-          "the settings were asked for somebody else than the picked addon")
+          "the settings were asked for somebody else than the page's addon")
     spec = dialog_spec(api)
     check(spec.get("kind") == "form",
           f"a declared form was not asked for as one: {spec.get('kind')!r}")
@@ -630,13 +835,12 @@ def test_the_presses(store: Any) -> None:
           and "hello\\config.json" in manager_status(api),
           f"a save was not said where it went: {manager_status(api)!r}")
 
-    print("\n18. a dialog nobody answers writes nothing, and an addon with "
+    print("\n19. a dialog nobody answers writes nothing, and an addon with "
           "nothing set is told so")
     api = fresh(store, answers={"session.addon_config": CONFIG_CARD})
     store.refresh_manager()
-    store.on_widget(store.TAB, "managed", "selected", {"text": "Hello"})
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_config", "clicked", {})
+    store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
     check(api.called("ui.dialog") and not api.called("session.set_addon_config"),
           "a dialog closed with Cancel was treated as an answer")
     check("left as they were" in manager_status(api),
@@ -644,7 +848,7 @@ def test_the_presses(store: Any) -> None:
     api.answer("session.addon_config", {**CONFIG_CARD, "fields": [],
                                         "exists": False, "values": {}})
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_config", "clicked", {})
+    store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
     check(not api.called("ui.dialog"),
           "an empty box was shown for an addon that declared no keys and keeps "
           "no file")
@@ -656,7 +860,7 @@ def test_the_presses(store: Any) -> None:
     api.answer("ui.dialog", {store.CONFIG_RAW: '{"keep": 2}'})
     api.answer("session.set_addon_config", {"keep": 2})
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_config", "clicked", {})
+    store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
     spec = dialog_spec(api)
     leaves = spec_leaves(spec)
     check(spec.get("kind") == "column" and store.CONFIG_RAW in leaves
@@ -668,19 +872,20 @@ def test_the_presses(store: Any) -> None:
           f"{api.last('session.set_addon_config')}")
     api.answer("ui.dialog", {store.CONFIG_RAW: "not json at all"})
     api.calls.clear()
-    store.on_widget(store.TAB, "mg_config", "clicked", {})
+    store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
     check(not api.called("session.set_addon_config"),
           "a text that is not JSON was written anyway")
     check("not one JSON object" in manager_status(api),
           f"bad JSON was refused quietly: {manager_status(api)!r}")
     api.answer("ui.dialog", {store.CONFIG_RAW: "[1, 2]"})
-    store.on_widget(store.TAB, "mg_config", "clicked", {})
+    store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
     check(not api.called("session.set_addon_config"),
           "a JSON list was taken for a settings file")
     check("one JSON object" in manager_status(api),
           f"the wrong shape was not said: {manager_status(api)!r}")
 
-    print("\n19. the dev-tab check writes the one app setting it may")
+    print("\n20. the dev-tab check writes the one app setting it may, and an app "
+          "that will not answer is reported")
     api = fresh(store)
     store.refresh_manager()
     api.calls.clear()
@@ -692,8 +897,6 @@ def test_the_presses(store: Any) -> None:
     check(prop(api, "devtab", "checked") is not None,
           "the check was left standing where it was clicked rather than as the "
           "app answers")
-
-    print("\n20. the app that will not answer is reported, not guessed past")
     api = fresh(store)
 
     def boom(**_kwargs: Any) -> None:
@@ -702,7 +905,9 @@ def test_the_presses(store: Any) -> None:
     api.session.addons = boom                       # a real failure, not a stub
     store.refresh_manager()
     check("would not say" in manager_status(api),
-          f"a table that could not be read said nothing: {manager_status(api)!r}")
+          f"a bar that could not be read said nothing: {manager_status(api)!r}")
+    check(not added_pages(api, store),
+          "pages were laid down out of an answer that never came")
 
 
 # --- four: the app behind the page ---

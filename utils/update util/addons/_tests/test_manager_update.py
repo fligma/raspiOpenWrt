@@ -552,6 +552,23 @@ def spec_words(node: Any) -> str:
     return str(node)
 
 
+def spec_leaf(node: Any, identifier: str) -> Any:
+    """The one control of a spec that carries this id, or nothing."""
+    if isinstance(node, dict):
+        if node.get("id") == identifier:
+            return node
+        for value in node.values():
+            found = spec_leaf(value, identifier)
+            if found is not None:
+                return found
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            found = spec_leaf(value, identifier)
+            if found is not None:
+                return found
+    return None
+
+
 def test_the_list_and_the_pane(upd: Any) -> None:
     print("\n5. the lines, and the pane beside them, say the same thing")
     api = fresh(upd)
@@ -734,6 +751,84 @@ def test_the_list_and_the_pane(upd: Any) -> None:
     check(not TAILS, "coming back to a read version cost a request")
     check(upd.read_already("berry1.6.1") and upd.read_already("berry1.6.0"),
           "a read version's story was not kept where the next pick can find it")
+
+    print("\n7d. what the pane has no room for goes under Older, and is pickable")
+    # The pane holds MAJOR_SLOTS lines and no more, so the versions past it are
+    # not counted off in a sentence: they are laid under one dropdown of their
+    # own. The fixtures only have two lines, so the pane's room is what is moved.
+    spec = upd.tab_spec()
+    head = spec_leaf(spec, upd.OLDER_HEAD) or {}
+    pick = spec_leaf(spec, upd.OLDER_PICK) or {}
+    check(head.get("text") == "Older lines" and head.get("visible") is False
+          and pick.get("kind") == "combo" and pick.get("visible") is False
+          and pick.get("on") == ["changed"],
+          f"the overflow is not a folded-away dropdown that reports a pick: "
+          f"{head} / {pick}")
+    check("mrest" not in spec_words(spec).split(),
+          "the pane still counts what it has no room for in a sentence")
+
+    api = fresh(upd)
+    del TAILS[:]
+    with patched(upd, MAJOR_SLOTS=1):
+        upd.check_now()
+        check(upd.slot_of("1.6") == 0 and upd.slot_of("1.5") == -1
+              and upd.older_indices() == [2],
+              f"a line with no row is not the overflow's: "
+              f"{[upd.slot_of(m) for m in ('1.6', '1.5')]} "
+              f"{upd.older_indices()}")
+        check(last_set(api, upd.OLDER_HEAD, "visible") is True
+              and last_set(api, upd.OLDER_PICK, "visible") is True,
+              "the overflow was painted with its dropdown still folded away")
+        names = items_for(api, upd.OLDER_PICK)
+        check(names == [upd.item_text(upd.published[2])]
+              and str(names[0]).startswith("1.5.9"),
+              f"the overflow's dropdown is not the versions with no row, in "
+              f"the words every line uses: {names}")
+        check(last_set(api, "major1", "visible") is None
+              and (spec_leaf(spec, "major1") or {}).get("visible") is False,
+              "a line the pane has no room for was put on the page anyway")
+        check(upd.older_index(str(names[0])) == 2
+              and upd.older_index("1.6.1  \u2014  this copy") == -1
+              and upd.older_index("") == -1,
+              "the overflow answers for a version that has a row of its own")
+        upd.pick_row(2)
+        check(str(last_set(api, upd.OLDER_PICK, "value")).startswith("1.5.9"),
+              f"picking an overflow version did not point its dropdown at it: "
+              f"{last_set(api, upd.OLDER_PICK, 'value')!r}")
+        upd.pick_row(0)                        # come back off the overflow
+        del api.calls[:]
+        upd.on_widget(upd.TAB, upd.OLDER_PICK, "changed",
+                      {"text": upd.item_text(upd.published[2])})
+        check(upd.picked == 2,
+              "the Older dropdown did not move the pane to its version")
+        upd.on_widget(upd.TAB, upd.OLDER_PICK, "changed",
+                      {"text": upd.item_text(upd.published[0])})
+        check(upd.picked == 2,
+              "the overflow's own dropdown picked a version off another line")
+        upd.on_widget(upd.TAB, upd.OLDER_PICK, "changed",
+                      {"text": upd.item_text(upd.published[1])})
+        check(upd.picked == 2,
+              "a version with a row of its own was picked from the overflow")
+        upd.filling = True
+        upd.on_widget(upd.TAB, upd.OLDER_PICK, "changed",
+                      {"text": upd.item_text(upd.published[2])})
+        upd.filling = False
+        check(upd.picked == 2,
+              "laying the overflow down was read as somebody picking it")
+        upd.on_widget("Other tab", upd.OLDER_PICK, "changed",
+                      {"text": upd.item_text(upd.published[2])})
+        check(upd.picked == 2, "another tab's overflow dropdown moved this pane")
+
+    # With room for every line the repository publishes, the overflow is not
+    # merely empty: it is not on the page at all.
+    del api.calls[:]
+    upd.check_now()
+    check(last_set(api, upd.OLDER_HEAD, "visible") is False
+          and last_set(api, upd.OLDER_PICK, "visible") is False
+          and not sets_for(api, upd.OLDER_PICK, "items"),
+          "a repository that fits the pane still got an Older dropdown")
+    check(upd.older_indices() == [],
+          "every line has a row, so nothing should be overflowing")
 
 
 def test_the_way_back(upd: Any) -> None:
@@ -1077,9 +1172,14 @@ def test_the_job(upd: Any) -> None:
                   f"the list read the versions again after installing one: "
                   f"{TAILS[tails_before:]}")
 
-        print("\n18. going back asks three answers, and the one that keeps the setup lands")
+        print("\n18. going back above the keep line asks three answers, and the one "
+              "that keeps the setup lands")
         target.write_bytes(b"the old program")
-        api2 = fresh(upd, version="1.6.1")
+        # The keep line is where this copy's setup may be left in place: the
+        # published fixtures sit at 1.6.x, so it is moved down to them rather
+        # than the versions being moved up to it. Its default is the clamp.
+        api2 = fresh(upd, version="1.6.1",
+                     config={"keep_min_version": "1.5.0"})
         api2.answer("ui.dialog", {"answer": upd.KEEP_ANSWER})
         api2.answer("ui.question", True)
         upd.check_now()
@@ -1129,6 +1229,59 @@ def test_the_job(upd: Any) -> None:
               f"the list still calls the downgraded-to version a way back: "
               f"{[(e['version'], e['stance']) for e in upd.published]}")
         check(restarts2 == [1], "the downgrade did not offer to start the older copy")
+
+        print("\n18a. below the keep line the middle answer is not on offer")
+        target.write_bytes(b"the old program")
+        api5 = fresh(upd, version="1.6.1")      # the shipped 2.0.0 clamp holds
+        api5.answer("ui.dialog", {"answer": upd.KEEP_ANSWER})
+        api5.answer("ui.question", True)
+        upd.check_now()
+        upd.pick_row(1)
+        fetches5: list[int] = []
+        with patched(upd, program_path=lambda: target,
+                     staging_target=lambda name: stage / name,
+                     system_name=lambda: THE_SYSTEM,
+                     _http=lambda values: fetches5.append(1) or FakeFetcher([]),
+                     _later=lambda seconds, callback: callback(),
+                     restart_app=lambda: None):
+            upd.update_selected()
+        boxes5 = [(arguments, named) for where, arguments, named in api5.calls
+                  if where == "ui.dialog"]
+        check(len(boxes5) == 1
+              and list(boxes5[0][1].get("answers") or [])
+              == [upd.ERASE_ANSWER, upd.CANCEL_ANSWER],
+              f"a way back below the keep line was still asked with the answer "
+              f"that keeps it: {None if not boxes5 else boxes5[0][1]}")
+        words5 = spec_words(boxes5[0][0]) if boxes5 else ""
+        check(f"further back than {upd.KEEP_ALLOWED}" in words5,
+              f"the two answers did not say why the third is missing: {words5!r}")
+        check("erase it and start clean" in last_status(api5)
+              and f"berry1.6.0 is further back than {upd.KEEP_ALLOWED}"
+              in last_status(api5),
+              f"an answer that keeps the setup below the line was obeyed rather "
+              f"than refused: {last_status(api5)!r}")
+        check(not fetches5 and target.read_bytes() == b"the old program",
+              "a refused keep still fetched and still swapped the program")
+        check(not upd.working and upd.job is None,
+              "a refused keep left the addon holding a job")
+        # The clamp is a rule about the version, and the line it is measured on
+        # is a setting like the floor: two dots and three read the same.
+        moved = upd.merge_config(upd.DEFAULTS, {"keep_min_version": "2"})
+        check(upd.keep_floor(moved) == "2"
+              and upd.keep_allowed(moved, "2.0.0") is True
+              and upd.keep_allowed(moved, "1.9.9") is False
+              and upd.keep_allowed(moved, "") is False,
+              f"the keep line does not read versions the way the list does: "
+              f"{upd.keep_floor(moved)!r}")
+        check(upd.keep_floor(upd.merge_config(upd.DEFAULTS, {}))
+              == upd.KEEP_ALLOWED,
+              "the default keep line is not the one the module names")
+        check(upd.downgrade_answers(False) == [upd.ERASE_ANSWER, upd.CANCEL_ANSWER]
+              and upd.downgrade_answers(True)
+              == [upd.ERASE_ANSWER, upd.KEEP_ANSWER, upd.CANCEL_ANSWER],
+              f"the answers under and above the line are not the two and three: "
+              f"{upd.downgrade_answers(False)}")
+        upd.pick_row(0)
 
         print("\n18b. the third answer leaves everything where it is")
         target.write_bytes(b"the old program")
@@ -1330,10 +1483,11 @@ def test_the_job_view(upd: Any) -> None:
     The pane is only there when the built tab says it is: ``tabs.set_widget``
     answers ``False`` for an id the layout does not hold. Both answers are driven
     here on the stub api, with the swap's own file in a temporary folder, so the
-    card's name, the bar's share, the console's lines and the notice beside it
-    are all seen - and a tab with no pane is seen writing to no console at all.
+    card's name, the bar's share, the console's lines and the hold the job puts on
+    the window's tab bar are all seen - and a tab with no pane is seen writing to
+    no console and holding nothing.
     """
-    print("\n22. the job's console, the card over it, and the notice beside it")
+    print("\n22. the job's console, the card over it, and the tab bar it holds")
     with tempfile.TemporaryDirectory() as raw:
         folder = Path(raw)
         target = folder / THE_FILE
@@ -1368,6 +1522,11 @@ def test_the_job_view(upd: Any) -> None:
             check(last_set(api, "jobterm", "clear") is True,
                   "the console was started on a screen that still held the "
                   "last job's lines")
+            # The job holds the window's tab bar for as long as its console is
+            # up: the progress is the one thing on screen worth reading.
+            check(api.asked("tabs.lock", "locked") is True,
+                  "a running download did not hold the window's tab bar: "
+                  f"{api.last('tabs.lock')}")
             check(str(last_set(api, "jobname", "text")) == "berry1.6.1",
                   f"the card does not name the version being fetched: "
                   f"{last_set(api, 'jobname', 'text')!r}")
@@ -1380,13 +1539,11 @@ def test_the_job_view(upd: Any) -> None:
             check(str(last_set(api, "jobstep", "text")) == line,
                   f"the card never said how much had come down: "
                   f"{last_set(api, 'jobstep', 'text')!r}")
-            check(last_set(api, "jobbar", "value")
-                  == api.asked("ui.progress_notice", "value"),
-                  f"the card's bar and the notice do not agree: "
-                  f"{api.last('ui.progress_notice')}")
             check(0 < int(last_set(api, "jobbar", "value") or 0) < 99,
                   f"a fifth of the way down read as nothing or as finished: "
                   f"{last_set(api, 'jobbar', 'value')!r}")
+            check(not api.called("ui.progress_notice"),
+                  "a step went out to the floating notice that was removed")
             written = [arguments[3] for where, arguments, _n in api.calls
                        if where == "tabs.set_widget" and len(arguments) >= 4
                        and arguments[1] == "jobterm" and arguments[2] == "write"]
@@ -1410,13 +1567,16 @@ def test_the_job_view(upd: Any) -> None:
         check(last_set(api, "jobpane", "visible") is False
               and last_set(api, "browse", "visible") is True,
               "the job kept its console up after the program landed")
-        check(api.asked("ui.progress_notice", "value") == 100,
-              f"the finished update did not fill its notice: "
-              f"{api.last('ui.progress_notice')}")
+        check(api.asked("tabs.lock", "locked") is False,
+              "the finished update still holds the window's tab bar: "
+              f"{api.last('tabs.lock')}")
+        check(last_set(api, "jobbar", "value") == 99,
+              f"the finished update filled a card that is being taken down: "
+              f"{last_set(api, 'jobbar', 'value')!r}")
         check(target.read_bytes() == body, "the job view's run did not land the file")
 
-        # a job on a tab with no pane: the notice still counts, nothing is
-        # written to a console that is not on screen
+        # a job on a tab with no pane: nothing is written to a console that is
+        # not on screen, and no tab bar is held for a job nobody can see
         target.write_bytes(b"the old program")
         api2 = fresh(upd, version="1.6.0")
         api2.answer("ui.question", True)
@@ -1440,8 +1600,10 @@ def test_the_job_view(upd: Any) -> None:
                    and arguments[1] in ("jobterm", "jobcard", "jobicon",
                                         "jobname", "jobstep", "jobbar")],
               "a job with no pane wrote to the console and card that are not there")
-        check(api2.called("ui.progress_notice"),
-              "a job with no pane lost its notice with it")
+        check(not api2.called("ui.progress_notice")
+              and not api2.called("tabs.lock"),
+              "a job with no pane showed a notice or held a bar it cannot be "
+              "seen behind")
         check(not upd.working and upd.job is None,
               "a job on a paneless tab could not end")
 

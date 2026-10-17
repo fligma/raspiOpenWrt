@@ -178,13 +178,18 @@ def last_rows_for(api: Any, widget: str) -> Any:
     return None
 
 
-def last_text_for(api: Any, widget: str) -> str:
-    """The line the addon last put on one label, by its widget id."""
+def last_set(api: Any, identifier: str, prop: str) -> Any:
+    """The last thing the addon sent one widget, whatever it was."""
     for where, arguments, _named in reversed(api.calls):
         if where == "tabs.set_widget" and len(arguments) >= 4 \
-                and arguments[1] == widget and arguments[2] == "text":
-            return str(arguments[3])
-    return ""
+                and arguments[1] == identifier and arguments[2] == prop:
+            return arguments[3]
+    return None
+
+
+def last_text_for(api: Any, widget: str) -> str:
+    """The line the addon last put on one label, by its widget id."""
+    return str(last_set(api, widget, "text") or "")
 
 
 def last_status(api: Any) -> str:
@@ -865,37 +870,54 @@ def test_the_switches(store: Any) -> None:
                   "a fresh install's switch was written as if it were an update")
             store.job = None
 
-            # the notice: the percentage is the whole batch's and the notice
-            # alone wears the steps - the page's status line is not rewritten
-            # mid-job - and the ending either fills the card or closes it
-            store.job = {"total": 2, "done": 1}
+            # the card: the percentage is the whole batch's and the card alone
+            # wears the steps - the page's status line is not rewritten mid-job -
+            # and only the ending leaves the bar where it got to, since the card
+            # goes with the job instead of fading over the window
+            store.job = {"total": 2, "done": 1, "pane": True}
             api.calls.clear()
             store._progress("compiling widget...", 0.5)
-            check(api.called("ui.progress_notice")
-                  and api.asked("ui.progress_notice", "value") == 75
-                  and api.asked("ui.progress_notice", "maximum") == 100,
+            check(last_set(api, "jobbar", "value") == 75,
                   f"the batch's half-way did not read 75 percent: "
-                  f"{api.last('ui.progress_notice')}")
-            check(api.asked("ui.progress_notice", "text")
+                  f"{last_set(api, 'jobbar', 'value')!r}")
+            check(last_set(api, "jobstep", "text")
                   == "2 of 2: compiling widget...",
-                  f"the notice did not count the batch: "
-                  f"{api.last('ui.progress_notice')}")
+                  f"the card did not count the batch: "
+                  f"{last_set(api, 'jobstep', 'text')!r}")
+            check(not api.called("ui.progress_notice"),
+                  "a step was still sent to the floating notice this app has no "
+                  "longer")
             check(last_status(api) == "",
                   f"a live step rewrote the page's status line: "
                   f"{last_status(api)!r}")
-            store.job = {"total": 3, "done": 1}
+            # A job whose tab has no pane has nowhere to print, and no card to
+            # be drawn on: the steps simply are not sent anywhere.
+            store.job = {"total": 2, "done": 1, "pane": False}
+            api.calls.clear()
+            store._progress("compiling widget...", 0.5)
+            check(last_set(api, "jobstep", "text") is None
+                  and last_set(api, "jobbar", "value") is None,
+                  "a job with no pane wrote on the card it never asked for")
+            store.job = {"total": 3, "done": 1, "pane": True}
             api.calls.clear()
             store._finish("the download stopped", bad=True)
-            check(api.called("ui.progress_notice_close"),
-                  "a job that ended bad left its notice hanging on screen")
+            check(api.asked("tabs.lock", "locked") is False,
+                  "a job that ended bad left the window's tab bar held: "
+                  f"{api.last('tabs.lock')}")
+            check(last_set(api, store.SUBTABS, "locked") is False,
+                  "a job that ended left the store's own sub-bar held")
+            check(last_set(api, "jobpane", "visible") is False,
+                  "a job that ended bad left its console over the browsing panes")
             check("stopped after 1 of 3" in last_status(api),
                   f"the failed batch did not say how far it got: "
                   f"{last_status(api)!r}")
-            store.job = {"total": 1, "done": 1}
+            store.job = {"total": 1, "done": 1, "pane": True}
             api.calls.clear()
             store._finish("installed addons/widget")
-            check(api.asked("ui.progress_notice", "value") == 100,
-                  "the job's last line never filled the notice to hundred")
+            check(last_set(api, "jobbar", "value") is None,
+                  "a finished job filled a card that is already being taken down")
+            check(not api.called("ui.progress_notice_close"),
+                  "an ending still closed a notice that is not shown")
             store.job, store.working = None, False
 
             # the batch install: two rows picked, one question, the queue held
@@ -1327,9 +1349,9 @@ def test_bundled_assets(store: Any) -> None:
 # --- five: the catalog generator ---
 
 def load_generator() -> Any:
-    """Import tools/gen_addon_store_index.py from a folder whose name has a space."""
-    path = ROOT / "tools" / "gen_addon_store_index.py"
-    spec = importlib.util.spec_from_file_location("gen_addon_store_index", str(path))
+    """Import buildtools.py from the top of the repository, over a path with a space."""
+    path = ROOT.parents[1] / "buildtools.py"
+    spec = importlib.util.spec_from_file_location("buildtools", str(path))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -1354,7 +1376,7 @@ def test_the_generator(store: Any) -> None:
         tests = root / "_tests"
         tests.mkdir(parents=True)
         (tests / "test_widget.py").write_text("x", encoding="utf-8")
-        first = gen.build_index(root, None)
+        first = gen.addon_index_build(root, None)
         by_id = {entry["id"]: entry for entry in first["addons"]}
         check({"widget", "bare"} <= set(by_id),
               f"the generator missed an addon: {sorted(by_id)}")
@@ -1369,20 +1391,23 @@ def test_the_generator(store: Any) -> None:
               "an addon with no test gained one anyway")
         check(widget.get("status") == "new",
               "a first-time addon was not marked new")
-        second = {entry["id"]: entry for entry in gen.build_index(root, first)["addons"]}
+        second = {entry["id"]: entry
+                  for entry in gen.addon_index_build(root, first)["addons"]}
         check(second["widget"].get("status", "") == "",
               "an unchanged addon was marked a second time")
-        bumped = gen.build_index(root, {"addons": [{"id": "widget", "version": "1.0"}]})
+        bumped = gen.addon_index_build(root, {"addons": [{"id": "widget",
+                                                          "version": "1.0"}]})
         moved = [e for e in bumped["addons"] if e["id"] == "widget"][0]
         check(moved.get("status") == "updated",
               "a changed version was not marked updated")
-        check(gen.render(gen.build_index(root, first))
-              == gen.render(gen.build_index(root, first)),
+        check(gen.render_index(gen.addon_index_build(root, first))
+              == gen.render_index(gen.addon_index_build(root, first)),
               "the same store rendered differently twice")
 
-    real = gen.STORE_DIR
+    real = gen.ADDON_STORE
     if (real / "hello_store.py").is_file():
-        by_id = {entry["id"]: entry for entry in gen.build_index(real, None)["addons"]}
+        by_id = {entry["id"]: entry
+                 for entry in gen.addon_index_build(real, None)["addons"]}
         check({"hello_store", "cert_manager", "openwrt_logs"} <= set(by_id),
               f"the real store folder did not list every addon: {sorted(by_id)}")
         check(all(by_id[i].get("test") for i in
@@ -2657,6 +2682,14 @@ def test_the_job_view(store: Any) -> None:
             check(set_as("jobterm", "clear") is True,
                   "the console was started on a screen that still held the "
                   "last job's lines")
+            # The job holds both bars while it runs: the window's tab bar, so a
+            # build cannot be clicked away from, and this tab's own sub-bar, so
+            # the Addon manager page cannot be opened over it.
+            check(api.asked("tabs.lock", "locked") is True,
+                  "a running job did not hold the window's tab bar: "
+                  f"{api.last('tabs.lock')}")
+            check(set_as(store.SUBTABS, "locked") is True,
+                  "a running job let its own tab's sub-bar be moved")
             check(set_as("jobname", "text") == "Hello from the store",
                   f"the card does not name the addon being installed: "
                   f"{set_as('jobname', 'text')!r}")
@@ -2672,7 +2705,9 @@ def test_the_job_view(store: Any) -> None:
                   f"the console did not get the line the log got: "
                   f"{set_as('jobterm', 'write')!r}")
 
-            # and a step is on the card, in the bar and in the notice at once
+            # and a step is on the card and nowhere else: the status line keeps
+            # the job's beginning and its ending, and nothing floats over the
+            # window to be drawn on
             api.calls.clear()
             store._progress("compiling hello_store...", 0.5)
             check(set_as("jobstep", "text") == "compiling hello_store...",
@@ -2681,9 +2716,11 @@ def test_the_job_view(store: Any) -> None:
             check(set_as("jobbar", "value") == 50,
                   f"the card's bar is not at the batch's half: "
                   f"{set_as('jobbar', 'value')!r}")
-            check(api.asked("ui.progress_notice", "value") == 50,
-                  f"the notice and the card do not agree: "
-                  f"{api.last('ui.progress_notice')}")
+            check(not api.called("ui.progress_notice"),
+                  "a step went out to the floating notice that was removed")
+            check(last_status(api) == "",
+                  f"a live step rewrote the page's status line: "
+                  f"{last_status(api)!r}")
 
             # a long step is cut for the card, since all of it is behind it
             api.calls.clear()
@@ -2692,16 +2729,20 @@ def test_the_job_view(store: Any) -> None:
             step = str(set_as("jobstep", "text"))
             check(len(step) == store._JOB_STEP_LEN and step.endswith("\u2026"),
                   f"a long step was written to the card as it came: {step!r}")
-            check(str(api.asked("ui.progress_notice", "text")) == long_step,
-                  f"the notice was cut short with the card: "
-                  f"{api.last('ui.progress_notice')}")
+            check(long_step not in api.logs,
+                  "the cut step was also said in full somewhere the card is not")
 
-            # the job ends the way it began: the browsing panes back, the log kept
+            # the job ends the way it began: the browsing panes back, the log kept,
+            # and both bars let go before anything else is touched
             api.calls.clear()
             store._finish("installed hello_store")
             check(set_as("jobpane", "visible") is False
                   and set_as("browse", "visible") is True,
                   "the job kept the console up after it ended")
+            check(api.asked("tabs.lock", "locked") is False,
+                  "a finished job still holds the window's tab bar")
+            check(set_as(store.SUBTABS, "locked") is False,
+                  "a finished job still holds this tab's own sub-bar")
             check(store.job is None and not store.working,
                   "the finished job is still holding the tab")
 
@@ -2723,8 +2764,13 @@ def test_the_job_view(store: Any) -> None:
                                             "jobname", "jobstep", "jobbar")],
                   "a job with no pane wrote to the console and card that are "
                   "not there")
-            check(api2.called("ui.progress_notice"),
-                  "a job with no pane lost its notice with it")
+            check(not api2.called("tabs.lock"),
+                  "a job nobody can see held the window's tab bar anyway")
+            check(not [arguments for name, arguments, _n in api2.calls
+                       if name == "tabs.set_widget" and len(arguments) >= 3
+                       and arguments[1] == store.SUBTABS
+                       and arguments[2] == "locked"],
+                  "a job with no pane locked the sub-bar it is not over")
             store._finish("installed hello_store")
             check(store.job is None and not store.working,
                   "a job on a paneless tab could not end")

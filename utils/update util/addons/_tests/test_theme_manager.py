@@ -1104,14 +1104,15 @@ def test_store(mgr: Any) -> None:
 # --- fourteen: the catalog generator, on a folder of its own ---
 
 def test_theme_store_generator() -> None:
-    """tools/gen_theme_store_index.py: one row per file, stable, checkable."""
+    """buildtools.py gen-theme-store-index: one row per file, stable, checkable."""
     print("\n14. the theme store's catalog generator")
     import importlib.util
 
-    where = ROOT / "tools" / "gen_theme_store_index.py"
-    spec = importlib.util.spec_from_file_location("gen_theme_store_index", where)
+    where = ROOT.parents[1] / "buildtools.py"
+    spec = importlib.util.spec_from_file_location("buildtools", where)
     gen = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gen)
+    COMMAND = "gen-theme-store-index"      # the name it is given on the command line
     home = Path(tempfile.mkdtemp(prefix="themes-store-test-"))
     try:
         store = home / "themes.store"
@@ -1119,32 +1120,33 @@ def test_theme_store_generator() -> None:
         one = {"name": "sea look", "colors": {"base": "#0b1220"}}
         (store / "sea look.theme").write_text(
             json.dumps(one, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        row = gen.build_index(store)["themes"][0]
+        row = gen.theme_index_build(store)["themes"][0]
         check(row["id"] == "sea_look" and row["filename"] == "sea look.theme"
               and row["version"] == "1" and row.get("status") == "new",
               f"the row a file with no version says is: {row}")
-        check(gen.main(["--store", str(store), "--check"]) == 1,
+        check(gen.main([COMMAND, "--store", str(store), "--check"]) == 1,
               "--check passed with no index on disk at all")
-        check(gen.main(["--store", str(store)]) == 0, "writing the index failed")
+        check(gen.main([COMMAND, "--store", str(store)]) == 0,
+              "writing the index failed")
         settled = json.loads((store / "index.json").read_text(encoding="utf-8"))
         check(settled["themes"][0].get("status") == "new",
               "the first write lost the new mark")
-        check(gen.main(["--store", str(store)]) == 0, "rewriting failed")
+        check(gen.main([COMMAND, "--store", str(store)]) == 0, "rewriting failed")
         second = (store / "index.json").read_text(encoding="utf-8")
-        check(gen.main(["--store", str(store)]) == 0
+        check(gen.main([COMMAND, "--store", str(store)]) == 0
               and (store / "index.json").read_text(encoding="utf-8") == second,
               "the settled output moved between runs: a build could not tell "
               "what changed")
-        check(gen.main(["--store", str(store), "--check"]) == 0,
+        check(gen.main([COMMAND, "--store", str(store), "--check"]) == 0,
               "--check refused the file it had just written itself")
         # A raised version in the file is the one thing that marks a row updated.
         one["version"] = "2"
         (store / "sea look.theme").write_text(json.dumps(one), encoding="utf-8")
-        again = gen.build_index(store, gen.load_previous(store / "index.json"))
+        again = gen.theme_index_build(store, gen.load_index(store / "index.json"))
         check(again["themes"][0].get("status") == "updated",
               f"a raised version did not mark the row: {again['themes'][0]}")
         # And the catalog the shipped folder really carries.
-        shipped = gen.build_index(gen.STORE_DIR, None)["themes"]
+        shipped = gen.theme_index_build(gen.THEME_STORE, None)["themes"]
         check(len(shipped) >= 4,
               f"the shipped themes.store lists {len(shipped)} themes")
     finally:

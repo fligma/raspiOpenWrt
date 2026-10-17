@@ -34,12 +34,13 @@ installed file and the addon's own settings are left behind.
 
 Before a program is replaced, the addon it is being written for is stopped and
 switched off: its running process is killed, so the file is not held open, and
-its row is marked off while the new one goes in. A freshly installed addon is
+its tab is marked off while the new one goes in. A freshly installed addon is
 left that way - written into the active profile's settings as switched off, so
 nothing of it runs until it is turned on - and an update puts its switch back
 where it stood before the job, so an addon that was on comes back on when the
-app has rescanned the folder. Every switch is answered in a live notice over
-the app's corner: a progress bar with the percentage of the batch done.
+app has rescanned the folder. Every job is answered on the tab it was started
+on: the card over the job's console names the addon in hand and counts the
+batch's share, and the log underneath holds every line the build said.
 
 A program only says what it is once it runs, and the app needs some of that
 before then, so what the addon's source declared is written down as it is
@@ -79,11 +80,11 @@ left exactly as it is - and the addon's on/off switch is returned to the state
 the person had it in before the job started, so an addon that was on stays on.
 
 Install and Update work on whatever rows are selected, so ctrl-clicking several
-addons runs them as one batch behind a single progress notice, one job after
-another until the queue is empty. An installed addon's row wears a check box
-that switches it on or off where it stands, and the rescan an install ends with
-keeps the tab it was started from showing, so a job never moves the person away
-from the store.
+addons runs them as one batch behind a single card on the job's pane, one job
+after another until the queue is empty. An installed addon's row wears a check
+box that switches it on or off where it stands, and the rescan an install ends
+with keeps the tab it was started from showing, so a job never moves the person
+away from the store.
 
 Deleting one takes that compiled program (or folder) back out of ``addons/`` and
 rescans. By default it takes the addon's own ``_data`` settings with it, since
@@ -100,7 +101,8 @@ than a Python is passed over. When PyInstaller is missing the store installs it
 itself with ``pip`` - for this user alone when the plain install is refused -
 and the user is not asked to. The store holds no token of its own: every request
 carries whatever ``api.session.git_token()`` answers with, which is the profile's
-one git token while the switch on this addon's row in the Addon manager is on, and
+one git token while the switch on this addon's tab in the Addon manager is
+on, and
 nothing at all while it is off. The sources are editable in
 ``addons/_data/addon_store/config.json``, in that file's
 ``sources`` list - a list of records rather than the one value per line the
@@ -114,26 +116,30 @@ on the device and how it reaches that device, with the job log underneath the
 pair. While a job runs, that pair gives way to the job's own view: a terminal for
 a background, printing every step of the build as it arrives, with a card in the
 middle naming the addon being installed and counting its share of the batch. The
-same steps and the same share go up in the app's floating notice at the corner of
-the screen, so the work can be followed from any other tab, and the pane goes
-back to the browsing when the job ends. Everything is built from a declarative
-spec and its buttons and rows report back through ``on_widget``, so the same file
-works imported into the app and compiled into a program of its own by the Addon
-Dev tab. It marks itself with ``assets/addon_storeicon.png`` when the program
-ships one, and with a drawn store bag when it does not, the way the other bundled
-addons' tabs do.
+job holds the tab bar and this tab's own sub-bar so neither can be switched away
+from until it ends, and the pane goes back to the browsing when it does. The bar
+is the job's only showing; nothing floats over the window beside it, since a card
+that does not travel with the app and vanishes when the app is hidden explains
+nothing. Everything is built from a declarative spec and its buttons and rows
+report back through ``on_widget``, so the same file works imported into the app
+and compiled into a program of its own by the Addon Dev tab. It marks itself with
+``assets/addon_storeicon.png`` when the program ships one, and with a drawn store
+bag when it does not, the way the other bundled addons' tabs do.
 
 All of that is the first of the tab's two pages now. The second is the Addon
-manager: every addon the program did not ship with, listed with the switches the
-app owns for it - run it, force its tabs into a window of their own, let it read
-the profile's git token - beside the addon's own gates over the transports its
-manifest asked for, the choice of which connection it rides, and the buttons that
-raise its window, restart it, open its folder, edit the settings it declared, put
-a Desktop link for it on the machine or delete it, with the Show the Addon Dev
-tab check in the header above them. An addon that came inside the program keeps
-its own page in the app's Settings and is left off that list; these used to be the
-Installed addons page in Settings, and everything that page could do for them -
-the traffic gates and the settings form - is done here instead.
+manager: every addon the program did not ship with, one sub-tab apiece, each
+showing that addon's switches by default - run it, force its tabs into a window
+of their own, let it read the profile's git token - beside the addon's own gates
+over the transports its manifest asked for, the choice of which connection it
+rides, and the buttons that raise its window, restart it, open its folder, edit
+the settings it declared, put a Desktop link for it on the machine or delete it.
+An addon that is switched off keeps its caption grey instead of being taken off
+the bar, so its page can still be opened and switched back on. The first addon
+opens by default, with the Show the Addon Dev tab check in the header above them.
+An addon that came inside the program keeps its own page in the app's Settings and
+is left out of this list; these used to be the Installed addons page in Settings,
+and everything that page could do for them - the traffic gates and the settings
+form - is done here instead.
 """
 
 from __future__ import annotations
@@ -167,14 +173,15 @@ ADDON = {
                    "or removes it from the addons folder. Installs PyInstaller "
                    "itself when it is not already present. A job is shown as a "
                    "terminal behind a card that names the addon in hand and "
-                   "counts the batch's progress, and the same progress in a "
-                   "floating notice. The tab's second page is the Addon manager: "
-                   "every addon the program did not ship with, with the app's "
-                   "switches for it - run it, force its tabs into a window of "
-                   "their own, let it read the profile's git token - beside its "
-                   "own gates over SSH and SFTP, its choice of which connection "
-                   "it rides, and its restart, folder, settings, Desktop shortcut "
-                   "and delete buttons.",
+                   "counts the batch's progress, and the tab is held on that "
+                   "view until the job ends. The tab's second page is the Addon "
+                   "manager: every addon the program did not ship with, one "
+                   "sub-tab apiece, each showing that addon's switches for it - "
+                   "run it, force its tabs into a window of their own, let it "
+                   "read the profile's git token - beside its own gates over SSH "
+                   "and SFTP, its choice of which connection it rides, and its "
+                   "restart, folder, settings, Desktop shortcut and delete "
+                   "buttons. An addon that is switched off keeps a grey caption.",
     "requires": [],
     # GitHub over HTTPS and this machine's disk: it never reaches a device.
     "connection": "none",
@@ -199,13 +206,22 @@ session_delete_config: bool | None = None
 #: ``icons``, so a catalog with fifty addons in it costs fifty downloads once.
 icon_paths: dict[str, str] = {}
 icon_queue: list[str] = []
-#: The Addon manager page's own view: the rows the app listed for it, the caption
-#: each of those is drawn under in the table, and the addon the switches under
-#: the table are standing for. None of it is read off the disk - the app's record
-#: is the one answer, so a row here and a row in Settings cannot disagree.
+#: The Addon manager page's own view: the records the app listed for it, the
+#: caption each of those is filed under, the addon whose page is on show, and -
+#: since every page carries the addon's slug in its control ids - the slug each
+#: tab is drawn under and the order those slugs are on the bar in. None of it is
+#: read off the disk: the app's record is the one answer, so a page here and a
+#: page in Settings cannot disagree.
 managed: list[dict] = []
 manager_rows: dict[str, dict] = {}
 manager_picked = ""
+#: The sub-tab each addon is drawn under: its slug - the id as a widget name may
+#: spell it - to the record, the slugs in the order their tabs are on the bar, and
+#: whether the pages are being laid out right now. That last one is what keeps a
+#: repaint from reading its own tab change back as the person clicking about.
+manager_slugs: dict[str, dict] = {}
+manager_order: list[str] = []
+manager_building = False
 
 #: A module name PyInstaller can import: anything else becomes an underscore.
 _SAFE = re.compile(r"[^A-Za-z0-9_]")
@@ -505,8 +521,9 @@ _JOB_SUB = ("QLabel { color: #9a9a9a; font-size: 9pt; padding: 0px;"
 #: whole compiler traceback cannot push the rest of the screen off view.
 _JOB_STEP_LEN = 52
 
-#: The manager's State column: the same three colours the store's status line
-#: uses for news, a failure and an addon that is simply switched off.
+#: The manager's state words: the same three colours the store's status line
+#: uses for news, a failure and an addon that is simply switched off. The last
+#: one doubles as the grey an off addon's tab caption is drawn in.
 _STATE_OK = "#23d18b"
 _STATE_WARN = "#ffb020"
 _STATE_OFF = "#8f8f8f"
@@ -535,16 +552,24 @@ PAGE_ADDONS = "Addons"
 PAGE_MANAGER = "Addon manager"
 MANAGER_PAGE = 1
 
-#: The manager's table: four words over a row per addon, the name taking whatever
-#: room the other three leave, and a tick in front of it that is the addon's own
-#: enable switch. Below it the pane the table is split with is the switches and
-#: the buttons, promised two parts of the height in five.
-MANAGER_COLUMNS = ("Name", "Version", "Author", "State")
-MANAGER_PANE = "managerpane"
-MANAGER_SHARE = [3, 2]
+#: The manager's own page: a header line, and under it one sub-tab per addon.
+#: The pages are not in the spec at all - the addons that are installed here are
+#: only known once the app has answered - so ``refresh_manager`` builds them into
+#: ``MANAGER_TABS`` with ``add_page`` and lays the whole row out again whenever
+#: the record changes. A person then opens the addon they mean by its own tab
+#: rather than by finding its row in a table and reading the panel under it, and
+#: that addon's switches are on screen from the start.
+MANAGER_TABS = "managetabs"
+MANAGER_HEADING = "What the app does for it"
 
-#: The switches under the manager's table. The first three are the app's own: the
-#: record the table's tick writes, the force-popout switch, and whether the
+#: Each addon's page holds the same controls as every other page, and a tab's
+#: widgets all live in one registry, so a page's ids are the shared name and this
+#: addon's own, joined. Which addon a report came from is read back out of the
+#: same split, so no page has to be looked up by its caption.
+MANAGER_SEP = "@@"
+
+#: The switches on an addon's page. The first three are the app's own: the
+#: record its run switch writes, the force-popout switch, and whether the
 #: profile's one git token is this addon's business. The last three are the
 #: addon's own gates, moved here when the Settings page became shipped-only: one
 #: per transport its manifest asked for - a switch is drawn only for the transports
@@ -553,7 +578,7 @@ MANAGER_SHARE = [3, 2]
 MANAGER_SWITCHES = ("mg_enable", "mg_popout", "mg_token", "mg_ssh", "mg_sftp",
                     "mg_own")
 
-#: The two transports a row can be asked to gate, in the order their switches are
+#: The two transports a page can be asked to gate, in the order their switches are
 #: drawn, each with the id it lives under.
 MANAGER_TRANSPORTS = (("ssh", "mg_ssh"), ("sftp", "mg_sftp"))
 
@@ -561,8 +586,8 @@ MANAGER_TRANSPORTS = (("ssh", "mg_ssh"), ("sftp", "mg_sftp"))
 #: for without counting positions in the tuple above.
 MANAGER_GATE_IDS = {identifier: name for name, identifier in MANAGER_TRANSPORTS}
 
-#: What can be done to the picked addon from here. The first button's words
-#: change with the row it stands for: an addon whose tabs live in a window is
+#: What can be done to the addon from its own page. The first button's words
+#: change with the addon it stands for: one whose tabs live in a window is
 #: raised, one whose tabs are in the main bar is merely shown. The settings button
 #: opens the form the addon's own ``fields.json`` declares, which is what the panel
 #: folded under its name in Settings used to be.
@@ -749,34 +774,148 @@ def addons_page() -> dict:
     ]}
 
 
+def manager_slug(row: dict) -> str:
+    """The addon's id as it may be spelled inside a widget id.
+
+    The same characters a catalog id is turned into a module name with, so the
+    id of a control says which addon it belongs to and can be read back whole.
+    """
+    return clean_id(one_line(row.get("id")))
+
+
+def mid(base: str, slug: str) -> str:
+    """One control's id on one addon's page: the shared name and the addon's."""
+    return f"{base}{MANAGER_SEP}{slug}"
+
+
+def split_mid(identifier: str) -> tuple[str, str]:
+    """The control a page id names, and the addon slug it was built with."""
+    base, found, slug = str(identifier or "").partition(MANAGER_SEP)
+    return (base, slug) if found else (base, "")
+
+
+def manager_page(row: dict, slug: str = "") -> dict:
+    """One addon's page: its own switches, its own buttons, and the app's say.
+
+    What the table used to keep behind a picked row is on screen from the moment
+    the page opens, so nothing has to be selected before something can be changed.
+    The page is built out of the record the app last answered for, which means a
+    transport the manifest never named is not drawn at all rather than drawn and
+    greyed, and every switch's tick and every button's words are already right -
+    a page costs no round trip to put together, and none to look at.
+
+    Every control carries the addon's slug in its id, because all these pages
+    share the tab's one registry and two addons called "Run it" would otherwise
+    be the same widget to ``on_widget``. The caller passes the slug it has filed
+    the record under, so a second addon whose id cleans to the same name still
+    owns controls nobody else can answer for.
+
+    The column is folded into a ``scroll`` because a page carries a heading, up to
+    six switches, a paragraph of reason and seven buttons: on a short window that
+    is more than the tab has room for, and the last row of buttons being cut off
+    is worse than a scroll bar.
+    """
+    slug = str(slug or "") or manager_slug(row)
+    wants = manager_transports(row)
+    switches: list[dict] = [
+        {"kind": "check", "id": mid("mg_enable", slug), "label": "Run it",
+         "checked": bool(row.get("enabled")), "on": ["toggled"],
+         "tooltip": "The addon's own switch: off stops it and takes its tabs "
+                    "away, on starts it again and gives them back"},
+        {"kind": "check", "id": mid("mg_popout", slug), "label": "Force popout",
+         "checked": bool(row.get("popout_switch")),
+         "enabled": bool(row.get("popout_switchable")), "on": ["toggled"],
+         "tooltip": "Off, its tabs sit in the main window's bar. On, "
+                    "every page it owns is moved into a window of its "
+                    "own, which can be raised, resized and put on a "
+                    "Desktop link of its own. Greyed out when the "
+                    "addon's own manifest has already said"},
+        {"kind": "check", "id": mid("mg_token", slug),
+         "label": "Use the global git token",
+         "checked": bool(row.get("git_token")), "on": ["toggled"],
+         "tooltip": "On, the addon is handed the token kept in "
+                    "Settings > Connection, which is what reaches a "
+                    "private repository and lifts the anonymous rate "
+                    "limit. Off, it asks GitHub as anybody else would"},
+    ]
+    for name, gate in MANAGER_TRANSPORTS:
+        if name not in wants:
+            continue
+        switches.append(
+            {"kind": "check", "id": mid(gate, slug),
+             "label": f"Use {name.upper()}",
+             # A record from an app that answers no gate at all means the addon
+             # use the transport it declared, which is a fresh install's shape.
+             "checked": bool(row.get(f"{name}_allowed", True)),
+             "on": ["toggled"],
+             "tooltip": f"Off: this addon is refused every {name.upper()} job, "
+                        f"even with the main connection open and {name.upper()} "
+                        f"on in the Connection panel. On: it may use "
+                        f"{name.upper()}, along with that app-wide switch and "
+                        f"its own switch above"})
+    switches.append(
+        {"kind": "check", "id": mid("mg_own", slug),
+         "label": "Open a connection of its own",
+         "checked": bool(row.get("own_connection")),
+         "enabled": bool(row.get("own_switchable")), "on": ["toggled"],
+         "tooltip": "Off: the addon shares the app's one main "
+                    "connection, and can use it no earlier than that "
+                    "connection is open. On: it opens a connection of "
+                    "its own for each call, so it works whether or not "
+                    "the main one is up, and through "
+                    "api.device.bind() it can reach a different "
+                    "device. Greyed out for an addon whose manifest "
+                    "already picked one or the other"})
+    body = {"kind": "column", "expand": True, "children": [
+        {"kind": "row", "children": [
+            {"kind": "image", "id": mid("mg_icon", slug), "size": 48},
+            {"kind": "column", "expand": True, "children": [
+                {"kind": "label", "id": mid("mg_name", slug),
+                 "text": manager_caption(row), "style": _DETAIL_TITLE,
+                 "word_wrap": True},
+                {"kind": "label", "id": mid("mg_sub", slug),
+                 "text": manager_summary(row), "style": _DETAIL_SUB,
+                 "word_wrap": True},
+            ]},
+        ]},
+        {"kind": "label", "text": MANAGER_HEADING, "style": _DETAIL_HEAD},
+        {"kind": "form", "children": switches},
+        {"kind": "label", "id": mid("mg_note", slug), "text": manager_note(row),
+         "word_wrap": True, "expand": True, "style": _DETAIL_SUB},
+        {"kind": "row", "children": [
+            {"kind": "button", "id": mid(identifier, slug),
+             "text": ("Raise window" if (identifier == "mg_window" and
+                                         (row.get("popout") or
+                                          row.get("window_open")))
+                      else "Remove shortcut" if (identifier == "mg_shortcut" and
+                                                 row.get("shortcut"))
+                      else text),
+             "on": ["clicked"]} for identifier, text in MANAGER_BUTTONS],
+        },
+    ]}
+    return {"kind": "scroll", "children": [body]}
+
+
 def manager_spec() -> dict:
-    """The Addon manager page: what is installed here, and what the app does for it.
+    """The Addon manager page: a header, and one sub-tab per installed addon.
 
-    The table is the addons that did not come inside the program, read from the
-    app in one call rather than from the folder by hand, so a row here is the same
-    record the enable switch writes everywhere else. Its tick is that switch, and
-    picking the row fills in the switches under it - running the addon, forcing its
-    tabs into a window of their own, letting it read the profile's git token, and
-    the addon's own gates over the two transports beside the choice of which
-    connection it rides - the buttons that raise it, restart it, show where it
-    lives, edit the settings it declared, put a Desktop link for its window on the
-    machine, or take it back out again.
+    The tabs are not in this spec. What is installed here is only known once the
+    app has answered, so :func:`refresh_manager` builds the pages into
+    ``MANAGER_TABS`` and lays them out again whenever the record changes; all that
+    is fixed is the header and the bar they hang on. An addon that is switched off
+    keeps its tab with a grey caption rather than losing it, because the page that
+    says it is off is the page that switches it back on - disabling the tab would
+    hide the only answer.
 
-    The tab is a splitter rather than a stack, so the list and the switches under
-    it can each be given room; nothing here is built by hand, and every one of
-    these controls answers through the same ``on_widget`` hook the store's own
-    page uses. A transport switch is drawn only for a transport the manifest named
-    rather than greyed, because a gate over traffic the addon never asked for is
-    noise; everything else that cannot be moved is greyed and :func:`manager_note`
-    says why. The Show the Addon Dev tab check sits in the header with the count
-    because it is an addon setting like the rest of the page - it used to sit on
-    the app's own Startup page.
+    The Show the Addon Dev tab check sits in the header with the count because it
+    is an addon setting like the rest of the page - it used to sit on the app's own
+    Startup page - and the count is the number of tabs below it.
     """
     return {"kind": "column", "label": PAGE_MANAGER, "children": [
         {"kind": "row", "children": [
             {"kind": "label", "text": "Addon manager", "style": BANNER_STYLE},
-            {"kind": "label", "id": "managerstatus", "text": "Pick an addon to "
-             "change what the app does for it.", "word_wrap": True,
+            {"kind": "label", "id": "managerstatus",
+             "text": "Nothing installed outside the program.", "word_wrap": True,
              "expand": True, "style": _STATUS_TEXT},
             {"kind": "label", "id": "managercount", "text": "",
              "style": _STATUS_STYLE,
@@ -789,74 +928,10 @@ def manager_spec() -> dict:
                         "brings it back at once",
              "on": ["toggled"]},
         ]},
-        {"kind": "splitter", "vertical": True, "id": MANAGER_PANE,
-         "sizes": MANAGER_SHARE, "children": [
-            {"kind": "table", "id": "managed",
-             "columns": list(MANAGER_COLUMNS), "stretch": [0],
-             "col_widths": [0, 80, 120, 150], "font_size": 11,
-             "checkbox": 0, "multi": True, "on": ["selected", "toggled"],
-             "tooltip": "Every addon this profile runs that did not come inside "
-                        "the program. Tick a row to switch the addon on or off, "
-                        "click one to change what is asked of it below"},
-            {"kind": "column", "children": [
-                {"kind": "label", "text": "What the app does for the picked addon",
-                 "style": _DETAIL_HEAD},
-                {"kind": "form", "children": [
-                    {"kind": "check", "id": "mg_enable", "label": "Run it",
-                     "on": ["toggled"],
-                     "tooltip": "The same switch as the row's tick: off stops the "
-                                "addon and takes its tabs away, on starts it again "
-                                "and gives them back"},
-                    {"kind": "check", "id": "mg_popout", "label": "Force popout",
-                     "on": ["toggled"],
-                     "tooltip": "Off, its tabs sit in the main window's bar. On, "
-                                "every page it owns is moved into a window of its "
-                                "own, which can be raised, resized and put on a "
-                                "Desktop link of its own. Greyed out when the "
-                                "addon's own manifest has already said"},
-                    {"kind": "check", "id": "mg_token",
-                     "label": "Use the global git token",
-                     "on": ["toggled"],
-                     "tooltip": "On, the addon is handed the token kept in "
-                                "Settings > Connection, which is what reaches a "
-                                "private repository and lifts the anonymous rate "
-                                "limit. Off, it asks GitHub as anybody else would"},
-                    {"kind": "check", "id": "mg_ssh", "label": "Use SSH",
-                     "visible": False, "on": ["toggled"],
-                     "tooltip": "Off: this addon is refused every SSH job, even "
-                                "with the main connection open and SSH on in the "
-                                "Connection panel. On: it may use SSH, along with "
-                                "that app-wide switch and its own switch above. "
-                                "Only shown for an addon whose manifest asked for "
-                                "SSH"},
-                    {"kind": "check", "id": "mg_sftp", "label": "Use SFTP",
-                     "visible": False, "on": ["toggled"],
-                     "tooltip": "Off: this addon is refused every SFTP job - no "
-                                "file is read, none is written - even with the "
-                                "main connection open and SFTP on in the Connection "
-                                "panel. On: it may use SFTP, along with that "
-                                "app-wide switch and its own switch above. Only "
-                                "shown for an addon whose manifest asked for SFTP"},
-                    {"kind": "check", "id": "mg_own",
-                     "label": "Open a connection of its own",
-                     "on": ["toggled"],
-                     "tooltip": "Off: the addon shares the app's one main "
-                                "connection, and can use it no earlier than that "
-                                "connection is open. On: it opens a connection of "
-                                "its own for each call, so it works whether or not "
-                                "the main one is up, and through "
-                                "api.device.bind() it can reach a different "
-                                "device. Greyed out for an addon whose manifest "
-                                "already picked one or the other"},
-                ]},
-                {"kind": "label", "id": "mg_note", "text": "", "word_wrap": True,
-                 "style": _DETAIL_SUB},
-                {"kind": "row", "children": [
-                    {"kind": "button", "id": identifier, "text": text,
-                     "on": ["clicked"]} for identifier, text in MANAGER_BUTTONS],
-                 },
-            ]},
-         ]},
+        {"kind": "tabs", "id": MANAGER_TABS, "children": [],
+         "on": ["changed"],
+         "tooltip": "One tab per addon this profile runs that did not come "
+                    "inside the program; a grey name is one that is switched off"},
     ]}
 
 
@@ -1045,7 +1120,7 @@ def profile_token() -> str:
     """The token this addon is allowed to send to GitHub, which is the profile's.
 
     There is one token for a profile and it is written in Settings > Connection;
-    the switch on this addon's row in the store's Addon manager decides whether
+    the switch on this addon's tab in the store's Addon manager decides whether
     ``api.session.git_token()`` answers with it at all. An empty string is a real
     answer rather than a failure - it means anonymous, which is what every public
     repository is read with - so a build with no api, no token and a refused call
@@ -1896,7 +1971,7 @@ def manager_say(text: str, bad: bool = False) -> None:
 
 
 def manager_state(row: dict) -> tuple[str, str]:
-    """One addon as its State cell and the colour its row is drawn in."""
+    """One addon as the words said under its name, and the colour they wear."""
     if one_line(row.get("error")):
         return "failed to start", _STATE_WARN
     if row.get("running"):
@@ -1907,10 +1982,10 @@ def manager_state(row: dict) -> tuple[str, str]:
 
 
 def manager_popout_words(row: dict) -> str:
-    """The State column's second half: where this addon's tabs are right now.
+    """The second half of that line: where this addon's tabs are right now.
 
     A window that was closed is named as closed rather than left out, because the
-    addon behind it is still running and the row's first button is what brings it
+    addon behind it is still running and the page's first button is what brings it
     back - the same button reads *Raise window* for it.
     """
     if row.get("window_open"):
@@ -1920,11 +1995,25 @@ def manager_popout_words(row: dict) -> str:
     return ""
 
 
-def manager_caption(row: dict) -> str:
-    """The name the table shows for one addon, with its id when two share a name.
+def manager_summary(row: dict) -> str:
+    """The one line under an addon's name: version, author, and how it stands.
 
-    A row is looked up by the first column's words, so the caption has to be one
-    that names exactly one addon - which two addons of the same name would not be.
+    The four columns the table spent on this are one line here, since an addon's
+    page only ever describes the one addon and needs no headings to be read.
+    """
+    words, _tint = manager_state(row)
+    parts = [one_line(row.get("version")) or "no version",
+             one_line(row.get("author")) or "no author",
+             words + manager_popout_words(row)]
+    return "  \u00b7  ".join(parts)
+
+
+def manager_caption(row: dict) -> str:
+    """The name the tab shows for one addon, with its id when two share a name.
+
+    A tab is looked up by its caption as much as by its place on the bar, so the
+    caption has to be one that names exactly one addon - which two addons of the
+    same name would not be.
     """
     caption = one_line(row.get("name")) or one_line(row.get("id"))
     same = [one for one in managed
@@ -1933,16 +2022,16 @@ def manager_caption(row: dict) -> str:
 
 
 def manager_row_for(text: Any) -> dict | None:
-    """The row a table caption, an id or a name stands for; nothing for a stray.
+    """The row a caption, an id, a name or a widget slug stands for; not a stray.
 
-    The table hands back only the first column's words and a person may name an
-    addon either way, so the captions are tried first, then the ids, then the
-    names as the app gave them.
+    A page reports the addon it belongs to through the slug in its control ids
+    rather than through words, so the slug is tried as well - which is also what
+    lets an addon be named by the id its folder is filed under.
     """
     wanted = one_line(text)
     if not wanted:
         return None
-    row = manager_rows.get(wanted)
+    row = manager_slugs.get(wanted) or manager_rows.get(wanted)
     if row is not None:
         return row
     lowered = wanted.lower()
@@ -1950,23 +2039,20 @@ def manager_row_for(text: Any) -> dict | None:
         if one_line(one.get("id")).lower() == lowered:
             return one
     for one in managed:
+        if manager_slug(one) == wanted:
+            return one
+    for one in managed:
         if manager_caption(one).lower() == lowered:
             return one
     return None
 
 
-def manager_buttons(usable: bool) -> None:
-    """The manager's buttons, greyed until a row says what they are for."""
-    for identifier, _text in MANAGER_BUTTONS:
-        _detail(identifier, "enabled", bool(usable))
-
-
 def manager_transports(row: dict) -> list[str]:
     """Which of the two transports this addon's manifest asked for, in switch order.
 
-    The switches under the table are drawn off this rather than off the record's
-    gates, because an addon that never named SFTP has no opinion about it and would
-    only be confused by a switch for it.
+    A page's switches are drawn off this rather than off the record's gates,
+    because an addon that never named SFTP has no opinion about it and would only
+    be confused by a switch for it.
     """
     needs = {one_line(one).lower() for one in (row.get("requires") or [])}
     return [name for name, _identifier in MANAGER_TRANSPORTS if name in needs]
@@ -1985,8 +2071,8 @@ def manager_note(row: dict) -> str:
                      "window unless its own code asks for a window of their own.")
     elif row.get("popout"):
         words.append("Its tabs live in a window of their own; closing that "
-                     "window leaves the addon running, and the row's first "
-                     "button brings the window back.")
+                     "window leaves the addon running, and the first button "
+                     "under this note brings the window back.")
     else:
         words.append("Its tabs sit in the main window's bar.")
     if row.get("shortcut"):
@@ -2018,65 +2104,85 @@ def manager_note(row: dict) -> str:
     return " ".join(words)
 
 
-def show_manager_row(row: dict | None) -> None:
-    """The switches, the buttons and the saying, for one picked addon.
+def manager_pages() -> list[str]:
+    """The captions the manager's bar is holding, left to right.
 
-    Nothing is asked of the app here: the row is the answer the last paint got,
-    so moving about the page costs no round trip. A switch the addon cannot be
-    given is greyed out rather than taken away - only a transport it never named
-    is hidden at all - and :func:`manager_note` says why in the line under the
-    form.
+    The pages are built as the app's record changes rather than as the tab is
+    built, so this is the only honest answer to how many of them there are - and
+    the only way to find out how many have to be taken away before a new row of
+    them can be laid down.
     """
-    global manager_picked
-    if row is None:
-        manager_picked = ""
-        for identifier in MANAGER_SWITCHES:
-            _detail(identifier, "checked", False)
-            _detail(identifier, "enabled", False)
-        for _name, identifier in MANAGER_TRANSPORTS:
-            _detail(identifier, "visible", False)
-        _detail("mg_note", "text",
-                "Nothing is picked: the table above lists every addon the "
-                "program did not come with, and a row's tick is that addon's "
-                "own switch.")
-        manager_buttons(False)
-        return
-    manager_picked = one_line(row.get("id"))
-    _detail("mg_enable", "checked", bool(row.get("enabled")))
-    _detail("mg_enable", "enabled", True)
-    _detail("mg_popout", "checked", bool(row.get("popout_switch")))
-    _detail("mg_popout", "enabled", bool(row.get("popout_switchable")))
-    _detail("mg_token", "checked", bool(row.get("git_token")))
-    _detail("mg_token", "enabled", True)
-    wants = manager_transports(row)
-    for name, identifier in MANAGER_TRANSPORTS:
-        _detail(identifier, "visible", name in wants)
-        # A row from an app that answers no gate at all is a row that means the
-        # addon may use the transport it declared, which is a fresh install's shape.
-        _detail(identifier, "checked", bool(row.get(f"{name}_allowed", True)))
-        _detail(identifier, "enabled", name in wants)
-    _detail("mg_own", "checked", bool(row.get("own_connection")))
-    _detail("mg_own", "enabled", bool(row.get("own_switchable")))
-    _detail("mg_note", "text", manager_note(row))
-    _detail("mg_window", "text",
-            "Raise window" if (row.get("popout") or row.get("window_open"))
-            else "Show tab")
-    _detail("mg_shortcut", "text", "Remove shortcut" if row.get("shortcut")
-            else "Desktop shortcut")
-    manager_buttons(True)
+    if api is None:
+        return []
+    try:
+        held = api.tabs.widget_value(TAB, MANAGER_TABS, "pages")
+    except AddonError:
+        return []
+    return [one_line(one) for one in (held or [])]
+
+
+def manager_open() -> int:
+    """Which page the manager's bar is showing, or -1 while it shows none."""
+    if api is None:
+        return -1
+    try:
+        place = api.tabs.widget_value(TAB, MANAGER_TABS, "index")
+    except (AddonError, TypeError, ValueError):
+        return -1
+    return int(place) if isinstance(place, int) else -1
+
+
+def manager_picture(row: dict) -> str:
+    """The mark an addon's page wears: its own picture, or the store's default.
+
+    The same lookup the list uses, so a page and its row agree; an addon nobody
+    has fetched a picture for simply wears the default rather than a blank box.
+    """
+    try:
+        return icon_of(row)
+    except Exception:
+        return ""
+
+
+def manager_unique_slug(base: str) -> str:
+    """A slug no other page is using, so two addons cannot share a control.
+
+    Every control on a page is named from its slug, and all the pages write into
+    the tab's one registry, so two ids that clean to the same name - "my-addon"
+    and "my_addon" - would be the same switch twice over. The second of them is
+    numbered, and its page is built from the numbered slug like everything else.
+    """
+    slug = base or "addon"
+    if slug not in manager_slugs:
+        return slug
+    extra = 2
+    while f"{base}_{extra}" in manager_slugs:
+        extra += 1
+    return f"{base}_{extra}"
 
 
 def refresh_manager(_checked: bool = False) -> None:
-    """The manager's table, straight from the app's own record.
+    """Lay the addon pages out again, straight from the app's own record.
 
     One call answers for every addon in the folder, and what is listed is what
     the app says rather than what this machine's disk looks like, so an addon put
     in since the last look is here without a rescan. The addons that came inside
-    the program are left out - they keep their own pages in Settings - and the row
-    the switches are standing for is painted again from the fresh answer, so a
-    switch moved here and a switch moved in Settings cannot drift apart.
+    the program are left out - they keep their own pages in Settings - and each of
+    the rest gets a tab of its own, so the switches are on screen for the addon
+    already opened rather than hidden under a row that has to be picked first.
+
+    The pages are laid out whole: taken away and built again, because a page is
+    only ever as true as the record it was drawn from and a toggle moves that
+    record. The bar is put back on the page it was showing, and a repaint reports
+    its own tab change no more than a person clicking about does - the flag round
+    the rebuild is what keeps the two apart.
+
+    An addon that is switched off keeps its tab, drawn grey: the page that says it
+    is off is the page that switches it back on, so a caption being faded is a
+    fact to be read and not a door to be shut.
     """
-    global managed, manager_rows, manager_picked
+    global managed, manager_rows, manager_slugs, manager_order
+    global manager_picked, manager_building
     if api is None:
         return
     try:
@@ -2085,23 +2191,40 @@ def refresh_manager(_checked: bool = False) -> None:
         manager_say(f"the app would not say what is installed: {error}", bad=True)
         return
     managed = [dict(row) for row in (rows or []) if not row.get("settings_page")]
-    manager_rows = {}
-    painted = []
-    for row in managed:
-        caption = manager_caption(row)
-        words, tint = manager_state(row)
-        painted.append({"cells": [caption, one_line(row.get("version")),
-                                  one_line(row.get("author")) or "-",
-                                  words + manager_popout_words(row)],
-                        "color": tint, "check": bool(row.get("enabled"))})
-        manager_rows[caption] = row
-    _detail("managed", "rows", painted)
+    was_open = manager_open()
+    manager_rows, manager_slugs, manager_order = {}, {}, []
+    keep = was_open if 0 <= was_open < len(managed) else 0
+    manager_building = True
+    try:
+        for _page in range(len(manager_pages())):
+            _detail(MANAGER_TABS, "remove_page", 0)
+        for row in managed:
+            slug = manager_unique_slug(manager_slug(row))
+            caption = manager_caption(row)
+            manager_slugs[slug] = row
+            manager_rows[caption] = row
+            manager_order.append(slug)
+            _detail(MANAGER_TABS, "add_page",
+                    {"label": caption, "spec": manager_page(row, slug),
+                     "current": False})
+            _detail(mid("mg_icon", slug), "image", manager_picture(row))
+        _detail(MANAGER_TABS, "tab_colors",
+                ["" if row.get("enabled") else _STATE_OFF for row in managed])
+        if managed:
+            _detail(MANAGER_TABS, "current", keep)
+    finally:
+        manager_building = False
+    manager_picked = (one_line((manager_slugs.get(manager_order[keep])
+                                or {}).get("id")) if managed else "")
     _detail("managercount", "text", f"{len(managed)} managed"
             if managed else "nothing installed")
     show_devtab_toggle()
-    if manager_picked and manager_row_for(manager_picked) is None:
-        manager_picked = ""
-    show_manager_row(manager_row_for(manager_picked))
+    if managed:
+        row = manager_slugs[manager_order[keep]]
+        words, _tint = manager_state(row)
+        manager_say(f"{manager_caption(row)}: {words}")
+    else:
+        manager_say("Nothing installed outside the program.")
 
 
 def show_devtab_toggle() -> None:
@@ -2139,60 +2262,74 @@ def set_devtab(payload: dict) -> None:
     note(words)
 
 
-def pick_managed(payload: dict) -> None:
-    """A row was picked: fill in the switches and the buttons under it.
+def manager_row_at(index: Any) -> dict | None:
+    """The row whose tab sits at that place on the manager's bar.
 
-    A repaint arrives here as a selection of nothing, and that is not the person
-    changing their mind, so the form keeps the addon it was standing for until a
-    row really is picked.
+    The bar counts from zero and an addon may be filed under a numbered slug, so
+    the order the pages were laid down in is the only thing a position can be read
+    against - and it is the same order the app answered for.
     """
-    row = manager_row_for((payload or {}).get("text"))
-    if row is None and api is not None:
-        try:
-            chosen = api.tabs.widget_value(TAB, "managed", "selected")
-        except AddonError:
-            return
-        text = (chosen[0] if isinstance(chosen, (list, tuple)) and chosen
-                else chosen)
-        row = manager_row_for(text)
+    try:
+        place = int(index)
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= place < len(manager_order)):
+        return None
+    return manager_slugs.get(manager_order[place])
+
+
+def manager_tab_shown(payload: dict) -> None:
+    """One addon's tab was opened: say which, and how it stands.
+
+    Nothing is asked of the app - the page was built from the row the last paint
+    got - so moving about the bar costs no round trip. A repaint lands here too,
+    while it is still laying the pages out, and that is the rebuild's own doing
+    rather than the person's, so it is dropped.
+    """
+    global manager_picked
+    if manager_building:
+        return
+    data = payload if isinstance(payload, dict) else {}
+    row = manager_row_at(data.get("index"))
+    if row is None:
+        row = manager_row_for(data.get("text"))
     if row is None:
         return
-    show_manager_row(row)
+    manager_picked = one_line(row.get("id"))
     words, _tint = manager_state(row)
     manager_say(f"{manager_caption(row)}: {words}")
 
 
-def manager_row_toggled(payload: dict) -> None:
-    """The tick in the manager's table is that addon's switch, moved from the row.
+def manager_refused(words: str) -> None:
+    """A switch that is not this addon's to move: say so, and mean it.
 
-    The same record as the switch under it, and the same load or stop after it, so
-    one door is not a second opinion on the other.
+    The pages are laid out first and the reason written after, because the repaint
+    ends by stating how the open page's addon stands - said the other way round,
+    the refusal would be painted straight over before it could be read.
     """
-    row = manager_row_for((payload or {}).get("text"))
-    if row is None:
-        return
-    if one_line(row.get("id")) != manager_picked:
-        show_manager_row(row)
-    manager_toggle("mg_enable", {"checked": (payload or {}).get("checked")})
+    refresh_manager()
+    manager_say(words, bad=True)
 
 
-def manager_toggle(ident: str, payload: dict) -> None:
-    """One of the switches under the table, written through the app.
+def manager_toggle(ident: str, slug: str, payload: dict) -> None:
+    """One switch on an addon's own page, written through the app.
 
     Every one of them is the app's own record rather than anything the store
     keeps: the first starts or stops the addon, the second moves its tabs in or out
     of a window of their own, the third decides whether the profile's git token is
     its business at all, the next two are the addon's gates over the traffic its
     manifest asked for, and the last puts it on a connection of its own rather than
-    on the app's session. A switch the addon has not got is refused with the reason
-    on the status line, and the table is painted again either way so what is on
-    screen is the record rather than what was clicked.
+    on the app's session. Which addon is meant is read from the slug its page's
+    control ids carry, so a switch on the wrong page cannot be answered for the
+    wrong addon. A switch the addon has not got is refused with the reason on the
+    status line, and the pages are laid out again either way so what is on screen
+    is the record rather than what was clicked.
     """
     if api is None or working:
         return
-    row = manager_row_for(manager_picked)
+    row = manager_slugs.get(str(slug or "")) or manager_row_for(manager_picked)
     if row is None:
-        manager_say("pick an addon in the list first", bad=True)
+        manager_say("open one of the addon tabs first", bad=True)
         return
     addon_id = one_line(row.get("id"))
     want = bool((payload or {}).get("checked"))
@@ -2203,10 +2340,9 @@ def manager_toggle(ident: str, payload: dict) -> None:
         elif ident == "mg_popout":
             moved = bool(api.session.set_addon_popout(addon_id=addon_id, on=want))
             if not moved:
-                manager_say(f"{addon_id} has no force-popout switch to move - its "
-                            f"manifest names its own state, or it came inside the "
-                            f"program", bad=True)
-                refresh_manager()
+                manager_refused(f"{addon_id} has no force-popout switch to move - "
+                                f"its manifest names its own state, or it came "
+                                f"inside the program")
                 return
             words = (f"{addon_id} is now in a window of its own" if want
                      else f"{addon_id}'s tabs are back in the main window")
@@ -2219,10 +2355,8 @@ def manager_toggle(ident: str, payload: dict) -> None:
             moved = bool(api.session.set_addon_transport(addon_id=addon_id,
                                                         transport=gate, on=want))
             if not moved:
-                manager_say(f"{addon_id} has no {gate.upper()} switch to move - "
-                            f"its manifest does not ask for that transport",
-                            bad=True)
-                refresh_manager()
+                manager_refused(f"{addon_id} has no {gate.upper()} switch to move - "
+                                f"its manifest does not ask for that transport")
                 return
             words = (f"{addon_id} may use {gate.upper()} again" if want
                      else f"{addon_id} is refused {gate.upper()}")
@@ -2230,18 +2364,16 @@ def manager_toggle(ident: str, payload: dict) -> None:
             moved = bool(api.session.set_addon_own_connection(addon_id=addon_id,
                                                              on=want))
             if not moved:
-                manager_say(f"{addon_id} has no own-connection switch to move - its "
-                            f"manifest already said which connection it rides",
-                            bad=True)
-                refresh_manager()
+                manager_refused(f"{addon_id} has no own-connection switch to move - "
+                                f"its manifest already said which connection it "
+                                f"rides")
                 return
             words = (f"{addon_id} now opens a connection of its own" if want
                      else f"{addon_id} rides the app's main connection again")
         else:
             return
     except Exception as error:
-        manager_say(f"{addon_id} could not be switched: {error}", bad=True)
-        refresh_manager()
+        manager_refused(f"{addon_id} could not be switched: {error}")
         return
     try:
         api.tabs.activate(TAB)        # an addon waking up must not steal the page
@@ -2287,8 +2419,11 @@ def manager_show(row: dict) -> None:
             manager_say(f"{addon_id}'s window could not be raised: {error}",
                         bad=True)
             return
-        manager_say(f"{addon_id}'s window is up")
+        # The window is where the tabs are now, so the page has to be told - and
+        # the words above are written after the repaint, which would otherwise
+        # state the open page's condition straight over them.
         refresh_manager()
+        manager_say(f"{addon_id}'s window is up")
         return
     names = [one_line(name) for name in (row.get("tabs") or []) if one_line(name)]
     if not names:
@@ -2549,21 +2684,24 @@ def manager_delete(row: dict) -> None:
     _reload()
 
 
-def manager_action(ident: str) -> None:
-    """One of the buttons under the table, for the addon the row stands for.
+def manager_action(ident: str, slug: str = "") -> None:
+    """One of the buttons on an addon's page, for the addon that page is.
 
-    Only the addons-folder button needs nothing picked - that folder is wherever a
-    person with no rows to work on would want to look - so it is answered first and
-    the rest are refused plainly rather than silently.
+    Only the addons-folder button needs no addon in hand - that folder is wherever
+    a person with nothing installed would want to look - so it is answered first,
+    before the page is looked up, and the rest are refused plainly rather than
+    silently. The page's own slug says which addon is meant; with no slug to go on
+    the button falls back on the tab that is open, which is the same addon the
+    person was looking at.
     """
     if api is None:
         return
     if ident == "mg_folder":
         reveal(addons_dir())
         return
-    row = manager_row_for(manager_picked)
+    row = manager_slugs.get(str(slug or "")) or manager_row_for(manager_picked)
     if row is None:
-        manager_say("pick an addon in the list first", bad=True)
+        manager_say("open one of the addon tabs first", bad=True)
         return
     addon_id = one_line(row.get("id"))
     if ident == "mg_window":
@@ -3043,6 +3181,29 @@ def _job_card(name: str = "", step: str | None = None,
         pass
 
 
+def _lock_pages(hold: bool) -> None:
+    """Keep the job's page under the person's eyes, or let them browse again.
+
+    Two bars are held and both are this addon's business: the window's tab bar,
+    through ``api.tabs.lock``, so a build cannot be clicked away from and left
+    running out of sight; and this tab's own sub-bar, so the Addon manager page
+    cannot be opened while a job has the store's page. Neither hold is remembered
+    anywhere - the window hands the bar back if the addon stops mid-job, and
+    :func:`_finish` releases both on every ending, good or bad.
+
+    A tab built without the job pane has nothing to hold either, so the whole
+    thing is quiet about it: an older layout, or a bare test harness, runs a job
+    exactly as it always did.
+    """
+    if api is None:
+        return
+    try:
+        api.tabs.lock(hold)
+    except Exception:
+        pass
+    _detail(SUBTABS, "locked", hold)
+
+
 def _begin(verb: str, entry: dict | None = None) -> dict:
     """Start a job: the buttons grey out and one dict holds its whole state.
 
@@ -3053,7 +3214,9 @@ def _begin(verb: str, entry: dict | None = None) -> dict:
 
     ``pane`` says whether the tab could put the job's console on screen, and so
     whether the build's lines have anywhere to be printed on; nothing else about
-    the job depends on the answer.
+    the job depends on the answer - except the holding of the bars below it, which
+    is asked for with the pane, since a job nobody can see is a job nobody can
+    stay with.
     """
     global working, job
     working = True
@@ -3069,16 +3232,18 @@ def _begin(verb: str, entry: dict | None = None) -> dict:
         pass
     job["pane"] = _job_show(True)
     if job["pane"]:
+        _lock_pages(True)
         try:
             api.tabs.set_widget(TAB, "jobterm", "clear", True)
         except AddonError:
             pass
         _job_card(_job_name(entry), step="", picture=_job_picture(entry))
     note(f"{job['source']}: this job reads the store from here")
-    # The page hears the job once, here. The steps themselves go only to the
-    # floating notice: a status line rewritten on every one of them reads as
-    # a flicker in the middle of the tab while the card's bar already counts
-    # the same work up in the corner.
+    # The page hears the job twice: here and at its end. The steps go to the
+    # card's own line and to the console behind it, where the work is actually
+    # being watched - a status line rewritten on every one of them reads as a
+    # flicker in the middle of the tab while the bar on the card already counts
+    # the same work up in front of the person.
     say(f"{verb} starting...")
     _progress(f"{verb} starting...", 0.0)
     return job
@@ -3088,7 +3253,7 @@ def _begin_job(verb: str, items: list[dict]) -> dict:
     """Start a job over a batch: the first entry works at once, the rest queue.
 
     One job covers the whole of what was picked. Its queue is worked through
-    addon by addon, and the live notice counts its percentage over all of
+    addon by addon, and the card's bar counts its percentage over all of
     them, so ten installs read as one job at one pace.
     """
     global job
@@ -3102,9 +3267,9 @@ def _finish(text: str, bad: bool = False) -> None:
     """End the job in hand: the buttons come back and one line is left up.
 
     A batch that stops part-way says how far it got, so the last line holds
-    the whole truth of the job. The live notice ends either way: filled to
-    hundred percent, to be held a moment and fade, when all is well; closed
-    straight away when the job ended bad.
+    the whole truth of the job. The bars a job was holding are let go first,
+    before anything else is touched: an ending that then failed would
+    otherwise leave the window's tab bar answering to nobody.
     """
     global working, job
     if job is not None:
@@ -3117,6 +3282,8 @@ def _finish(text: str, bad: bool = False) -> None:
         was_pane = False
     job = None
     working = False
+    if was_pane:
+        _lock_pages(False)
     _buttons(True)
     if was_pane:
         # The browsing view is what the tab was showing before the job, and the
@@ -3126,31 +3293,23 @@ def _finish(text: str, bad: bool = False) -> None:
         # The log starts folded, but a failure is exactly when its full text is
         # wanted; the status line only ever carries one line of it.
         show_log(True)
-    if api is not None:
-        try:
-            if bad:
-                api.ui.progress_notice_close()
-            else:
-                api.ui.progress_notice("Berry addon store", str(text), 100, 100)
-        except Exception:
-            pass
     say(text, bad=bad)
     note(text)
 
 
 def _progress(text: str, frac: float) -> None:
-    """One step of the job: the live notice's line and its percentage.
+    """One step of the job, worn on the card that sits over its console.
 
     The percentage covers the whole batch: a finished addon counts as one full
     share and the one in hand contributes its part of a share, so the bar of
     ten installs creeps by tenths of a tenth and never runs back. Only the
-    ending itself reaches hundred percent, because the notice holds and fades
-    the moment it is filled.
+    ending itself reaches hundred percent, because nothing here is asked to
+    hold and fade - the card is on the tab the work is happening on and goes
+    when the work does.
 
-    Nothing here touches the tab's status line - the download notice wears the
-    steps, and the page hears the job only at its start and its end. The job's own
-    card is told the same words and the same share, since it is the copy that sits
-    in front of the work rather than in the corner of the screen.
+    Nothing here touches the tab's status line either: the page hears the job at
+    its start and its end, and everything in between is written on the card and on
+    the console behind it.
     """
     if api is None or job is None:
         return
@@ -3159,10 +3318,6 @@ def _progress(text: str, frac: float) -> None:
     part = max(0.0, min(1.0, float(frac)))
     percent = min(99, int(round(100.0 * (done + part) / total)))
     line = f"{done + 1} of {total}: {text}" if total > 1 else str(text)
-    try:
-        api.ui.progress_notice("Berry addon store", line, percent, 100)
-    except Exception:
-        pass
     _job_card(step=line, percent=percent)
 
 
@@ -4071,6 +4226,7 @@ def shutdown() -> None:
     """Let go of everything this copy held: the connections, the job, the pane."""
     global api, working, job, shown, picked, filter_text, session_delete_config
     global managed, manager_rows, manager_picked
+    global manager_slugs, manager_order, manager_building
     _drop_http()
     working = False
     job = None
@@ -4080,7 +4236,10 @@ def shutdown() -> None:
     session_delete_config = None
     managed = []
     manager_rows = {}
+    manager_slugs = {}
+    del manager_order[:]
     manager_picked = ""
+    manager_building = False
     del icon_queue[:]
     api = None
 
@@ -4095,39 +4254,38 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     or right-clicked - is what fills in the pane beside the list. A row's check
     box is the installed addon's own switch, moved without leaving the tab.
 
-    The Addon manager's page answers through the same hook: its buttons, the six
-    switches under its table, the tick on one of its rows and the check that shows
-    or hides the Addon Dev tab all name themselves, and none of them waits on the
-    network - the app's record is one call away, the settings form is built from
-    what the addon declared, and the only file work is a delete.
-
-    Nothing here waits on the network except the one request a right-click's
-    menu and a commit lookup each make for themselves.
+    The Addon manager's pages answer through the same hook. Their controls are
+    named for the shared control and the addon it belongs to, so the pair is split
+    out here before anything is looked up: a button does its one thing to the
+    addon on its page, a switch writes that addon's record, and a ``changed`` on
+    the manager's own bar says which page the person is looking at. The header's
+    check that shows or hides the Addon Dev tab is the manager's one control that
+    belongs to no addon. None of them waits on the network - the app's record is
+    one call away, the settings form is built from what the addon declared, and
+    the only file work is a delete.
     """
     if str(tab) != TAB:
         return
     ident = str(identifier)
     name = str(event)
     data = payload if isinstance(payload, dict) else {}
+    base, slug = split_mid(ident)
+    if slug and base in MANAGER_IDS and name == "clicked":
+        manager_action(base, slug)
+        return
+    if slug and base in MANAGER_SWITCHES and name in ("toggled", "changed"):
+        manager_toggle(base, slug, data)
+        return
     if name == "clicked":
-        if ident in MANAGER_IDS:
-            manager_action(ident)
-            return
         handler = HANDLERS.get(ident)
         if handler is not None:
             handler()
         return
-    if ident in MANAGER_SWITCHES and name in ("toggled", "changed"):
-        manager_toggle(ident, data)
+    if ident == MANAGER_TABS and name == "changed":
+        manager_tab_shown(data)
         return
     if ident == "devtab" and name in ("toggled", "changed"):
         set_devtab(data)
-        return
-    if ident == "managed":
-        if name == "selected":
-            pick_managed(data)
-        elif name == "toggled":
-            manager_row_toggled(data)
         return
     if ident == "delcfg" and name in ("toggled", "changed"):
         set_delete_config_session(data)

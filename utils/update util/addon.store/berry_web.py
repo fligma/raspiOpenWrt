@@ -27,7 +27,7 @@ Nothing that a user might want to change is hardcoded. The repository, the ref,
 the folder inside it, the patterns that are never sent, the served folder's name,
 the uhttpd section, the port and the restart command all live in
 ``addons/_data/berry_web/config.json``, shown as a form by **Edit settings** on
-this addon's row in the store's Addon manager page. That file is the one the
+this addon's tab in the store's Addon manager page. That file is the one the
 retired **Rasconf web installer** kept its own settings in - the keys are
 deliberately named the same, so an install that existed before carries its
 settings straight across.
@@ -68,10 +68,12 @@ ADDON = {
     # than assumed, and the move that renames it starts from what the device
     # said instead of from a setting an older install never wrote.
     # 1.3 drops the addon's own GitHub token field. A profile has one token, kept
-    # in Settings > Connection, and the switch on this addon's row in the store's
+    # in Settings > Connection, and the switch on this addon's tab in the store's
     # Addon manager decides whether it is handed over; the old key is lifted into
     # the profile by the app the first time it loads, so nothing stops working.
-    "version": "1.3",
+    # 1.4 is the layout pass over the store: the lines that wrap on this tab now
+    # hug their own height, so the room a page has over falls to its tables.
+    "version": "1.4",
     "author": "fligma",
     "description": "Looks for the Berry dashboard on the connected host and, when "
                    "it is not there, installs src/www_rasconf from GitHub over "
@@ -198,7 +200,7 @@ FIELDS = [
 #: The install form, on the installer page. The GitHub token is not a field of
 #: this addon: it belongs to the profile, is written in Settings > Connection and
 #: reaches a request through ``profile_token`` while the switch on this addon's
-#: row in the store's Addon manager is on.
+#: tab in the store's Addon manager is on.
 GROUPS_INSTALL = [
     ("Where the files come from", ["source", "owner", "repo", "ref", "repo_path",
                                    "local_dir"]),
@@ -1196,7 +1198,7 @@ def profile_token() -> str:
     """The token this addon is allowed to send to GitHub, which is the profile's.
 
     There is one token for a profile and it is written in Settings > Connection;
-    the switch on this addon's row in the store's Addon manager decides whether
+    the switch on this addon's tab in the store's Addon manager decides whether
     ``api.session.git_token()`` answers with it at all. An empty string is a real
     answer rather than a failure - it means anonymous, which is what a public
     repository is read with - so a build with no api, no token and a refused call

@@ -28,6 +28,7 @@ utils/update util/addons/*/_internal/
 *.new
 *tmp*
 *probe_*
+*_probe*
 # The folder the CI build stages the shipped addons in before packing them
 # inside the executable.
 utils/update util/_addon_bundle/

@@ -1241,43 +1241,27 @@ class BerryManager(
         except Exception as error:          # a toast is never worth a traceback
             self.log(f"tray notice failed: {error}")
 
-    def progress_notice(self, key: str, title: str, text: str = "",
-                        value: int = 0, maximum: int = 100) -> None:
-        """The live card of a job that is still running, one per speaker.
+    def set_tabs_locked(self, locked: bool) -> bool:
+        """Hold the window's tab bar on whatever page it is showing.
 
-        ``key`` names who is talking - an addon calls this through
-        ``api.ui.progress_notice``, which hands its own id - and the same key
-        gets the same card back with new figures on every step of its job. A
-        card filled to ``maximum`` holds a few seconds and closes itself; the
-        window owns them all, so a closing app takes them with it.
+        An addon that swaps its tab over to a job's progress card asks for this
+        while the job runs, so the pane being watched cannot be clicked away to
+        - and gets the bar back on the same call with ``locked`` off. The hold
+        covers the keyboard and the wheel as well as the click; a page the app
+        itself asks for is refused too, which is the point. Nothing is remembered
+        in the window's settings and nothing outlives the work: an addon stopping
+        hands the bar back (see ``core.addon._clean``), so a lock cannot be left
+        over a tab that is gone.
         """
-        notices = getattr(self, "_progress_notices", None)
-        if notices is None:
-            notices = self._progress_notices = {}
-        name = str(key or "addon")
-        notice = notices.get(name)
+        if not hasattr(self, "tabs"):
+            return False
         try:
-            if notice is None:
-                from core.ui import ProgressNotice
+            from core.ui import set_tab_lock
 
-                notice = ProgressNotice(self)
-                notices[name] = notice
-            notice.show_notice(str(title or ""), str(text or ""),
-                               int(value), max(1, int(maximum)))
-        except Exception as error:          # a card is never worth a traceback
-            self.log(f"progress notice: {error}")
-
-    def progress_notice_close(self, key: str) -> None:
-        """Take one speaker's card away; nothing when it never showed one."""
-        notice = getattr(self, "_progress_notices", {}).get(str(key or "addon"))
-        if notice is None:
-            return
-        try:
-            notice.close_notice()
-            notice.deleteLater()
-        except RuntimeError:                # the window went with it already
-            pass
-        self._progress_notices.pop(str(key or "addon"), None)
+            return set_tab_lock(self.tabs, bool(locked))
+        except Exception as error:            # a bar that will not hold is a bar
+            self.log(f"tab lock: {error}")
+            return False
 
     # Interface zoom
 

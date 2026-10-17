@@ -1573,7 +1573,7 @@ def paint_default_tab(p: QPainter) -> None:
     """Four rounded tiles in the bar's grey with one accent corner.
 
     Drawn in the 32-unit space a tab picture is painted into, and shared with
-    ``tools/make_store_icons.py``, which writes the same mark out as
+    ``buildtools.py make-store-icons``, which writes the same mark out as
     ``assets/defaulttabicon.png`` - so the file a person can edit and the drawing
     that stands in when it is gone cannot drift apart.
     """
@@ -2641,103 +2641,122 @@ def tooltips_enabled() -> bool:
     return True if engine is None else engine.enabled()
 
 
-class ProgressNotice(QFrame):
-    """A small card that floats over the window's corner and keeps a live job's
-    percentage on screen while it runs.
+class TabLock(QObject):
+    """Holds one tab widget on the page it is showing.
 
-    A tray toast says one thing and leaves; a job like a store install wants the
-    opposite - a number that moves while the work does, from a window the person
-    may have pushed behind anything else. So this is a frameless top-level card:
-    who is speaking, how far the job has got as a bar with its percent, and one
-    line of what it is doing now. The app keeps one per speaker and re-shows it
-    on every step; nothing here waits on the addon that owns it.
+    A job that replaces a pane with its own progress card is ruined by the pane
+    being switched out from under it: the download carries on behind a tab the
+    person has clicked away to, and the card they were watching is gone. So the
+    widget is held rather than told off. Every way a page can change is stopped
+    at the door - a click or a drag on the bar, the wheel over it, the keyboard
+    nudges Qt binds to Ctrl+Tab and Page Up/Down - and one more, which is the
+    one an event filter cannot see coming: a program calling ``setCurrentIndex``
+    itself. That is answered by watching ``currentChanged`` and putting the
+    index back while the lock holds.
 
-    A notice that reaches its end holds for a few seconds and goes away on its
-    own, so the finish line is read rather than chased; a new job takes the same
-    card back before it closes. It never takes focus: ``WA_ShowWithoutActivating``
-    keeps the pointer where the user left it.
+    Locking is deliberately not done with ``setTabEnabled``. The main bar is
+    custom-painted and re-enables every tab it is not the gap whenever it
+    re-measures (see :class:`RightPinnedTabBar`), so a greyed tab would heal
+    itself on the next resize and read as a broken tab besides.
+
+    Nothing here belongs to a particular addon: the window locks its own bar
+    while a job runs, and a ``tabs`` container built from an addon's spec is
+    locked the same way through its own ``locked`` property.
     """
 
-    HOLD_MS = 4000      # a finished notice stays on screen this long
-    GAP = 18            # the card's margin from the window's corner
+    #: Events the bar is asked to forget while the lock holds.
+    VETOED = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+              QEvent.Type.MouseButtonDblClick, QEvent.Type.Wheel,
+              QEvent.Type.KeyPress)
 
-    def __init__(self, win: QWidget) -> None:
-        super().__init__(win, Qt.WindowType.Tool
-                         | Qt.WindowType.FramelessWindowHint
-                         | Qt.WindowType.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        column = QVBoxLayout(self)
-        column.setContentsMargins(zoom_size(12), zoom_size(10),
-                                  zoom_size(12), zoom_size(10))
-        self._title = QLabel(self)
-        self._bar = QProgressBar(self)
-        self._bar.setRange(0, 100)
-        self._bar.setFormat("%p%")
-        self._bar.setTextVisible(True)
-        self._text = QLabel(self)
-        self._text.setWordWrap(True)
-        theme_style(self._title, "QLabel { color: $bright; font-weight: 700; }")
-        theme_style(self._text, "QLabel { color: $muted; }")
-        theme_style(self, "QFrame { background-color: $surface; border: 1px"
-                          " solid $accent; border-radius: 8px; }"
-                          " QProgressBar { border: 1px solid $border;"
-                          " border-radius: 5px; background-color: $soft;"
-                          " text-color: $text; height: 16px; }"
-                          " QProgressBar::chunk { border-radius: 4px;"
-                          " background-color: $accent; }")
-        self._closer: QTimer | None = None
-        self.setMaximumWidth(zoom_size(340))
-        self.setMinimumWidth(zoom_size(220))
+    def __init__(self, widget: QTabWidget) -> None:
+        super().__init__(widget)
+        self.widget = widget
+        self.held = widget.currentIndex()
+        self.reverting = False
+        bar = widget.tabBar()
+        if bar is not None:
+            bar.installEventFilter(self)
+        widget.currentChanged.connect(self._changed)
 
-    def show_notice(self, title: str, text: str, value: int,
-                    maximum: int) -> None:
-        """Put the card up with this figure in it; a full bar closes it soon."""
-        limit = max(1, int(maximum))
-        shown = max(0, min(limit, int(value)))
-        self._bar.setMaximum(limit)
-        self._bar.setValue(shown)
-        self._title.setText(str(title or ""))
-        self._text.setText(str(text or ""))
-        self._text.setVisible(bool(str(text or "").strip()))
-        self._cancel_close()
-        self.adjustSize()
-        self._place()
-        self.show()
-        # A window manager is free to ignore where a window was put before it
-        # was ever mapped, which leaves the card sitting in the middle of the
-        # screen; placing again once it is visible pins it to the corner the
-        # first place only aimed at.
-        self._place()
-        if shown >= limit:
-            self._hold_then_close()
+    def lock(self) -> None:
+        """Hold the page that is showing; nothing to hold until the bar exists."""
+        self.held = self.widget.currentIndex()
 
-    def close_notice(self) -> None:
-        """Take the card away now, timer and all."""
-        self._cancel_close()
-        self.hide()
+    def unlock(self) -> None:
+        """Let the pages move again."""
+        self.held = -1
+        self.reverting = False
 
-    def _cancel_close(self) -> None:
-        if self._closer is not None:
-            self._closer.stop()
-            self._closer = None
+    def locked(self) -> bool:
+        """Whether a hold is in place right now."""
+        return self.held >= 0
 
-    def _hold_then_close(self) -> None:
-        self._cancel_close()
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.timeout.connect(self.close_notice)
-        timer.start(self.HOLD_MS)
-        self._closer = timer
-
-    def _place(self) -> None:
-        """Sit the card inside the parent window's bottom-right corner."""
-        win = self.parentWidget()
-        if win is None:
+    def _changed(self, index: int) -> None:
+        """Something moved the page past the veto - put it back."""
+        if self.held < 0 or self.reverting or index == self.held:
             return
-        gap = zoom_size(self.GAP)
-        spot = win.mapToGlobal(QPoint(win.width() - self.width() - gap,
-                                      win.height() - self.height() - gap))
-        self.move(max(0, spot.x()), max(0, spot.y()))
+        if not (0 <= self.held < self.widget.count()):
+            # The held page went away (a sub-tab was rebuilt under the lock);
+            # holding an empty spot is worse than letting go.
+            self.held = -1
+            return
+        self.reverting = True
+        try:
+            self.widget.setCurrentIndex(self.held)
+        finally:
+            self.reverting = False
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if self.held >= 0 and event.type() in self.VETOED \
+                and isinstance(watched, (QTabBar, QTabWidget)):
+            return True
+        return False
+
+
+def tab_lock(widget: QTabWidget) -> TabLock:
+    """The widget's keeper, made the first time it is asked for and reused after."""
+    keeper = getattr(widget, "_addon_tab_lock", None)
+    if keeper is None:
+        keeper = widget._addon_tab_lock = TabLock(widget)
+    return keeper
+
+
+def set_tab_lock(widget: QTabWidget, locked: bool) -> bool:
+    """Hold or free a tab widget; says whether there was a bar to hold onto."""
+    if not isinstance(widget, QTabWidget):
+        return False
+    keeper = tab_lock(widget)
+    if locked:
+        keeper.lock()
+    else:
+        keeper.unlock()
+    return True
+
+
+def grey_tab(widget: QTabWidget, index: int, grey: bool) -> None:
+    """Draw one tab's caption in the theme's faded colour, or in its normal one.
+
+    A tab bar colours its captions itself, so this goes through Qt's per-tab
+    foreground, which is what a plain ``QTabBar`` paints with. An invalid colour
+    is what takes the override back off, which is how a page that was grey and
+    no longer is returns to the theme.
+    """
+    if not isinstance(widget, QTabWidget):
+        return
+    if not (0 <= int(index) < widget.count()):
+        return
+    bar = widget.tabBar()
+    if bar is None:
+        return
+    if grey:
+        try:
+            tint = QColor(ui.color("faint"))
+        except Exception:
+            tint = QColor("#8f8f8f")
+        bar.setTabTextColor(int(index), tint)
+    else:
+        bar.setTabTextColor(int(index), QColor())
 
 
 class _TitleTip(QObject):

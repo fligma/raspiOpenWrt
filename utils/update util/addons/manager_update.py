@@ -69,15 +69,17 @@ nothing new.
 Installing is offered in both directions: a version ahead is an update, the
 running one is marked, and an older one is a way back - the same swap, since a
 program that has gone wrong is fixed by putting the previous file in its place.
-Going back has a floor, ``1.6.0`` by default and a setting like everything else:
-a version older than that predates things the swap itself relies on, so it is
-refused with the reason rather than installed, warning or no warning. Above the
-floor, an older version is asked about with three honest answers rather than a
-yes or no, because what is at risk is not the program but everything written down
-beside it: keep it and take the risk, back up ``config`` and every addon's data
-folder into a zip beside the program and delete what a newer copy wrote - the
-installed addons, the profile files, the written themes - or leave this copy
-where it is. Nothing is fetched or written before that answer is given.
+Going back has two lines, both settings like everything else. ``1.6.0`` is the
+floor: a version older than that predates things the swap itself relies on, so it
+is refused with the reason rather than installed, warning or no warning. ``2.0.0``
+is the keep line: at or above it an older version is asked about with three honest
+answers rather than a yes or no, because what is at risk is not the program but
+everything written down beside it - keep it and take the risk, back up ``config``
+and every addon's data folder into a zip beside the program and delete what a
+newer copy wrote (the installed addons, the profile files, the written themes), or
+leave this copy where it is. Below the keep line the middle answer is not on
+offer: so far back, the only way to go is clean, and the dialog says so with two
+buttons. Nothing is fetched or written before that answer is given.
 
 When the check runs by itself it is the user who has to notice, not the tab
 that is not open, so a version found is sent through ``api.ui.popup`` and comes
@@ -88,13 +90,13 @@ for anyone who leaves it open for days.
 An install is the one long job here, and it is shown as one. While the bytes are
 coming down the tab's browsing panes give way to the job's own view: a terminal
 for a background, printing every step as it arrives, with a card in the middle
-naming the version being fetched and counting its share of the download. The same
-steps and the same share go up in the app's floating notice at the corner of the
-screen, so the job can be followed from any other tab, and the notice ends with
-the job - filled and fading when the swap landed, closed straight away when it
-did not. The view is put together from the spec language alone (an ``overlay``
-over a ``terminal``), and a tab built without it simply keeps the browsing panes
-on screen: the job does not care where its lines are printed.
+naming the version being fetched and counting its share of the download. That
+card is the only place the job is shown, and the window's tab bar is held on this
+tab while it runs, so the progress cannot be clicked away from; the hold goes
+with the job, whether it landed or not. The view is put together from the spec
+language alone (an ``overlay`` over a ``terminal``), and a tab built without it
+simply keeps the browsing panes on screen: the job does not care where its lines
+are printed.
 """
 
 from __future__ import annotations
@@ -121,18 +123,20 @@ ADDON = {
     "author": "fligma",
     "description": "Groups the berry tags published on GitHub into their major "
                    "lines, newest first, each line opening to its own builds, and "
-                   "says which version this copy is. Any of them - a newer "
-                   "release, or an older one back to the floor set here - is put "
-                   "in the running program's place once its release's file has "
-                   "been checked. A version's words, its commit and its file list "
-                   "are read only when it is picked, and kept; going back to an "
-                   "older copy asks three questions instead of one, so the choice "
-                   "is between taking what is written down as it stands, backing "
-                   "it up and starting clean, or leaving this copy alone. One "
+                   "says which version this copy is; what is past the pane's room "
+                   "goes under an Older dropdown. Any of them - a newer release, "
+                   "or an older one back to the floor set here - is put in the "
+                   "running program's place once its release's file has been "
+                   "checked. A version's words, its commit and its file list are "
+                   "read only when it is picked, and kept; going back to an older "
+                   "copy asks three questions instead of one, so the choice is "
+                   "between taking what is written down as it stands, backing it "
+                   "up and starting clean, or leaving this copy alone - and below "
+                   "the keep line the second of those is the only way back. One "
                    "found by a check that ran on its own is announced as a notice, "
-                   "and a download is shown as a job: a terminal behind a card "
-                   "that names the version and counts its bytes, with the same "
-                   "progress in a floating notice.",
+                   "and a download is shown as a job the tab holds onto: a "
+                   "terminal behind a card that names the version and counts its "
+                   "bytes.",
     "requires": [],
     # This talks to GitHub and to the disk it runs on, never to a device.
     "connection": "none",
@@ -167,6 +171,15 @@ MAX_REDIRECTS = 8
 #: older copy, and is refused rather than attempted.
 OLDEST_ALLOWED = "1.6.0"
 
+#: The oldest version that may be installed with this copy's own setup left
+#: where it is. A way back below this line is only offered after everything
+#: written down - the config folder, the installed addons, the themes somebody
+#: copied - has been backed up and erased, because a program that old is read to
+#: disagree with those files rather than merely to be behind them. It is not the
+#: same line as ``OLDEST_ALLOWED``: that one refuses the move outright, this one
+#: refuses to make the move carelessly.
+KEEP_ALLOWED = "2.0.0"
+
 # --- what can be configured, and what it starts out as ---
 
 DEFAULTS = {
@@ -178,6 +191,7 @@ DEFAULTS = {
     "check_minutes": 60,
     "notify_found": True,
     "min_version": OLDEST_ALLOWED,
+    "keep_min_version": KEEP_ALLOWED,
 }
 
 FIELDS = [
@@ -207,6 +221,12 @@ FIELDS = [
      "hint": "Going backwards is offered for any version at or above this one, "
              f"and refused below it. Blank is {OLDEST_ALLOWED}; a fork that "
              "publishes differently may name its own."},
+    {"key": "keep_min_version", "label": "Oldest version its setup may be kept for",
+     "kind": "text",
+     "hint": "Going back to a version at or above this one offers to leave the "
+             "config folder and the installed addons where they are. Below it "
+             f"the only way back is to back up and erase first - blank is "
+             f"{KEEP_ALLOWED}."},
 ]
 
 #: The GitHub token is not one of these: it belongs to the profile and is read
@@ -216,7 +236,7 @@ GROUPS = [("Where updates come from",
            ["owner", "repo", "tag_prefix"]),
           ("When it checks, and what it says",
            ["check_startup", "check_again", "check_minutes", "notify_found",
-            "min_version"])]
+            "min_version", "keep_min_version"])]
 
 BUTTONS = (("check", "Check now"), ("update", "Install the picked version"),
            ("page", "Open releases page"))
@@ -507,10 +527,16 @@ LOG_SHARE = [5, 2]
 
 #: How many major lines the left pane can lay out at once. A spec is built once
 #: and an addon cannot grow a column while it runs, so the rows are promised
-#: here and shown or hidden as the published versions need them; a line past the
-#: last of these is counted in words instead, and the releases page holds every
-#: one of them whatever their number.
+#: here and shown or hidden as the published versions need them; everything past
+#: the last of them is not lost but folded away - it goes under one Older dropdown
+#: at the foot of the pane, which holds those versions by name and picks like any
+#: other dropdown here does.
 MAJOR_SLOTS = 10
+
+#: The id of that dropdown, and of the line of words above it. Neither carries a
+#: row number, so neither can be mistaken for one of the major lines' controls.
+OLDER_PICK = "molder"
+OLDER_HEAD = "molderhead"
 
 # --- the view a job puts over the browsing panes ---
 
@@ -598,6 +624,13 @@ def _majors_pane() -> dict:
     builds under it, so the pane is one row per line and the line's versions are
     the dropdown's. Lines below the one being read start shut, and opening one
     costs nothing, because the tags were all read in one request.
+
+    The pane has room for ``MAJOR_SLOTS`` of them and no more, so what is past
+    that goes under one dropdown of its own at the foot of the list: the versions
+    of the lines with no row are named there in the same words as anywhere else
+    and picking one moves the whole tab to it. Nothing is counted off in an
+    apology of a sentence - the overflow has a place to be picked from, and the
+    releases page under the tab still holds every version whatever their number.
     """
     return {"kind": "column", "children": [
         {"kind": "label", "text": "Published version lines",
@@ -605,8 +638,15 @@ def _majors_pane() -> dict:
         {"kind": "scroll", "children": [{"kind": "column", "children": [
             {"kind": "column", "id": "majors", "children":
              [_major_slot(index) for index in range(MAJOR_SLOTS)] + [
-                 {"kind": "label", "id": "mrest", "text": "", "visible": False,
-                  "word_wrap": True, "style": meta_style()},
+                 {"kind": "label", "id": OLDER_HEAD, "text": "Older lines",
+                  "visible": False, "word_wrap": True,
+                  "style": section_style()},
+                 {"kind": "combo", "id": OLDER_PICK, "visible": False,
+                  "tooltip": "The versions on the lines this pane has no room "
+                             "for, newest first. Picking one reads what it was "
+                             "for and points the install button at it, as any "
+                             "other version here does.",
+                  "on": ["changed"]},
                  {"kind": "spacer"}]},
         ]}]},
     ]}
@@ -1175,6 +1215,29 @@ def _floor(values: dict) -> str:
     return one_line(config_get(values, "min_version", "")) or OLDEST_ALLOWED
 
 
+def keep_floor(values: dict) -> str:
+    """The oldest version this copy's setup may be left in place for.
+
+    The line the question is asked on: at or above it a way back offers to keep
+    everything written down beside the program, and below it the same question is
+    not on offer at all - only the backed-up, erased way back is.
+    """
+    return one_line(config_get(values, "keep_min_version", "")) or KEEP_ALLOWED
+
+
+def keep_allowed(values: dict, version: Any) -> bool:
+    """Whether berry<version> may be installed with this copy's setup kept.
+
+    The comparison is the same one the floor is measured with, so ``2.0`` and
+    ``2.0.0`` are the same program here as everywhere else, and a version that
+    cannot be read at all is not allowed to keep anything.
+    """
+    wanted = one_line(version)
+    if not wanted:
+        return False
+    return not version_newer(keep_floor(values), wanted)
+
+
 def _prefix(values: dict) -> str:
     """The word a version tag starts with, defaulted rather than blank."""
     return (one_line(config_get(values, "tag_prefix", DEFAULTS["tag_prefix"]))
@@ -1310,14 +1373,89 @@ def slot_of(major: Any) -> int:
     """Which row of the pane one major line is laid out in; -1 past the last.
 
     A version published on a line older than the pane can hold has no row and no
-    dropdown, which is why the rows it could not show are counted in words under
-    the last of them rather than left out in silence.
+    dropdown of its own, which is what the Older dropdown at the foot of the pane
+    is for: it holds exactly those versions, so nothing is left unsaid and nothing
+    is left unpickable.
     """
     wanted = one_line(major)
     for slot, line in enumerate(lines[:MAJOR_SLOTS]):
         if str(line.get("major") or "") == wanted:
             return slot
     return -1
+
+
+def older_indices() -> list[int]:
+    """Every published version on a line the pane has no row for, newest first.
+
+    Worked off the lines rather than off a count, so a version this addon cannot
+    read as a version at all - and so belonging to no line - is offered in the
+    Older dropdown too: it is still published, it still has a file, and hiding it
+    altogether would be a worse answer than the sentence that used to count it.
+    """
+    return [index for index in range(len(published))
+            if slot_of(major_of(published[index].get("version"))) < 0]
+
+
+def older_index(text: Any) -> int:
+    """Which published version the Older dropdown says it is showing.
+
+    The version is the first word of the entry, so the marking beside it never
+    gets in the way of the match, and the search stays inside the overflow: a
+    version that has a row of its own is answered for by that row, and the Older
+    dropdown cannot be pointed at it.
+    """
+    wanted = one_line(text).split(" ")[0].strip()
+    if not wanted:
+        return -1
+    for index in older_indices():
+        entry = published[index]
+        if wanted in (entry.get("version"), entry.get("tag")):
+            return index
+    return -1
+
+
+def _paint_older() -> None:
+    """Lay the overflow out under its Older dropdown, or fold the dropdown away.
+
+    The versions are named in the same words the major lines' dropdowns use, so
+    one list of published builds reads the same whichever half of the pane it is
+    picked from, and the whole row - the heading with it - is hidden when the
+    repository has not published past the pane's room. Laying names down reports a
+    choice of its own, so it happens with ``filling`` up, exactly as a major line's
+    does.
+    """
+    global filling
+    wanted = older_indices()
+    names = [item_text(published[index]) for index in wanted]
+    _set(OLDER_HEAD, "visible", bool(names))
+    _set(OLDER_PICK, "visible", bool(names))
+    if not names:
+        slot_names.pop(OLDER_PICK, None)
+        return
+    was, filling = filling, True
+    try:
+        if slot_names.get(OLDER_PICK) != names:
+            _set(OLDER_PICK, "items", names)
+            slot_names[OLDER_PICK] = names
+        if 0 <= picked < len(published) and picked in wanted:
+            _set(OLDER_PICK, "value", item_text(published[picked]))
+    finally:
+        filling = was
+
+
+def pick_older(payload: Any) -> None:
+    """The Older dropdown reported what it is showing: move the tab to that version.
+
+    The same guard the major lines' dropdowns work under: a dropdown being laid
+    down is not anybody picking anything, and a version already picked is not
+    picked a second time.
+    """
+    if filling:
+        return
+    index = older_index(combo_text(payload))
+    if index < 0 or index == picked:
+        return
+    pick_row(index)
 
 
 def open_line_for(index: int) -> str:
@@ -1534,6 +1672,9 @@ def show_versions(have: str, floor: str) -> None:
     open survives a repaint - the user's own doing, not this pane's - but only
     for lines that still exist, and a dropdown never lays its versions down here
     unless its line is already open.
+
+    What is past the pane's room is not left out of the page: it goes under the
+    Older dropdown at its foot, which is painted from the same grouping.
     """
     global lines, filling
     if api is None:
@@ -1549,12 +1690,7 @@ def show_versions(have: str, floor: str) -> None:
                 _clear_slot(slot)
             else:
                 _paint_slot(slot, line, have, floor)
-        rest = len(lines) - MAJOR_SLOTS
-        _set("mrest", "visible", rest > 0)
-        if rest > 0:
-            _set("mrest", "text",
-                 f"{rest} older line(s) have no room here; the releases page "
-                 "under the tab holds every version on them")
+        _paint_older()
     finally:
         filling = was
 
@@ -1848,6 +1984,12 @@ def pick_row(index: int) -> None:
         if major and major not in opened:
             opened.append(major)
         _paint_slot(slot, lines[slot], have, floor)
+    else:
+        # The version sits on a line the pane has no row for, so the Older
+        # dropdown is the one place the pane can point at it: picked from the
+        # list or from a repaint, an overflow version is no different from a
+        # hotfix whose line gets opened to show it.
+        _paint_older()
     show_detail(values, published[index], have, floor)
 
 
@@ -2204,36 +2346,66 @@ def factory_reset(version: str) -> list[str]:
     return words
 
 
-def downgrade_words(entry: dict, have: str, wanted: str, across: bool) -> str:
+def downgrade_words(entry: dict, have: str, wanted: str, across: bool,
+                    keep_ok: bool = True, keep_line: str = "") -> str:
     """The first half of the question: what is being replaced, and how far back.
 
     A hotfix on the same line and a line nobody has been on are not the same risk,
     so they are not said the same way - and the version still being named here is
     the one the picked entry carries, not whatever the list was showing when the
     button was first looked at.
+
+    Below ``keep_line`` the keeping half of the answer is not on offer, and the
+    words say so where the risk is listed: a person who is shown three buttons and
+    refused by none of them has been told a rule they cannot see.
     """
     step = ("That reaches across a major line: the older program predates whole "
             "features of this one."
             if across else
             "It is a hotfix on the same line as this copy, so the older program "
             "is close to this one.")
+    if keep_ok:
+        offer = ("You may keep what is written down beside this program, or back "
+                 "it up and start clean over it.")
+    else:
+        offer = (f"This is further back than {one_line(keep_line) or KEEP_ALLOWED}, "
+                 "and below that line keeping what is written down is not offered: "
+                 "the only way back is to copy it into a backup and erase it "
+                 "first.")
     return (f"This copy is berry{have or '?'} and {one_line(entry.get('tag'))} "
             f"is berry{wanted}, so installing puts an older program where the "
             f"newer one runs now.\n{step}\n\nThe swap itself moves one file and "
-            "nothing else; what is at risk is everything written down beside it.")
+            "nothing else; what is at risk is everything written down beside it. "
+            + offer)
 
 
-def downgrade_dialog(entry: dict, have: str, wanted: str, across: bool) -> str:
+def downgrade_answers(keep_ok: bool = True) -> list[str]:
+    """The buttons the question is asked with: three, or two under the clamp.
+
+    **Download with current setup** is taken away rather than greyed, because a
+    dialog's buttons cannot be greyed from an addon and one that did nothing when
+    pressed would read as a fault in the program rather than as a rule about the
+    version.
+    """
+    if keep_ok:
+        return [ERASE_ANSWER, KEEP_ANSWER, CANCEL_ANSWER]
+    return [ERASE_ANSWER, CANCEL_ANSWER]
+
+
+def downgrade_dialog(entry: dict, have: str, wanted: str, across: bool,
+                     keep_ok: bool = True, keep_line: str = "") -> str:
     """Ask somebody going backwards what should happen to what is written down.
 
     Three honest answers rather than a yes or no, because the question really has
     three: keep everything and take the risk, start clean and take the loss, or
-    leave the program where it is. Closing the box without an answer comes back
-    ``""``, which is treated exactly as **Cancel** is - nothing fetched, nothing
-    written, one line on the status.
+    leave the program where it is. Below the keep line the middle one is not on
+    offer at all, and the words above the buttons say why. Closing the box without
+    an answer comes back ``""``, which is treated exactly as **Cancel** is -
+    nothing fetched, nothing written, one line on the status.
     """
     spec = {"kind": "column", "children": [
-        {"kind": "label", "text": downgrade_words(entry, have, wanted, across),
+        {"kind": "label",
+         "text": downgrade_words(entry, have, wanted, across, keep_ok, keep_line),
          "word_wrap": True},
         {"kind": "label", "text": "What may go wrong:", "word_wrap": True},
         {"kind": "multi", "readonly": True, "value":
@@ -2241,7 +2413,7 @@ def downgrade_dialog(entry: dict, have: str, wanted: str, across: bool) -> str:
     ]}
     try:
         answer = api.ui.dialog(spec, f"Go back to berry{wanted}?",
-                               answers=[ERASE_ANSWER, KEEP_ANSWER, CANCEL_ANSWER])
+                               answers=downgrade_answers(keep_ok))
     except AddonError as error:
         note(f"the question could not be asked: {error}")
         return ""
@@ -2428,6 +2600,24 @@ def restart_app() -> None:
 
 # --- the job: download one step per tick, then swap ---
 
+def _lock_pages(hold: bool) -> None:
+    """Keep the window on this tab while the job is on screen, then let it go.
+
+    The job's progress is drawn inside the tab, so a tab bar that can be clicked
+    is a way to walk away from it and leave the card behind; holding the bar is
+    what makes the pane the only thing that can be looked at until the job ends.
+    This tab has no sub-bar of its own, so the window's bar is all there is to
+    hold - and the hold is the app's rather than this addon's, so stopping the
+    addon lets go of it even if a job died halfway through.
+    """
+    if api is None:
+        return
+    try:
+        api.tabs.lock(hold)
+    except Exception:                        # noqa: BLE001 - a lock is a courtesy
+        pass
+
+
 def _job_show(show: bool) -> bool:
     """Swap the browsing panes for the job's console, or hand them back.
 
@@ -2489,7 +2679,7 @@ def _job_card(name: str = "", step: str | None = None,
 
 
 def _progress(text: str, frac: float | None = None) -> None:
-    """One step of the job: the floating notice's line and share, and the card's.
+    """One step of the job: the card's line and share, and the console's whole.
 
     The share is the download's own bytes so far, so a 20 MB program counts up as
     it arrives rather than in made-up stages; a step that knows its part of the
@@ -2497,11 +2687,11 @@ def _progress(text: str, frac: float | None = None) -> None:
     never told its length has no share to show: the bar is left where it stands
     and the line carries the byte count on its own.
 
-    Nothing here touches the tab's status line: the notice wears the steps, and
-    the page hears the job only at its start and its end, so a download does not
-    read as a flicker behind the card's bar. The step is printed on the job's
-    console too, in full, because for a download these counts are the whole of
-    what is going on - there is no build output behind the card to read instead.
+    Nothing here touches the tab's status line: the card wears the steps, and the
+    page hears the job only at its start and its end, so a download does not read
+    as a flicker behind the card's bar. The step is printed on the job's console
+    too, in full, because for a download these counts are the whole of what is
+    going on - there is no build output behind the card to read instead.
     """
     if api is None or job is None:
         return
@@ -2511,17 +2701,12 @@ def _progress(text: str, frac: float | None = None) -> None:
         total = int(job.get("total") or 0)
         got = int(job.get("got") or 0)
         percent = min(99, int(round(100.0 * got / total))) if total else None
-    try:
-        api.ui.progress_notice("Berry Manager update", str(text),
-                               percent if percent is not None else 0, 100)
-    except Exception:
-        pass
     _job_write(text)
     _job_card(step=text, percent=percent)
 
 
 def _bytes_line() -> str:
-    """How far the download has come, in the words the notice and the card wear."""
+    """How far the download has come, in the words the card and the console wear."""
     got = int((job or {}).get("got") or 0)
     total = int((job or {}).get("total") or 0)
     return (f"downloading... {_size(got)}"
@@ -2535,6 +2720,10 @@ def _begin(verb: str, values: dict, name: str = "") -> dict:
     the download's steps have anywhere to be printed on; nothing else about the job
     depends on the answer. ``name`` is what the card in the middle of it is to
     call the version being fetched.
+
+    Where the console did go up, the window's tab bar is held on this tab until the
+    job ends: the progress is the one thing on screen worth reading, and clicking
+    away would leave it behind with nowhere to be seen.
     """
     global working, job
     working = True
@@ -2548,6 +2737,7 @@ def _begin(verb: str, values: dict, name: str = "") -> dict:
         pass
     job["pane"] = _job_show(True)
     if job["pane"]:
+        _lock_pages(True)
         try:
             api.tabs.set_widget(TAB, "jobterm", "clear", True)
         except AddonError:
@@ -2561,9 +2751,9 @@ def _begin(verb: str, values: dict, name: str = "") -> dict:
 def _finish(text: str, bad: bool = False) -> None:
     """End the job in hand: the browsing panes come back and one line is left up.
 
-    The live notice ends either way: filled to hundred percent, to be held a
-    moment and fade, when all is well; closed straight away when the job ended
-    bad.
+    The bar's hold is let go first, so the person can move about again whatever
+    the job ended with - and the card that wore the steps goes with the pane it
+    was drawn on, leaving the outcome on the status line and in the log.
     """
     global working, job
     if job is not None and job.get("response") is not None:
@@ -2574,6 +2764,8 @@ def _finish(text: str, bad: bool = False) -> None:
     was_pane = bool((job or {}).get("pane"))
     job = None
     working = False
+    if was_pane:
+        _lock_pages(False)
     _buttons(True)
     if was_pane:
         # The browsing view is what the tab was showing before the job, and the
@@ -2583,15 +2775,6 @@ def _finish(text: str, bad: bool = False) -> None:
         # The log starts folded, but a failure is exactly when its full text is
         # wanted; the status line only ever carries one line of it.
         show_log(True)
-    if api is not None:
-        try:
-            if bad:
-                api.ui.progress_notice_close()
-            else:
-                api.ui.progress_notice("Berry Manager update", str(text),
-                                       100, 100)
-        except Exception:
-            pass
     say(text, bad=bad)
     note(text)
 
@@ -2707,7 +2890,7 @@ def finish_download() -> None:
         system = system_name()
         program, how = check_bytes(data, system)
         # The bytes are down, so the job's own part of the work is done and what
-        # is left is the swap: one line, said once, on the notice and the card.
+        # is left is the swap: one line, said once, on the card and the console.
         _progress(f"{_size(len(program))} {how}; putting it in place", 1.0)
         target = program_path()
         staged = staging_target(target.name + ".new")
@@ -2755,6 +2938,13 @@ def update_selected(_checked: bool = False) -> None:
     three honest answers, because the thing at risk is not the program but
     everything written down beside it. The answer is taken before anything is
     fetched or written, and the floor says no before the answer is even asked.
+
+    A version further back than the keep line is asked with two answers instead
+    of three, and an answer that kept the setup anyway - from a dialog built on
+    an older layout, or from a test harness that hands back what it is told to -
+    is turned down here rather than obeyed. The clamp is the rule about the
+    version, so it is applied where the version is named, not only where the
+    buttons are drawn.
     """
     global found
     if api is None or working:
@@ -2779,10 +2969,18 @@ def update_selected(_checked: bool = False) -> None:
     wanted = one_line(entry.get("version"))
     erase = False
     if back:
+        keep_line = keep_floor(values)
+        keep_ok = keep_allowed(values, wanted)
         choice = downgrade_dialog(entry, have, wanted,
-                                  major_of(wanted) != major_of(have))
+                                  major_of(wanted) != major_of(have),
+                                  keep_ok, keep_line)
         if choice == ERASE_ANSWER:
             erase = True
+        elif choice == KEEP_ANSWER and not keep_ok:
+            say(f"berry{wanted} is further back than {keep_line}, so going back "
+                f"without erasing the written data is not allowed - erase it and "
+                f"start clean, or leave this copy alone", bad=True)
+            return
         elif choice != KEEP_ANSWER:
             say("the way back was turned down; nothing was fetched and nothing "
                 "was written")
@@ -2946,7 +3144,9 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     the button of a line says to open or shut it. Both of the last two carry the
     row of the pane they belong to in their name, so a pick is matched against the
     versions of that line alone - which is the one place a fork's repository can
-    publish the same number on two lines and still be answered correctly.
+    publish the same number on two lines and still be answered correctly. The one
+    dropdown that carries no row number is the Older one, and it is matched against
+    the lines the pane had no room for.
     """
     if str(tab) != TAB:
         return
@@ -2957,6 +3157,9 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         return
     if slot >= 0 and name.startswith("mpick") and str(event) == "changed":
         _run("pick_text", slot, payload or {})
+        return
+    if name == OLDER_PICK and str(event) == "changed":
+        _run("pick_older", payload or {})
         return
     if name == "showlog" and str(event) in ("toggled", "changed"):
         show_log((payload or {}).get("checked"))

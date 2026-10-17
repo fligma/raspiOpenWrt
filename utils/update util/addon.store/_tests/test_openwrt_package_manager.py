@@ -149,8 +149,8 @@ def test_manifest_and_config(addon: Any, api: Api) -> None:
     check(addon.ADDON.get("requires") == ["ssh", "sftp"],
           f"requires ssh and sftp services: {addon.ADDON.get('requires')!r}")
     check(str(addon.ADDON.get("api")) == "1", "addon api version is 1")
-    check(str(addon.ADDON.get("version") or "") == "1.4",
-          f"the published version is 1.4: {addon.ADDON.get('version')!r}")
+    check(str(addon.ADDON.get("version") or "") == "1.5",
+          f"the published version is 1.5: {addon.ADDON.get('version')!r}")
     check("icon" not in addon.ADDON,
           "the manifest names no picture, so the store picks one by the rule")
     check(addon.TAB_ICON_FILE == "openwrt_package_managericon.png",

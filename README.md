@@ -139,10 +139,11 @@ copied password taken back off the clipboard after the seconds you set) - and an
 install is not a
 second-class addon. The store writes an `addons/<id>.json` manifest beside the program it
 built (its name, version, author and the transports it needs) and seeds its
-settings form, so the moment it is switched on it is a full row on the store's
-**Addon manager** page - enable switch, restart, its own SSH and SFTP gates,
-an own-connection option where the author left the choice open, its settings
-form and a Desktop shortcut - while the addons that came inside the program each
+settings form, so the moment it is switched on it has a tab of its own on the
+store's **Addon manager** page - enable switch, restart, its own SSH and SFTP
+gates, an own-connection option where the author left the choice open, its
+settings form and a Desktop shortcut, its caption drawn grey while it is off -
+while the addons that came inside the program each
 keep a page of their own in Settings. Deleting it from the store takes the
 program and that manifest back, and
 takes `addons/_data/<id>` with it unless you say otherwise - the switch on the

@@ -11,7 +11,7 @@ first and the web server restarted after.
 Nothing is installed or hardcoded: the folder, both file names, the subject,
 the alternative names, the key type, the lifetime and the follow-up commands
 all come from ``addons/_data/cert_manager/config.json``. That file is shown as a
-form by **Edit settings** on this addon's row in the store's Addon manager page,
+form by **Edit settings** on this addon's tab in the store's Addon manager,
 and it is plain JSON, so it can be edited anywhere. Every profile on every device
 can have its own, because the addon only ever asks the device the *current
 profile* is connected to.
@@ -33,7 +33,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Certificate manager",
-    "version": "1.4",
+    "version": "1.5",
     "author": "fligma",
     "description": "Shows the certificate on the device as a tidy summary or the raw "
                    "openssl text, and reissues the .crt and .key over SSH, with the "
@@ -322,17 +322,21 @@ def tab_spec(values: dict) -> dict:
             "kind": "group", "text": title, "layout": "form",
             "children": [control_spec(key, values) for key in keys],
         })
+    # Two buttons to a row rather than five in a strip: their captions are long
+    # enough that a single row asks for more width than this pane is ever given,
+    # and a horizontal scrollbar in a form is what makes fields unreadable.
     groups.append({
-        "kind": "row",
+        "kind": "grid",
         "children": [{"kind": "button", "id": identifier, "text": text,
-                      "tooltip": tip, "on": ["clicked"]}
-                     for identifier, text, tip in (
+                      "tooltip": tip, "row": order // 2, "col": order % 2,
+                      "on": ["clicked"]}
+                     for order, (identifier, text, tip) in enumerate((
             ("view", "View current", "List both files and show the certificate in full"),
             ("reissue", "Reissue certificate", "Write a new .crt and .key on the device"),
             ("push", "Save to config", "Keep these values in addons/_data/cert_manager/config.json"),
             ("pull", "Reload from config", "Put the saved values back into the form"),
             ("copy", "Save a copy locally", "Keep the certificate PEM in the addon's own folder"),
-        )],
+        ))],
     })
     left = {"kind": "scroll", "children": [{"kind": "column", "children": groups,
                                             "stretch": True}]}

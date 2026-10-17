@@ -14,7 +14,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "OpenWrt Log Viewer",
-    "version": "3.0",
+    "version": "3.1",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],
@@ -471,7 +471,7 @@ TAB_SPEC = {
 def init(plugin_api: Any) -> None:
     global api
     api = plugin_api
-    # The form the 'Edit settings' button builds on this addon's row in the
+    # The form the 'Edit settings' button builds on this addon's tab in the
     # Addon manager; the file is read fresh, never cached.
     api.config.declare(
         fields=CONFIG_FIELDS, defaults=CONFIG_DEFAULTS,

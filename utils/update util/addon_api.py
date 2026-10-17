@@ -781,6 +781,55 @@ class _PaneFitter(QObject):
             held["shut"] = list(self._shut)
 
 
+class _WrappedHug(QObject):
+    """Keeps a word-wrapped line to the height its text actually needs.
+
+    A label that wraps can grow in both directions, and a column shares its
+    free room out between everything that can grow: a one-line status note put
+    above a table then takes half the page and the table is left as a strip at
+    the bottom of it. So the line is pinned to the height its text needs at the
+    width it has been given, worked out again whenever the pane widens or
+    narrows and whenever the addon writes new words into it. The line keeps its
+    wrap - a narrow pane still gets every line, in a taller box - but it never
+    eats the room the widgets under it asked for.
+    """
+
+    def __init__(self, label: QLabel) -> None:
+        super().__init__(label)
+        self._label = label
+        policy = label.sizePolicy()
+        policy.setVerticalPolicy(QSizePolicy.Policy.Fixed)
+        label.setSizePolicy(policy)
+        label.installEventFilter(self)
+        self.cap(label.width())
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Resize:
+            size, was = event.size(), event.oldSize()
+            if not was.isValid() or size.width() != was.width():
+                self.cap(size.width())
+        return False
+
+    def cap(self, width: int) -> None:
+        """Allow the line exactly the height this much text needs at that width."""
+        try:
+            need = self._label.heightForWidth(int(width)) if int(width) > 0 else 0
+        except (TypeError, ValueError):
+            need = 0
+        if need <= 0:
+            # Nothing laid out to work from yet - a hidden pane, a width of
+            # zero - so the label's own guess about its text is the measure.
+            need = self._label.sizeHint().height()
+        if need > 0:
+            self._label.setMaximumHeight(need)
+
+
+def _hug_wrapped(widget: QWidget) -> None:
+    """The one hug a wrapped line has, made on the first ask and found again."""
+    if getattr(widget, "_addon_hug", None) is None:
+        widget._addon_hug = _WrappedHug(widget)
+
+
 def _swatch_icon(colour: QColor) -> QIcon:
     """The chip at the end of a ``color`` line; grey when the hex is bad."""
     side = max(12, zoom_size(16))
@@ -893,6 +942,12 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
         widget.setPlaceholderText(str(spec["placeholder"]))
     if spec.get("word_wrap") is not None and hasattr(widget, "setWordWrap"):
         widget.setWordWrap(bool(spec["word_wrap"]))
+        if bool(spec["word_wrap"]) and isinstance(widget, QLabel):
+            # A wrapped line hugs its own height, so the room a column has over
+            # falls to the table or text under it rather than being eaten here.
+            # Only a label wraps a line of its own; a check box that wraps its
+            # caption is still a single row of the form it sits in.
+            _hug_wrapped(widget)
     if spec.get("expand") and hasattr(widget, "setSizePolicy"):
         # Take the slack of the row or column it sits in: a long line then wraps
         # inside the room that is actually left, instead of being squeezed by a
@@ -913,6 +968,12 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
         widget.setStyleSheet(str(spec["style"]))
     if spec.get("object_name") is not None:
         widget.setObjectName(str(spec["object_name"]))
+    if spec.get("locked") is not None and isinstance(widget, QTabWidget):
+        # A container can be born held: the job pane that swaps a tab over is
+        # built with "locked": True and never has to remember to ask.
+        apply_widget_property(widget, "locked", spec["locked"])
+    if spec.get("tab_colors") is not None and isinstance(widget, QTabWidget):
+        apply_widget_property(widget, "tab_colors", spec["tab_colors"])
     if "enabled" in spec:
         widget.setEnabled(bool(spec["enabled"]))
     if "visible" in spec:
@@ -969,6 +1030,15 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
             widget.valueChanged.connect(lambda value: events(identifier, "changed", {"value": int(value)}))
         elif isinstance(widget, QCheckBox):
             widget.toggled.connect(lambda on: events(identifier, "changed", {"checked": bool(on)}))
+        elif isinstance(widget, QTabWidget):
+            # Which sub-page the person is looking at: the caption comes back
+            # beside the index, so an addon can tell one dynamically built page
+            # from another without keeping its own list in step with Qt's.
+            widget.currentChanged.connect(
+                lambda index: events(identifier, "changed", {
+                    "index": int(index),
+                    "text": str(widget.tabText(index) or "")
+                    if 0 <= index < widget.count() else ""}))
     if "context" in names:
         # Right-click: the row's text is sent along so the addon needs no
         # second round trip; it shows its menu with ``api.ui.choose``.
@@ -1537,8 +1607,15 @@ def _build_one(spec: dict, registry: dict,
         inner = QWidget()
         body = children[0] if children and isinstance(children[0], dict) else {"kind": "column"}
         layout = _make_layout(inner, body.get("kind", "column"))
+        # The room left under a scrolled column is the column's own saying: an
+        # addon that wants its form pinned to the top of the pane writes
+        # ``"stretch": True`` on the column inside the scroll, and a pane that
+        # is only a wrapper keeps whatever the scroll itself promised.
+        holder = dict(spec)
+        if body.get("stretch") is not None:
+            holder["stretch"] = body["stretch"]
         _fill_children(layout, body.get("children") or [], str(body.get("kind") or "column"),
-                       spec, registry, events)
+                       holder, registry, events)
         area.setWidget(inner)
         _apply_common(area, spec, registry, events)
         return area
@@ -1940,6 +2017,34 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
             _tabs_add_page(widget, value)
         else:
             _tabs_remove_page(widget, value)
+    elif prop == "locked":
+        # Hold a tabs container on the page it is showing: no click on its own
+        # sub-bar, and no keyboard or wheel move, until it is let go. Used for a
+        # job that must not be browsed away from; the app's main bar is held by
+        # the same idea through ``api.tabs.lock``.
+        if not isinstance(widget, QTabWidget):
+            raise AddonError("'locked' holds the pages of a tabs container")
+        from core.ui import set_tab_lock
+
+        if not set_tab_lock(widget, bool(value)) and bool(value):
+            raise AddonError("'locked' needs a tabs container")
+    elif prop == "tab_colors":
+        # One caption colour per page, given as a list of colours where an
+        # empty entry means "as the theme draws it". A page that is switched
+        # off is greyed this way rather than disabled, so it can still be
+        # clicked open and read.
+        if not isinstance(widget, QTabWidget):
+            raise AddonError("'tab_colors' paints the captions of a tabs container")
+        bar = widget.tabBar()
+        for index, colour in enumerate(value or []):
+            if not (0 <= index < widget.count()) or bar is None:
+                continue
+            tint = str(colour or "").strip()
+            if not tint:
+                bar.setTabTextColor(index, QColor())
+                continue
+            paint = QColor(tint)
+            bar.setTabTextColor(index, paint if paint.isValid() else QColor())
     elif prop == "font_size":
         font = widget.font()
         font.setPointSize(zoom_size(int(value or 10)))
@@ -1948,6 +2053,14 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
             widget.set_font(font)
         else:
             widget.setFont(font)
+    hug = getattr(widget, "_addon_hug", None)
+    if hug is not None:
+        # A wrapped line's own height is worked out from the words it carries,
+        # so any property that can move those words - ``text``, ``html``,
+        # ``value``, a new ``font_size`` - has to be asked again how much room
+        # the line needs now. Qt does not say so through a resize, and a status
+        # line left capped at its first message would be cut off mid-sentence.
+        hug.cap(widget.width())
 
 
 def _make_row(row: Any) -> tuple[QTreeWidgetItem, Any, bool]:
@@ -2675,7 +2788,7 @@ class SessionAPI:
         """Move one addon's own gate over SSH or SFTP, and say whether it has one.
 
         This is the switch that used to sit under the addon's name in Settings and
-        now sits on its row in the store's Addon manager: off, the addon is refused
+        now sits on its tab in the store's Addon manager: off, the addon is refused
         that transport even with the main connection open and the app-wide switch
         on. Only a transport its manifest asked for is switchable - anything else
         answers False, because the addon never declared it and would not use it
@@ -2949,11 +3062,11 @@ class DeviceAPI:
                 "the main connection is not open: press Connect in the "
                 "Connection panel, or call device.ensure_connected() to ask "
                 "for it" + (" - or switch this addon onto a connection of its "
-                            "own on its row in the Addon manager" if self._may_have_own()
+                            "own on its tab in the Addon manager" if self._may_have_own()
                             else ""))
 
     def _may_have_own(self) -> bool:
-        """Whether the row's switch could put this addon on its own connection."""
+        """Whether the tab's switch could put this addon on its own connection."""
         addon = self._addon()
         if addon is None or getattr(addon, "is_bundled", False):
             return False
@@ -3010,7 +3123,7 @@ class DeviceAPI:
         return self._main()
 
     def _mark(self, transport: str) -> None:
-        """Note the transport for the dot on the addon's row; never fails the call."""
+        """Note the transport for the dot on the addon's tab; never fails the call."""
         try:
             self._api._manager.mark_transport(self._api._addon, transport)
         except Exception:
@@ -3098,7 +3211,7 @@ class DeviceAPI:
     def is_connected(self, protocol: str | None = None) -> bool:
         """Whether this addon could use a connection right now.
 
-        Its own switch, that transport's switch on its row, the master switch
+        Its own switch, that transport's switch on its tab, the master switch
         and the transport's app-wide switch all count, and an addon sharing the
         app's session can only use what is open: the one main connection. An
         addon on a connection of its own brings that connection up itself, so
@@ -3629,39 +3742,6 @@ class UIAPI:
         """A message in the status line that goes away by itself after ``ms``."""
         self._win.statusBar().showMessage(str(text), max(500, int(ms)))
 
-    def progress_notice(self, title: str, text: str = "", value: int = 0,
-                        maximum: int = 100) -> None:
-        """A live card over the window's corner, showing a running job's percent.
-
-        Where ``popup`` says one thing and leaves and ``notify`` writes a line
-        that fades, this is a card that stays while a job runs and moves a bar
-        as it goes, so a person who has pushed the window behind anything else
-        can still watch an install reach its end. The card is this addon's own -
-        keyed by its id, so repeated calls bring the same bar up with a new
-        figure instead of stacking - and it is named for the addon speaking.
-        ``value`` runs from 0 to ``maximum``; a card filled to ``maximum`` holds
-        a few seconds and closes itself, and :meth:`progress_notice_close` takes
-        it away sooner.
-        """
-        show = getattr(self._win, "progress_notice", None)
-        if not callable(show):
-            return
-        try:
-            show(str(self._api.id or "addon"), self._titled(title),
-                 str(text or ""), int(value), max(1, int(maximum)))
-        except Exception:                        # a card never breaks a job
-            pass
-
-    def progress_notice_close(self) -> None:
-        """Take this addon's progress card away now, if it is showing one."""
-        hide = getattr(self._win, "progress_notice_close", None)
-        if not callable(hide):
-            return
-        try:
-            hide(str(self._api.id or "addon"))
-        except Exception:
-            pass
-
     def window(self) -> QWidget:
         """The main window. Use sparingly - it is the app itself."""
         return self._win
@@ -4057,6 +4137,30 @@ class TabsAPI:
             return False
         self._win.tabs.setCurrentWidget(entry["page"])
         return True
+
+    def lock(self, locked: bool = True) -> bool:
+        """Hold the window's tab bar on the tab it is showing, or let it go.
+
+        A long job that fills its own tab with a progress pane is worth nothing
+        if the person can click to another tab while it runs and leave the job
+        with nowhere to be read: this holds the bar so no click, wheel or
+        keyboard nudge moves a page until ``locked`` is off again. It is the
+        window's whole bar, not one tab's, because the point is that the job's
+        tab is the only thing on screen that is talking. A ``tabs`` container
+        inside an addon's own page is held by the same idea through its
+        ``locked`` property, so a store can shut its sub-bar too.
+
+        The hold is the app's, not the addon's: stopping the addon lets go of it,
+        so a job that dies halfway cannot leave the bar frozen. ``False`` comes
+        back when the window has no bar to hold.
+        """
+        hold = getattr(self._win, "set_tabs_locked", None)
+        if not callable(hold):
+            return False
+        try:
+            return bool(hold(bool(locked)))
+        except Exception:                    # a bar that will not hold is a bar
+            return False
 
     def url(self, name: str) -> str:
         """The address an embedded page is showing; empty for a custom tab."""

@@ -31,10 +31,10 @@ the tab has to work with. What the tab does with a secret once it is open:
 * a password reads as bullets until **Show passwords** is ticked, and the
   password box in the form is only typeable while it is shown, so nobody edits
   an entry blind;
-* **Copy password** puts the password on the clipboard with ``api.ui.copy`` and
-  starts a timer for **Clipboard clears after** seconds. When it fires the
-  clipboard is wiped only if it still holds exactly what the addon put there, so
-  whatever was copied since is left alone;
+* the **Copy** button beside the password box puts the password on the clipboard
+  with ``api.ui.copy`` and starts a timer for **Clipboard clears after** seconds.
+  When it fires the clipboard is wiped only if it still holds exactly what the
+  addon put there, so whatever was copied since is left alone;
 * after **Lock after** minutes with nothing pressed on this tab, the vault locks
   itself and says so in the status line.
 
@@ -62,7 +62,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Password manager",
-    "version": "1.0",
+    "version": "1.1",
     "author": "fligma",
     "description": "Keeps logins in one encrypted file on this computer - no device, "
                    "no cloud - unlocked for the session with a master password, with "
@@ -784,21 +784,37 @@ def button(identifier: str, text: str, tip: str, enabled: bool = True) -> dict:
 
 
 def entry_group() -> dict:
-    """The five fields of one entry, and the stamp of when it last changed."""
+    """The five fields of one entry, and the stamp of when it last changed.
+
+    The two copy buttons sit beside the field each one takes, not in a strip
+    under the form: a row of five buttons wants more width than the pane gets
+    on this side of the split, and the pair would be a horizontal scrollbar.
+    """
     return {"kind": "group", "text": "The entry", "layout": "form", "children": [
         {"kind": "line", "id": "name", "label": "Name",
          "placeholder": "Router admin, VPN, GitHub...",
          "tooltip": "What you call this login. The list is sorted by it"},
-        {"kind": "line", "id": "user", "label": "User",
-         "placeholder": "root", "tooltip": "The account the password belongs to"},
-        {"kind": "line", "id": "pass", "label": "Password", "style": MONO_STYLE,
-         "tooltip": "Bullets until **Show passwords** is ticked - the box can only "
-                    "be typed in while it is showing, so nobody edits a password "
-                    "they cannot see. **Copy password** works either way",
-         "on": ["changed"]},
-        {"kind": "line", "id": "site", "label": "Site / service",
+        {"kind": "row", "label": "User", "children": [
+            {"kind": "line", "id": "user", "expand": True,
+             "placeholder": "root", "tooltip": "The account the password belongs to"},
+            button("copy_user", "Copy", "The user name on the clipboard. It is not "
+                                        "a secret, so it is left there", False),
+        ]},
+        {"kind": "row", "label": "Password", "children": [
+            {"kind": "line", "id": "pass", "expand": True, "style": MONO_STYLE,
+             "tooltip": "Bullets until **Show passwords** is ticked - the box can "
+                        "only be typed in while it is showing, so nobody edits a "
+                        "password they cannot see. The button beside it copies "
+                        "either way",
+             "on": ["changed"]},
+            button("copy_pass", "Copy", "The password on the clipboard, and off it "
+                                        "again after the seconds the config names",
+                   False),
+        ]},
+        {"kind": "line", "id": "site", "label": "Site",
          "placeholder": "192.168.1.1, or https://example.org",
-         "tooltip": "Where this login is used"},
+         "tooltip": "Where this login is used - an address or a site, whichever "
+                    "you would search the list for"},
         {"kind": "multi", "id": "note", "label": "Note",
          "placeholder": "Recovery e-mail, the PIN, when it was changed...",
          "tooltip": "Anything worth remembering about this entry. It is encrypted "
@@ -826,13 +842,15 @@ def maker_group(values: dict) -> dict:
          "checked": bool(config_get(values, "gen_upper", True))},
         {"kind": "check", "id": "gen_digits", "text": "Digits (0-9)",
          "checked": bool(config_get(values, "gen_digits", True))},
-        {"kind": "check", "id": "gen_symbols", "text": f"Symbols ({SYMBOLS})",
+        {"kind": "check", "id": "gen_symbols", "text": "Symbols",
+         "tooltip": f"One of {SYMBOLS} at random. Ticked along with the others, it "
+                    "widens the alphabet the password is drawn from",
          "checked": bool(config_get(values, "gen_symbols", True))},
         {"kind": "check", "id": "gen_no_ambiguous",
-         "text": "Skip the confusing ones (l I 1 O 0)",
-         "checked": bool(config_get(values, "gen_no_ambiguous", True)),
-         "tooltip": "For a password that has to be read out loud or typed from a "
-                    "screen onto a phone"},
+         "text": "Skip the confusing ones",
+         "tooltip": "Leaves out l, I, 1, O and 0 - for a password that has to be "
+                    "read out loud or typed from a screen onto a phone",
+         "checked": bool(config_get(values, "gen_no_ambiguous", True))},
         {"kind": "row", "label": "Guess work", "children": [
             {"kind": "progress", "id": "strength", "maximum": 100, "value": 0,
              "expand": True,
@@ -908,23 +926,18 @@ def tab_spec(values: dict) -> dict:
         {"kind": "label", "id": "status", "word_wrap": True, "expand": True,
          "text": "A vault of passwords, kept encrypted on this computer.",
          "style": "color: #23d18b; padding: 2px 4px;"},
-        {"kind": "splitter", "sizes": [5, 4], "children": [
+        {"kind": "splitter", "sizes": [1, 1], "children": [
             list_pane(),
             {"kind": "scroll", "children": [
                 {"kind": "column", "stretch": True, "children": [
                     entry_group(), maker_group(values),
                     {"kind": "row", "children": [
-                        button("save", "Save entry",
+                        button("save", "Save",
                                "Write this entry into the vault file, adding it if "
                                "the form was started empty"),
-                        button("revert", "Reload it",
+                        button("revert", "Revert",
                                "Put the saved values back into the form", False),
-                        button("copy_pass", "Copy password",
-                               "The password on the clipboard, and off it again "
-                               "after the seconds the config names", False),
-                        button("copy_user", "Copy user",
-                               "The user name on the clipboard. It is not a secret, "
-                               "so it is left there", False),
+                        {"kind": "spacer"},
                         button("delete", "Delete", "Take this entry out of the "
                                                     "vault", False),
                     ]},
