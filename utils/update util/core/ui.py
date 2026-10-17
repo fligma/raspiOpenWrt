@@ -3138,10 +3138,12 @@ class _ColorWheel(QWidget):
         radius = self._side / 2.0
         painter.drawPixmap(0, 0, self._disc(self._side))
         if self._value < 1.0:
-            painter.setCompositionMode(QPainter.CompositionMode.SourceAtop)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceAtop)
             painter.fillRect(self.rect(), QColor(
                 0, 0, 0, int(round(255 * (1.0 - self._value)))))
-            painter.setCompositionMode(QPainter.CompositionMode.SourceOver)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver)
         angle = self._hue * 2.0 * math.pi
         mx = radius + radius * self._sat * math.cos(angle)
         my = radius - radius * self._sat * math.sin(angle)

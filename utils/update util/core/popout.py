@@ -30,13 +30,14 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel,
                              QMenu, QPushButton, QTabWidget, QVBoxLayout, QWidget)
 
 from addon_common import find_addon_picture, find_icon
-from core.const import ADDONS_DIR, ASSETS_DIR, BASE_DIR, scaled_sheet
+from core.const import (ADDONS_DIR, ASSETS_DIR, BASE_DIR, current_zoom,
+                        scaled_sheet, step_zoom, zoom_size)
 import core.ui
 from core.net import SharedConnection, SharedSessionWorker, credential_id
 from core.views import BrowserMixin, cert_bypass_active, set_cert_bypass
@@ -50,6 +51,21 @@ GEOMETRY_KEYS = ("x", "y", "width", "height", "maximized")
 #: A tab the record never wrote down: it goes in after the ones that were, since
 #: nothing is known about where it belonged.
 LAST_SLOT = 1 << 30
+
+# --- the window's own furniture, all of it said at 100% zoom ---
+
+#: The air inside the header row and the gap between its two widgets: as much a
+#: part of the interface's size as the sheet it is drawn from, so the interface
+#: zoom multiplies them like everything else.
+HEADER_MARGINS = (10, 6, 8, 6)
+HEADER_GAP = 8
+
+#: Where a window that nothing was ever kept about stands: big enough for a page
+#: with two panes in it, and small enough to move out of the way.
+DEFAULT_SIZE = (900, 640)
+
+#: The floor a window is never shrunk below, by a zoom step or by the record.
+MIN_SIZE = 60
 
 
 # --- the window ---
@@ -77,19 +93,24 @@ class PopoutWindow(QWidget):
         self._minimum: tuple[int, int] | None = None
         self._geometry_timer: QTimer | None = None
         self._pending: tuple[str, dict] | None = None
+        # The window is drawn at the interface zoom like the rest of the program:
+        # these two hold what it was last laid out at, and the sheet its addon
+        # asked for over the theme, so a zoom step can pour the whole thing again.
+        self._addon_css = ""
+        self._zoom = current_zoom()
         self.setObjectName("popoutWindow")
         self.setWindowTitle(str(title or "Berry addon"))
         if icon is not None:
             self.setWindowIcon(icon)
-        self.setStyleSheet(scaled_sheet(core.ui.stylesheet()))
 
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
         self.header = QWidget()
         row = QHBoxLayout(self.header)
-        row.setContentsMargins(10, 6, 8, 6)
-        row.setSpacing(8)
+        self._header_row = row
+        row.setContentsMargins(*(zoom_size(value) for value in HEADER_MARGINS))
+        row.setSpacing(zoom_size(HEADER_GAP))
         self.caption = QLabel(self.windowTitle())
         self.caption.setStyleSheet("font-weight: 600;")
         row.addWidget(self.caption)
@@ -110,6 +131,69 @@ class PopoutWindow(QWidget):
         self.tabs.tabBar().setUsesScrollButtons(True)
         column.addWidget(self.tabs, 1)
         self._show_bar()
+        self.follow_zoom()
+
+    # --- following the interface zoom ---
+
+    def follow_zoom(self, zoom: int | None = None) -> bool:
+        """Redraw the window at the interface zoom; says whether it changed size.
+
+        Three things go with a zoom rung: the sheet, which is the theme's own and
+        is re-rendered rather than scaled twice; the header's air and the floor
+        the page may be squeezed down to, both measured in the pixels the zoom
+        multiplies; and the window itself, which grows by the same step it was
+        drawn at so the room a person chose keeps meaning the same part of the
+        page. A maximised window is left to fill the screen it already fills.
+        """
+        percent = current_zoom() if zoom is None else step_zoom(int(zoom), 0)
+        was = self._zoom or percent
+        self._zoom = percent
+        base = scaled_sheet(core.ui.stylesheet(), percent)
+        self.setStyleSheet(f"{base}\n{self._addon_css}" if self._addon_css else base)
+        self._header_row.setContentsMargins(
+            *(zoom_size(value, percent) for value in HEADER_MARGINS))
+        self._header_row.setSpacing(zoom_size(HEADER_GAP, percent))
+        self.zoom_page_marks(percent)
+        if self._minimum and self._flags["resizable"]:
+            self.setMinimumSize(*(zoom_size(value, percent)
+                                  for value in self._minimum))
+        if percent == was or self.isMaximized():
+            return False
+        factor = percent / float(was)
+        size = self.size()
+        width = max(MIN_SIZE, int(size.width() * factor))
+        height = max(MIN_SIZE, int(size.height() * factor))
+        self.resize(width, height)
+        if not self._flags["resizable"]:
+            # A locked window keeps its one size, and that size is now this one.
+            self.setMinimumSize(width, height)
+            self.setMaximumSize(width, height)
+        return True
+
+    def resize_default(self) -> None:
+        """Stand at the size a window of this program's takes when nothing about
+        where it last stood was ever kept."""
+        self.resize(*(zoom_size(value) for value in DEFAULT_SIZE))
+        self.center()
+
+    def zoom_page_marks(self, percent: int) -> None:
+        """The pictures the pages inside this window wear, at the zoom in force.
+
+        The main bar is scaled by the app; a popout's own bar - shown as soon as
+        an addon has two pages out here - is nobody else's business, so it is
+        measured the same way: the style's baseline and the theme's mark size,
+        both multiplied.
+        """
+        bar = self.tabs.tabBar()
+        base = getattr(self, "_mark_base", None)
+        if base is None:
+            base = max(1, int(bar.iconSize().width()))
+            self._mark_base = base
+        side = zoom_size(base, percent)
+        from_theme = core.ui.icon_px()
+        if from_theme:
+            side = max(side, zoom_size(from_theme, percent))
+        bar.setIconSize(QSize(side, side))
 
     # --- pages ---
 
@@ -187,18 +271,26 @@ class PopoutWindow(QWidget):
             self.setWindowIcon(mark)
 
     def set_style(self, css: str) -> None:
-        """The theme with the addon's own sheet laid over it, as a tab's is."""
-        base = scaled_sheet(core.ui.stylesheet())
-        self.setStyleSheet(f"{base}\n{css}" if css else base)
+        """The theme with the addon's own sheet laid over it, as a tab's is.
+
+        The addon's words are kept rather than merged, because the window is
+        redrawn whenever the theme or the interface zoom moves and both halves
+        have to come back in the same order.
+        """
+        self._addon_css = str(css or "")
+        self.follow_zoom(self._zoom)
 
     def set_sizes(self, width: int | None = None, height: int | None = None) -> None:
+        """The size an addon asks for: its own pixels at 100% zoom, drawn at the
+        zoom the interface is using."""
         if width and height:
-            self.resize(int(width), int(height))
+            self.resize(zoom_size(int(width)), zoom_size(int(height)))
 
     def set_minimum(self, width: int, height: int) -> None:
+        """The floor an addon pins the page to, in the same 100% zoom pixels."""
         self._minimum = (int(width), int(height))
         if self._flags["resizable"]:
-            self.setMinimumSize(int(width), int(height))
+            self.setMinimumSize(zoom_size(int(width)), zoom_size(int(height)))
 
     def set_position(self, x: int, y: int) -> None:
         self.move(int(x), int(y))
@@ -356,7 +448,7 @@ class PopoutWindow(QWidget):
             height = int(data.get("height") or 0)
         except (TypeError, ValueError):
             return False
-        if width < 60 or height < 60:
+        if width < MIN_SIZE or height < MIN_SIZE:
             return False
         self.resize(width, height)
         try:
@@ -404,7 +496,11 @@ def window_for(manager: Any, addon: Any, create: bool = False) -> PopoutWindow |
     window = PopoutWindow(title=str(addon.name or addon.id), save=save,
                           report=report, dock=lambda _n, m=manager, a=addon:
                           dock_back(m, a), icon=addon_mark(manager, addon))
-    window.read_geometry(manager.record_for(addon.id).get("popout_geometry"))
+    if not window.read_geometry(manager.record_for(addon.id).get("popout_geometry")):
+        # First run, or a record that kept nothing usable: the window takes the
+        # size the program offers a window it knows nothing about, at the zoom
+        # the interface is drawn at, rather than Qt's notion of a small dialog.
+        window.resize_default()
     where[addon.id] = window
     return window
 
@@ -595,6 +691,29 @@ def close_windows(manager: Any, addon: Any) -> None:
     recall(manager, addon)
     manager.windows.pop(addon.id, None)
     window.deleteLater()
+
+
+def follow_zoom(manager: Any, percent: int | None = None) -> int:
+    """Every live popout window of this program, laid out at the interface zoom.
+
+    A window is not a tab in the bar: it holds a sheet of its own and a header of
+    its own, and the app's zoom pass reaches neither through the window sheet, so
+    the manager calls this after it has redrawn itself. Says how many windows
+    answered - a window that has already gone with its addon is not counted, and
+    is not an error.
+    """
+    where = getattr(manager, "windows", None) or {}
+    done = 0
+    for addon_id in list(where):
+        window = where.get(addon_id)
+        if window is None:
+            continue
+        try:
+            window.follow_zoom(percent)
+            done += 1
+        except (RuntimeError, AttributeError, TypeError):
+            continue            # a window half-taken-down keeps its addon's tab
+    return done
 
 
 # --- the desktop link ---

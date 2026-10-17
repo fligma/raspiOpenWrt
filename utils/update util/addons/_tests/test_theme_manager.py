@@ -253,6 +253,14 @@ def test_the_tab(mgr: Any, app: Any) -> None:
     check(registry["hex"].inherits("QLineEdit"),
           "the hex line is not a line, so 'value' will not reach it")
 
+    # A sheet laid on a widget is kept as written - pixels at 100% - so the
+    # zoom in force can re-pour it: an addon's widgets follow the same rule
+    # the app's own do when the interface grows or shrinks.
+    sample = "QWidget { background-color: #123456; padding: 8px; }"
+    addon_api.apply_widget_property(registry["tpreview"], "style", sample)
+    check(str(getattr(registry["tpreview"], "_theme_sheet", "")) == sample,
+          "the widget does not hold the sheet for a zoom change to re-pour")
+
     # Anything the user works with says what it is for, in a tooltip or, for a
     # text box, in the grey line that is in it until something is typed.
     HANDLED = ("button", "combo", "line", "spin", "check", "color", "tree", "table")
@@ -632,6 +640,80 @@ def test_colour_wheel(mgr: Any, api: Api) -> None:
     api.picked_colour = ""
 
 
+class WindowApi(Api):
+    """An api whose program really has a window: the switch answers for it."""
+
+    def __init__(self, addon_id: str = "theme_manager") -> None:
+        super().__init__(addon_id=addon_id)
+        self.popped_now = False
+
+    def default(self, method: str, arguments: Any, named: Any) -> Any:
+        if method == "window.popped":
+            return self.popped_now
+        if method == "window.open":
+            self.popped_now = True
+            return True
+        if method == "window.popout":
+            self.popped_now = bool(
+                self.argument(method, "on", arguments, named, True))
+            return True
+        return super().default(method, arguments, named)
+
+
+def test_editor_window(mgr: Any, api: Api) -> None:
+    """The maker lifts the tab into a window of its own, and remembers."""
+    print("\n6c. the editor window")
+    spec = mgr.tab_spec()
+    check(node_of(spec, "win") is not None,
+          "the banner carries no button for the editor window")
+    check(node_of(spec, "wheel") is None,
+          "the maker still wears the two-step 'Wheel...' button")
+    check(node_of(spec, "chgcolor") is not None,
+          "the one-go 'Change colour...' button went with the refinement")
+    check(mgr.DEFAULTS.get("edit_popout") is True,
+          "the editor window is not what the settings ask for by default")
+    check("edit_popout" in [str(one.get("key")) for one in mgr.FIELDS],
+          "the editor window switch is not declared as a setting")
+    win = WindowApi()
+    mgr.init(win)
+    try:
+        # Going onto the maker opens the window, once, and the button says so.
+        mgr.focus_editor()
+        check(win.times("window.open") == 1,
+              f"one jump opened the editor window "
+              f"{win.times('window.open')} times")
+        check(win.sent("win", "text") == "Dock the editor",
+              f"the banner button reads {win.sent('win', 'text')!r} while the "
+              "tab stands in a window")
+        check(win.sent("subtabs", "current") == mgr.PAGE_MAKER,
+              "the jump did not land on the maker")
+        # A second jump finds the window there already and opens no new one.
+        mgr.focus_editor()
+        check(win.times("window.open") == 1,
+              "a second jump re-opened a window that was already out")
+        # The banner button docks it back; the app's event then forgets the ask.
+        mgr.on_widget(mgr.TAB, "win", "clicked", {})
+        check(win.times("window.popout") == 1 and not win.popped_now,
+              "the banner button did not dock the tab back")
+        was = win.times("config.update")
+        mgr.on_window({"event": "docked"})
+        check(win.times("config.update") == was + 1,
+              "docking back by hand did not switch the setting off with it")
+        check(win.sent("win", "text") == "Editor window...",
+              "the banner button did not change back with the docking")
+        # With the switch off, the jump leaves the tab in the bar.
+        win.config_values["edit_popout"] = False
+        opened = win.times("window.open")
+        mgr.focus_editor()
+        check(win.times("window.open") == opened,
+              "the editor window came back after its switch went off")
+        check(win.sent("subtabs", "current") == mgr.PAGE_MAKER,
+              "the maker did not open in the tab once the window was off")
+    finally:
+        # Hand the tab back to the api every later section uses.
+        mgr.init(api)
+
+
 # --- seven: the tab bar ---
 
 def test_knobs(mgr: Any, api: Api) -> None:
@@ -995,6 +1077,11 @@ def test_hooks(mgr: Any, api: Api) -> None:
     actions = [mgr.refresh_all, mgr.start, mgr.show_source, mgr.focus_editor,
                mgr.blank_draft, mgr.discard_draft, mgr.apply_picked,
                mgr.delete_picked, mgr.create_from_template, mgr.open_folder,
+               mgr.show_maker, mgr.toggle_window, mgr.update_window_button,
+               lambda: mgr.on_window({"event": "docked"}),
+               lambda: mgr.on_window({}),
+               lambda: mgr.open_window(), lambda: mgr.window_shown(),
+               lambda: mgr.wants_window(),
                lambda: mgr.on_event("theme_changed", {}),
                lambda: mgr.on_config({"addon": "x"}),
                lambda: mgr.on_widget(mgr.TAB, "save", "clicked", {}),
@@ -1192,6 +1279,7 @@ def main() -> int:
         test_knobs(mgr, api)
         test_save(mgr, api)
         test_colour_wheel(mgr, api)
+        test_editor_window(mgr, api)
         test_source(mgr, api)
         test_files(mgr, api)
         test_docs(mgr, api)

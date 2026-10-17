@@ -34,10 +34,13 @@ usable theme.
 Editing happens on a *draft*: the theme in the editor's hand, held complete in
 memory, changed a token or a knob at a time and shown as JSON that can be typed
 into directly. A colour can be changed in one move - press **Change colour...**
-or right-click a token and pick the wheel - and the **Live preview** at the top
-of the maker repaints on every change, so the look is seen as it is made.
-Nothing reaches the disk until **Save**, and nothing reaches the window until
-**Apply**, so a look can be ruined without anyone noticing.
+or right-click a token and pick the wheel - and the **Live preview** beside the
+editor repaints on every change, so the look is seen as it is made. The maker
+is the busiest page in the tab, so it opens in a window of its own by default:
+the tab lifts out of the bar into a top-level window that follows the interface
+zoom and can be docked back with a press. Nothing reaches the disk until
+**Save**, and nothing reaches the window until **Apply**, so a look can be
+ruined without anyone noticing.
 
 The **Docs** sub-tab is laid out like the Addon Dev panel's: a tree of the
 ``api.theme`` calls under headings, beside the page each one opens. It is read
@@ -61,7 +64,7 @@ from addon_common import (AddonError, config_get, find_addon_picture, jsonable,
 
 ADDON = {
     "name": "Theme Manager",
-    "version": "1.3",
+    "version": "1.4",
     "author": "fligma",
     "description": "Makes, edits and downloads the .theme files the program is "
                    "drawn from: every look on disk with a live preview beside "
@@ -70,7 +73,8 @@ ADDON = {
                    "theme came from), an editor that works on one theme at a "
                    "time - colours by their groups (change one with the wheel "
                    "in a click, against a live preview), the tab bar by its "
-                   "knobs, or the JSON direct - and a reference of every "
+                   "knobs, or the JSON direct - in a window of its own that "
+                   "follows the interface zoom - and a reference of every "
                    "api.theme call. Themes are set in Settings > Appearance, "
                    "which the tab links to.",
     "requires": [],
@@ -125,6 +129,10 @@ DEFAULTS = {
     "confirm_delete": True,
     "save_applies": True,
     "expand_groups": True,
+    # The maker opens in a window of its own: the editor is four panes deep
+    # and the tab bar gives it only the width of the window. Off, the editor
+    # stays in the tab like every other page.
+    "edit_popout": True,
     # The store: which repositories the catalog is read from. The same shape
     # the addon store keeps; the GitHub token is not kept here, since a profile
     # has exactly one of those and it is read through ``profile_token``.
@@ -145,12 +153,18 @@ FIELDS = [
      "kind": "bool",
      "hint": "The editor's trees list every token, grouped by what it is used "
              "for. Closed, only the first group of each is opened for you."},
+    {"key": "edit_popout", "label": "Open the editor in a window of its own",
+     "kind": "bool",
+     "hint": "The Theme Maker lifts out of the tab bar into a window that "
+             "follows the interface zoom and gets the whole screen. Docking "
+             "it back from that window switches this off; the banner's "
+             "button opens or docks the window either way."},
 ]
 
 #: The store's GitHub token is not one of these: it belongs to the profile and is
 #: written in Settings > Connection, and the switch on this addon's row in the
 #: store's Addon manager decides whether it is handed over at all.
-GROUPS = (("The editor", ["save_applies", "expand_groups"]),
+GROUPS = (("The editor", ["save_applies", "expand_groups", "edit_popout"]),
           ("Files", ["confirm_delete"]))
 
 # --- the tab's own look ---
@@ -1507,9 +1521,92 @@ def store_page() -> dict:
 
 def edit_page() -> dict:
     """The Theme Maker: start a look from a template, then change it token by
-    token, knob by knob, or as JSON."""
-    return {"kind": "column", "children": [
-        {"kind": "splitter", "sizes": [3, 3], "children": [
+    token, knob by knob, or as JSON.
+
+    The working panes take the left of the page and the preview the whole right,
+    so the sample stands as tall as the trees it is read against; the draft's
+    own file lies under them, folded down until it is wanted. This is the page
+    the editor window opens on - see ``edit_popout`` - and it is built to use
+    the room a window of its own gives.
+    """
+    return {"kind": "splitter", "sizes": [5, 3], "children": [
+        {"kind": "column", "children": [
+            {"kind": "row", "children": [
+                {"kind": "label", "text": "Editing", "style": _HEAD_STYLE},
+                {"kind": "combo", "id": "draft", "expand": True, "on": ["changed"],
+                 "tooltip": "The theme in the editor. Picking another one drops any "
+                            "change that has not been saved."},
+                {"kind": "line", "id": "draftas",
+                 "placeholder": "a new name for it",
+                 "tooltip": "Leave blank to save over the theme opened. Filled in, "
+                            "Save writes a new file instead of touching that one."},
+                {"kind": "check", "id": "applylive", "text": "redraw on save",
+                 "checked": True,
+                 "tooltip": "Save the theme the window is drawn from and the change "
+                            "shows at once"},
+                {"kind": "button", "id": "newdraft", "text": "Blank from default",
+                 "on": ["clicked"], "tooltip": "A draft of the shipped look, not on "
+                                               "disk until it is saved"},
+            ]},
+            {"kind": "splitter", "vertical": True, "sizes": [4, 1], "children": [
+                {"kind": "splitter", "sizes": [5, 4], "children": [
+                    {"kind": "tree", "id": "tokens", "columns": ["Colour", "Hex"],
+                     "on": ["selected", "context"],
+                     "tooltip": "Every colour the interface is painted with, in the "
+                                "blocks it is used for. Pick one and set it on the "
+                                "right; right-click it to change it with the wheel."},
+                    {"kind": "column", "children": [
+                        {"kind": "label", "id": "tokennote", "text": "",
+                         "word_wrap": True, "style": _HEAD_STYLE},
+                        {"kind": "row", "children": [
+                            {"kind": "label", "text": "hex"},
+                            {"kind": "color", "id": "hex", "expand": True,
+                             "placeholder": "#rrggbb",
+                             "tooltip": "Type a colour, or press the chip for the "
+                                        "wheel"},
+                            {"kind": "button", "id": "chgcolor",
+                             "text": "Change colour...", "on": ["clicked"],
+                             "tooltip": "Open the wheel on the picked "
+                                        "token and set it in one go"},
+                            {"kind": "button", "id": "setcolor",
+                             "text": "Set colour", "on": ["clicked"],
+                             "tooltip": "Put that colour on the picked token in "
+                                        "the draft"},
+                        ]},
+                        {"kind": "label", "text": "The tab bar",
+                         "style": _HEAD_STYLE},
+                        {"kind": "tree", "id": "knobs", "columns": ["Knob", "Now"],
+                         "on": ["selected"],
+                         "tooltip": "What the app owns about a tab: its picture, "
+                                    "its air, its corners, whether it shows its "
+                                    "name at all."},
+                        {"kind": "row", "children": [
+                            {"kind": "label", "text": "to"},
+                            {"kind": "spin", "id": "knobnum", "minimum": 0,
+                             "maximum": 200, "value": 0,
+                             "tooltip": "For a knob measured in pixels"},
+                            {"kind": "check", "id": "knobbool", "text": "on",
+                             "tooltip": "For a knob that is a switch"},
+                            {"kind": "button", "id": "setknob", "text": "Set knob",
+                             "on": ["clicked"], "tooltip": "Put that value on the "
+                                                           "picked knob in the draft"},
+                        ]},
+                    ]},
+                ]},
+                # The draft's own file, under the two lists rather than beside
+                # them: pulled up it is the bigger part of the page, folded
+                # down it leaves the colours and the knobs the whole of the room.
+                {"kind": "multi", "id": "source", "highlight": "json",
+                 "expand": True,
+                 "placeholder": "the draft as its file holds it - edit it here "
+                                "and press Use the JSON"},
+            ]},
+            {"kind": "row", "children": buttons(EDIT_BUTTONS) + [
+                {"kind": "label", "id": "draftstate", "text": "", "expand": True,
+                 "style": _HEAD_STYLE},
+            ]},
+        ]},
+        {"kind": "splitter", "vertical": True, "sizes": [1, 3], "children": [
             {"kind": "group", "text": "A look that does not exist yet",
              "children": [
                  {"kind": "row", "children": [
@@ -1519,7 +1616,6 @@ def edit_page() -> dict:
                       "tooltip": "The starting point: each is a whole theme, "
                                  "ready to edit, and none of them is on disk "
                                  "until you create it"},
-                     {"kind": "label", "text": "named"},
                      {"kind": "line", "id": "newname", "expand": True,
                       "placeholder": "my look",
                       "tooltip": "A file name, so no / \\ : * ? or quotes; "
@@ -1527,88 +1623,13 @@ def edit_page() -> dict:
                                  "theme's name"},
                      {"kind": "button", "id": "create", "text": "Create",
                       "on": ["clicked"], "tooltip": "Write the new theme and "
-                                                    "open it in the editor "
-                                                    "below"},
+                                                    "open it in the editor"},
                  ]},
-                 {"kind": "label", "id": "tplnote", "text": "", "word_wrap": True,
-                  "style": _HEAD_STYLE},
+                 {"kind": "label", "id": "tplnote", "text": "",
+                  "word_wrap": True, "style": _HEAD_STYLE},
              ]},
             preview_spec("mpreview", "mprevnote", "mprevtokens",
                          title="Live preview"),
-        ]},
-        {"kind": "row", "children": [
-            {"kind": "label", "text": "Editing", "style": _HEAD_STYLE},
-            {"kind": "combo", "id": "draft", "expand": True, "on": ["changed"],
-             "tooltip": "The theme in the editor. Picking another one drops any "
-                        "change that has not been saved."},
-            {"kind": "line", "id": "draftas", "placeholder": "a new name for it",
-             "tooltip": "Leave blank to save over the theme opened. Filled in, "
-                        "Save writes a new file instead of touching that one."},
-            {"kind": "check", "id": "applylive", "text": "redraw on save",
-             "checked": True,
-             "tooltip": "Save the theme the window is drawn from and the change "
-                        "shows at once"},
-            {"kind": "button", "id": "newdraft", "text": "Blank from default",
-             "on": ["clicked"], "tooltip": "A draft of the shipped look, not on "
-                                           "disk until it is saved"},
-        ]},
-        {"kind": "splitter", "vertical": True, "sizes": [4, 1], "children": [
-            {"kind": "splitter", "sizes": [5, 4], "children": [
-                {"kind": "tree", "id": "tokens", "columns": ["Colour", "Hex"],
-                 "on": ["selected", "context"],
-                 "tooltip": "Every colour the interface is painted with, in the "
-                            "blocks it is used for. Pick one and set it on the "
-                            "right; right-click it to change it with the wheel."},
-                {"kind": "column", "children": [
-                    {"kind": "label", "id": "tokennote", "text": "",
-                     "word_wrap": True, "style": _HEAD_STYLE},
-                    {"kind": "row", "children": [
-                        {"kind": "label", "text": "hex"},
-                        {"kind": "color", "id": "hex", "expand": True,
-                         "placeholder": "#rrggbb",
-                         "tooltip": "Type a colour, or press the chip for the "
-                                    "wheel"},
-                        {"kind": "button", "id": "wheel", "text": "Wheel...",
-                         "on": ["clicked"],
-                         "tooltip": "The app's colour wheel"},
-                        {"kind": "button", "id": "chgcolor",
-                         "text": "Change colour...", "on": ["clicked"],
-                         "tooltip": "Open the wheel on the picked "
-                                    "token and set it in one go"},
-                        {"kind": "button", "id": "setcolor", "text": "Set colour",
-                         "on": ["clicked"], "tooltip": "Put that colour on the "
-                                                       "picked token in the draft"},
-                    ]},
-                    {"kind": "label", "text": "The tab bar", "style": _HEAD_STYLE},
-                    {"kind": "tree", "id": "knobs", "columns": ["Knob", "Now"],
-                     "on": ["selected"],
-                     "tooltip": "What the app owns about a tab: its picture, its "
-                                "air, its corners, whether it shows its name at "
-                                "all."},
-                    {"kind": "row", "children": [
-                        {"kind": "label", "text": "to"},
-                        {"kind": "spin", "id": "knobnum", "minimum": 0,
-                         "maximum": 200, "value": 0,
-                         "tooltip": "For a knob measured in pixels"},
-                        {"kind": "check", "id": "knobbool", "text": "on",
-                         "tooltip": "For a knob that is a switch"},
-                        {"kind": "button", "id": "setknob", "text": "Set knob",
-                         "on": ["clicked"], "tooltip": "Put that value on the "
-                                                       "picked knob in the draft"},
-                    ]},
-                ]},
-            ]},
-            # The draft's own file, under the two lists rather than beside them:
-            # pulled up it is the bigger part of the page, folded down it leaves
-            # the colours and the knobs the whole of the room.
-            {"kind": "multi", "id": "source", "highlight": "json",
-             "expand": True,
-             "placeholder": "the draft as its file holds it - edit it here and "
-                            "press Use the JSON"},
-        ]},
-        {"kind": "row", "children": buttons(EDIT_BUTTONS) + [
-            {"kind": "label", "id": "draftstate", "text": "", "expand": True,
-             "style": _HEAD_STYLE},
         ]},
     ]}
 
@@ -1635,7 +1656,9 @@ def tab_spec() -> dict:
     Declarative, so the same file runs in the app's process or outside it, and
     every widget is reached by name through ``set_widget`` afterwards. The
     banner's Appearance button is the one link out: themes are worn on the
-    whole window, and where they are picked is Settings > Appearance.
+    whole window, and where they are picked is Settings > Appearance. The
+    window button is the editor's own: it lifts the tab into a window of its
+    own, or brings it back.
     """
     return {"kind": "column", "children": [
         {"kind": "row", "children": [
@@ -1643,6 +1666,11 @@ def tab_spec() -> dict:
             {"kind": "label", "id": "status", "text": "Ready.", "word_wrap": True,
              "expand": True, "style": _STATUS_STYLE},
             {"kind": "label", "id": "where", "text": "", "style": _HEAD_STYLE},
+            {"kind": "button", "id": "win", "text": "Editor window...",
+             "on": ["clicked"],
+             "tooltip": "Lift this tab into a window of its own - the editor "
+                        "gets the whole screen, and the window follows the "
+                        "interface zoom - or dock it back into the tab bar"},
             {"kind": "button", "id": "appearance", "text": "Appearance...",
              "on": ["clicked"],
              "tooltip": "Themes are worn on the whole window and are picked "
@@ -1672,6 +1700,93 @@ def build_tab() -> None:
 def show_page(page: int) -> None:
     """Move to one of the sub-tabs; the menu and the app's links use this."""
     put(SUB, int(page), "current")
+
+
+# --- the editor window: the maker with the whole screen around it ---
+
+def wants_window() -> bool:
+    """Whether the settings ask the editor to open in a window."""
+    return bool(config_get(values(), "edit_popout", True))
+
+
+def window_shown() -> bool:
+    """Whether this tab stands in a window of its own just now.
+
+    ``False`` is the right answer for a bare process or a program with no
+    window support: the tab then simply stays in the bar and every call below
+    does nothing loud.
+    """
+    if api is None:
+        return False
+    try:
+        return bool(api.window.popped(TAB))
+    except (AddonError, AttributeError, TypeError):
+        return False
+
+
+def open_window() -> bool:
+    """Put this tab's window on screen, making it by popping the tab out."""
+    if api is None:
+        return False
+    try:
+        opened = bool(api.window.open(TAB))
+    except AddonError:
+        opened = False
+    update_window_button()
+    return opened
+
+
+def toggle_window(_checked: bool = False) -> None:
+    """The banner's button: move the tab between the bar and a window."""
+    if api is None:
+        return
+    if window_shown():
+        if guarded(lambda: api.window.popout(TAB, False), "dock the theme editor"):
+            say("the editor is back in the tab bar")
+    elif open_window():
+        show_page(PAGE_MAKER)
+        say("the editor is in a window of its own - it follows the interface "
+            "zoom; Dock back puts it home")
+    update_window_button()
+
+
+def update_window_button() -> None:
+    """The banner's button wears the word for where the tab stands."""
+    put("win", "Dock the editor" if window_shown() else "Editor window...",
+        "text")
+
+
+def on_window(payload: dict) -> None:
+    """The tab's window came or went: say so on the tab itself.
+
+    Coming back with **Dock back** is a choice worth remembering, so the
+    editor-window setting goes off with it: an editor that pops straight back
+    out after a person has just put it away is not one they will trust.
+    """
+    update_window_button()
+    event = str((payload or {}).get("event") or "")
+    if event in ("undocked", "docked"):
+        where = ("in its own window" if event == "undocked"
+                 else "back in the tab bar")
+        say(f"the theme editor is {where}")
+    if event == "docked" and api is not None and wants_window():
+        try:
+            api.config.update({"edit_popout": False})
+        except (AddonError, AttributeError, TypeError):
+            pass
+
+
+def show_maker() -> None:
+    """Move to the Theme Maker, opening the editor window first when asked for.
+
+    Every road onto the maker - the Tools menu, the theme list's **Edit it**,
+    a template's **Create**, the editor's own combo - comes through here, so
+    the setting decides once, in one place.
+    """
+    if wants_window() and not window_shown():
+        open_window()
+    show_page(PAGE_MAKER)
+    update_window_button()
 
 
 # --- the Themes sub-tab ---
@@ -2190,7 +2305,7 @@ def create_from_template(_checked: bool = False) -> None:
         return
     put("newname", "")
     refresh_themes()
-    show_page(PAGE_MAKER)
+    show_maker()
     open_draft(str(saved))
     say(f"{saved} made from {chosen or 'the theme in use'}")
 
@@ -2314,6 +2429,12 @@ The file is read when it is applied, not watched, so a program that is already
 running does not notice a change until Apply. The folder is beside the program,
 and the program makes it, with ``default.theme`` inside it, the first time it
 runs.
+
+The Theme Manager tab edits these files. Its maker opens in a window of its own
+by default - the editor has four panes worth of room and the tab bar gives it
+one - and the window follows the interface zoom, sizes and all; **Dock back**
+in its header puts the tab home into the bar and remembers that you prefer it
+there.
 """),
     ("Colour tokens", """
 ``colors`` names the colours the interface is painted with. Every token is one
@@ -2557,11 +2678,15 @@ def wrap(text: str) -> str:
 # --- the hooks the app calls ---
 
 def focus_editor(_checked: bool = False) -> None:
-    """The Tools menu entry: the tab, on the maker."""
+    """The Tools menu entry: the tab, on the maker.
+
+    A tab that stands in a window is brought forward by the same call: the
+    window answers to the tab's name wherever the tab is worn.
+    """
     if api is None:
         return
+    show_maker()
     api.tabs.activate(TAB)
-    show_page(PAGE_MAKER)
 
 
 def refresh_all(_ignored: Any = None) -> None:
@@ -2606,6 +2731,7 @@ COMMANDS = {
     "ssources": edit_sources,
     "newdraft": blank_draft, "setcolor": set_colour, "wheel": pick_colour,
     "chgcolor": change_picked_colour,
+    "win": toggle_window,
     "setknob": set_knob, "getsource": show_source, "putsource": use_source,
     "save": lambda: save_draft(False),
     "saveapply": lambda: save_draft(True), "discard": discard_draft,
@@ -2734,7 +2860,7 @@ def edit_picked_by_name(name: str) -> None:
             put("draft", draft_name, "value")
             say("still editing " + str(draft_name))
             return
-    show_page(PAGE_MAKER)
+    show_maker()
     open_draft(name)
 
 
@@ -2755,6 +2881,11 @@ def init(plugin_api: Any) -> None:
     api.ui.menu_item("Theme Manager (make and edit themes)", focus_editor,
                      menu="Tools")
     api.events.on("theme_changed", lambda data: on_event("theme_changed", data))
+    try:
+        api.events.on("window", lambda data: on_window(data))
+    except (AddonError, AttributeError, TypeError):
+        pass                       # a program with no windows says nothing back
+    update_window_button()
     refresh_all()
     load_local_store()
     say(f"{len(api.theme.names())} themes, the window drawn from {in_force()}")
@@ -2792,6 +2923,7 @@ def on_config(payload: dict) -> None:
     config = values()
     put("applylive", bool(config_get(config, "save_applies", True)), "checked")
     show_tokens()
+    update_window_button()
     apply_schedule(config)
 
 

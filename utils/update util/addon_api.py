@@ -965,7 +965,7 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
     if spec.get("tooltip") is not None:
         widget.setToolTip(str(spec["tooltip"]))
     if spec.get("style") is not None:
-        widget.setStyleSheet(str(spec["style"]))
+        style_sheet(widget, str(spec["style"]))
     if spec.get("object_name") is not None:
         widget.setObjectName(str(spec["object_name"]))
     if spec.get("locked") is not None and isinstance(widget, QTabWidget):
@@ -1868,6 +1868,32 @@ def _fill_children(layout: QLayout, children: list, kind: str, spec: dict,
         layout.addStretch(1)
 
 
+def style_sheet(widget: QWidget, text: Any) -> QWidget:
+    """Lay one addon sheet on a widget so it follows the theme and the zoom.
+
+    The sheet is kept as written - pixels at 100% - and ``core.ui`` remembers
+    it against the widget, re-pouring it scaled every time the interface zoom
+    or the theme changes; ``$token`` words in it are read as the theme's own.
+    With no app beside the widget there is nobody to re-pour, so the sheet is
+    scaled once here, which is the best a bare process can do.
+    """
+    text = str(text or "")
+    try:
+        from core import ui as _ui
+    except ImportError:                        # an addon running with no app
+        _ui = None
+    if _ui is not None:
+        try:
+            _ui.theme_style(widget, text)
+            if not text:
+                widget.setStyleSheet("")       # an empty sheet is a cleared one
+            return widget
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+    widget.setStyleSheet(scaled_sheet(text) if text else "")
+    return widget
+
+
 def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
     """One ``set_widget`` operation, shared by the Python and the process API."""
     text = "" if value is None else str(value)
@@ -1889,7 +1915,7 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
     elif prop == "tooltip":
         widget.setToolTip(text)
     elif prop == "style":
-        widget.setStyleSheet(text)
+        style_sheet(widget, text)
     elif prop == "enabled":
         widget.setEnabled(bool(value))
     elif prop == "highlight":
@@ -4012,7 +4038,7 @@ class TabsAPI:
                 self._api._manager.push_widget_event(self._api.id, tab_name, identifier, event, payload))
             widget, registry = build_spec(spec, events=events)
         if style:
-            widget.setStyleSheet(str(style))
+            style_sheet(widget, style)
         self._win.tabs.insertTab(self._index(position), widget, name)
         self._store[name] = {
             "page": widget, "url_input": None, "view": widget if _is_web_view(widget) else None,
@@ -4131,12 +4157,29 @@ class TabsAPI:
         return True
 
     def activate(self, name: str) -> bool:
-        """Put this addon's tab on screen; ``True`` when it had it."""
+        """Put this addon's tab on screen; ``True`` when it had it.
+
+        A tab that has been popped out stands in a window rather than in the
+        bar: activating it shows the page in that window and brings the window
+        forward, so a jump to an addon's own page works however it is worn.
+        """
         entry = self._store.get(str(name))
         if entry is None:
             return False
-        self._win.tabs.setCurrentWidget(entry["page"])
-        return True
+        page = entry["page"]
+        bar = getattr(self._win, "tabs", None)
+        if bar is not None and bar.indexOf(page) >= 0:
+            bar.setCurrentWidget(page)
+            return True
+        window = self._api._manager.windows.get(str(self._api._addon.id))
+        if window is not None and window.has_page(str(name)):
+            try:
+                window.tabs.setCurrentWidget(page)
+            except (AttributeError, RuntimeError):
+                pass
+            window.present()
+            return True
+        return False
 
     def lock(self, locked: bool = True) -> bool:
         """Hold the window's tab bar on the tab it is showing, or let it go.
@@ -4364,7 +4407,7 @@ class TabsAPI:
         entry = self._store.get(str(name))
         if entry is None:
             raise AddonError(f"no addon tab called {name!r}")
-        entry["page"].setStyleSheet(str(css))
+        style_sheet(entry["page"], css)
 
     def set_icon(self, name: str, icon: Any = None) -> bool:
         """A mark beside the tab's label (SVG text or a picture file); None clears; an embedded page keeps following its favicon."""
@@ -4850,7 +4893,7 @@ class SettingsPagesAPI:
                                                      event, payload))
             widget, registry = build_spec(spec, events=events)
         if style:
-            widget.setStyleSheet(str(style))
+            style_sheet(widget, style)
         caption = str(title or name)
         host = self._win.add_settings_page(caption, widget)
         if host is None:

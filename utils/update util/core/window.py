@@ -1311,6 +1311,16 @@ class BerryManager(
             self.zoom_tab_icons(percent)
             self.sync_tab_transport_dots()
 
+        # An addon whose tabs were popped out owns a window - its own sheet, its
+        # own header, its own page marks - and none of that is under this window's
+        # stylesheet, so it is asked in the same pass to move to the new rung.
+        try:
+            from core import popout
+
+            popout.follow_zoom(self, percent)
+        except Exception as error:            # a window that will not redraw is
+            self.log(f"popout zoom: {error}")  # no reason to stop the app's own
+
     def zoom_tab_icons(self, percent: int) -> None:
         """Scale the tab icons (addon ones included) from the style's baseline and the theme's mark size, so 100% under the default theme matches as shipped."""
         bar = self.tabs.tabBar()
@@ -1403,7 +1413,13 @@ class BerryManager(
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(THEMES_DIR)))
 
     def show_theme_manager(self) -> None:
-        """Come to the Theme Manager's own tab, or say where to switch it on."""
+        """Come to the Theme Manager's own tab, or say where to switch it on.
+
+        The tab may be standing in the bar or in a window of its own, which is
+        what the addon's own setting decides; either place is the same editor.
+        """
+        if self.show_popped_tab(THEME_MANAGER_TAB):
+            return
         bar = self.tabs.tabBar()
         for index in range(self.tabs.count()):
             if tab_caption(bar, index) == THEME_MANAGER_TAB:
@@ -1412,6 +1428,25 @@ class BerryManager(
         self.notify_popup("Themes", "The Theme Manager addon is not running: "
                                     "switch it on on the Theme Manager page in "
                                     "Settings.")
+
+    def show_popped_tab(self, label: str) -> bool:
+        """Bring the window that holds a tab of this name to the front, if one does.
+
+        A page that left the bar for a popout window is not in the bar to be
+        switched to, so every jump the app offers - View > Theme, the Settings
+        link, a menu item - has to ask the windows as well. The addon owns the
+        window it was popped into, so presenting it is all there is to do.
+        """
+        wanted = str(label)
+        for window in list(getattr(self, "windows", {}).values()):
+            try:
+                if window is None or not window.has_page(wanted):
+                    continue
+                window.present()
+                return True
+            except (AttributeError, RuntimeError):
+                continue
+        return False
 
     def show_appearance_settings(self) -> bool:
         """Open Settings and stand on its Appearance page, where the theme in
