@@ -46,7 +46,6 @@ def find_asset(filename: str) -> Path | None:
             return candidate
     return None
 
-
 #: The program's own version, the one the About dialog shows and the update
 #: addon compares against the tags published on GitHub (``berry`` + this).
 #: One line to change per release, everything else reads it from here.

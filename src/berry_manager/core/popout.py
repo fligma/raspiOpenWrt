@@ -53,7 +53,6 @@ GEOMETRY_KEYS = ("x", "y", "width", "height", "maximized")
 LAST_SLOT = 1 << 30
 
 # --- the window's own furniture, all of it said at 100% zoom ---
-
 #: The air inside the header row and the gap between its two widgets: as much a
 #: part of the interface's size as the sheet it is drawn from, so the interface
 #: zoom multiplies them like everything else.
