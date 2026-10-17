@@ -13,8 +13,8 @@ import posixpath
 import threading
 from typing import Any
 
-from PyQt6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QThread, QUrl, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QIcon, QKeySequence, QPixmap, QResizeEvent, QTextCursor
+from PyQt6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QKeySequence, QPixmap, QResizeEvent, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -1407,10 +1407,13 @@ class BerryManager(
         self.addon_event("theme_changed", theme=used, wanted=wanted)
         return used
 
-    def open_themes_folder(self) -> None:
-        """Show the themes folder in the system's file viewer."""
+    def open_themes_folder(self) -> bool:
+        """Show the themes folder in the system's file viewer; whether it really opened."""
         core.ui.ensure_installed()
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(THEMES_DIR)))
+        opened = core.ui.open_in_file_manager(THEMES_DIR)
+        if not opened:
+            self.log(f"the file viewer could not be opened at {THEMES_DIR}")
+        return opened
 
     def show_theme_manager(self) -> None:
         """Come to the Theme Manager's own tab, or say where to switch it on.

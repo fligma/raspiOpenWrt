@@ -50,7 +50,7 @@ def find_asset(filename: str) -> Path | None:
 #: The program's own version, the one the About dialog shows and the update
 #: addon compares against the tags published on GitHub (``berry`` + this).
 #: One line to change per release, everything else reads it from here.
-APP_VERSION = "2.0.4"
+APP_VERSION = "2.1.4"
 UPDATE_TAG_PREFIX = "berry"
 
 # --- file names and fixed identifiers ---
@@ -699,6 +699,16 @@ DEFAULT_THEME = {
 }
 
 
+#: Sheets already rendered, kept by the exact tokens they were poured from. A
+#: theme is read once and painted from many places - the window, every popout,
+#: the theme editor's live preview, every late widget - and substituting a
+#: forty-kilobyte shape each time buys nothing: the answer only moves when a
+#: colour or a knob does, and that changes the key. The cap is a brake, not a
+#: limit worth tuning: switching themes replaces the whole set at once.
+_SHEET_CACHE: dict[tuple, str] = {}
+_SHEET_CACHE_MAX = 12
+
+
 def render_theme(theme: object) -> str:
     """The application stylesheet one theme asks for, as Qt text.
 
@@ -714,7 +724,17 @@ def render_theme(theme: object) -> str:
     values: dict[str, object] = {**colors, **tabs}
     extra = str(data.get("styles") or "")
     values["styles"] = f"\n/* from the theme itself */\n{extra}\n" if extra.strip() else ""
-    return _SHEET_BODY.safe_substitute(**values)
+    # Both dicts are rebuilt in the fixed key order of ``THEME_COLORS`` and
+    # ``THEME_TABS``, so the same tokens always make the same key.
+    key = tuple(values.items())
+    held = _SHEET_CACHE.get(key)
+    if held is not None:
+        return held
+    sheet = _SHEET_BODY.safe_substitute(**values)
+    if len(_SHEET_CACHE) >= _SHEET_CACHE_MAX:
+        _SHEET_CACHE.clear()
+    _SHEET_CACHE[key] = sheet
+    return sheet
 
 
 #: The sheet the app boots with before a profile's theme has been read. Every
@@ -743,6 +763,9 @@ def current_zoom() -> int:
 def set_zoom(zoom: int) -> int:
     """Remember the zoom so later widgets match; returns the nearest ladder rung kept."""
     percent = step_zoom(zoom, 0)
+    if percent != _zoom_state["percent"]:
+        # Every scaled sheet on hand was measured for the old one.
+        _SCALED_CACHE.clear()
     _zoom_state["percent"] = percent
     return percent
 
@@ -774,13 +797,32 @@ def zoom_size(number: int, zoom: int | None = None) -> int:
     return _zoomed(int(number), percent / 100.0)
 
 
+#: Sheets already scaled, kept by the text and the zoom they were scaled at.
+#: Re-running the substitution over the whole application sheet is the expensive
+#: part of handing a widget its own sheet, and the same sheet goes through here
+#: again on every theme refresh and every late-built widget - same words, same
+#: zoom, same answer. Held by the text itself rather than by ``id``, because a
+#: caller may hand back a freshly built copy of the same sheet.
+_SCALED_CACHE: dict[tuple[str, int], str] = {}
+_SCALED_CACHE_MAX = 24
+
+
 def scaled_sheet(sheet: str, zoom: int | None = None) -> str:
     """``sheet`` with every px/pt size multiplied by the zoom, so late widgets match."""
     percent = current_zoom() if zoom is None else int(zoom)
+    text = str(sheet or "")
+    key = (text, percent)
+    held = _SCALED_CACHE.get(key)
+    if held is not None:
+        return held
     factor = percent / 100.0
 
     def scale(match: re.Match) -> str:
         return f"{_zoomed(float(match.group(1)), factor)}{match.group(2)}"
 
-    return _QSS_SIZE.sub(scale, sheet)
+    scaled = _QSS_SIZE.sub(scale, text)
+    if len(_SCALED_CACHE) >= _SCALED_CACHE_MAX:
+        _SCALED_CACHE.clear()
+    _SCALED_CACHE[key] = scaled
+    return scaled
 

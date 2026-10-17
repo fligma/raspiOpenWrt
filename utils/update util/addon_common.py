@@ -24,6 +24,7 @@ in the app, in a compiled addon and in a bare test.
 """
 
 from __future__ import annotations
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -203,6 +204,64 @@ def addon_config_path(addon_id: str) -> Path:
 def addon_schema_path(addon_id: str) -> Path:
     """The side copy of an addon's field descriptions, kept beside the config so Settings can show the form for a switched-off addon."""
     return addon_data_dir(addon_id) / "fields.json"
+
+
+# --- the bytecode that stands in for an addon's source ---
+
+#: The header flags of a ``.pyc`` carrying a checked hash of the source it was
+#: made from: bit 0 says the header holds a hash where a date would be, bit 1
+#: says whoever reads it must compare that hash before running it. Only that
+#: kind is ever used here - see :func:`bytecode_ready`.
+PYC_CHECKED_HASH = 0b11
+
+#: The ending a precompiled addon is kept under: the source's own name, then
+#: this, sitting in the same folder as the text it stands for.
+BYTECODE_SUFFIX = ".pyc"
+
+#: How many bytes of a ``.pyc`` say what it is: magic, flags, and the hash.
+PYC_HEADER = 16
+
+
+def bytecode_path(source: Any) -> Path:
+    """The file that would hold ``source``'s bytecode: its name beside it, ``.pyc``."""
+    path = Path(str(source))
+    return path.with_name(path.stem + BYTECODE_SUFFIX)
+
+
+def bytecode_header(sidecar: Any) -> bytes:
+    """The first bytes of a bytecode file, or fewer than sixteen when it is shorter."""
+    with Path(str(sidecar)).open("rb") as handle:
+        return handle.read(PYC_HEADER)
+
+
+def bytecode_ready(source: Any, sidecar: Any = None) -> bool:
+    """Whether a bytecode file may be run in place of the source beside it.
+
+    Three things have to agree before it is used, and any one of them failing
+    sends the reader back to the ``.py``. The magic number is the interpreter's
+    bytecode version, so a file built by another Python is never run by this
+    one. The header must be the checked-hash kind: a date says nothing once a
+    build has unpacked the file somewhere new and every date in it is fresh. And
+    the hash must be this source's hash, so an addon edited in the Dev tab is
+    read as the text it holds now rather than as the bytecode of the text it
+    used to be - which is what lets a shipped ``.pyc`` sit beside a shipped
+    ``.py`` without anybody having to keep the two in step by hand.
+    """
+    source = Path(str(source))
+    sidecar = Path(str(sidecar)) if sidecar is not None else bytecode_path(source)
+    try:
+        header = bytecode_header(sidecar)
+        text = source.read_bytes()
+    except OSError:
+        return False
+    if len(header) < PYC_HEADER or header[:4] != importlib.util.MAGIC_NUMBER:
+        return False
+    if int.from_bytes(header[4:8], "little") != PYC_CHECKED_HASH:
+        return False
+    try:
+        return header[8:16] == importlib.util.source_hash(text)
+    except ValueError:                      # no sha256 in this interpreter
+        return False
 
 
 #: The manifest key that says where an addon came from. An addon the store

@@ -192,7 +192,7 @@ class ProcessAPI:
         "ui.dialog": ("spec", "title", "ok", "answers"),
         "ui.set_setting_widget": ("widget_or_spec",),
         "tabs.add_web_tab": ("name", "url", "ip", "port", "path", "scheme",
-                             "position", "pinned", "icon_only"),
+                             "position", "pinned", "icon_only", "menu"),
         "tabs.add_tab": ("name", "widget", "spec", "style", "position",
                          "pinned", "icon_only"),
         "tabs.close": ("name",),

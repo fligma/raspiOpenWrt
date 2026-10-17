@@ -1825,11 +1825,23 @@ def open_window() -> bool:
 
 
 def close_window(_checked: bool = False) -> None:
-    """Hide the maker window; the draft stays in hand, the page stays built."""
+    """Hide the maker; the draft stays in hand either way.
+
+    Popped out - its usual state - this hides the addon's window, exactly as
+    the window's own close button does. The window's **Dock back** button can
+    leave the page standing in the main bar instead, and a tab in the bar has
+    no window to hide: there the tab itself is taken away, and the next
+    **Edit it** - or the banner's button - builds it again from the draft.
+    """
     if api is None:
         return
     try:
-        api.window.show(MAKER, False)
+        if api.window.popped(MAKER):
+            api.window.show(MAKER, False)
+        elif api.tabs.exists(MAKER):
+            api.tabs.close(MAKER)
+            say("the Theme Maker is closed; the draft is kept and the "
+                "banner's button builds the window again")
     except (AddonError, AttributeError, TypeError):
         pass
 
@@ -1863,15 +1875,20 @@ def update_window_button() -> None:
 def on_window(payload: dict) -> None:
     """The maker window came or went: say so on the status line.
 
-    The maker hides and shows; it is never docked back into the bar, so the
-    old journeys of a popped tab - undocked and docked - cannot be told here
-    at all, and nothing about them is remembered in the settings.
+    The maker hides and shows by choice; the window's **Dock back** button is
+    the one road that puts the page in the bar, and the status line says what
+    **Close window** will do there. Nothing about any of it is remembered in
+    the settings.
     """
     event = str((payload or {}).get("event") or "")
+    tab = str((payload or {}).get("tab") or "")
     if event == "opened":
         say("the Theme Maker is open in its own window")
     elif event == "closed":
         say("the Theme Maker is hidden")
+    elif event == "docked" and tab in (MAKER, ""):
+        say("the Theme Maker is back in the bar; its Close window button "
+            "there takes the tab away")
 
 
 # --- the Themes sub-tab ---
@@ -2457,15 +2474,20 @@ def delete_picked(_checked: bool = False) -> None:
 
 
 def open_folder(_checked: bool = False) -> None:
-    """The themes folder, in the system's own file viewer, through the window."""
+    """The themes folder, in the system's own file viewer, through the window.
+
+    The window says whether the viewer really came up; a quiet ``True`` from
+    Qt is not taken for an open folder, and anything else says where the
+    folder is instead of pretending it appeared.
+    """
     if api is None:
         return
     opener = getattr(get_window(), "open_themes_folder", None)
     if callable(opener):
         try:
-            opener()
-            say("the themes folder is open")
-            return
+            if opener():
+                say("the themes folder is open")
+                return
         except Exception:                        # an app that cannot open it still says where
             pass
     api.ui.information("The themes folder",

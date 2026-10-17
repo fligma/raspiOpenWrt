@@ -734,6 +734,14 @@ def popout_target() -> tuple[str, str]:
     return runner, f'"{script}"'
 
 
+#: What the shell answered about the Desktop this run, or None while it has not
+#: been asked. Starting PowerShell costs some two hundred milliseconds, and an
+#: addon row wants the folder it would write a link into - so a store tab with
+#: four addons in it would ask the same question four times, every time it is
+#: redrawn. The folder does not move while the program runs.
+_DESKTOP_ASKED: str | None = None
+
+
 def desktop_folder() -> Path:
     """The folder this machine shows on the Desktop, asked of the shell itself.
 
@@ -742,13 +750,17 @@ def desktop_folder() -> Path:
     ``BERRY_DESKTOP_DIR`` says otherwise for a test, which must not touch the
     real Desktop to prove that a link is written and removed.
     """
+    global _DESKTOP_ASKED
     override = str(os.environ.get("BERRY_DESKTOP_DIR") or "").strip()
     if override:
         return Path(override)
     if os.name == "nt":
-        got = _ask_powershell("[Environment]::GetFolderPath('Desktop')")
-        if got:
-            return Path(got)
+        if _DESKTOP_ASKED is None:
+            # A blank answer is kept too: no PowerShell here is settled
+            # news for the rest of the run, not a question to ask again.
+            _DESKTOP_ASKED = _ask_powershell("[Environment]::GetFolderPath('Desktop')")
+        if _DESKTOP_ASKED:
+            return Path(_DESKTOP_ASKED)
     return Path.home() / "Desktop"
 
 

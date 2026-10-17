@@ -148,6 +148,13 @@ class Api(addon_client.StubAPI):
         if method == "tabs.exists":
             return str(self.argument(method, "name", arguments, named,
                                      "")) in self.tab_names
+        if method == "tabs.close":
+            # The tab goes out of the program as the addon remembers it: a later
+            # ``exists`` has to say no, or a rebuild would skip itself.
+            name = str(self.argument(method, "name", arguments, named, ""))
+            if name in self.tab_names:
+                self.tab_names.remove(name)
+            return True
         if method == "tabs.set_widget":
             # The tab answers back: a control holds what was last set on it, so
             # the addon's own ``get`` reads its own ``put`` the way it would in
@@ -739,6 +746,21 @@ def test_editor_window(mgr: Any, api: Api) -> None:
         mgr.on_widget(mgr.TAB, "win", "clicked", {})
         check(win.times("window.open") == 2 and win.visible_now,
               "the banner button did not bring the window back")
+        # The window's **Dock back** button can leave the page standing in the
+        # bar; there is no window to hide for that state, so the maker's own
+        # Close button has to take the tab itself away - and say so.
+        win.popped_now = False
+        mgr.on_widget(mgr.MAKER, "mclose", "clicked", {})
+        check(win.times("tabs.close") == 1 and mgr.MAKER not in win.tab_names,
+              "Close window did not take the docked maker tab out of the bar")
+        check(win.times("window.show") == 1,
+              "Close window hid a window the docked maker never had")
+        # The draft survives the tab; the next jump builds the page again and
+        # opens the window as if nothing had been thrown away.
+        held = win.times("window.open")
+        mgr.focus_editor()
+        check(mgr.MAKER in win.tab_names and win.times("window.open") == held + 1,
+              "a jump after the docked close rebuilt nothing")
         # With the switch on, start-up raises the window by itself.
         fresh = WindowApi()
         fresh.config_values["edit_popout"] = True

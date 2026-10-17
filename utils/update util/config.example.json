@@ -46,15 +46,15 @@
       "terminal_history_limit": 500,
       "web_port": 8989,
       "web_path": "/cgi-bin/index.py",
-      "luci_url": "http://192.168.12.1/",
+      "luci_url": "http://192.168.1.1/",
       "web_tabs": [ 
         { "name": "LuCI", "ip": "", "port": 443, "path": "/", "scheme": "https" }
       ],
       "addons": {
         "berry": { "enabled": true, "ssh_enabled": true, "sftp_enabled": true,"settings": {} },
         "addon_store": { "enabled": true, "settings": {} },
-        "berry_web": { "enabled": false, "ssh_enabled": true, "sftp_enabled": true, "settings": {} },
-        "manager_update": { "enabled": true, "settings": {} }
+        "manager_update": { "enabled": true, "settings": {} },
+        "theme_manager": { "enabled": true, "ssh_enabled": true, "sftp_enabled": true }
       },
       "quick_commands": [
         { "label": "Show version", "command": "cat /etc/openwrt_release" }

@@ -548,7 +548,7 @@ def parse_check(result: Any) -> dict:
     """
     out = str(result.get("out") if isinstance(result, dict) else (result or ""))
     info = {"folder": False, "files": 0, "home": "", "python": "",
-            "answered": False, "url": "", "is_berry": False,
+            "answered": False, "url": "", "is_berry": False, "https": False,
             "sections": {}, "served": [], "no_fetch": False,
             "code": int(result.get("code") or 0) if isinstance(result, dict) else 0,
             "body": ""}
@@ -564,6 +564,10 @@ def parse_check(result: Any) -> dict:
                 info["files"] = 0
         elif text.startswith("HOME "):
             info["home"] = text[5:].strip().strip("'\"")
+        elif text.startswith("HTTPS "):
+            # ``on`` when the section listens over https or redirects to it;
+            # the page is opened with the scheme the device's own config names.
+            info["https"] = text[6:].strip() == "on"
         elif text.startswith("SH "):
             # ``uhttpd.lan.home='/www'``, as the device's own uci showed it.
             name, _, where = text[3:].strip().partition("=")
@@ -627,6 +631,10 @@ def summary_rows(check: dict) -> list[dict]:
         pairs = [f"{name} \u2192 {where}" for name, where
                  in list(sections.items())[:5]]
         rows.append({"cells": ["uhttpd serves", ", ".join(pairs)]})
+    if check.get("https"):
+        rows.append({"cells": ["https", "the section listens over https, so the "
+                                             "page is opened over https"],
+                     "color": "#23d18b"})
     if check.get("no_fetch"):
         rows.append({"cells": ["Asking the page", "neither curl nor wget is on "
                                                  "the device, so the page could "
@@ -1485,6 +1493,12 @@ def check_script(paths: dict) -> str:
         'echo "FOLDER $(if [ -d "$WEBHOME" ]; then echo yes; else echo no; fi)"',
         'echo "FILES $(find "$WEBHOME" -type f 2>/dev/null | wc -l)"',
         f'echo "HOME $(uci -q get uhttpd.{section}.home 2>/dev/null)"',
+        # Whether this section answers over https at all: a listen address of
+        # its own, or a redirect that pushes every plain ask over there. The
+        # page is opened with whatever the device's own config says.
+        f'echo "HTTPS $( {{ uci -q get uhttpd.{section}.listen_https;'
+        f' uci -q get uhttpd.{section}.redirect_https;'
+        f' }} 2>/dev/null | grep -q . && echo on)"',
         'uci -q show uhttpd 2>/dev/null | grep home= | sed "s/^/SH /"',
         f'for D in /www /www_* /srv /srv/www; do'
         f' if [ -f "$D/{entry}" ]; then'
@@ -1493,12 +1507,24 @@ def check_script(paths: dict) -> str:
     ] + _page_probe(page_urls(paths)))
 
 
-def land_on(check: dict) -> None:
-    """Where the tab opens: a live dashboard is looked at, anything else fixed."""
-    view_page(STATUS_PAGE if check.get("is_berry") else INSTALL_PAGE)
+def land_on(check: dict, landing: bool = True) -> None:
+    """Where the tab opens: a live dashboard is looked at as a page, anything
+    else fixed.
+
+    ``landing`` is the boot and the reconnect: a dashboard that answers gets
+    shown straight away, in its own web tab. A re-check the user pressed on the
+    status page only moves the notebook - yanking a fresh tab in front of the
+    buttons they are reading would be the addon reading its own mail first.
+    """
+    if check.get("is_berry"):
+        view_page(STATUS_PAGE)
+        if landing:
+            open_dashboard()
+    else:
+        view_page(INSTALL_PAGE)
 
 
-def check_device(_checked: bool = False) -> None:
+def check_device(_checked: bool = False, landing: bool = True) -> None:
     """One look at the connected host, and the tab arranged around what it said."""
     if api is None or working:
         return
@@ -1509,7 +1535,7 @@ def check_device(_checked: bool = False) -> None:
         last_check.clear()
         last_check.update(check)
         show_check(check)
-        land_on(check)
+        land_on(check, landing)
         found = elsewhere(check, paths["home"])
         if check.get("is_berry"):
             say(f"the Berry dashboard answers on {check.get('url')}"
@@ -2622,12 +2648,52 @@ def copy_raw(_checked: bool = False) -> None:
         pass
 
 
+# --- the little menu that rides the dashboard's own page ---
+
+#: What the small button floated over the embedded page offers, by id and
+#: caption. Each entry comes back through ``on_widget(PAGE, id, "clicked")``,
+#: so it is handled exactly like a button on the addon's own tab.
+WEB_MENU_ITEMS = (
+    ("menu_status", "Status page"),
+    ("menu_installer", "Go to installer"),
+    ("menu_uci", "uhttpd settings"),
+    ("menu_recheck", "Re-check the device"),
+)
+
+
+def show_tab_page(page: int) -> None:
+    """Bring the addon's own tab forward and stand it on one of its pages."""
+    view_page(page)
+    focus_tab()
+
+
+#: Where each entry of that menu leads.
+WEB_MENU = {
+    "menu_status": lambda: show_tab_page(STATUS_PAGE),
+    "menu_installer": lambda: show_tab_page(INSTALL_PAGE),
+    "menu_uci": lambda: show_tab_page(UHTTPD_PAGE),
+    "menu_recheck": check_device,
+}
+
+
+def menu_entries() -> list[dict]:
+    """The corner button's entries, in the shape ``add_web_tab`` takes."""
+    return [{"id": identifier, "label": label}
+            for identifier, label in WEB_MENU_ITEMS]
+
+
 def open_dashboard(_checked: bool = False) -> None:
-    """The page in a tab of its own, so an install can be looked at straight away."""
+    """The page in a tab of its own, so an install can be looked at straight away.
+
+    The scheme follows the device's own config: the check asks the uhttpd
+    section whether it listens over https or redirects there, and a section
+    that does is visited over https - whatever the plain probe happened to
+    answer on first."""
     if api is None:
         return
     paths = job_paths(merge_current())
-    scheme = "https" if str(last_check.get("url") or "").startswith("https") else "http"
+    scheme = "https" if (str(last_check.get("url") or "").startswith("https")
+                         or last_check.get("https")) else "http"
     url = ""
     try:
         url = str(api.session.web_url({"ip": "", "port": paths["port"],
@@ -2644,7 +2710,7 @@ def open_dashboard(_checked: bool = False) -> None:
             api.tabs.activate(PAGE)
             api.tabs.navigate(PAGE, url)
         else:
-            api.tabs.add_web_tab(PAGE, url=url)
+            api.tabs.add_web_tab(PAGE, url=url, menu=menu_entries())
         say(f"opened {url}")
     except AddonError as error:
         say(f"the page could not be opened: {error}", bad=True)
@@ -2725,7 +2791,7 @@ def to_page(page: int) -> None:
 
 #: What each button on the tab does, by its spec id.
 HANDLERS.update({
-    "recheck": check_device,
+    "recheck": lambda: check_device(landing=False),
     "check": check_page,
     "open": open_dashboard,
     "to_installer": lambda: to_page(INSTALL_PAGE),
@@ -2842,12 +2908,19 @@ def shutdown() -> None:
 
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
-    """A button on the tab was clicked: run what its id means."""
-    if str(tab) != TAB or str(event) != "clicked":
+    """A button on the tab, or an entry of the dashboard page's own corner
+    menu, was clicked: run what its id means."""
+    if str(event) != "clicked":
         return
-    handler = HANDLERS.get(str(identifier))
-    if handler is not None:
-        handler()
+    if str(tab) == TAB:
+        handler = HANDLERS.get(str(identifier))
+        if handler is not None:
+            handler()
+        return
+    if str(tab) == PAGE:
+        handler = WEB_MENU.get(str(identifier))
+        if handler is not None:
+            handler()
 
 
 def on_config(payload: dict) -> None:

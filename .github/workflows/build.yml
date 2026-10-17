@@ -235,6 +235,19 @@ jobs:
         # so - the files are pictures, not code. See buildtools.py make-web-icons.
         python buildtools.py make-web-icons --check
 
+    - name: Check the shipped pictures are packed
+      run: |
+        # Every picture the program carries, the store's cards wear and the
+        # dashboard links to is written with its bytes deflated as hard as they
+        # go. The three picture tools do that themselves now, but two of the
+        # shipped files are artwork somebody put in the tree that no tool owns,
+        # and anything written before that carries whatever compression one
+        # machine's Qt happened to reach for. Nothing is resized, re-filtered or
+        # re-coloured here - the question is only whether the bytes already in
+        # the file can be packed again - so a picture cannot change shape over
+        # this step, and all that is noticed is weight. See buildtools.py pack-pngs.
+        python buildtools.py pack-pngs --check
+
     - name: Check the theme store catalog is up to date
       run: |
         # The Theme Store reads themes.store/index.json off GitHub, and the
@@ -339,8 +352,10 @@ jobs:
             Copy-Item -Path (Join-Path $_.FullName "*") -Destination $into -Recurse -Force
           }
         # Nothing test-shaped or left over from a local run travels with the
-        # build, wherever it hides: a folder addon's own tests or bytecode,
-        # if one ever carried them, are stripped from the staged copy.
+        # build, wherever it hides: a folder addon's own tests, or bytecode
+        # written by a local ``precompile-addons``, are stripped from the staged
+        # copy - the next step makes fresh bytecode for these exact sources, and
+        # an old file sitting beside a new one would simply be refused.
         Get-ChildItem -Path $stage -Recurse -Directory |
           Where-Object { $_.Name -in "__pycache__", "tests", "_tests" } |
           ForEach-Object { Remove-Item -Recurse -Force $_.FullName }
@@ -353,6 +368,32 @@ jobs:
         }
         Write-Output "addons packed into the program:"
         Get-ChildItem -Path $stage -Recurse -Name
+
+    - name: Precompile the addons packed inside the program
+      shell: pwsh
+      working-directory: "utils/update util"
+      run: |
+        # The addons a build packs sit in a folder that is unpacked again on
+        # every start, so nothing the interpreter caches carries over from one
+        # run to the next: each start reads every shipped addon's text and
+        # parses it, which is a few hundred milliseconds before the window is
+        # drawn. This writes a <name>.pyc beside each staged source instead, so
+        # the program unmarshals bytecode in milliseconds and keeps the .py in
+        # the build purely for whoever wants to read it.
+        # What is written carries a checked hash of the text it came from, and
+        # addon_common.bytecode_ready only accepts the pair while that hash
+        # still matches: an addon dropped into the folder beside the exe, or one
+        # the Dev tab has just edited, is read from its own source as it always
+        # was, and a bytecode file built by another Python is passed by
+        # altogether. The second call asks the app's own question of what was
+        # just written - sidecars the running program would ignore mean a build
+        # that quietly went back to parsing, which is noticed here rather than
+        # in a boot nobody measures. See buildtools.py precompile-addons.
+        $bundle = (Resolve-Path _addon_bundle).Path
+        python ../../buildtools.py precompile-addons $bundle
+        if ($LASTEXITCODE -ne 0) { Write-Output "FAILED to compile the staged addons"; exit 1 }
+        python ../../buildtools.py precompile-addons --check $bundle
+        if ($LASTEXITCODE -ne 0) { Write-Output "FAILED: the packed bytecode is not what the app would read"; exit 1 }
 
     - name: Stage the modules an addon imports
       shell: pwsh

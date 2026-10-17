@@ -571,13 +571,14 @@ import sys
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
-from PyQt6.QtCore import QTimer, QUrl
+from PyQt6.QtCore import QEvent, QObject, QPoint, QUrl, Qt
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTabBar,
@@ -727,12 +728,83 @@ else:
     WebTabPage = None
 
 
+class _CornerKeeper(QObject):
+    """Keeps a small button pinned to the corner of the web view it floats on.
+
+    The view is resized with the window, split by the page's own scrolling and
+    moved when the tab bar re-measures; a button placed once would end up
+    anywhere but the corner, so this re-places it on every resize and show."""
+
+    def __init__(self, place: Callable[[], None]) -> None:
+        super().__init__()
+        self._place = place
+
+    def eventFilter(self, watched: object, event: object) -> bool:
+        try:
+            kind = event.type()
+        except AttributeError:
+            return False
+        if kind in (QEvent.Type.Resize, QEvent.Type.Show):
+            self._place()
+        return False
+
+
+class _FirstShowLoad(QObject):
+    """Loads a web tab's address the first moment the tab is actually seen.
+
+    Making the view is cheap; filling it is not - every load hands work to
+    Chromium and keeps a rendered page in memory, and at start-up most of the
+    profile's tabs are the ones the user is not looking at. So a tab born out
+    of sight waits: nothing is fetched until the page becomes visible, and the
+    address is read at that moment, which means a host change or an addon's
+    navigation in the meantime is what gets loaded. Whoever arms this must
+    also ``cancel`` it when something else loads the view first."""
+
+    def __init__(self, load: Callable[[], None]) -> None:
+        super().__init__()
+        self._load = load
+        self._armed = True
+
+    def cancel(self) -> None:
+        """The page has been loaded, or told to load; nothing is owed to it."""
+        self._armed = False
+
+    def fire(self) -> bool:
+        """Load now rather than wait to be seen; ``False`` when it had already
+        loaded, so the caller knows its own request still stands."""
+        if not self._armed:
+            return False
+        self._armed = False
+        self._load()
+        return True
+
+    def eventFilter(self, watched: object, event: object) -> bool:
+        if not self._armed:
+            return False
+        try:
+            kind = event.type()
+        except AttributeError:
+            return False
+        if kind == QEvent.Type.Show:
+            self.fire()                 # once, whatever the load does next
+        return False
+
+
 class BrowserMixin:
     """Embedded browser tabs, mixed into the main window; its attributes come from ``core.window.BerryManager``."""
 
     def _build_web_like_tab(self, initial_url: str, title: str,
                             position: int | None = None,
-                            home: bool = True) -> tuple[QLineEdit, QWebEngineView | None, QWidget]:
+                            home: bool = True,
+                            menu: list | None = None,
+                            on_menu: Callable[[str], None] | None = None,
+                            defer: bool = False,
+                            ) -> tuple[QLineEdit, QWebEngineView | None, QWidget]:
+        """Build one browser tab and hand back its parts.
+
+        ``defer`` holds the first load back until the tab is shown; the
+        address a page opens itself is never held, since it arrives already
+        wanted."""
         page = QWidget()
         layout = QVBoxLayout(page)
         controls = QHBoxLayout()
@@ -765,7 +837,8 @@ class BrowserMixin:
             notice.setStyleSheet("color: #ffb020; padding: 12px;")
             layout.addWidget(notice, 1)
             open_btn = QPushButton("Open in browser")
-            open_btn.clicked.connect(lambda: os.startfile(url_input.text()) if hasattr(os, "startfile") else None)
+            open_btn.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl(url_input.text())))
             layout.addWidget(open_btn)
             go_button.clicked.connect(lambda: None)
             add_tab()
@@ -776,9 +849,14 @@ class BrowserMixin:
             view.setPage(WebTabPage(self))
         add_tab()
 
-        open_btn.clicked.connect(lambda: QDesktopServices.openUrl(view.url()))
+        # A tab held back from loading still answers to Go, to Enter in the
+        # address bar and to the api; whichever of those starts a load ends
+        # the waiting, so the show filter has nothing left to do.
+        hold: _FirstShowLoad | None = None
 
         def load_url() -> None:
+            if hold is not None:
+                hold.cancel()
             view.setUrl(QUrl(url_input.text()))
 
         def go_home() -> None:
@@ -828,8 +906,71 @@ class BrowserMixin:
         view.loadStarted.connect(hide_error_bar)
         view.loadFinished.connect(report_failure)
 
+        # "Open in system browser" reads the address bar rather than the view,
+        # so it is useful on a tab that has not loaded yet.
+        open_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(url_input.text())))
+
+        if defer:
+            hold = _FirstShowLoad(load_url)
+            page.installEventFilter(hold)
+            page._first_show_load = hold    # the filter lives with the page
+            # Anything that puts a page into the view - the api navigating it,
+            # or set_html serving one - settles the tab without this filter.
+            view.urlChanged.connect(lambda _url, h=hold: h.cancel())
+            view.loadStarted.connect(lambda h=hold: h.cancel())
+            if page.isVisible():
+                # The tab came up in front of the user, so its showing event
+                # passed before this filter was fitted: load it here rather
+                # than wait for a second one that may never come.
+                load_url()
+
+        if menu:
+            self._attach_overlay_menu(view, menu, on_menu)
+
         layout.addWidget(view, 1)
         return url_input, view, page
+
+    def _attach_overlay_menu(self, view: "QWebEngineView", menu: list,
+                             on_pick: Callable[[str], None] | None) -> None:
+        """Float a small round button on the page's bottom-right corner: it pops
+        up the entries the addon asked for, and hands the picked one back through
+        ``on_pick``. The button is a child of the view and native like it, so it
+        sits over the web content instead of under it; a nameless event filter
+        keeps it in the corner while the page resizes."""
+        button = QPushButton("\u2261", view)
+        button.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        button.setFixedSize(30, 30)
+        button.setToolTip("Actions for this page")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setStyleSheet(
+            "QPushButton { background: rgba(38, 38, 38, 210); color: #e8e8e8;"
+            " border: 1px solid #6a6a6a; border-radius: 15px;"
+            " font-size: 15px; padding: 0px; }"
+            "QPushButton:hover { background: rgba(70, 70, 70, 225); }")
+        popup = QMenu(button)
+        for item in menu:
+            entry = item if isinstance(item, dict) else {}
+            identifier = str(entry.get("id") or "")
+            if not identifier:
+                continue
+            action = popup.addAction(str(entry.get("label") or identifier))
+            action.triggered.connect(
+                lambda _=False, i=identifier: on_pick(i) if callable(on_pick)
+                else None)
+        button.clicked.connect(lambda: popup.popup(
+            button.mapToGlobal(QPoint(0, button.height()))))
+
+        def place() -> None:
+            button.move(max(0, view.width() - button.width() - 14),
+                        max(0, view.height() - button.height() - 14))
+            button.raise_()
+
+        keeper = _CornerKeeper(place)
+        view.installEventFilter(keeper)
+        button.installEventFilter(keeper)
+        button._corner_keeper = keeper        # the filter lives with the button
+        place()
 
     def _build_load_error_bar(self) -> tuple[QWidget, QLabel, QPushButton, QPushButton]:
         """The hidden notice row under a web tab's address bar: label plus open/accept buttons."""
@@ -889,10 +1030,9 @@ class BrowserMixin:
 
     def _add_web_tab(self, tab: dict, default_host: str, position: int | None = None) -> None:
         url = web_tab_url(tab, default_host)
-        url_input, view, page = self._build_web_like_tab(url, tab.get("name", "Tab"), position)
+        url_input, view, page = self._build_web_like_tab(
+            url, tab.get("name", "Tab"), position, defer=True)
         self._web_tab_entries.append({"page": page, "url_input": url_input, "view": view, "tab": tab})
-        if view is not None:
-            QTimer.singleShot(200, lambda v=view, u=url_input: v.setUrl(QUrl(u.text())))
 
     def rebuild_web_tabs(self) -> None:
         """Recreate every configurable tab from the config, kept in front of Settings; addon tabs are untouched."""
@@ -922,18 +1062,19 @@ class BrowserMixin:
                 entry["url_input"].setText(web_tab_url(entry["tab"], default_host))
 
     def add_transient_web_tab(self, tab: dict, position: int | None = None,
-                              on_closed: Callable[[], None] | None = None) -> dict:
-        """Open a browser tab that belongs to no profile (addons use it): not saved, not listed, not rebuilt. It wears an X for the user to close, and whoever opened it is told when that happens."""
+                              on_closed: Callable[[], None] | None = None,
+                              on_menu: Callable[[str], None] | None = None) -> dict:
+        """Open a browser tab that belongs to no profile (addons use it): not saved, not listed, not rebuilt. It wears an X for the user to close, and whoever opened it is told when that happens. ``tab["menu"]`` gives the entries of the small button floated over the page, and ``on_menu`` is told which one was picked."""
         default_host = self.app_config.get("host", "192.168.1.1")
         url = web_tab_url(tab, tab.get("ip") or default_host)
-        url_input, view, page = self._build_web_like_tab(url, tab.get("name", "Tab"), position)
+        url_input, view, page = self._build_web_like_tab(
+            url, tab.get("name", "Tab"), position,
+            menu=list(tab.get("menu") or []), on_menu=on_menu, defer=True)
         entry = {"page": page, "url_input": url_input, "view": view, "tab": tab}
         if callable(on_closed):
             entry["on_closed"] = on_closed
         self._transient_tab_entries.append(entry)
         self._mark_tab_closable(page)
-        if view is not None:
-            QTimer.singleShot(200, lambda v=view, u=url_input: v.setUrl(QUrl(u.text())))
         return entry
 
     def remove_transient_tab(self, page: QWidget) -> None:

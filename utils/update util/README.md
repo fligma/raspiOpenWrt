@@ -97,7 +97,9 @@ executable: top-level `.py` addons, compiled addons (a loose `.exe` or `.bin`
 with its `<name>.json` manifest, or a folder whose program is `addon.exe`,
 `addon.bin` or `<folder>.exe`), and folder addons built from `addon.py` or
 `main.py`; `__pycache__` and any `tests`/`_tests` folder are stripped from the
-copy. The `addons` folder that ships beside the built program is left empty
+copy. The next step compiles what is staged - see [Bytecode beside the
+source](#bytecode-beside-the-source) - and only then is the folder packed. The
+`addons` folder that ships beside the built program is left empty
 for the user's own drop-ins. Last, a build that got this far is published: a
 `release` job tags the commit `berry` + `APP_VERSION`, opens a release at that
 tag and attaches one archive per system, each holding the program with its
@@ -133,6 +135,9 @@ PyInstaller still collects both, because its scanner follows plain imports
 inside functions as readily as ones at the top; only imports that sit behind a
 condition - the QtWebEngine pair, tried and fallen back on - need the
 `--hidden-import` list.
+The addon files a build packs are the other weight on the way up, and they are
+handled the same way once rather than on every launch: see [Bytecode beside the
+source](#bytecode-beside-the-source).
 
 ### Assets
 
@@ -173,6 +178,17 @@ the painters in `core.ui`. Both take `--force` to rewrite a file that is already
 there
 and `--check` to name what is missing, and the workflow runs both checks, so a
 picture that was never made stops the build instead of quietly never arriving.
+Every file they write is deflated as hard as it will go: a PNG's bytes are the
+scanlines after filtering, and running that deflate again over the bytes already
+in the file costs nothing a person can see - no unfiltering, no rescaling, no
+new palette - and is worth up to a sixth of a flat mark. Qt is given no say
+there, because the only quality it takes for a PNG is a trade of pixels against
+bytes. A third command asks the same question of the files these two do not
+own - the artwork somebody drew elsewhere and put in the tree - and the
+workflow runs it as a check, so weight cannot creep back in: `buildtools.py
+pack-pngs [--check] [file or folder ...]`, over `assets`, `addon.store/assets`
+and the dashboard's own pictures. The README's `media/` folder is deliberately
+not one of them: those drawings belong to no build.
 
 Nothing hard-codes the folder: `core.const.find_asset(name)` looks in `assets`
 beside the resources, then the old top-level location, then beside the
@@ -191,7 +207,7 @@ the seven that make the window itself live in the `core/` package, one per layer
 | --- | --- |
 | `berry_manager.py` | Entry point: Qt application, window icon, startup |
 | `addon_api.py` | The `api` object every addon receives and the declarative widget builder; the plain helpers are re-exported from `addon_common` |
-| `addon_common.py` | The Qt-free half of the contract: errors, JSON results, the config and build-mark files. Imported by an addon, by a test and by the app; reads only `core.const` of the app's own modules |
+| `addon_common.py` | The Qt-free half of the contract: errors, JSON results, the config and build-mark files, and the rule that decides when a precompiled addon may be read in place of its source (`bytecode_ready`). Imported by an addon, by a test and by the app; reads only `core.const` of the app's own modules |
 | `addon_client.py` | The addon side of the pipe - the `api` a process addon uses, `serve()` for its own process, and the recording stub a test runs against |
 | `core/const.py` | Paths, defaults, the colour tokens and tab knobs a theme is made of, and the app stylesheet built from them. Carries no Qt at all, which is what lets `addon_common` read it |
 | `core/ui.py` | The look of the window, read from the `themes/<name>.theme` files - reading, checking, writing and rendering them, and the templates a new one is begun from; the reading, normalising and writing of `config.json`; the reusable pieces - `RightPinnedTabBar` and `RightPinnedTabWidget` (the main bar, its pinned run and its own measuring), `ToggleSwitch`, `ToggleGroup`, `CollapseGroup`, `TabTransportDots`, `TabCloseButton`, the shared file tree and the popup dialogs; and the startup splash card |
@@ -575,6 +591,18 @@ carry no button, because they are removed through Settings > Custom tabs,
 not by hand. A page-opened tab starts out called *New page*, takes the
 site's own title as its name once the page has one, and follows its own
 address rather than the active profile's host.
+
+An embedded tab is built as the window is built, but its address is not fetched
+until the tab is first looked at. A profile with four dashboard tabs would
+otherwise hand four pages to Chromium while the user is reading the terminal:
+the tabs out of sight stay empty, and the one on screen loads as the window
+appears. Anything that asks for the page by name gets it at once instead - **Go
+/ Refresh**, Enter in the address bar, an addon's `tabs.navigate` or
+`tabs.reload`, a page pulled into a window of its own - and none of those is
+loaded a second time when the tab is next opened. The address fetched is the
+one the bar holds at that moment, so a host change that lands while the tab is
+out of sight is what gets loaded rather than the one the tab was given at
+startup.
 
 Auto-connect is one switch for the one main connection: **Connect at startup**,
 in the connection panel and saved as `auto_connect`, opens the SSH session -
@@ -1307,7 +1335,10 @@ written through the shell's own `WScript.Shell` so it is a real shortcut with th
 addon's picture on it, and `berry-<id>.desktop` on Linux, filed in
 `~/.local/share/applications` with a copy beside the Desktop folder when that
 exists. Taking the switch back down deletes both. The Desktop is asked for, never
-guessed.
+guessed - and asked once: the shell's answer is kept for the rest of the run,
+since an addon row drawn four times must not start PowerShell four times to learn
+the same path. `BERRY_DESKTOP_DIR` overrides the answer, which is how the tests
+write a link without touching the real Desktop.
 
 The link starts this same program with `--popout <id>`, and that launch is
 deliberately small: no main window, no splash, no Settings, no profile picker,
@@ -2763,6 +2794,8 @@ app reads that copy as a set of *shipped* addons:
   `core.const.BUILTIN_ADDONS_DIR` is where it looks, and
   `HAS_BUILTIN_ADDONS` says whether a build has such a folder at all - in a
   source checkout the two folders are the same one directory.
+  The step between the staging and the packing is
+  [Bytecode beside the source](#bytecode-beside-the-source) below.
 - A shipped addon is an addon in every other respect: same manifest, same `api`,
   same events, same config file - with one flag set, `builtin`, that says the
   file belongs to the build. Nothing writes to it: the Details form is read-only,
@@ -2813,6 +2846,41 @@ The rest of the frozen path model is unchanged:
   separate program in the folder rather than a `.py` file.
 - A folder addon's own data files sit beside the `.exe` too, and
   `api.paths.data` is always a real writable directory.
+
+#### Bytecode beside the source
+
+Every shipped addon is otherwise read from its own text on every start of a
+packaged program. That is not laziness: the packed addons sit in a folder that is
+unpacked anew each launch, so the `.pyc` files Python writes for itself land in a
+temporary directory and are gone before they could be read twice. Parsing the
+four shipped addons costs 276 ms of the 699 ms a cold launch spends getting its
+window up, and it is work that is identical on every machine and every run - so
+the build does it once instead, with `buildtools.py precompile-addons [file or
+folder ...]`, which the workflow runs over `_addon_bundle` after staging it and
+before packing it. Each source gets a `<name>.pyc` beside it carrying a *checked
+hash* of the text it was made from, and `addon_common.bytecode_ready` is the one
+rule that decides whether such a pair may be used: the magic number has to be
+this interpreter's (a file built by another Python is not this Python's
+bytecode), the header has to be the checked-hash kind (a date says nothing about
+a file that was unpacked a second ago), and the recorded hash has to be the hash
+of the source lying next to it. Reading the four addons as bytecode costs 6 ms
+where reading them as text costs 276 - and it stops the program writing a
+megabyte of its own `__pycache__` into that temporary folder every start. The
+price is 110 KB more inside the archive, since bytecode runs to about a fifth
+again of the text it came from.
+
+Nothing about that rule lets a stale file run. An addon dropped into the folder
+beside the `.exe` over the top of a shipped one, an addon the Addon Dev tab has
+just edited, a checkout whose Python is a different minor version from the
+build's - each fails one of the three questions, and the addon is imported from
+its text exactly as it always was. The sidecar keeps the module's `__file__`
+pointing at the `.py` a person can read, and its code objects carry the plain
+file name, so a log line about an addon says `addon_store.py` rather than a
+temporary folder nobody can open. The workflow asks the app's own question after
+writing - a second `precompile-addons --check`, which reads every pair with
+`bytecode_ready` and fails the build over bytecode the running program would
+pass by - and `--clean` takes the files away again, which is what leaves a
+checkout as it was found (they are Git-ignored wherever they sit).
 
 `config` and `addons/_data` are created beside the `.exe` on the first
 run, which is where the certificate addon's file ends up - also for an addon

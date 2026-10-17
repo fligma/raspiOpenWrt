@@ -40,6 +40,7 @@ from __future__ import annotations
 
 
 import concurrent.futures
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -94,9 +95,10 @@ from addon_api import (
     write_config_json,
 )
 from addon_common import (addon_data_dir, addon_manifest_path, addon_origin,
-                          build_mark, future_handle, kill_process_tree,
-                          popen_tree, release_process_tree,
-                          terminate_process_tree, write_build_mark)
+                          build_mark, bytecode_path, bytecode_ready,
+                          future_handle, kill_process_tree, popen_tree,
+                          release_process_tree, terminate_process_tree,
+                          write_build_mark)
 from core.const import (
     ADDON_DATA_DIR,
     ADDON_EXECUTABLE_SUFFIX,
@@ -1522,12 +1524,37 @@ class AddonManager:
             self._call_hook(addon, "start")
         return True
 
+    def _module_spec(self, module_name: str, source: Path):
+        """How one addon's file is opened: its bytecode, when a sidecar is valid.
+
+        A build can carry a ``<name>.pyc`` beside a shipped addon (the
+        ``precompile-addons`` tool writes them into the folder it packs), and
+        reading bytecode costs a few milliseconds where parsing the same text
+        costs eighty - multiplied by every shipped addon, on every start, since
+        a build's addons sit in a temporary folder no cache survives in. The
+        sidecar is only used while ``bytecode_ready`` says it still matches the
+        text beside it, so an addon edited in the Dev tab, or built by another
+        Python, is imported from its source exactly as it always was.
+        """
+        sidecar = bytecode_path(source)
+        if bytecode_ready(source, sidecar):
+            spec = importlib.util.spec_from_loader(
+                module_name, importlib.machinery.SourcelessFileLoader(
+                    module_name, str(sidecar)), origin=str(source))
+            if spec is not None:
+                # The module keeps the name of the file its author can read,
+                # and __cached__ says where the code it holds now came from.
+                spec.has_location = True
+                spec.cached = str(sidecar)
+                return spec
+        return importlib.util.spec_from_file_location(module_name, str(source))
+
     def _load_python(self, addon: Addon) -> None:
         module_name = f"rasconf_addon_{safe_identifier(addon.id)}"
         location = str(addon.source.parent)
         if location not in sys.path:
             sys.path.insert(0, location)
-        spec = importlib.util.spec_from_file_location(module_name, str(addon.source))
+        spec = self._module_spec(module_name, addon.source)
         if spec is None or spec.loader is None:
             raise AddonError("the file could not be read as a Python module")
         module = importlib.util.module_from_spec(spec)
@@ -2260,9 +2287,14 @@ class AddonManager:
         identifier = addon.id
         self.bus.post(lambda: self.refresh_connection_dots(identifier))
 
-    def open_folder(self) -> None:
+    def open_folder(self) -> bool:
+        """Show the addons folder in the system's file viewer; whether it opened."""
         self.ensure_folder()
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(ADDONS_DIR)))
+        opened = core.ui.open_in_file_manager(ADDONS_DIR)
+        if not opened:
+            self.log("", f"the file viewer could not be opened at {ADDONS_DIR}",
+                     True)
+        return opened
 
     # --- the config files in addons/_data/<id> ---
 
@@ -2309,8 +2341,8 @@ class AddonManager:
             self._call_hook(addon, "on_config", payload)
         self.notify("addon_config_changed", payload)
 
-    def open_config_file(self, addon_id: str) -> None:
-        """Hand the file to whatever the system uses for JSON."""
+    def open_config_file(self, addon_id: str) -> bool:
+        """Hand the file to whatever the system uses for JSON; whether it opened."""
         path = addon_config_path(addon_id)
         self.ensure_folder()
         if not path.is_file():
@@ -2318,12 +2350,20 @@ class AddonManager:
                 write_config_json(path, self.config_values(addon_id))
             except OSError as error:
                 self.log(addon_id, f"could not create {path.name}: {error}", warning=True)
-                return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+                return False
+        opened = core.ui.open_in_file_manager(path)
+        if not opened:
+            self.log(addon_id, f"the file viewer could not be opened at {path}", True)
+        return opened
 
-    def open_config_folder(self) -> None:
+    def open_config_folder(self) -> bool:
+        """Show ``addons/_data`` in the system's file viewer; whether it opened."""
         self.ensure_folder()
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(ADDON_DATA_DIR)))
+        opened = core.ui.open_in_file_manager(ADDON_DATA_DIR)
+        if not opened:
+            self.log("", f"the file viewer could not be opened at {ADDON_DATA_DIR}",
+                     True)
+        return opened
 
     def open_addon_manager(self) -> bool:
         """Start the store if need be and put its Addon manager page on screen.
@@ -6771,8 +6811,9 @@ class AddonDevWidget(QWidget):
         self.open_path(ADDON_TEST_DIR)
 
     @staticmethod
-    def open_path(path: Path) -> None:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+    def open_path(path: Path) -> bool:
+        """Show a file or folder in the system's own viewer; whether it opened."""
+        return core.ui.open_in_file_manager(path)
 
     # --- new addon ---
 

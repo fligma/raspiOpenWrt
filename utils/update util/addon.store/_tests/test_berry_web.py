@@ -142,6 +142,20 @@ NOFETCH = {"code": 0, "err": "", "out": (
     "NOANSWER\n"
 )}
 
+#: The same live dashboard on a device whose own uhttpd section listens over
+#: https: the plain probe still answers over http first, but what the config
+#: says decides the address the page is opened at.
+TLS_LIVE = {"code": 0, "err": "", "out": (
+    "FOLDER yes\n"
+    "FILES 22\n"
+    "HOME /www_berry\n"
+    "HTTPS on\n"
+    "PY /usr/bin/python3\n"
+    f"ANSWERED http://{HOST}:8989/cgi-bin/index.py\n"
+    "B <!DOCTYPE html>\n"
+    "B <title>Berry - Dashboard</title>\n"
+)}
+
 
 def check(condition: object, text: str) -> None:
     """One thing the addon has to do; all of them are reported, not just the first."""
@@ -204,7 +218,9 @@ class Api(addon_client.StubAPI):
                                                        named, "")))
             return self.question_answer
         if method == "session.web_url":
-            return f"http://{self.host}:8989/cgi-bin/index.py"
+            page = self.argument(method, "tab", arguments, named, {}) or {}
+            scheme = str(page.get("scheme") or "http")
+            return f"{scheme}://{self.host}:8989/cgi-bin/index.py"
         return super().default(method, arguments, named)
 
     def sets(self, identifier: str, prop: str | None = None) -> list:
@@ -329,6 +345,15 @@ def test_the_check() -> None:
     check("curl" in rows.get("Asking the page", ""),
           f"the missing tool is not said: {rows}")
 
+    secured = berry_web.parse_check(TLS_LIVE)
+    check(secured["https"] and secured["is_berry"],
+          f"a section that listens over https was not noticed: {secured}")
+    check(not berry_web.parse_check(LIVE)["https"],
+          "https was claimed of a device that never said so")
+    rows = {row["cells"][0]: row["cells"][1]
+            for row in berry_web.summary_rows(secured)}
+    check("https" in rows, f"the table does not say the server speaks https: {rows}")
+
 
 # --- two: where the tab opens once it has been told ---
 
@@ -350,6 +375,28 @@ def test_the_landing() -> None:
         check("NOANSWER" in api.commands[-1] and "curl" in api.commands[-1],
               "the check never asks the host for its own page")
         berry_web.shutdown()
+
+    # The live dashboard lands as a page: the web view opens by itself, with
+    # the corner menu the addon's own entries make up.
+    api = fresh(answer=LIVE)
+    berry_web.check_device()
+    check(api.called("tabs.add_web_tab"),
+          "a live dashboard did not land on the web view")
+    menu = api.asked("tabs.add_web_tab", "menu") or []
+    check(bool(menu) and all(str(one.get("id")) and str(one.get("label"))
+                             for one in menu),
+          f"the corner menu did not travel with the page: {menu!r}")
+    berry_web.shutdown()
+
+    # A re-check pressed on the status page reports; it does not yank a page
+    # in front of the buttons being read.
+    api = fresh(answer=LIVE)
+    berry_web.check_device(landing=False)
+    check(not api.called("tabs.add_web_tab"),
+          "a manual re-check opened a page over the status buttons")
+    check(api.last_set("views", "current") == berry_web.STATUS_PAGE,
+          "the re-check did not even leave the notebook on the status page")
+    berry_web.shutdown()
 
     print("\n2b. what the status line says about each")
     api = fresh(answer=LIVE)
@@ -494,6 +541,10 @@ def test_the_probe() -> None:
           "a device with neither curl nor wget is not said to be one")
     check('SERVED $D' in script and "grep home=" in script,
           "the device is never asked which of its folders holds the page")
+    check("listen_https" in script and "redirect_https" in script,
+          "the device is not asked whether its section speaks https")
+    check('echo "HTTPS $' in script,
+          "the https answer is not reported on its own line")
     check(script.count("for URL in") == 1, "the page is asked for twice over")
 
     api = fresh(answer=LIVE)
@@ -857,6 +908,23 @@ def test_the_routes() -> None:
     berry_web.open_dashboard()
     opened = api.asked("tabs.add_web_tab", "url")
     check("8989" in str(opened), f"the dashboard was not opened at its port: {opened!r}")
+    berry_web.shutdown()
+
+    api = fresh(answer=LIVE)
+    berry_web.last_check.update(berry_web.parse_check(TLS_LIVE))
+    berry_web.open_dashboard()
+    opened = str(api.asked("tabs.add_web_tab", "url") or "")
+    check(opened.startswith("https"),
+          f"the https device was visited over plain http: {opened!r}")
+    berry_web.shutdown()
+
+    api = fresh(answer=LIVE)
+    berry_web.on_widget(berry_web.PAGE, "menu_installer", "clicked", {})
+    check(api.last_set("views", "current") == berry_web.INSTALL_PAGE,
+          "the corner menu's installer entry did not move the notebook")
+    check(api.called("tabs.activate"),
+          "the corner menu did not bring the addon's own tab forward")
+    berry_web.on_widget(berry_web.PAGE, "no such entry", "clicked", {})
     berry_web.shutdown()
 
     api = fresh(answer=LIVE)

@@ -85,9 +85,12 @@ The namespaces on ``api``
 
 ``api.tabs``
     ``add_web_tab(name, url="", ip="", port=0, path="", scheme="",
-    position=None, pinned=False, icon_only=False)`` embeds a browser tab that
-    belongs to no profile: it is not stored in the settings and never shows up in
-    Settings > Custom tabs.
+    position=None, pinned=False, icon_only=False, menu=None)`` embeds a browser
+    tab that belongs to no profile: it is not stored in the settings and never
+    shows up in Settings > Custom tabs. ``menu`` is a list of
+    ``{"id": ..., "label": ...}`` entries shown on a small button floating over
+    the corner of the page; picking one comes back as ``on_widget(name, id,
+    "clicked", {})``.
     ``add_tab(name, widget=None, spec=None, style="", position=None,
     pinned=False, icon_only=False)`` adds a tab holding any QWidget (Python) or a
     widget built from a declarative spec (see SPEC FORMAT). With ``position`` left
@@ -3985,8 +3988,15 @@ class TabsAPI:
 
     def add_web_tab(self, name: str, url: str = "", ip: str = "", port: int = 0,
                     path: str = "", scheme: str = "", position: int | None = None,
-                    pinned: bool = False, icon_only: bool = False) -> str:
-        """An embedded page belonging to no profile: not stored, not rebuilt; give either a full url or ip/port/path/scheme. The tab wears an X, and closing it by hand simply takes it away."""
+                    pinned: bool = False, icon_only: bool = False,
+                    menu: list | None = None) -> str:
+        """An embedded page belonging to no profile: not stored, not rebuilt; give either a full url or ip/port/path/scheme. The tab wears an X, and closing it by hand simply takes it away.
+
+        ``menu`` is a list of ``{"id": ..., "label": ...}`` entries: the page then
+        wears a small button over the corner of the view that pops them up, and
+        picking one reports ``on_widget(name, id, "clicked", {})`` back to the
+        addon, exactly as a button on a spec-built tab does.
+        """
         name = str(name).strip()
         if not name:
             raise AddonError("a tab needs a name")
@@ -3994,9 +4004,21 @@ class TabsAPI:
             self.close(name)
         tab = dict(_tab_definition(url, ip, port, path, scheme))
         tab["name"] = name
+        entries = [{"id": str(item.get("id") or ""),
+                    "label": str(item.get("label") or item.get("id") or "")}
+                   for item in (menu or [])
+                   if isinstance(item, dict) and str(item.get("id") or "")]
+        pick = None
+        if entries:
+            tab["menu"] = entries
+
+            def pick(menu_id: str, tab_name: str = name) -> None:
+                self._api._manager.push_widget_event(self._api.id, tab_name,
+                                                     str(menu_id), "clicked", {})
         entry = self._win.add_transient_web_tab(
             tab, self._index(position),
-            on_closed=lambda: self._forget_closed(entry["page"]))
+            on_closed=lambda: self._forget_closed(entry["page"]),
+            on_menu=pick)
         self._store[name] = {
             "page": entry["page"], "url_input": entry["url_input"],
             "view": entry["view"], "tab": tab, "web": True, "registry": {},
@@ -4227,6 +4249,11 @@ class TabsAPI:
         """Load an embedded page again, doing nothing when the tab is gone."""
         entry = self._store.get(str(name))
         if entry is None:
+            return
+        waiting = getattr(entry.get("page"), "_first_show_load", None)
+        if waiting is not None and waiting.fire():
+            # The tab has never been looked at, so "again" can only mean "for
+            # the first time": what it wears in its address bar is loaded.
             return
         if entry["view"] is not None:
             entry["view"].reload()
@@ -5017,11 +5044,11 @@ class ConfigAPI:
         """Whether the addon has written its file yet."""
         return self.file.is_file()
 
-    def open_folder(self) -> None:
-        """Show the addon's own ``addons/_data/<id>`` folder."""
-        from PyQt6.QtGui import QDesktopServices
+    def open_folder(self) -> bool:
+        """Show the addon's own ``addons/_data/<id>`` folder; ``True`` when the file viewer really opened."""
+        from core.ui import open_in_file_manager
 
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(addon_data_dir(self._api.id))))
+        return open_in_file_manager(addon_data_dir(self._api.id))
 
     # --- what the keys mean ---
 

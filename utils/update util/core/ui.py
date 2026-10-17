@@ -68,9 +68,11 @@ THEME_KEYS = ("name", "author", "blurb", "colors", "tabs", "styles")
 _BAD_NAME = re.compile(r"""[<>:"/\\|?*\x00-\x1f]""")
 
 #: What the app holds in memory about the look in force: the name asked for,
-#: the theme it came to, and a count that rises whenever either changes.
+#: the theme it came to, a count that rises whenever either changes, and the
+#: application sheet rendered from it - held empty until somebody asks, since
+#: most launches never paint a sheet twice.
 _state = {"name": DEFAULT_THEME_NAME, "theme": dict(DEFAULT_THEME),
-          "revision": 0}
+          "revision": 0, "sheet": None}
 
 
 # --- the folder and its files ---
@@ -161,17 +163,51 @@ def raw(name: Any) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+#: Themes already read off disk, kept by the stamp of the file they came from.
+#: Completing one means opening the file, parsing its JSON and filling in every
+#: colour and knob it left out, and the same few files are asked for over and
+#: over - the look in force, each popout, the theme list, the api's answers.
+#: The stamp is what makes this safe to hand out without a restart: a file
+#: written while the program runs - by the Theme Manager, or by hand - is read
+#: again the moment it is asked for. ``raw``, the text an editor shows, is
+#: deliberately never cached, so an open file cannot see a stale answer.
+_RESOLVED: dict[str, tuple] = {}
+
+
+def _stamp(path: Path) -> tuple:
+    """What identifies one file's contents cheaply; empty when it is not there."""
+    try:
+        info = path.stat()
+    except OSError:
+        return ()
+    return (int(info.st_mtime_ns), int(info.st_size))
+
+
 def resolve(name: Any) -> dict:
-    """One theme complete: every colour and every knob, whatever the file left out."""
-    data = raw(name)
-    return {
-        "name": safe_name(name) or DEFAULT_THEME_NAME,
+    """One theme complete: every colour and every knob, whatever the file left out.
+
+    The top level comes back as a copy, so a caller may add and drop keys
+    freely; the colour and knob tables inside it are the ones held here, and are
+    for reading.
+    """
+    cleaned = safe_name(name) or DEFAULT_THEME_NAME
+    stamp = _stamp(file_for(name))
+    held = _RESOLVED.get(cleaned)
+    if held is not None and held[0] == stamp:
+        return dict(held[1])
+    data = raw(cleaned)
+    theme = {
+        "name": cleaned,
         "author": str(data.get("author") or ""),
         "blurb": str(data.get("blurb") or ""),
         "colors": theme_colors(data.get("colors")),
         "tabs": theme_tabs(data.get("tabs")),
         "styles": str(data.get("styles") or ""),
     }
+    if len(_RESOLVED) >= 32:
+        _RESOLVED.clear()          # a folder of hand-written themes, forgotten
+    _RESOLVED[cleaned] = (stamp, theme)
+    return dict(theme)
 
 
 def validate(theme: Any) -> list[str]:
@@ -244,6 +280,7 @@ def write(name: Any, theme: dict, *, force: bool = False) -> Path:
         raise ValueError("; ".join(problems))
     path = file_for(cleaned)
     path.write_text(dump(cleaned, theme), encoding="utf-8")
+    _RESOLVED.pop(cleaned, None)     # whatever was read of the old file is gone
     if cleaned == current_name():
         use(cleaned)             # a new file for the look in force takes effect
     return path
@@ -258,6 +295,7 @@ def remove(name: Any) -> bool:
     if not path.is_file():
         return False
     path.unlink()
+    _RESOLVED.pop(cleaned, None)
     if cleaned == current_name():
         use(DEFAULT_THEME_NAME)
     return True
@@ -294,15 +332,26 @@ def use(name: Any) -> str:
         cleaned = DEFAULT_THEME_NAME
     _state["name"] = cleaned
     _state["theme"] = resolve(cleaned)
+    _state["sheet"] = None          # the sheet is painted from the new look
     _state["revision"] += 1
     return cleaned
 
 
 def theme(name: Any = None) -> dict:
     """One theme, complete; the one in force when no name is given."""
-    if name is None or str(name) == "":
+    if _is_in_force(name):
         return dict(_state["theme"])
     return resolve(name)
+
+
+def _is_in_force(name: Any) -> bool:
+    """Whether a theme asked for by name is the one already being worn.
+
+    Saying so keeps the whole look - the sheet, the colours, every knob - on one
+    read of what is already in memory instead of a second trip to disk for a
+    file that was parsed a moment ago.
+    """
+    return bool(name is None or str(name) == "" or safe_name(name) == _state["name"])
 
 
 def revision() -> int:
@@ -312,23 +361,37 @@ def revision() -> int:
 
 def colors(name: Any = None) -> dict:
     """Every colour token and the hex it currently means."""
-    return dict(theme(name)["colors"])
+    return dict(_colors_of(name))
+
+
+def _colors_of(name: Any) -> dict:
+    """The colour table one theme means, without copying it for a single read."""
+    if _is_in_force(name):
+        return _state["theme"]["colors"]
+    return resolve(name)["colors"]
 
 
 def color(token: Any, name: Any = None, default: str = "") -> str:
     """One colour token as a hex; ``default`` when the interface has no such token."""
-    table = theme(name)["colors"]
+    table = _colors_of(name)
     return str(table.get(str(token), default or THEME_COLORS.get(str(token), "")))
 
 
 def tabs(name: Any = None) -> dict:
     """Every tab knob and the size it currently means, in px at 100% zoom."""
-    return dict(theme(name)["tabs"])
+    return dict(_tabs_of(name))
+
+
+def _tabs_of(name: Any) -> dict:
+    """The knob table one theme means, without copying it for a single read."""
+    if _is_in_force(name):
+        return _state["theme"]["tabs"]
+    return resolve(name)["tabs"]
 
 
 def tab_metric(key: Any, name: Any = None) -> Any:
     """One tab knob by itself."""
-    return theme(name)["tabs"].get(str(key), THEME_TABS.get(str(key)))
+    return _tabs_of(name).get(str(key), THEME_TABS.get(str(key)))
 
 
 def chrome_px(name: Any = None) -> int:
@@ -358,8 +421,10 @@ def shows_dots(name: Any = None) -> bool:
 
 def stylesheet(name: Any = None) -> str:
     """The application sheet for one theme, at 100% zoom - the window scales it."""
-    if (name is None or str(name) == "" or safe_name(name) == _state["name"]):
-        return render_theme(_state["theme"])
+    if _is_in_force(name):
+        if _state["sheet"] is None:
+            _state["sheet"] = render_theme(_state["theme"])
+        return _state["sheet"]
     return render_theme(resolve(name))
 
 
@@ -1464,11 +1529,31 @@ from core.const import find_asset, scaled_sheet, zoom_size
 _themed: list[weakref.ref] = []
 
 
+#: The tokens a hand-written sheet may name, as one map of words, rebuilt only
+#: when the look in force changes. Every widget that carries a sheet of its own
+#: is poured through here, and a theme change pours every one of them again -
+#: same tokens, so the same map serves all of them.
+_TOKEN_MAP = {"revision": -1, "values": {}}
+
+
+def _token_values() -> dict:
+    """Every colour and knob of the look in force, as the text a sheet wants."""
+    revision = _state["revision"]
+    if _TOKEN_MAP["revision"] != revision or not _TOKEN_MAP["values"]:
+        theme_data = _state["theme"]
+        _TOKEN_MAP["values"] = {str(key): str(value) for key, value in
+                                {**theme_data["colors"],
+                                 **theme_data["tabs"]}.items()}
+        _TOKEN_MAP["revision"] = revision
+    return _TOKEN_MAP["values"]
+
+
 def theme_text(text: str) -> str:
     """``$token`` in a hand-written sheet becomes the colour or size the theme means."""
-    values = {str(key): str(value) for key, value in
-              {**ui.colors(), **ui.tabs()}.items()}
-    return Template(str(text or "")).safe_substitute(**values)
+    sheet = str(text or "")
+    if "$" not in sheet:
+        return sheet            # nothing to substitute: hand back what came in
+    return Template(sheet).safe_substitute(_token_values())
 
 
 def theme_style(widget: QWidget, sheet: str) -> QWidget:
@@ -3508,3 +3593,51 @@ def finish() -> None:
 def active() -> bool:
     """Whether a splash is up; for tests and for anyone who must not wait on one."""
     return _card is not None
+
+
+###############################################################################
+# Opening a file or folder in the system's own viewer.
+#
+# ``QDesktopServices.openUrl`` is the obvious call and the untrustworthy one:
+# it answers with a plain ``bool`` that nobody here ever read, and on a machine
+# with no handler wired up it says nothing, opens nothing and leaves the app
+# claiming the folder is on screen. Every "Open folder" button goes through
+# :func:`open_in_file_manager` instead, which asks the operating system itself
+# first - ``os.startfile`` on Windows, ``xdg-open`` on Linux, ``open`` on
+# macOS - and only falls back on Qt when the native word fails to launch.
+###############################################################################
+
+
+def open_in_file_manager(path: Any) -> bool:
+    """Show one file or folder in the system's own viewer; ``True`` when something was launched.
+
+    A missing path is answered with ``False`` rather than a shell error, so
+    every caller can decide what to say. A file goes to whatever the system
+    opens that type with; a folder goes to the file manager.
+    """
+    import os
+    import subprocess
+    import sys
+
+    target = Path(str(path))
+    if not target.exists():
+        return False
+    text = str(target)
+    try:
+        if os.name == "nt":
+            os.startfile(text)                    # noqa: S606 - the Windows shell itself
+            return True
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", text])
+            return True
+        subprocess.Popen(["xdg-open", text])
+        return True
+    except OSError:
+        pass
+    try:                                        # no native opener: ask Qt
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+
+        return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(text)))
+    except Exception:
+        return False

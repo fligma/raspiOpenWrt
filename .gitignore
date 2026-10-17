@@ -20,6 +20,10 @@ utils/update util/addons/_data/
 utils/update util/themes/
 
 utils/update util/addons/_build/
+# The bytecode a ``buildtools.py precompile-addons`` run leaves beside an addon's
+# own file. A build writes its own into the copy it stages and packs those,
+# which are never this folder's business.
+*.pyc
 utils/update util/addons/*.exe
 utils/update util/addons/*.bin
 utils/update util/addons/*/*.exe

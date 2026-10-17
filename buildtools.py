@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Every build-time tool Berry Manager needs, in the one file.
 
-Nine small programs used to sit in ``utils/update util/tools``: four that read
+Ten small programs used to sit in ``utils/update util/tools``: four that read
 the source and stop a build over something that would only be noticed by whoever
 happens to open the page (``check_names``, ``check_api_docs``,
 ``check_guide_links``, ``check_connection_saying``), two that write the catalogs
 the addon store and the theme store read off GitHub (``gen_addon_store_index``,
-``gen_theme_store_index``), and three that draw picture files out of the drawings
+``gen_theme_store_index``), three that draw picture files out of the drawings
 held in the sources (``make_addon_icons``, ``make_store_icons``,
-``make_web_icons``). They are one job seen nine times - prove the tree, or
-regenerate what is derived from it - and none of them is used while the program
-runs, so they live here at the top of the repository rather than inside the app.
+``make_web_icons``), one that compresses the pictures already there harder
+without moving a pixel (``pack_pngs``) and one that writes the bytecode a packed
+program reads its addons from (``precompile_addons``). They are one job seen ten
+times over - prove the tree, or regenerate what is derived from it - and none of
+them is used while the program runs, so they live here at the top of the
+repository rather than inside the app.
 
 Name the tool to run it, from any folder::
 
@@ -23,6 +26,8 @@ Name the tool to run it, from any folder::
     python buildtools.py make-addon-icons [--side 128] [--force] [--check] [id ...]
     python buildtools.py make-store-icons [--side 128] [--force] [--check]
     python buildtools.py make-web-icons [--side 512] [--force] [--check]
+    python buildtools.py pack-pngs [--check] [file or folder ...]
+    python buildtools.py precompile-addons [--check] [--clean] [file or folder ...]
 
     python buildtools.py --list            # what is here, and what it is for
 
@@ -43,6 +48,7 @@ import os
 import re
 import struct
 import sys
+import zlib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -63,6 +69,12 @@ ASSETS = APP / "assets"
 #: because the tree an install uploads is that one, and the pictures the page
 #: links to have to be in the tree that goes over.
 WEB_ASSETS = REPO / "src" / "www_rasconf" / "assets"
+
+#: Every folder whose pictures are shipped - in the program, on the store's
+#: cards, on the dashboard's page. ``media`` is deliberately not one of them:
+#: those are the README's own drawings, which no build carries and no window
+#: reads, so their weight belongs to nobody but a person loading the page.
+PNG_HOME = (ASSETS, ADDON_STORE / "assets", WEB_ASSETS)
 
 #: Folders that hold nothing the program runs from.
 SKIP_DIRS = {"__pycache__", ".venv", ".git", "node_modules", "_build",
@@ -1060,6 +1072,169 @@ def raster(svg: str, side: int) -> Any:
     return canvas
 
 
+# --- writing the same picture in fewer bytes ---
+#
+# Qt's PNG writer takes no compression setting worth asking for: the ``quality``
+# it is handed is a trade of pixels against bytes (100 on a PNG writes the
+# near-raw rows of a picture, and once wrote 978 KB of it where 512 sat), and
+# what is left on the table is only how hard the deflate was worked. Working it
+# again over the bytes already in the file moves nothing a person can see, so
+# these three writers and ``pack-pngs`` all end up here.
+
+#: The settings one file is tried at. Level and window are fixed at what zlib
+#: reaches for when asked to be small: what makes a flat drawing cheap is the
+#: filtering the picture library already chose, and these tries only decide how
+#: hard the repeats in the filtered rows are found. ``Z_FILTERED`` answers to
+#: rows of near-zero differences, ``Z_RLE`` and ``Z_HUFFMAN_ONLY`` to a palette
+#: file whose bytes are indexes rather than colours - a mark of one kind or the
+#: other wins each of them somewhere in the shipped set.
+PNG_TRIES = ((9, 9, zlib.Z_DEFAULT_STRATEGY), (9, 9, zlib.Z_FILTERED),
+             (9, 9, zlib.Z_RLE), (9, 9, zlib.Z_HUFFMAN_ONLY))
+
+PNG_HEAD = b"\x89PNG\r\n\x1a\n"
+
+
+def png_chunks(data: bytes) -> list[tuple[bytes, bytes]] | None:
+    """A PNG cut into ``(kind, payload)``, or ``None`` when it is not one.
+
+    Read as far as the file holds, so a truncated chunk answers ``None`` instead
+    of half an answer: nothing here needs to know what the picture shows, only
+    which bytes the file says belong to it.
+    """
+    if not data.startswith(PNG_HEAD):
+        return None
+    out: list[tuple[bytes, bytes]] = []
+    pos = len(PNG_HEAD)
+    while pos + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + length]
+        if len(body) != length:
+            return None
+        out.append((kind, body))
+        pos += 12 + length
+    return out
+
+
+def png_bytes_of(chunks: list[tuple[bytes, bytes]]) -> bytes:
+    """The file those chunks describe, every CRC worked out again."""
+    data = PNG_HEAD
+    for kind, body in chunks:
+        data += struct.pack(">I", len(body)) + kind + body
+        data += struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+    return data
+
+
+def tight_png(data: bytes) -> bytes:
+    """The same picture compressed harder; the bytes unchanged when it cannot be.
+
+    A PNG's IDAT holds the scanlines after filtering, and filtering is what makes
+    a flat drawing small: the compressor is handed rows of near-zero differences
+    and returns them near-zero. Running the deflate again over those exact bytes
+    therefore cannot move a pixel - there is no unfiltering, no resampling, no
+    palette to re-choose - and on the marks these tools draw it is worth a sixth
+    of the file. The smallest of :data:`PNG_TRIES` is taken, checked by opening
+    it again and comparing, and a file that has nothing left to give is handed
+    back as it came.
+    """
+    chunks = png_chunks(data)
+    if not chunks:
+        return data
+    packed = b"".join(body for kind, body in chunks if kind == b"IDAT")
+    if not packed:
+        return data
+    try:
+        raw = zlib.decompress(packed)
+    except zlib.error:
+        return data
+    smallest = None
+    for level, mem, strategy in PNG_TRIES:
+        try:
+            maker = zlib.compressobj(level, zlib.DEFLATED, 15, mem, strategy)
+            body = maker.compress(raw) + maker.flush()
+        except (ValueError, zlib.error):
+            continue
+        if smallest is None or len(body) < len(smallest):
+            smallest = body
+    if smallest is None:
+        return data
+    if zlib.decompress(smallest) != raw:
+        return data                       # the picture would have to move: no
+    out: list[tuple[bytes, bytes]] = []
+    placed = False
+    for kind, body in chunks:
+        if kind != b"IDAT":
+            out.append((kind, body))
+        elif not placed:
+            out.append((kind, smallest))  # one chunk where the old ones were
+            placed = True
+    made = png_bytes_of(out)
+    return made if len(made) < len(data) else data
+
+
+def tight_ico(data: bytes) -> bytes:
+    """An ICO whose PNG frames have been tightened; unchanged when that is not it.
+
+    ``make-web-icons`` writes a PNG-compressed ICO, so the same deflate that
+    shrinks a picture shrinks each frame carried inside it. The directory is
+    taken apart, the frames replaced and the offsets worked out again. A frame
+    held as raw bitmap bytes - which Windows also accepts - is a different kind
+    of file to guess at, so the whole ICO is left alone rather than half read.
+    """
+    if len(data) < 6:
+        return data
+    reserved, kind, count = struct.unpack("<HHH", data[:6])
+    if reserved or kind != 1 or not count:
+        return data
+    frames = []
+    for index in range(count):
+        entry = data[6 + 16 * index:22 + 16 * index]
+        if len(entry) < 16:
+            return data
+        _wide, _high, _colors, _res, _planes, _bits, length, start = \
+            struct.unpack("<BBBBHHII", entry)
+        body = data[start:start + length]
+        if len(body) != length or not body.startswith(PNG_HEAD):
+            return data
+        frames.append(body)
+    made_frames = [tight_png(body) for body in frames]
+    if all(len(made) == len(body) for made, body in zip(made_frames, frames)):
+        return data
+    head = struct.pack("<HHH", 0, 1, count)
+    entries, body_out, offset = b"", b"", len(head) + 16 * count
+    for index, frame in enumerate(made_frames):
+        entry = data[6 + 16 * index:22 + 16 * index]
+        _w, _h, _c, _r, _p, _b, _len, _start = struct.unpack("<BBBBHHII", entry)
+        entries += struct.pack("<BBBBHHII", _w, _h, _c, _r, _p, _b,
+                               len(frame), offset)
+        offset += len(frame)
+        body_out += frame
+    return head + entries + body_out
+
+
+def tight_file(path: Path) -> bytes | None:
+    """The tighter bytes for one picture file, or ``None`` when it is as good as it gets."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if path.suffix.lower() == ".ico":
+        made = tight_ico(data)
+    elif path.suffix.lower() == ".png":
+        made = tight_png(data)
+    else:
+        return None
+    return None if made == data else made
+
+
+def write_png(image: Any, target: Path) -> bool:
+    """One ``QImage`` written as a PNG; ``False`` when Qt cannot make it."""
+    try:
+        target.write_bytes(png_of(image))
+    except (OSError, RuntimeError):
+        return False
+    return True
+
+
 def cmd_make_addon_icons(argv: list[str]) -> int:
     """Write every addon's own tab picture into the folder its icons live in.
 
@@ -1121,7 +1296,7 @@ def cmd_make_addon_icons(argv: list[str]) -> int:
             missing.append(addon_id)
             continue
         folder.mkdir(parents=True, exist_ok=True)
-        if not image.save(str(target), "PNG"):
+        if not write_png(image, target):
             print(f"could not write {target}")
             missing.append(addon_id)
             continue
@@ -1176,7 +1351,8 @@ def _canvas(size: int) -> tuple[Any, float, Any]:
 
 def _tile(painter: Any, scale: float, size: int) -> None:
     """The rounded near-black tile every mark sits on, with a crimson rim."""
-    from PyQt6.QtGui import QColor, QPen, QRectF
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QColor, QPen
 
     inset = INSET * scale
     side = size - 2 * inset
@@ -1364,7 +1540,7 @@ def cmd_make_store_icons(argv: list[str]) -> int:
             continue
         image = drawer()
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not image.save(str(path), "PNG"):
+        if not write_png(image, path):
             print(f"FAILED: {path} could not be written")
             return 1
         made += 1
@@ -1443,14 +1619,19 @@ def cut(base: Any, side: int) -> Any:
 
 
 def png_of(image: Any) -> bytes:
-    """One ``QImage`` as PNG bytes, without touching the disk."""
+    """One ``QImage`` as PNG bytes, compressed, without touching the disk.
+
+    Every writer of a picture goes through here, so the tightening is done once
+    and every file - a tab mark, a store card, a frame inside ``favicon.ico`` -
+    is handed the same treatment.
+    """
     from PyQt6.QtCore import QBuffer, QIODevice
 
     buffer = QBuffer()
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     if not image.save(buffer, "PNG"):
         raise RuntimeError("Qt refused to write a PNG")
-    return bytes(buffer.data())
+    return tight_png(bytes(buffer.data()))
 
 
 def image_pixels(image: Any) -> bytes:
@@ -1674,6 +1855,251 @@ def cmd_make_web_icons(argv: list[str]) -> int:
     return 0
 
 
+def pack_targets(arguments: list[str]) -> list[Path]:
+    """The picture files to look at: those named, or every picture the program ships.
+
+    A named folder is walked for PNGs and ICOs outside the skipped directories,
+    so the command can be pointed at one addon's assets as easily as at the whole
+    set. Nothing is invented when a name reaches nothing: the command says so and
+    fails, because a build that packed zero pictures and reported success is how
+    a fat file sits there for years.
+    """
+    if not arguments:
+        found: list[Path] = []
+        for home in PNG_HOME:
+            if not home.is_dir():
+                continue
+            found.extend(sorted(home.rglob("*.png")))
+            found.extend(sorted(home.rglob("*.ico")))
+        return found
+    picked: list[Path] = []
+    for argument in arguments:
+        path = Path(argument)
+        if not path.is_absolute():
+            path = (REPO / path).resolve()
+        if path.is_dir():
+            for child in sorted(list(path.rglob("*.png")) + list(path.rglob("*.ico"))):
+                if not set(child.parts) & SKIP_DIRS:
+                    picked.append(child)
+        elif path.is_file():
+            picked.append(path)
+        else:
+            print(f"there is nothing at {argument}")
+    return picked
+
+
+def cmd_pack_pngs(argv: list[str]) -> int:
+    """Compress the shipped pictures harder, without moving one pixel.
+
+    The three writers above tighten what they draw, but two of the shipped
+    pictures are artwork a person put in the tree and no tool owns, and every
+    file written before this command existed carries whatever compression the
+    Qt on that machine happened to use. This asks the same question of all of
+    them: can the bytes inside this PNG be deflated harder and still open to the
+    same rows? The picture is never unfiltered, resized or re-coloured, so what
+    a window or a browser shows afterwards is byte for byte the same image.
+
+    ``--check`` writes nothing and exits 1 when a file still has bytes to give,
+    which is how a build keeps the set small rather than only once, here.
+    """
+    _utf8_stdout()
+    parser = argparse.ArgumentParser(
+        prog="buildtools.py pack-pngs",
+        description="Compress the shipped pictures harder; the pixels cannot move.")
+    parser.add_argument("paths", nargs="*",
+                        help="files or folders, instead of every shipped picture")
+    parser.add_argument("--check", action="store_true",
+                        help="write nothing, only report what is not packed")
+    args = parser.parse_args(argv)
+
+    targets = pack_targets([str(item) for item in args.paths])
+    if not targets:
+        print("no picture to look at: nothing named holds a PNG or an ICO")
+        return 2
+    loose = 0
+    saved = 0
+    for path in targets:
+        made = tight_file(path)
+        try:
+            shown = str(path.relative_to(REPO))
+        except ValueError:
+            shown = str(path)
+        if made is None:
+            continue
+        before, after = path.stat().st_size, len(made)
+        loose += 1
+        saved += before - after
+        if args.check:
+            print(f"loose    {shown}: {before} -> {after} bytes "
+                  f"({(before - after) / max(before, 1) * 100:.1f}% to give)")
+            continue
+        path.write_bytes(made)
+        print(f"packed   {shown}: {before} -> {after} bytes "
+              f"({(before - after) / max(before, 1) * 100:.1f}% off)")
+    if args.check:
+        if loose:
+            print(f"{loose} picture(s) of {len(targets)} still hold bytes a deflate "
+                  f"can take; run: python buildtools.py pack-pngs")
+            return 1
+        print(f"all {len(targets)} shipped picture(s) are packed as tight as they go")
+        return 0
+    if not loose:
+        print(f"nothing to do: all {len(targets)} picture(s) were already packed")
+    else:
+        print(f"packed {loose} of {len(targets)} picture(s), "
+              f"{saved} bytes fewer, pixels unchanged")
+    return 0
+
+
+def addon_sources(folder: Path) -> list[Path]:
+    """The addon sources in one folder: each loose ``.py``, and each folder addon's own file.
+
+    The rule is the app's own scanner's: a name beginning with a dot or an
+    underscore is not an addon, which is what keeps ``_tests``, ``_data`` and the
+    build staging out of the set. A folder addon is only ever its ``addon.py`` or
+    ``main.py``, and a bytecode file belongs beside that one file rather than
+    beside the whole folder, because that is where the loader looks for it.
+    """
+    found: list[Path] = []
+    for child in sorted(folder.iterdir(), key=lambda path: path.name.lower()):
+        if child.name.startswith((".", "_")):
+            continue
+        if child.is_file() and child.suffix.lower() == ".py":
+            found.append(child)
+        elif child.is_dir():
+            for entry in ("addon.py", "main.py"):
+                script = child / entry
+                if script.is_file():
+                    found.append(script)
+    return found
+
+
+def precompile_targets(arguments: list[str]) -> list[Path]:
+    """The addon files to write bytecode for: those named, or the program's own.
+
+    A name is looked for where it was typed from as well as from the repository,
+    since the build runs this beside the staged folder and a person runs it in the
+    checkout: the same words mean either place, and a name that holds neither is
+    said out loud rather than quietly compiling nothing.
+    """
+    if not arguments:
+        folder = APP / "addons"
+        return addon_sources(folder) if folder.is_dir() else []
+    picked: list[Path] = []
+    for argument in arguments:
+        path = Path(argument)
+        if not path.is_absolute():
+            for candidate in (Path.cwd() / path, REPO / path):
+                if candidate.exists():
+                    path = candidate
+                    break
+            else:
+                path = REPO / path
+        if path.is_dir():
+            picked.extend(addon_sources(path))
+        elif path.is_file() and path.suffix.lower() == ".py":
+            picked.append(path)
+        else:
+            print(f"there is nothing to compile at {argument}")
+    return picked
+
+
+def cmd_precompile_addons(argv: list[str]) -> int:
+    """Write a ``.pyc`` beside each addon, so a build reads bytecode rather than text.
+
+    A packaged program carries its shipped addons inside the executable, in a
+    folder that is unpacked again every start, so nothing the interpreter caches
+    survives: each start parses every addon from source, which for the ten
+    addons in the tree is some three hundred milliseconds of the boot. A
+    ``<name>.pyc`` sitting beside the source it was made from is read in single
+    digits of milliseconds instead, at the cost of about a fifth again of the
+    source's size in the bundle.
+
+    The files are made as *checked hash* bytecode, and
+    ``addon_common.bytecode_ready`` only ever accepts one whose recorded hash is
+    the hash of the text beside it: an addon edited in the Dev tab, or a
+    bytecode file built by another Python, falls back to its source rather than
+    running the old code. ``--check`` asks that same question of the tree and
+    writes nothing, so a build can prove the sidecars it packed are ones the app
+    will actually use. ``--clean`` removes them, which is what leaves a checkout
+    as it was found.
+    """
+    _utf8_stdout()
+    _use_app()
+    import py_compile
+
+    from addon_common import bytecode_path, bytecode_ready
+
+    parser = argparse.ArgumentParser(
+        prog="buildtools.py precompile-addons",
+        description="Write the bytecode a shipped addon is read from; "
+                    "the source beside it stays the truth.")
+    parser.add_argument("paths", nargs="*",
+                        help="addon files or folders, instead of the program's own")
+    parser.add_argument("--check", action="store_true",
+                        help="write nothing, only report what has no usable bytecode")
+    parser.add_argument("--clean", action="store_true",
+                        help="remove the bytecode files instead of writing them")
+    args = parser.parse_args(argv)
+
+    targets = precompile_targets([str(item) for item in args.paths])
+    if not targets:
+        print("no addon to look at: nothing named holds a source file")
+        return 2
+    pending = 0
+    written = 0
+    cleared = 0
+    for path in targets:
+        sidecar = bytecode_path(path)
+        try:
+            shown = str(sidecar.relative_to(APP))
+        except ValueError:
+            shown = str(sidecar)
+        if args.clean:
+            if sidecar.is_file():
+                sidecar.unlink()
+                cleared += 1
+                print(f"cleared  {shown}")
+            continue
+        if not args.check:
+            try:
+                py_compile.compile(str(path), cfile=str(sidecar), dfile=path.name,
+                                   doraise=True, quiet=2,
+                                   invalidation_mode=(
+                                       py_compile.PycInvalidationMode.CHECKED_HASH))
+            except (py_compile.PyCompileError, OSError) as error:
+                print(f"FAILED   {shown}: {error}")
+                pending += 1
+                continue
+        if not bytecode_ready(path, sidecar):
+            # Written and refused, or never written: either way the app reads
+            # the text, which is the whole cost this command exists to avoid.
+            print(f"stale    {shown}: no bytecode the app would read")
+            pending += 1
+            continue
+        if args.check:
+            continue
+        written += 1
+        print(f"built    {shown}: {path.stat().st_size} -> "
+              f"{sidecar.stat().st_size} bytes")
+    if args.clean:
+        print(f"cleared {cleared} bytecode file(s) of {len(targets)} addon(s)"
+              if cleared else "nothing to clear: no bytecode beside these addons")
+        return 0
+    if args.check:
+        if pending:
+            print(f"{pending} of {len(targets)} addon(s) have no bytecode the app would "
+                  f"read; run: python buildtools.py precompile-addons")
+            return 1
+        print(f"all {len(targets)} addon(s) have bytecode the app will read")
+        return 0
+    if pending:
+        print(f"built {written} of {len(targets)}, {pending} not written")
+        return 1
+    print(f"built {written} bytecode file(s) for {len(targets)} addon(s)")
+    return 0
+
+
 # ============================================================== the command bar
 
 #: ``name -> (what it does, the line the help shows)`` in the order a build runs
@@ -1706,6 +2132,12 @@ COMMANDS: dict[str, tuple[Any, str]] = {
     "make-web-icons": (
         cmd_make_web_icons,
         "cut the dashboard's favicons and tiles out of the app's icon"),
+    "pack-pngs": (
+        cmd_pack_pngs,
+        "compress the shipped pictures harder; the pixels cannot move"),
+    "precompile-addons": (
+        cmd_precompile_addons,
+        "write the .pyc a shipped addon is read from, beside each source"),
 }
 
 
