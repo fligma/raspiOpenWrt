@@ -571,7 +571,7 @@ import sys
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QUrl, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, QUrl, Qt
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -728,6 +728,27 @@ else:
     WebTabPage = None
 
 
+if QWebEngineView is not None:
+    class QuietWebView(QWebEngineView):
+        """A web view that never asks the window for more room than it has.
+
+        Booting the browser process moves a plain view's size hints: the
+        page announces a preferred size and the layout minimums the window
+        obeys rise with it, so opening a browser tab resizes the whole
+        window on its own. The view fills whatever room it is given, and
+        that is the only size it should ever have asked for - both hints
+        are pinned at nothing here, and the layout's own stretch keeps
+        the page as big as the tab it sits in."""
+
+        def minimumSizeHint(self) -> QSize:
+            return QSize(0, 0)
+
+        def sizeHint(self) -> QSize:
+            return QSize(0, 0)
+else:
+    QuietWebView = None
+
+
 class _CornerKeeper(QObject):
     """Keeps a small button pinned to the corner of the web view it floats on.
 
@@ -827,7 +848,7 @@ class BrowserMixin:
                 return self.tabs.addTab(page, title)
             return self.tabs.insertTab(position, page, title)
 
-        if QWebEngineView is None:
+        if QuietWebView is None:
             notice = QLabel(
                 "Embedded browser is unavailable.\n"
                 "Install PyQt6-WebEngine to view this page inside the app, "
@@ -844,7 +865,7 @@ class BrowserMixin:
             add_tab()
             return url_input, None, page
 
-        view = QWebEngineView()
+        view = QuietWebView()
         if WebTabPage is not None:
             view.setPage(WebTabPage(self))
         add_tab()

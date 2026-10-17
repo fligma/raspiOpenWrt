@@ -3,9 +3,9 @@
     {
       "id": "berry_web",
       "name": "Berry web dashboard",
-      "version": "1.4",
+      "version": "1.5",
       "author": "fligma",
-      "description": "Looks for the Berry dashboard on the connected host and, when it is not there, installs src/www_rasconf from GitHub over SFTP: a backup, the files, the theme this program is wearing, the uhttpd section written with uci, the exec bit on the CGI entry, a restart and a check that the page answers. Also views and edits those options, finds which folder on the device holds the page, and can move that one to /www_berry - an install left in /www_rasconf by an older setup included.",
+      "description": "Looks for the Berry dashboard on the connected host and, when it is not there, installs src/www_rasconf from GitHub over SFTP: a backup, the files, the theme this program is wearing, the uhttpd section written with uci, the exec bit on the CGI entry, a restart and a check that the page answers. Also views and edits those options, finds which folder on the device holds the page, and can move that one to /www_berry - an install left in /www_rasconf by an older setup included. The page it finds is shown inside the tab, with a side bar back to the forms and on to a browser.",
       "filename": "berry_web.py",
       "requires": [
         "ssh",

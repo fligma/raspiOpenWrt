@@ -2,7 +2,7 @@
 """Berry web dashboard: put the Berry web UI on the device and get uhttpd serving it.
 
 This is the addon a person installs from the store when the router has no web
-interface yet, or has one that has fallen behind. It does four things:
+interface yet, or has one that has fallen behind. It does five things:
 
 * **looks** - one command over SSH asks the connected host whether the folder is
   there, whether uhttpd points at it, whether ``python3`` is installed and
@@ -17,7 +17,12 @@ interface yet, or has one that has fallen behind. It does four things:
   edited, and the file ``/etc/config/uhttpd`` can be read as it stands;
 * **moves the folder** - ``/www_rasconf`` to ``/www_berry``, or anywhere else, in
   one action that renames the folder, points uhttpd at the new name, commits and
-  restarts.
+  restarts;
+* **shows the page** - the dashboard the device is serving is opened inside this
+  addon's own tab, over its forms, by a side bar down the left that also leads
+  back out to them. The same page can be opened in a tab of the app's own, which
+  is where an address bar and a certificate ask live, or handed to the machine's
+  browser.
 
 The look of the page follows the program: ``css/theme.css`` is generated from the
 theme the app is wearing and uploaded with the rest, so the dashboard is the same
@@ -34,7 +39,11 @@ settings straight across.
 
 The tab is built from a declarative spec and its buttons report back through
 ``on_widget``, so the same file works imported into the app and compiled into a
-program of its own by the Addon Dev tab
+program of its own by the Addon Dev tab. Everything the tab can be looking at -
+one of the three forms, or the device's page - is asked for through ``view_page``
+and ``open_dashboard``, so the side bar, the buttons at the bottom of each page
+and where a check lands all take the same route and none of them has to know the
+page is standing where its forms were.
 """
 
 from __future__ import annotations
@@ -73,7 +82,14 @@ ADDON = {
     # the profile by the app the first time it loads, so nothing stops working.
     # 1.4 is the layout pass over the store: the lines that wrap on this tab now
     # hug their own height, so the room a page has over falls to its tables.
-    "version": "1.4",
+    # 1.5 brings the page into this addon's own tab. A side bar down the left
+    # holds the four places the tab can be looking at - the dashboard page, and
+    # its three forms - and the page is now shown inside the tab over the forms
+    # instead of only in a tab of its own, which the side bar still offers, as it
+    # offers the machine's browser. The page is put up by itself when the device
+    # answers as the dashboard and again after an install that worked, while the
+    # switch on the uhttpd page is on.
+    "version": "1.5",
     "author": "fligma",
     "description": "Looks for the Berry dashboard on the connected host and, when "
                    "it is not there, installs src/www_rasconf from GitHub over "
@@ -83,7 +99,8 @@ ADDON = {
                    "views and edits those options, finds which folder on the "
                    "device holds the page, and can move that one to /www_berry "
                    "- an install left in /www_rasconf by an older setup "
-                   "included.",
+                   "included. The page it finds is shown inside the tab, with a "
+                   "side bar back to the forms and on to a browser.",
     "requires": ["ssh", "sftp"],
     # The files go up over the profile's own session. "both" so a person can
     # switch this addon onto a connection of its own, which is also what lets a
@@ -99,6 +116,11 @@ api = None                  # filled in by init()
 working = False             # one job at a time
 job: dict | None = None     # the job in progress, or nothing
 last_check: dict = {}       # what the device last said about itself
+# The tab has two bodies in the same room: its own notebook of forms, and the
+# page the device serves shown over it. Which is up, and which page of the
+# notebook was last asked for, are the two things the side bar has to say.
+showing_page = False
+shown_page = 0              # the notebook's status page, as STATUS_PAGE numbers it
 
 # --- what can be configured, and what it starts out as ---
 
@@ -130,6 +152,9 @@ DEFAULTS = {
     "web_home": "/www_berry",
     "uci_section": "berry",
     "theme_sync": True,
+    # Whether the page the device serves is put up inside this tab when the
+    # device has it. The side bar's first button does the same thing by hand.
+    "auto_show": True,
 }
 
 FIELDS = [
@@ -195,6 +220,12 @@ FIELDS = [
      "kind": "multiline",
      "hint": "One per line, run on the device once the files are written"},
     {"key": "verify", "label": "Check the page answers afterwards", "kind": "bool"},
+    {"key": "auto_show", "label": "Show the page in this tab when the device has it",
+     "kind": "bool",
+     "hint": "The page goes up over the tab's own forms when the device answers "
+             "as the dashboard, and again after an install that worked. The side "
+             "bar has the same button either way; untick to keep the tab on its "
+             "forms"},
 ]
 
 #: The install form, on the installer page. The GitHub token is not a field of
@@ -216,6 +247,7 @@ GROUPS_UCI = [
                                     "web_path"]),
     ("The page's own file", ["cgi_entry", "make_executable", "theme_sync"]),
     ("After a change", ["restart_command", "verify"]),
+    ("The page inside this tab", ["auto_show"]),
 ]
 
 FIELDS_BY_KEY = {str(field["key"]): field for field in FIELDS}
@@ -326,6 +358,59 @@ _CHIP_STYLES = {
 ACTION_COLORS = {"queued": "#5fb3ff", "new": "#5fb3ff", "written": "#23d18b",
                  "replaced": "#ffb020", "written again": "#ffb020",
                  "already there": "#777777"}
+
+#: The side bar's buttons: one wide column of them, the words to the left so the
+#: row of them reads as a list of places rather than a row of actions.
+NAV_STYLE = ("QPushButton { color: #c8c8c8; background-color: #1b1b1b;"
+             " border: 1px solid #3c3c3c; border-radius: 6px;"
+             " padding: 7px 10px; text-align: left; }"
+             "QPushButton:hover { color: #ffffff; border-color: #7c2140; }"
+             "QPushButton:disabled { color: #4a4a4a; }")
+
+#: The one that says where the tab is looking now.
+NAV_ON_STYLE = ("QPushButton { color: #ffffff; background-color: #24141a;"
+                " border: 1px solid #c51a4a; border-radius: 6px;"
+                " padding: 7px 10px; text-align: left; font-weight: 600; }")
+
+#: A rule across the side bar, splitting the places from the page's own moves and
+#: from the other places it can be seen. There is no divider in the spec language
+#: - a ``line`` is a text box - so this is a label with nothing but an edge.
+NAV_RULE_STYLE = "QLabel { background-color: #2c2c2c; max-height: 1px; }"
+
+#: The side bar, in three groups. Each id is a handler, and each one is painted
+#: lit or plain by :func:`paint_nav` according to where the tab is looking.
+NAV_PLACES = (
+    ("nav_dash", "Dashboard page",
+     "The page the device serves, shown here in this tab over its forms"),
+    ("nav_status", "Status", "What the device last said about itself"),
+    ("nav_install", "Installer", "Fetch the files and write them over"),
+    ("nav_uci", "uhttpd settings",
+     "The served folder, its port, and the section that owns them"),
+)
+NAV_MOVES = (
+    ("nav_recheck", "Re-check the device",
+     "Ask the host what it has again; the tab's pages move to match, but the "
+     "page is not put over them"),
+    ("nav_back", "\u2190", "One step back inside the page"),
+    ("nav_forward", "\u2192", "One step forward inside the page"),
+    ("nav_reload", "\u21ba", "Ask the device for the page again"),
+)
+NAV_ELSEWHERE = (
+    ("nav_tab", "In a browser tab",
+     "The page in a tab of its own, with the app's address bar and its way of "
+     "tolerating a certificate"),
+    ("nav_system", "In the system browser",
+     "The machine's own browser, which has probably met this router before"),
+)
+NAV_ITEMS = NAV_PLACES + NAV_MOVES + NAV_ELSEWHERE
+NAV_BY_ID = {identifier: (text, tip) for identifier, text, tip in NAV_ITEMS}
+
+#: The three moves inside the page, which only answer while the page is up.
+NAV_PAGE_MOVES = ("nav_back", "nav_forward", "nav_reload")
+
+#: Which side-bar button stands for each page of the notebook.
+NAV_FOR_PAGE = {STATUS_PAGE: "nav_status", INSTALL_PAGE: "nav_install",
+                UHTTPD_PAGE: "nav_uci"}
 
 #: Shell chars that must never reach a command line.
 _UNSAFE = re.compile(r"[\"'`$;|&<>\\\n\r\t]")
@@ -795,11 +880,67 @@ def buttons_spec(tips: tuple) -> dict:
 
 
 def view_page(page: int) -> None:
-    """Jump the tab's notebook: 0 status, 1 the installer, 2 uhttpd."""
+    """Jump the tab's notebook: 0 status, 1 the installer, 2 uhttpd.
+
+    This is also the way back out of the device's page, and every way of asking
+    for the forms comes through it: the side bar, the buttons at the bottom of
+    each page, the corner menu of the browser tab, and where a check lands the
+    tab. None of them has to know that a page is standing where its forms were.
+    """
+    global shown_page
+    if api is None:
+        return
     try:
-        api.tabs.set_widget(TAB, "views", "current", int(page))
+        shown_page = int(page)
+    except (TypeError, ValueError):
+        shown_page = STATUS_PAGE
+    _body(False)
+    try:
+        api.tabs.set_widget(TAB, "views", "current", shown_page)
     except (AddonError, AttributeError, TypeError):
         pass
+
+
+def _body(page_up: bool) -> None:
+    """Put the device's page over the tab's forms, or take it back off again.
+
+    Two siblings in one column with one of them hidden: that is the whole swap,
+    and it is why the notebook's own captions go with it rather than staying to
+    be clicked under a page that has no use for them. The page keeps whatever it
+    has loaded when it goes behind, so a trip back to the installer and home
+    again does not bounce a person out of the dashboard they had reached.
+    """
+    global showing_page
+    page_up = bool(page_up)
+    if page_up == showing_page:
+        paint_nav()
+        return
+    showing_page = page_up
+    for identifier, up in (("dash", page_up), ("views", not page_up)):
+        try:
+            api.tabs.set_widget(TAB, identifier, "visible", up)
+        except (AddonError, AttributeError, TypeError):
+            pass
+    for identifier in NAV_PAGE_MOVES:
+        # Back, forwards and a reload are nothing to do while the page is behind.
+        try:
+            api.tabs.set_widget(TAB, identifier, "enabled", page_up)
+        except (AddonError, AttributeError, TypeError):
+            pass
+    paint_nav()
+
+
+def paint_nav() -> None:
+    """Light the side-bar button that says where the tab is looking."""
+    if api is None:
+        return
+    lit = "nav_dash" if showing_page else NAV_FOR_PAGE.get(shown_page, "")
+    for identifier, _text, _tip in NAV_ITEMS:
+        try:
+            api.tabs.set_widget(TAB, identifier, "style",
+                                NAV_ON_STYLE if identifier == lit else NAV_STYLE)
+        except (AddonError, AttributeError, TypeError):
+            pass
 
 
 def uci_page(page: int) -> None:
@@ -879,7 +1020,8 @@ def refresh_totals(items: list[dict] | None = None) -> None:
 
 
 def tab_spec(values: dict) -> dict:
-    """The whole tab: a header, the step flow, and one notebook of three pages."""
+    """The whole tab: a header, the step flow, and the body - the side bar beside
+    either the notebook of three pages or the page the device serves."""
     steps: list[dict] = []
     for index, (key, caption) in enumerate(STEPS):
         if index:
@@ -908,12 +1050,67 @@ def tab_spec(values: dict) -> dict:
              "style": _CHIP_STYLES["gray"]},
             {"kind": "spacer"},
         ]},
-        {"kind": "tabs", "id": "views", "children": [
-            _status_page(),
-            _installer_page(values),
-            _uci_page(values),
+        # The body is a splitter rather than a row so that it takes the room over
+        # the header the way the notebook did on its own, and so the side bar can
+        # be given more of the width - or less - by hand.
+        {"kind": "splitter", "sizes": [1, 5], "children": [
+            nav_spec(),
+            {"kind": "column", "expand": True, "children": [
+                {"kind": "tabs", "id": "views", "children": [
+                    _status_page(),
+                    _installer_page(values),
+                    _uci_page(values),
+                ]},
+                dash_spec(),
+            ]},
         ]},
     ]}
+
+
+def _nav_button(identifier: str) -> dict:
+    """One button of the side bar, from the table of what each is called."""
+    text, tip = NAV_BY_ID[identifier]
+    return {"kind": "button", "id": identifier, "text": text, "tooltip": tip,
+            "style": NAV_STYLE, "on": ["clicked"]}
+
+
+def _nav_rule() -> dict:
+    """The thin edge between the side bar's groups."""
+    return {"kind": "label", "text": "", "style": NAV_RULE_STYLE}
+
+
+def nav_spec() -> dict:
+    """The side bar: the four places, then the page's own news, then elsewhere.
+
+    It stands beside both bodies rather than inside either, so it is the one
+    thing always within reach - which is what it is here for, since a page that
+    fills the tab leaves nothing else to click. The spacer underneath keeps the
+    buttons at their own height instead of stretching them down the side of it.
+    """
+    column: list[dict] = [_nav_button(one) for one, _t, _p in NAV_PLACES]
+    column.append(_nav_rule())
+    column.append(_nav_button("nav_recheck"))
+    column.append({"kind": "row",
+                   "children": [_nav_button(one) for one in NAV_PAGE_MOVES]})
+    column.append(_nav_rule())
+    column += [_nav_button(one) for one, _t, _p in NAV_ELSEWHERE]
+    column.append({"kind": "spacer"})
+    return {"kind": "column", "children": column}
+
+
+def dash_spec() -> dict:
+    """The device's own page, waiting behind the tab's forms for its turn.
+
+    Built with no address and out of sight, so nothing is asked of the device
+    until the page is called for: the app holds an address given to a leaf that
+    is not showing until the moment it is, which is what costs a person who
+    never opens the dashboard nothing at all.
+    """
+    return {"kind": "web", "id": "dash", "visible": False, "expand": True,
+            "on": ["loaded"],
+            "tooltip": "The page the device is serving. The side bar's Status, "
+                       "Installer and uhttpd buttons put this tab's own forms "
+                       "back up"}
 
 
 def _status_page() -> dict:
@@ -931,7 +1128,8 @@ def _status_page() -> dict:
             ("recheck", "Re-check", "Ask the connected host again what it has"),
             ("check", "Check page", "Ask the device for its own page and report "
                                     "what came back"),
-            ("open", "Open dashboard", "The page the device is serving, in its own tab"),
+            ("open", "Open dashboard", "The page the device is serving, shown "
+                                       "here in this tab"),
             ("to_installer", "Go to installer",
              "The page that fetches the files and writes them over"),
         )),
@@ -1055,6 +1253,9 @@ def build_tab() -> None:
     api.tabs.add_tab(TAB, spec=tab_spec(merge_config(DEFAULTS, _stored_config())),
                      style=TAB_STYLE)
     api.tabs.set_icon(TAB, tab_icon())
+    # The side bar starts lit on the status page, which is where the tab is
+    # looking; a landing that finds a dashboard relights it from there.
+    paint_nav()
 
 
 def show_form(values: dict) -> None:
@@ -1511,14 +1712,15 @@ def land_on(check: dict, landing: bool = True) -> None:
     """Where the tab opens: a live dashboard is looked at as a page, anything
     else fixed.
 
-    ``landing`` is the boot and the reconnect: a dashboard that answers gets
-    shown straight away, in its own web tab. A re-check the user pressed on the
-    status page only moves the notebook - yanking a fresh tab in front of the
-    buttons they are reading would be the addon reading its own mail first.
+    ``landing`` is the boot and the reconnect: a dashboard that answers is put up
+    inside this tab, over the forms, while the switch on the uhttpd page is on.
+    A re-check the user pressed only moves the notebook - the forms they are
+    reading are not to be covered by a page they did not ask for, and the side
+    bar's first button is there when they want it.
     """
     if check.get("is_berry"):
         view_page(STATUS_PAGE)
-        if landing:
+        if landing and auto_show_wanted():
             open_dashboard()
     else:
         view_page(INSTALL_PAGE)
@@ -1755,6 +1957,11 @@ def _done() -> None:
         return
     say(f"{label} - {text}.")
     note(f"{label} finished: {text}")
+    if label == "Install" and last_check.get("is_berry") and auto_show_wanted():
+        # The proof is already in hand: the verify stage asked the device for its
+        # page and it answered as the dashboard, so what was just written can be
+        # looked at without a second trip to the host.
+        open_dashboard()
 
 
 def _problem(text: str) -> None:
@@ -2465,9 +2672,14 @@ def apply_uci(_checked: bool = False) -> None:
 
 
 def check_device_later() -> None:
-    """Re-check once the restarted server has had a moment to come up."""
+    """Re-check once the restarted server has had a moment to come up.
+
+    Not a landing: this follows Apply and Move, and what the person is looking at
+    are the forms they just changed. A page come up over the top of them would be
+    the addon hiding its own work; the side bar is one click away instead.
+    """
     try:
-        api.schedule.after(1.5, check_device)
+        api.schedule.after(1.5, lambda: check_device(landing=False))
     except (AddonError, AttributeError, TypeError):
         pass
 
@@ -2648,12 +2860,13 @@ def copy_raw(_checked: bool = False) -> None:
         pass
 
 
-# --- the little menu that rides the dashboard's own page ---
+# --- the page: inside this tab, in a tab of its own, in the machine's browser ---
 
 #: What the small button floated over the embedded page offers, by id and
 #: caption. Each entry comes back through ``on_widget(PAGE, id, "clicked")``,
 #: so it is handled exactly like a button on the addon's own tab.
 WEB_MENU_ITEMS = (
+    ("menu_dash", "Show in this tab"),
     ("menu_status", "Status page"),
     ("menu_installer", "Go to installer"),
     ("menu_uci", "uhttpd settings"),
@@ -2667,8 +2880,10 @@ def show_tab_page(page: int) -> None:
     focus_tab()
 
 
-#: Where each entry of that menu leads.
+#: Where each entry of that menu leads. The first is spelled as a call rather
+#: than the name because the page's own functions are further down this file.
 WEB_MENU = {
+    "menu_dash": lambda: open_dashboard(),
     "menu_status": lambda: show_tab_page(STATUS_PAGE),
     "menu_installer": lambda: show_tab_page(INSTALL_PAGE),
     "menu_uci": lambda: show_tab_page(UHTTPD_PAGE),
@@ -2682,25 +2897,77 @@ def menu_entries() -> list[dict]:
             for identifier, label in WEB_MENU_ITEMS]
 
 
-def open_dashboard(_checked: bool = False) -> None:
-    """The page in a tab of its own, so an install can be looked at straight away.
+def page_url() -> str:
+    """The address the device's page is asked for, in the scheme its config says.
 
-    The scheme follows the device's own config: the check asks the uhttpd
-    section whether it listens over https or redirects there, and a section
-    that does is visited over https - whatever the plain probe happened to
-    answer on first."""
-    if api is None:
-        return
+    The check asks the uhttpd section whether it listens over https or redirects
+    there, and a section that does is visited over https - whatever the plain
+    probe happened to answer on first. An empty answer means there is no host to
+    ask, which every caller says in its own words.
+    """
     paths = job_paths(merge_current())
     scheme = "https" if (str(last_check.get("url") or "").startswith("https")
                          or last_check.get("https")) else "http"
-    url = ""
     try:
-        url = str(api.session.web_url({"ip": "", "port": paths["port"],
-                                       "path": paths["web_path"],
-                                       "scheme": scheme}) or "")
+        return str(api.session.web_url({"ip": "", "port": paths["port"],
+                                        "path": paths["web_path"],
+                                        "scheme": scheme}) or "")
     except (AddonError, AttributeError, TypeError):
-        url = ""
+        return ""
+
+
+def auto_show_wanted() -> bool:
+    """The switch on the uhttpd page: is the page put up when the device has it?
+
+    Read from the form rather than from the file, so the tick a person is looking
+    at is the one that decides. With no api beside the addon, or a config that
+    will not answer, the page is shown - which is what this addon did before the
+    switch existed.
+    """
+    try:
+        return bool(config_get(merge_current(), "auto_show",
+                               DEFAULTS["auto_show"]))
+    except (AddonError, AttributeError, TypeError):
+        return bool(DEFAULTS["auto_show"])
+
+
+def open_dashboard(_checked: bool = False) -> None:
+    """The page inside this tab, over the forms: the tab becomes the dashboard.
+
+    The address goes to the leaf before the leaf is shown, which is what lets the
+    app hold the fetch until the page is on screen and make it once. A build
+    without QtWebEngine refuses the ask, and the tab keeps its forms rather than
+    showing a notice where a page should be: the browser tab down the side bar is
+    the way to see it there.
+    """
+    if api is None:
+        return
+    url = page_url()
+    if not url.startswith("http"):
+        say("there is no address to open: put a host in the connection panel",
+            bad=True)
+        return
+    try:
+        api.tabs.set_widget(TAB, "dash", "url", url)
+    except AddonError as error:
+        say(f"this build cannot show the page inside the tab ({error}) - \u201cIn "
+            "a browser tab\u201d on the left can", bad=True)
+        return
+    _body(True)
+    say(f"showing {url}")
+
+
+def open_in_tab(_checked: bool = False) -> None:
+    """The page in a tab of its own, with the app's own work put over it.
+
+    That tab is the one that carries the address bar, Home, the bar shown when a
+    page refuses and the ask to tolerate a certificate, and the corner menu that
+    leads back to this addon's forms - none of which an embedded page has room
+    for. So it stays one button away rather than going away.
+    """
+    if api is None:
+        return
+    url = page_url()
     if not url.startswith("http"):
         say("there is no address to open: put a host in the connection panel",
             bad=True)
@@ -2711,9 +2978,67 @@ def open_dashboard(_checked: bool = False) -> None:
             api.tabs.navigate(PAGE, url)
         else:
             api.tabs.add_web_tab(PAGE, url=url, menu=menu_entries())
-        say(f"opened {url}")
+        say(f"opened {url} in a tab of its own")
     except AddonError as error:
         say(f"the page could not be opened: {error}", bad=True)
+
+
+def open_in_system(_checked: bool = False) -> None:
+    """The machine's own browser, which has probably met this router before."""
+    if api is None:
+        return
+    url = page_url()
+    if not url.startswith("http"):
+        say("there is no address to open: put a host in the connection panel",
+            bad=True)
+        return
+    try:
+        took = bool(api.ui.browse(url))
+    except (AddonError, AttributeError, TypeError):
+        took = False
+    if took:
+        say(f"the browser was given {url}")
+    else:
+        say(f"no browser would take it; the address is {url}", bad=True)
+
+
+def _web_move(prop: str) -> None:
+    """One move inside the embedded page: back, forward, a reload.
+
+    None of them is anything to do while the page is behind the forms, so a press
+    there asks for the page first and lets the leaf hold the address.
+    """
+    if api is None:
+        return
+    if not showing_page:
+        open_dashboard()
+        return
+    try:
+        api.tabs.set_widget(TAB, "dash", prop, "")
+    except AddonError:
+        pass
+
+
+def page_loaded(payload: dict) -> None:
+    """What the embedded page said of itself when it stopped loading.
+
+    A web view that is refused says nothing at all, and the commonest refusal here
+    is a router with a self-signed certificate - the one thing the app's browser
+    tab has a button for and an embedded page has no room for. So the two ways out
+    are said in words instead of leaving a blank pane to be stared at.
+    """
+    if api is None:
+        return
+    news = payload if isinstance(payload, dict) else {}
+    url = str(news.get("url") or "")
+    if news.get("ok"):
+        say(f"showing {url}" if url else "the page loaded")
+        return
+    say(f"{url or 'the page'} did not load - \u201cIn a browser tab\u201d on the "
+        "left asks again with a way to tolerate the certificate, and \u201cIn the "
+        "system browser\u201d hands it to the machine's own", bad=True)
+    note("the embedded page did not load; the browser tab can be told to accept "
+         "the device's certificate")
 
 
 # --- the buttons ---
@@ -2797,6 +3122,19 @@ HANDLERS.update({
     "to_installer": lambda: to_page(INSTALL_PAGE),
     "to_uci": lambda: to_page(UHTTPD_PAGE),
     "to_status": lambda: to_page(STATUS_PAGE),
+    # The side bar: the four places, the page's own moves, and the other two
+    # places it can be seen. None of these are jobs, so none of them stand down
+    # while one runs - a person installing a dashboard keeps the way out.
+    "nav_dash": open_dashboard,
+    "nav_status": lambda: to_page(STATUS_PAGE),
+    "nav_install": lambda: to_page(INSTALL_PAGE),
+    "nav_uci": lambda: to_page(UHTTPD_PAGE),
+    "nav_recheck": lambda: check_device(landing=False),
+    "nav_back": lambda: _web_move("back"),
+    "nav_forward": lambda: _web_move("forward"),
+    "nav_reload": lambda: _web_move("reload"),
+    "nav_tab": open_in_tab,
+    "nav_system": open_in_system,
     "fetch": lambda: _begin("fetch"),
     "install": lambda: _begin("install"),
     "push": push_config,
@@ -2898,18 +3236,25 @@ def start() -> None:
 
 
 def shutdown() -> None:
-    global api, working, job
+    global api, working, job, showing_page, shown_page
     _close_session()
     _drop_http()
     working = False
     job = None
     last_check.clear()
+    showing_page = False
+    shown_page = STATUS_PAGE
     api = None
 
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     """A button on the tab, or an entry of the dashboard page's own corner
-    menu, was clicked: run what its id means."""
+    menu, was clicked: run what its id means. The embedded page's own news -
+    that it loaded, or did not - comes back the same way."""
+    if str(tab) == TAB and str(event) == "loaded":
+        if str(identifier) == "dash":
+            page_loaded(payload or {})
+        return
     if str(event) != "clicked":
         return
     if str(tab) == TAB:

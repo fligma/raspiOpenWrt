@@ -76,6 +76,7 @@ from PyQt6.QtWidgets import (
 
 from addon_api import (
     API_VERSION,
+    GUI_ASK_TIMEOUT,
     AddonAPI,
     AddonError,
     app_icon_path,
@@ -97,7 +98,7 @@ from addon_api import (
 from addon_common import (addon_data_dir, addon_manifest_path, addon_origin,
                           build_mark, bytecode_path, bytecode_ready,
                           future_handle, kill_process_tree, popen_tree,
-                          release_process_tree, terminate_process_tree,
+                          release_process_tree, run_quiet, terminate_process_tree,
                           write_build_mark)
 from core.const import (
     ADDON_DATA_DIR,
@@ -132,6 +133,18 @@ class _Bus(QObject):
         self.dead = False
         # Where a job that raised gets said; the manager wires its own log.
         self._logger = logger
+        # What the crossing between threads has cost this run, counted for the
+        # Addon Dev tab and for a boot measured by hand: whether the wait or the
+        # work is the slow part is not a thing to guess at. Best effort - these
+        # are added to from several threads and are read as a rough figure.
+        self.posts = 0
+        self.asks = 0
+        self.waited = 0.0
+        # How deep the GUI thread is inside delivering a job. A wait that starts
+        # there can never be answered from where it stands: the job an addon is
+        # waiting on is the one this thread has not finished running (see
+        # :meth:`AddonWorker.drain`).
+        self.serving = 0
         self._invoke.connect(self._run)
 
     def _run(self, job: Callable[[], Any]) -> None:
@@ -146,12 +159,15 @@ class _Bus(QObject):
         with it, and one addon's broken job is not the app's: it is
         swallowed here and said in the log instead.
         """
+        self.serving += 1
         try:
             job()
         except (RuntimeError, AddonError):
             pass            # a widget went away mid-delivery while closing
         except Exception as error:
             self._note(error)
+        finally:
+            self.serving -= 1
 
     def _note(self, error: BaseException) -> None:
         """Say what a failing job raised, without ever raising again."""
@@ -168,6 +184,7 @@ class _Bus(QObject):
         """Run `job` on the GUI thread soon, without waiting for it."""
         if self.dead:
             return
+        self.posts += 1
         if on_gui_thread():
             # singleShot hands the job to a slot of its own, so it needs
             # the same guard the signal path gets through _run.
@@ -179,6 +196,7 @@ class _Bus(QObject):
         """Run `job` on the GUI thread and wait for its result."""
         if self.dead:
             raise AddonError("the app is closing")
+        self.asks += 1
         if on_gui_thread():
             return job()
         answers: queue.Queue = queue.Queue()
@@ -210,8 +228,363 @@ class _Bus(QObject):
         if seconds:
             time.sleep(seconds)
 
+    #: How long a wait rests when Qt says there was nothing to do: short enough
+    #: that an addon's request for a widget is answered within a fraction of a
+    #: millisecond, long enough that a thread standing here costs no real CPU.
+    REST = 0.0005
+
+    def wait(self, ready: Callable[[], bool], seconds: float = 0.0) -> bool:
+        """Keep serving the queue until `ready`, or until `seconds` run out.
+
+        This is the shape of every wait the interface does on an addon's thread, and
+        the addon's own api calls are answered from inside it: an addon building a
+        page asks for a hundred widgets and pays this loop for each, so it runs as
+        tight as it can rather than taking a nap between looks. ``seconds`` of zero
+        waits as long as it takes.
+
+        Returns whether `ready` was reached - a caller that timed out still has to
+        finish its own teardown without the addon.
+        """
+        deadline = time.monotonic() + seconds if seconds else 0.0
+        began = time.monotonic()
+        while not ready():
+            if self.dead:
+                return ready()
+            if not QCoreApplication.processEvents(
+                    QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents):
+                time.sleep(self.REST)
+            if deadline and time.monotonic() >= deadline:
+                return ready()
+        self.waited += time.monotonic() - began
+        return True
+
+
+#: The api namespaces whose calls belong on the GUI thread, because each one
+#: builds, reads or redraws a widget. Everything else an addon can ask for -
+#: ``device`` and ``paths`` - reaches a socket or a file and is safe to do from
+#: wherever the addon's own code happens to run. This is the one list of the
+#: two: the process bridge routes these names here (see
+#: :attr:`ProcessBridge.GUI_METHODS`) and an in-process addon's calls to them
+#: are handed over the same way (see :class:`ThreadedAPI`).
+GUI_NAMESPACES = ("ui", "tabs", "session", "events", "settings", "config",
+                  "settings_pages", "schedule", "peers", "theme", "window")
+
+
+class AddonWorker:
+    """One addon's own thread: its code runs there, in the order it was asked.
+
+    A source addon used to run every hook on the GUI thread, which meant that
+    an addon thinking - fetching a release, reading a log, waiting on SSH - was
+    the whole window not answering for the duration. Here the same code runs on
+    a thread of its own, one per addon, so a slow addon is only slow for itself
+    and the interface keeps painting.
+
+    Two promises hold it together:
+
+    * **one job at a time, in order**, so an addon's own state is never being
+      walked by two threads and a click that comes second cannot finish first;
+      the thread is never a pool, and one addon's work never runs beside its own;
+    * **nothing here touches Qt**. The addon's api calls to the widget
+      namespaces are handed to :class:`ThreadedAPI` and go to the GUI thread;
+      this thread only ever waits for the answer.
+
+    A hook that raises is said in the log and the queue carries on: one broken
+    addon is not allowed to take its own thread, let alone the app, down with it
+    - the same rule the process bridge keeps for a compiled addon.
+    """
+
+    #: How long a stop waits for the addon to finish what it was doing, before
+    #: it is left to run out its own time in the background and refused the
+    #: interface. Generous, because ``shutdown`` is allowed to close a session.
+    DRAIN_SECONDS = 5.0
+
+    def __init__(self, addon_id: str, bus: "_Bus",
+                 report: Callable[[str], None] | None = None) -> None:
+        self.id = str(addon_id)
+        self.bus = bus
+        self.report = report
+        self.queue: queue.Queue = queue.Queue()
+        # True from the moment the app decides this addon is going away: nothing
+        # new is queued, though what is already queued still runs out.
+        self.closing = False
+        # Set once the queued work has run: after that the addon is refused the
+        # interface, because the widgets its api calls would reach are being
+        # taken down around them.
+        self.retiring = False
+        self._idle = threading.Event()
+        self._idle.set()
+        self._left = 0
+        self._count = threading.Lock()
+        self._spent = 0
+        # How deep this thread is standing in the GUI thread's queue: an addon job
+        # that is waiting on a widget call has no use waiting for anything back.
+        self._hops = 0
+        self.thread = threading.Thread(target=self._loop, daemon=True,
+                                      name=f"addon-{self.id}")
+
+    # --- the queue ---
+
+    def start(self) -> None:
+        if not self.thread.is_alive():
+            self.thread.start()
+
+    def post(self, job: Callable[[], Any]) -> bool:
+        """Queue one job; ``False`` when this thread is going and will not run it."""
+        if self.retiring or self.closing:
+            return False
+        with self._count:
+            self._left += 1
+            self._idle.clear()
+        self.queue.put(job)
+        return True
+
+    def ask(self, job: Callable[[], Any], timeout: float = GUI_ASK_TIMEOUT) -> Any:
+        """Run one job here from the interface thread and wait for its answer.
+
+        The proxy's opposite: sometimes the app needs something that may only
+        happen on the addon's thread - its file imported, one hook called while
+        the load that reports its failure is still on the stack. Waiting plainly
+        would strand the pair, since that thread's own api calls are answered by
+        the very thread standing still, so each slice of the wait hands the event
+        queue a turn.
+        """
+        answers: queue.Queue = queue.Queue()
+
+        def run() -> None:
+            try:
+                answers.put(("ok", job()))
+            except BaseException as error:       # hand the real failure back
+                answers.put(("error", error))
+
+        if not self.post(run):
+            raise AddonError(f"{self.id} is gone: this addon is being stopped")
+        if not self.bus.wait(lambda: not answers.empty(), timeout):
+            self.closing = True        # nothing further is queued behind it
+            raise AddonError("the addon did not answer in time")
+        kind, value = answers.get_nowait()
+        if kind == "error":
+            raise value
+        return value
+
+    def pending(self) -> int:
+        """How many jobs are queued or running right now."""
+        with self._count:
+            return self._left
+
+    @property
+    def here(self) -> bool:
+        """Whether this call comes in on the addon's own thread.
+
+        The check that keeps an addon from being made to wait behind itself: a hook
+        that calls another hook, or is called by the app from inside a job already
+        running here, is answered on the spot rather than queued after it.
+        """
+        return threading.current_thread() is self.thread
+
+    def idle(self) -> bool:
+        """Whether nothing of this addon's is outstanding."""
+        return self._idle.is_set()
+
+    def in_hop(self) -> bool:
+        """Whether this thread is waiting on an answer from the GUI thread.
+
+        Counted rather than flagged, because one job can ask twice over - a widget
+        call made from inside a call that itself made one.
+        """
+        with self._count:
+            return self._hops > 0
+
+    def stuck(self) -> bool:
+        """Whether the answer this thread waits on can only come from inside us.
+
+        The one wait that is never answered: the addon is standing on the
+        interface for a widget, and this thread is in the middle of running that
+        very request, so finishing the wait would mean returning from the job that
+        has to answer it first. A hop whose request is still only queued is not
+        stuck at all - the interface is free to take it - which is why this asks
+        the bus as well as the thread.
+        """
+        return self.in_hop() and self.bus.serving > 0
+
+    @property
+    def jobs(self) -> int:
+        """How many jobs this thread has run; what the Addon Dev tab shows."""
+        return self._spent
+
+    def _loop(self) -> None:
+        while True:
+            job = self.queue.get()
+            if job is None:
+                break
+            try:
+                job()
+            except Exception as error:            # never let a job kill the thread
+                detail = f"{type(error).__name__}: {error}"
+                if self.report is not None:
+                    guard(self.report, detail, reporter=None)
+            finally:
+                with self._count:
+                    self._spent += 1
+                    self._left -= 1
+                    if self._left <= 0:
+                        self._left = 0
+                        self._idle.set()
+
+    # --- stopping ---
+
+    def drain(self, seconds: float = 0.0) -> bool:
+        """Wait for what is queued to run, serving the interface while waiting.
+
+        The GUI thread is the only thing that can answer this thread's api
+        calls, so a plain wait here is a deadlock with extra steps: an addon
+        finishing its ``shutdown`` and asking for a widget is asking the very
+        thread that is standing still. So each slice of the wait hands the event
+        queue a turn (the same trick the process bridge uses to stop a child).
+
+        ``seconds`` bounds the wait; zero waits as long as the addon takes.
+        Returns whether the thread came out empty.
+        """
+        if self.stuck():
+            # The addon is inside the interface right now, and this thread is the
+            # one standing in its way - a handler that stopped its own addon, which
+            # is the one wait that could never be answered. Waiting would only end
+            # in a timeout, and then in a shutdown that never got its widgets.
+            return self.idle()
+        return self.bus.wait(self.idle, seconds)
+
+    def stop(self, grace: float = DRAIN_SECONDS) -> None:
+        """Let the addon finish, then close the thread; nothing is waited on after.
+
+        New work is refused *before* the wait, so a stop cannot be extended by
+        events arriving while it runs - but the interface stays open to the work
+        already queued, because that is the addon's ``shutdown`` closing its own
+        session and it needs the widgets to say goodbye properly. Refusing the
+        interface comes after the queue has run out, and the thread itself is left
+        running rather than killed, because Python has no safe way to stop a thread
+        that is inside somebody else's code. A daemon thread that outlives its
+        addon can only reach the interface through its proxy, and the proxy has by
+        then been told to say no.
+        """
+        self.closing = True
+        self.drain(grace)
+        self.retiring = True
+        self.queue.put(None)          # wakes the loop for good once it is idle
+
+
+class _GuiNamespace:
+    """One api namespace worn as a hop: every call is run on the GUI thread.
+
+    The addon holds this instead of the real namespace and cannot tell the
+    difference - the same methods, the same answers, the same errors. What moves
+    is where the work happens: the widget is touched on the thread that owns it,
+    and the addon's thread waits for the result, exactly as a compiled addon's
+    request waits at the other end of a pipe.
+    """
+
+    def __init__(self, real: Any, bus: "_Bus", worker: AddonWorker,
+                 name: str) -> None:
+        self._real = real
+        self._bus = bus
+        self._worker = worker
+        self._name = name
+
+    def _hop(self, job: Callable[[], Any]) -> Any:
+        if self._worker.retiring:
+            raise AddonError(f"{self._name} is gone: this addon is being stopped")
+        if self._bus.dead:
+            raise AddonError("the app is closing")
+        with self._worker._count:
+            self._worker._hops += 1
+        try:
+            return self._bus.ask(job, timeout=GUI_ASK_TIMEOUT)
+        finally:
+            with self._worker._count:
+                self._worker._hops -= 1
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)          # the proxy's own parts, and no more
+        owner = getattr(type(self._real), name, None)
+        if isinstance(owner, property):
+            # Reading it runs the getter, and the getter reads a widget.
+            return self._hop(lambda: getattr(self._real, name))
+        value = getattr(self._real, name)
+        if not callable(value):
+            return value                        # a plain value: a string, a number
+        def call(*arguments: Any, **named: Any) -> Any:
+            return self._hop(lambda: getattr(self._real, name)(*arguments, **named))
+
+        call.__name__ = str(name)
+        call.__doc__ = getattr(value, "__doc__", None)
+        return call
+
+
+class ThreadedAPI:
+    """The api an addon is handed when its code runs on a thread of its own.
+
+    Same object, same names, one difference in behaviour: the namespaces that
+    own a widget are answered on the GUI thread, and the ones that reach a
+    socket or a file are answered right there on the addon's thread - so a
+    download is off the interface instead of on it, which is the whole point.
+
+    ``win`` is the window itself and is refused from another thread on purpose:
+    it is not part of what an addon is given to hold, and everything a widget
+    can be asked to do already has a name in the api.
+    """
+
+    #: What may be read straight off the real api: the addon's own record.
+    PLAIN = ("id", "name", "api_version", "base_dir", "_addon", "_manager")
+
+    def __init__(self, real: "AddonAPI", bus: "_Bus", worker: AddonWorker) -> None:
+        self._real = real
+        self._bus = bus
+        self._worker = worker
+        self._spaces = {name: _GuiNamespace(getattr(real, name), bus, worker, name)
+                        for name in GUI_NAMESPACES if getattr(real, name, None) is not None}
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._spaces:
+            return self._spaces[name]
+        if name == "win":
+            window = self._real.win
+            if on_gui_thread():
+                return window
+
+            def refused(*_arguments: Any, **_named: Any) -> Any:
+                raise AddonError(
+                    "the window is not this thread's to touch: an addon's own "
+                    "code runs on its thread, so reach the interface through "
+                    "the api namespaces rather than through api.win")
+
+            return refused
+        if name in ("log", "error"):
+            def say(text: Any, which=name) -> None:
+                # Told, not asked: a log line is worth neither a wait nor a
+                # timeout, and the answer is the window's own log.
+                self._bus.post(lambda: getattr(self._real, which)(text))
+
+            return say
+        return getattr(self._real, name)
+
+
+def thread_api(real: "AddonAPI", bus: "_Bus", worker: AddonWorker) -> Any:
+    """Wrap one addon's api for the thread its code will run on."""
+    return ThreadedAPI(real, bus, worker)
+
 
 _ID_CLEAN = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def threads_asked_for() -> bool:
+    """Whether addons get a thread each: an escape hatch off, everything else on.
+
+    ``BERRY_ADDON_THREADS=0`` puts every hook back on the GUI thread, exactly as
+    before this existed. It is there for two reasons: a harness with no event loop
+    of its own could never answer a threaded addon's api call, and anybody chasing
+    a strange addon with a debugger wants one thread, not a dozen.
+    """
+    return str(os.environ.get("BERRY_ADDON_THREADS", "1")).strip().lower() \
+        not in ("0", "off", "no", "false", "none")
 
 
 def safe_identifier(text: str) -> str:
@@ -364,6 +737,27 @@ class Addon:
         self.popout_record = False      # the profile's force-popout switch
         # Whether this addon may read the profile's global git token.
         self.git_token = False
+        # The thread this addon's own code runs on, and the api it is handed
+        # there. Both are None until the addon is loaded with threading on, and
+        # an addon without a thread is called on the GUI thread exactly as it
+        # always was - which is what the test harness and a run with
+        # BERRY_ADDON_THREADS=0 get.
+        self.worker: AddonWorker | None = None
+        self.thread_api: Any = None
+
+    # --- its own thread ---
+
+    @property
+    def threaded(self) -> bool:
+        """Whether this addon's hooks are run elsewhere than on the GUI thread."""
+        return self.worker is not None
+
+    def post(self, job: Callable[[], Any]) -> bool:
+        """Queue one job on this addon's thread; ``False`` when it has none."""
+        worker = self.worker
+        if worker is None:
+            return False
+        return worker.post(job)
 
     @property
     def is_bundled(self) -> bool:
@@ -466,9 +860,9 @@ class _Answered:
 class ProcessBridge:
     """Line-delimited JSON between the app and an executable addon."""
 
-    #: Requests served on the GUI thread because they touch Qt.
-    GUI_METHODS = ("ui.", "tabs.", "session.", "events.", "settings.", "config.",
-                   "settings_pages.", "schedule.", "peers.", "theme.", "window.")
+    #: Requests served on the GUI thread because they touch Qt. The same names
+    #: an in-process addon is handed wrapped - see :data:`GUI_NAMESPACES`.
+    GUI_METHODS = tuple(f"{name}." for name in GUI_NAMESPACES)
 
     #: Asked by the addon about a job the app is still running for it. These
     #: never reach the api: the bridge answers them from its own registry,
@@ -504,7 +898,6 @@ class ProcessBridge:
         declared = self.addon.manifest.get("command")
         command = [str(part) for part in declared] if isinstance(declared, list) and declared \
             else [str(self.addon.source)]
-        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # no console pop-up
         self.command = command
         self.exit_code = None
         self.started_at = time.monotonic()
@@ -521,7 +914,6 @@ class ProcessBridge:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            creationflags=flags,
             env=self._environment(),
         )
         self.reader = threading.Thread(target=self._read_stdout, daemon=True,
@@ -587,12 +979,7 @@ class ProcessBridge:
 
     def _wait(self, proc: subprocess.Popen, seconds: float) -> bool:
         """Poll while the closing GUI thread keeps answering this addon."""
-        deadline = time.monotonic() + seconds
-        while proc.poll() is None:
-            if time.monotonic() >= deadline:
-                return False
-            self.mgr.bus.pump()
-        return True
+        return self.mgr.bus.wait(lambda: proc.poll() is not None, seconds)
 
     def close_streams(self) -> None:
         if self.proc is None:
@@ -894,6 +1281,13 @@ class AddonManager:
     CRASH_LIMIT = 3         # this many on the way up is the last of them
     CRASH_QUICK = 10.0      # shorter than this and it never really started
 
+    #: How long one addon's thread is waited on while it is being stopped, and the
+    #: briefer answer when the app itself is going down. A worker's queue holds its
+    #: ``shutdown``, which is allowed to close a session and say goodbye; that is
+    #: worth waiting for once an addon, and not worth five seconds times five.
+    STOP_GRACE = AddonWorker.DRAIN_SECONDS
+    SHUTDOWN_GRACE = 1.5
+
     def __init__(self, window: Any) -> None:
         self.win = window
         self.bus = _Bus(lambda text: self.log("", text, warning=True))
@@ -914,6 +1308,15 @@ class AddonManager:
         self._started = False
         # id -> when its starts died on the way up; see CRASH_LIMIT.
         self._crashes: dict[str, list[float]] = {}
+        # Whether each addon gets a thread of its own. Asked once, because a run
+        # that mixes the two would hand some addons a proxy and others the real
+        # api, and an addon cannot be blamed for assuming which it was given.
+        # No event loop means no answers, so a bare harness runs inline too.
+        self.threaded = bool(threads_asked_for()
+                             and QCoreApplication.instance() is not None)
+        # How long stopping one addon's thread is waited on; shorter while the
+        # whole app is closing. See :meth:`AddonWorker.stop`.
+        self.stop_grace = self.STOP_GRACE
         # Nothing is read or started here; call reload() once the interface is up.
 
     @property
@@ -1065,6 +1468,9 @@ class AddonManager:
 
     def scan(self) -> list[Addon]:
         """Read the drop-in folder, then the shipped ones; one addon per id wins."""
+        # A scan is the one moment the app learns an addon arrived or went away,
+        # so nothing remembered about where their pictures stand is still owed.
+        forget_addon_pictures()
         kept: dict[str, Addon] = {}
         self.shadowed = {}
         for addon in self._discovered():
@@ -1180,6 +1586,9 @@ class AddonManager:
         except OSError:
             stat = None
         config = addon_config_path(addon.id)
+        # Read once for the row: the build mark answers both "prefer" and "build",
+        # and this is called for every addon twice a second while the tab is open.
+        mark = build_mark(addon.id)
         listeners = sorted({name for name, entries in self.listeners.items()
                             if any(where == addon.id for where, _callback in entries)})
         return {
@@ -1220,6 +1629,13 @@ class AddonManager:
             "config_fields": len(addon.config_fields),
             "tabs": sorted(addon.tabs),
             "timers": len(addon.timers),
+            # Where this addon's own code runs, and how much of it is still to do:
+            # the thread is named after the addon, and the two counts say whether it
+            # is thinking right now. A compiled addon has no thread of its own - it
+            # is a process - so both are blank/zero and its row shows its pid.
+            "thread": addon.worker.thread.name if addon.worker is not None else "",
+            "queued": addon.worker.pending() if addon.worker is not None else 0,
+            "jobs": addon.worker.jobs if addon.worker is not None else 0,
             "menu_items": len(addon.actions),
             "listeners": listeners,
             "has_setting_widget": addon.setting_widget is not None,
@@ -1227,8 +1643,8 @@ class AddonManager:
             "alternatives": [{"kind": item.kind, "source": str(item.source),
                               "builtin": bool(item.builtin)}
                              for item in self.alternatives(addon.id)],
-            "prefer": self.preferred_kind(addon.id),
-            "build": build_mark(addon.id),
+            "prefer": str(mark.get("prefer") or "source").lower(),
+            "build": mark,
             "manifest": jsonable(addon.manifest),
         }
 
@@ -1236,12 +1652,23 @@ class AddonManager:
         return [self.describe(addon) for addon in self.addons]
 
     def log(self, addon_id: str, text: Any, warning: bool = False) -> None:
-        """Send an addon's output into the app log, attributed."""
+        """Send an addon's output into the app log, attributed.
+
+        Said from wherever the addon's code happens to be running, and the log is a
+        widget, so a line from another thread is handed to the bus rather than
+        written across it. Fire and forget, twice over: an addon is not made to wait
+        for the words about itself, and a line that cannot be delivered is not worth
+        a timeout and a stuck thread.
+        """
         message = str(text)
         if not message:
             return
         first = message.splitlines()[0]
-        self.win.log(f"[{addon_id}] {'error: ' if warning else ''}{first}")
+        line = f"[{addon_id}] {'error: ' if warning else ''}{first}"
+        if on_gui_thread():
+            self.win.log(line)
+            return
+        self.bus.post(lambda: self.win.log(line))
 
     # --- (re)loading ---
 
@@ -1286,14 +1713,50 @@ class AddonManager:
                 self.unload(previous)
         self.addons = discovered
         wanted_addons = [addon for addon in self.addons if addon.enabled]
+        started: list[AddonWorker | None] = []
         for number, addon in enumerate(wanted_addons, start=1):
             # Named on the boot splash while it is up; harmless afterwards.
             core.ui.addon_step(number, len(wanted_addons),
                                       addon.name or addon.id)
-            self.load(addon)
+            # Every addon's import and ``init`` go to that addon's own thread and
+            # this does not wait, so they come up beside one another; the queue of
+            # each is noted and drained at the end of the loop.
+            started.append(self._load_note(addon, later=True))
+        self._wait_boot([worker for worker in started if worker is not None])
         self.refresh_rows()
         self._restore_window_tabs()
         self._reactivate_tab(active)
+
+    def _load_note(self, addon: Addon, later: bool = False) -> AddonWorker | None:
+        """Load one addon and hand back the thread its start-up is running on."""
+        try:
+            self.load(addon, later=later)
+        finally:
+            return addon.worker
+
+    #: How long a boot waits for the addons to finish coming up. The window has to
+    #: open sometime, and an addon hung on its first call is its own problem, not
+    #: everybody's; what the wait is for is honest tab order, not obedience.
+    BOOT_WAIT = 60.0
+
+    def _wait_boot(self, workers: list[AddonWorker]) -> None:
+        """Let the addons that were handed their thread finish coming up.
+
+        The interface is served while waiting, so this is a live splash rather than
+        the frozen one it replaces, and it ends as soon as every queue is empty -
+        which is the point of starting them all first: the wait is the slowest
+        single addon, not the sum of them. What it buys is that the tab bar, the
+        remembered order captured straight after and the ``startup`` event all see
+        the addons as they will stay. An addon still thinking when the wait ends is
+        left to finish behind the window and its tabs arrive late, which is what its
+        row already says while it loads.
+        """
+        deadline = time.monotonic() + self.BOOT_WAIT
+        for worker in workers:
+            # Waiting on one addon's queue serves every addon's, since the
+            # interface is where they all come to ask for a widget: what is left
+            # of the wait is the slowest addon, not the sum of them.
+            worker.drain(max(0.05, deadline - time.monotonic()))
 
     def apply_record(self, addon: Addon) -> None:
         """Put the profile's stored switches onto one discovered addon."""
@@ -1486,7 +1949,17 @@ class AddonManager:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def load(self, addon: Addon) -> bool:
+    def load(self, addon: Addon, later: bool = False) -> bool:
+        """Bring one addon up. ``later`` lets its own thread finish the job.
+
+        A boot passes ``later``: the addon's file is then imported and its
+        ``init`` run on the thread that addon has been given, and this returns
+        while that is still going, so the addons come up beside one another and
+        :meth:`_wait_boot` waits for all of them at the end. Every other caller -
+        a switch in Settings, a Restart, an install - waits here, because it asked
+        for this one addon and wants the answer, failure included, before it goes
+        on to what it was doing.
+        """
         if addon.loaded:
             return True
         if self.crash_halted(addon.id):
@@ -1500,7 +1973,7 @@ class AddonManager:
         self.apply_manifest(addon, addon.manifest)
         try:
             if addon.kind == "python":
-                self._load_python(addon)
+                self._load_python(addon, later=later)
             else:
                 self._load_process(addon)
         except AddonError as error:
@@ -1520,7 +1993,9 @@ class AddonManager:
         self.log(addon.id, f"loaded ({addon.kind}{', shipped' if addon.builtin else ''})")
         self.refresh_row(addon.id)
         # An addon switched on after startup missed the start event; give it now.
-        if self._started:
+        # Only one that has been read: a load handed to the addon's own thread does
+        # not have its module yet, and asks for ``start`` on that queue instead.
+        if self._started and addon.module is not None:
             self._call_hook(addon, "start")
         return True
 
@@ -1549,7 +2024,80 @@ class AddonManager:
                 return spec
         return importlib.util.spec_from_file_location(module_name, str(source))
 
-    def _load_python(self, addon: Addon) -> None:
+    def _load_python(self, addon: Addon, later: bool = False) -> None:
+        """Hand one source addon its thread, then read its file and run ``init``.
+
+        The import and the entry point are the two slowest things in starting this
+        app, and both used to happen on the GUI thread one addon after another:
+        parsing an addon the size of the store is tens of milliseconds, waiting on
+        a device at all is longer, and the window answered none of it meanwhile. So
+        both move to the thread this addon is given, and the interface is wrapped
+        for the ride - see :func:`thread_api`, which is what the addon is handed
+        instead of the api it used to hold. Without a thread - the environment hatch
+        off, or a harness with no event loop - the same code runs inline here, as it
+        always did, and an addon cannot tell which it got.
+        """
+        addon.api = AddonAPI(self, addon)
+        worker = self._make_worker(addon)
+        if worker is None:
+            self._import_python(addon, addon.api)
+            return
+        api = addon.thread_api = thread_api(addon.api, self.bus, worker)
+        if later:
+            # Queued behind nothing but itself: whoever asked for the whole world
+            # to come up waits for this queue to empty rather than standing here.
+            worker.post(lambda: self._load_up(addon, api))
+            if self._started:
+                # A rescan that happens after startup owes this addon ``start`` as
+                # much as a switch in Settings does, and the hook lives in a module
+                # that does not exist until the job above has run. So it is asked
+                # here, on the same queue, in the order the addon was read.
+                worker.post(lambda: self._call_hook(addon, "start"))
+            return
+        worker.ask(lambda: self._import_python(addon, api))
+
+    def _make_worker(self, addon: Addon) -> AddonWorker | None:
+        """One thread for one addon, already running; nothing when it is not to have one."""
+        if not self.threaded or addon.kind != "python":
+            return None
+        worker = AddonWorker(addon.id, self.bus,
+                             report=lambda message: self.log(addon.id, message,
+                                                             warning=True))
+        worker.start()
+        addon.worker = worker
+        return worker
+
+    def _load_up(self, addon: Addon, api: Any) -> None:
+        """Import and init on the addon's thread, landing any failure on its row."""
+        guard(lambda: self._import_python(addon, api),
+              reporter=lambda message: self._load_failed(addon, message))
+
+    def _load_failed(self, addon: Addon, message: str) -> None:
+        """A load that went wrong after it had been handed to the addon's thread.
+
+        Runs there, so everything the interface is asked for goes over the bus and
+        the thread is retired where it stands: an addon with no ``init`` run has
+        nothing left to do on it, and :meth:`AddonWorker.stop` would wait on the
+        very job that is reporting the failure.
+        """
+        addon.error = message
+        addon.loaded = False
+        addon.thread_api = None
+        worker = addon.worker
+        addon.worker = None
+        if worker is not None:
+            worker.closing = True
+            worker.retiring = True
+            worker.queue.put(None)
+        self.log(addon.id, f"failed to load: {message}", warning=True)
+        self.bus.post(lambda: self.refresh_row(addon.id))
+
+    def _import_python(self, addon: Addon, api: Any) -> None:
+        """Read one addon's file as a module, take its manifest from it, say init.
+
+        Called on the addon's thread, which is why nothing here touches a widget:
+        the api it hands to ``init`` is the wrapped one.
+        """
         module_name = f"rasconf_addon_{safe_identifier(addon.id)}"
         location = str(addon.source.parent)
         if location not in sys.path:
@@ -1587,8 +2135,7 @@ class AddonManager:
                     raise AddonError(f"needs api version {wanted}, this build has {API_VERSION}")
             except (TypeError, ValueError):
                 pass
-        addon.api = AddonAPI(self, addon)
-        self._call_hook(addon, "init", addon.api, required=True)
+        self._call_hook(addon, "init", api, required=True)
 
     def _load_process(self, addon: Addon) -> None:
         addon.data_dir.mkdir(parents=True, exist_ok=True)
@@ -1597,9 +2144,30 @@ class AddonManager:
         addon.api = AddonAPI(self, addon)
         bridge.start()
 
+    def _run_hook(self, addon: Addon, job: Callable[[], Any]) -> bool:
+        """Do one guarded hook call here, or on the thread that owns the addon.
+
+        The one place that decides, so every way in - an event, a message between
+        addons, a click inside one of its tabs - is answered in the same order on
+        the same thread. Called from that thread already, the call is simply made:
+        an addon is never kept waiting behind itself.
+        """
+        worker = addon.worker
+        if worker is None or worker.here:
+            job()
+            return True
+        return worker.post(job)
+
     def _call_hook(self, addon: Addon, name: str, *arguments: Any,
                    required: bool = False) -> bool:
-        """Call a module-level hook of a Python addon."""
+        """Call a module-level hook of a Python addon, on its own thread.
+
+        An addon that thinks - fetches a release, reads a log, waits on a device -
+        used to be the window not answering while it did it, because these calls ran
+        on the GUI thread. They are queued on the addon's thread instead and this
+        returns at once: its own work keeps its order, since it is one queue, and two
+        addons are never left waiting on each other.
+        """
         hook = getattr(addon.module, name, None)
         if not callable(hook):
             if required:
@@ -1607,13 +2175,13 @@ class AddonManager:
             return False
 
         def report(message: str) -> None:
-            # Keep the failure on the row, not only in the log.
+            # Keep the failure on the row, not only in the log. This is said from
+            # wherever the hook ran, so the redraw has to be handed over.
             addon.error = f"{name}: {message}"
             self.log(addon.id, message, warning=True)
-            self.refresh_row(addon.id)
+            self.bus.post(lambda: self.refresh_row(addon.id))
 
-        guard(hook, *arguments, reporter=report)
-        return True
+        return self._run_hook(addon, lambda: guard(hook, *arguments, reporter=report))
 
     # --- teardown ---
 
@@ -1637,6 +2205,14 @@ class AddonManager:
 
     def _clean(self, addon: Addon) -> None:
         """Undo everything the app created on this addon's behalf."""
+        # The thread goes first: whatever the addon queued - its ``shutdown``, the
+        # last of its tab writes - runs out here, and only once it has are its
+        # pages taken down. After this the addon has no way to reach a widget.
+        worker = addon.worker
+        if worker is not None:
+            addon.worker = None
+            addon.thread_api = None
+            worker.stop(self.stop_grace)
         # A job that was holding the tab bar down leaves with the addon that
         # asked for it; a bar still locked by a stopped addon is a bar that
         # answers to nobody.
@@ -1745,6 +2321,9 @@ class AddonManager:
         self.log(addon.id, f"{addon.error} - {addon.notes}", warning=True)
 
     def shutdown_all(self) -> None:
+        # Every addon's stop waits for its thread, and a queue of addons each given
+        # the full grace is a person watching a window that will not go away.
+        self.stop_grace = self.SHUTDOWN_GRACE
         for addon in self.loaded():
             try:
                 self.unload(addon, reason="app closing")
@@ -1752,6 +2331,10 @@ class AddonManager:
                 self.log(addon.id, f"closing: {error}", warning=True)
         # Whatever a broken unload left behind goes down with the app.
         for addon in self.addons:
+            worker = addon.worker
+            if worker is not None:
+                addon.worker = None
+                worker.stop(0.5)
             proc = getattr(addon.process, "proc", None) if addon.process else None
             if proc is not None and proc.poll() is None:
                 kill_process_tree(proc)
@@ -1946,24 +2529,41 @@ class AddonManager:
         return before - len(bucket)
 
     def notify(self, event: str, payload: dict | None = None) -> None:
-        """Tell every listener, plus the ``on_event``/``on_<event>`` hooks."""
+        """Tell every listener, plus the ``on_event``/``on_<event>`` hooks.
+
+        Nothing here waits: an event goes onto each addon's queue and the caller -
+        usually the interface, in the middle of a click - is done with it. An addon
+        that is behind on its own work hears about the event when it gets to it, in
+        the order the events came.
+        """
         data = jsonable(payload or {})
         for addon_id, callback in list(self.listeners.get(event, [])):
             addon = self.find(addon_id)
             if addon is None or not addon.loaded:
                 continue
-            guard(lambda: callback(data),
-                  reporter=lambda message: self.log(addon_id, f"{event}: {message}", True))
+            self._run_hook(
+                addon,
+                lambda: guard(lambda: callback(data),
+                              reporter=lambda message: self.log(
+                                  addon_id, f"{event}: {message}", True)))
         for addon in self.loaded():
             if addon.kind == "python":
                 hook = getattr(addon.module, "on_event", None)
                 if callable(hook):
-                    guard(hook, event, data,
-                          reporter=lambda message: self.log(addon.id, f"on_event: {message}", True))
+                    self._run_hook(
+                        addon,
+                        lambda a=addon, h=hook: guard(
+                            h, event, data,
+                            reporter=lambda message: self.log(
+                                a.id, f"on_event: {message}", True)))
                 named = getattr(addon.module, f"on_{event}", None)
                 if callable(named) and named is not hook:
-                    guard(named, data,
-                          reporter=lambda message: self.log(addon.id, f"on_{event}: {message}", True))
+                    self._run_hook(
+                        addon,
+                        lambda a=addon, h=named: guard(
+                            h, data,
+                            reporter=lambda message: self.log(
+                                a.id, f"on_{event}: {message}", True)))
             elif addon.process is not None and addon.process.alive():
                 addon.process.push({"op": "event", "name": event, "payload": data})
 
@@ -1977,15 +2577,23 @@ class AddonManager:
             hook = getattr(addon.module, "on_message", None)
             if not callable(hook):
                 return False
-            guard(hook, sender_id, payload,
-                  reporter=lambda message: self.log(addon.id, f"on_message: {message}", True))
-        elif addon.process is not None:
+            return self._run_hook(
+                addon,
+                lambda: guard(hook, sender_id, payload,
+                              reporter=lambda message: self.log(
+                                  addon.id, f"on_message: {message}", True)))
+        if addon.process is not None:
             addon.process.push({"op": "peer", "from": sender_id, "data": payload})
         return True
 
     def push_widget_event(self, addon_id: str, tab: str, identifier: str,
                           event: str, payload: dict) -> None:
-        """Report an interaction inside a spec-built tab back to its addon."""
+        """Report an interaction inside a spec-built tab back to its addon.
+
+        A click is the one thing a person waits on, so this is the path where an
+        addon thinking means a window that will not answer - which is why the hook
+        goes onto the addon's thread and the handler returns straight away.
+        """
         addon = self.find(addon_id)
         if addon is None:
             return
@@ -1997,8 +2605,11 @@ class AddonManager:
         if addon.module is not None:
             hook = getattr(addon.module, "on_widget", None)
             if callable(hook):
-                guard(hook, tab, identifier, event, message["payload"],
-                      reporter=lambda text: self.log(addon_id, f"on_widget: {text}", True))
+                self._run_hook(
+                    addon,
+                    lambda: guard(hook, tab, identifier, event, message["payload"],
+                                  reporter=lambda text: self.log(
+                                      addon_id, f"on_widget: {text}", True)))
 
     def refresh_app_icons(self) -> None:
         """Re-mark the addon tabs that asked to wear the app's own logo."""
@@ -3236,6 +3847,21 @@ def state_color(state: str) -> QBrush:
 #: change, and decoding the same PNG every two seconds buys nothing.
 _PICTURE_CACHE: dict[str, QIcon] = {}
 
+#: Where one addon's picture was last found to stand, and for how long that
+#: answer is trusted. Finding it is six folders deep and a handful of names each
+#: time, and a row asks on every redraw - on Windows that is the kind of file
+#: traffic a person feels as a laggy list. An addon being installed or removed
+#: clears this at once (see :func:`forget_addon_pictures`); the short life covers
+#: the one case that arrives by itself, a picture the store downloads while the
+#: app is open.
+_PICTURE_AT: dict[str, list] = {}
+PICTURE_TRUST_SECONDS = 10.0
+
+
+def forget_addon_pictures() -> None:
+    """Drop every remembered picture address: what is in the folders changed."""
+    _PICTURE_AT.clear()
+
 
 #: The addon store's id, whose own data folder keeps a copy of every picture it
 #: has downloaded for its catalog - the only copy of an installed addon's artwork
@@ -3278,20 +3904,31 @@ def addon_picture(row: dict) -> str:
     addon_id = str(row.get("id") or "").strip()
     if not addon_id:
         return ""
+    home = str(row.get("home") or "").strip()
+    data = str(row.get("data") or "").strip() or str(addon_data_dir(addon_id))
+    declared = str((row.get("manifest") or {}).get("icon") or "").strip()
+    key = config_name(addon_id)
+    stamp = (home, data, declared)
+    held = _PICTURE_AT.get(key)
+    if held is not None and held[0] == stamp and time.monotonic() < held[2]:
+        return held[1]
     extra = _picture_names(row)
     folders = []
-    home = str(row.get("home") or "").strip()
     if home:
         folders.append(Path(home) / "assets")
     folders.append(ASSETS_DIR)
-    data = str(row.get("data") or "").strip() or str(addon_data_dir(addon_id))
     folders += [Path(data), Path(data) / "assets", Path(data) / "icons"]
     folders.append(ADDON_DATA_DIR / STORE_ADDON_ID / "icons")
+    answer = ""
     for folder in folders:
         found = find_icon(folder, addon_id, *extra)
         if found:
-            return found
-    return default_icon_path(ASSETS_DIR)
+            answer = found
+            break
+    else:
+        answer = default_icon_path(ASSETS_DIR)
+    _PICTURE_AT[key] = [stamp, answer, time.monotonic() + PICTURE_TRUST_SECONDS]
+    return answer
 
 
 def addon_icon(row: dict) -> QIcon:
@@ -4101,10 +4738,9 @@ def _not_a_python(found: str) -> str:
         return ("a Windows app execution alias, standing for the Microsoft Store "
                 "page instead of a Python" if os.name == "nt"
                 else "an empty file that is not a Python")
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
-        done = subprocess.run([found, "-c", "import sys"], stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=20, creationflags=flags)
+        done = run_quiet([found, "-c", "import sys"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, timeout=20)
     except (OSError, subprocess.SubprocessError) as error:
         return f"a command that did not start ({error})"
     if done.returncode != 0:
@@ -4186,11 +4822,17 @@ def _has_pyinstaller_here() -> bool:
 
 
 def _has_pyinstaller(where: str) -> bool:
-    """Ask another interpreter whether it can build."""
+    """Ask another interpreter whether it can build.
+
+    Asked without a window: this program has no console of its own, so a plain
+    launch would hand the interpreter a fresh one, and a question the Dev tab asks
+    about every interpreter it has ever seen would flash a terminal over the
+    interface each time.
+    """
     try:
-        done = subprocess.run([where, "-c", "import PyInstaller"],
-                              stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=30)
+        done = run_quiet([where, "-c", "import PyInstaller"],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return False
     return done.returncode == 0
@@ -4891,6 +5533,36 @@ addon with several machines should reach for.
 [view](api:tabs.view) hands over the whole page object - in an imported addon
 only.
 
+A page can also be one leaf of an addon's own tab, beside its buttons: a ``web``
+widget in a spec is the same view, in the same pane as everything else the addon
+built, with no address bar over it.
+
+    {"kind": "web", "id": "page", "visible": False, "expand": True,
+     "on": ["loaded"]}
+
+Give it the address with ``set_widget(tab, id, "url", ...)``. The leaf holds an
+address rather than fetching it while nobody is looking: a page that is hidden,
+or on a sub-page nobody has opened, is not loaded until it is shown, and an
+address it is already showing is not asked for again - so an addon that puts its
+own form back over the page, and the page back again, does not bounce the person
+out of the session they had reached. ``widget_value(tab, id, "url")`` reads the
+address back, ``"title"`` what the page calls itself, ``"pending"`` an address
+held and not yet fetched and ``"loading"`` whether it is asking now. ``"back"``,
+``"forward"``, ``"reload"`` and ``"stop"`` are asked the same way as ``"url"``,
+with anything for the value. ``loaded`` comes back to ``on_widget`` with
+``{"ok": ..., "url": ...}`` when it stops, and a refusal is worth speaking about:
+the page shows nothing of its own, and a router with a self-signed certificate is
+the commonest reason.
+
+A build with no QtWebEngine in it makes the leaf a one-line notice instead, and
+sending it a ``"url"`` is refused with the reason - which is the addon's cue to
+offer the page somewhere else rather than to hide its own form behind an empty
+pane. That is the cue for [api.ui.browse](api:ui.browse) - the machine's own
+browser, which answers whether a program took the address. Use it whenever the
+page needs something this app cannot give it - a certificate the person has
+already tolerated once, the window they keep open beside the program - and say
+the address out loud when nothing would take it.
+
 ## A view for a long job
 
 An ``overlay`` is a stack instead of a row: its first child fills the area and
@@ -5225,18 +5897,108 @@ section of the file.
 [on](api:events.on) returns the callable that unregisters again;
 [off](api:events.off) drops what the addon had for one event, and
 [names](api:events.names) lists everything the app broadcasts. A listener runs on
-the GUI thread and is caught if it raises - the failure is written to the log
-against the addon's name rather than taking the window down.
+the addon's own thread with everything else that addon's code does (see
+[Threads](guide:threads)) and is caught if it raises - the failure is written to
+the log against the addon's name rather than taking the window down.
 
 The same message arrives two ways:
 
 - ``on_event(name, payload)`` is told everything.
 - ``on_<name>(payload)`` - ``on_ssh_connected`` - is told just that one.
 
-Keep a hook short; it runs in the app's event loop. Longer work goes to
-[api.schedule.after](api:schedule.after) or to a device call with
-``block=False``, and anything that has to wait for the user goes through
-[api.ui](api:ui.question) rather than a sleep.
+A hook no longer has to be short for the window's sake: it runs beside the
+interface rather than inside it, so a fetch or a whole log read is only slow for
+the addon doing it. What is still worth keeping quick is the addon's own queue -
+a click that arrives while a hook is thinking is run immediately after it, in
+order, and a hook that sleeps for a minute holds up that addon's next button for
+a minute. Work that can wait for itself belongs in
+[api.schedule.after](api:schedule.after), and a device call that should not hold
+the queue at all in [run_async](api:device.run_async).
+"""),
+
+    ("threads", "Threads: how an addon runs beside the window", """
+# Threads: how an addon runs beside the window
+
+Every hook an addon has - ``init``, ``start``, ``on_widget``, ``on_event``,
+``on_message``, ``on_config``, ``shutdown`` - and every [api.schedule](guide:anatomy)
+callback it asked for runs on that addon's own thread, and nowhere else. The app
+keeps one thread per addon, named ``addon-<id>``, and it is the only place that
+addon's code is ever run.
+
+    def on_widget(tab, ident, event, payload):
+        api.device.download("firmware.bin")     # the window keeps painting
+
+## One at a time, in order
+
+The thread is a queue, not a pool: two jobs of one addon never run beside each
+other, and the job asked for first finishes first. So an addon's own state is
+never being walked by two threads, and there is nothing to lock between its
+hooks - but a long hook does hold that addon's own next click behind it.
+
+## The api crosses back for you
+
+Nothing that addon code does with ``api`` has to think about threads. The
+namespaces that own a widget - ``ui``, ``tabs``, ``session``, ``events``,
+``settings``, ``config``, ``settings_pages``, ``schedule``, ``peers``, ``theme``,
+``window`` - are answered on the GUI thread, however deeply inside a hook they
+are asked; the call waits, gets its answer, and carries on where it was. The two
+that reach a socket or a file - ``device`` and ``paths`` - are answered on the
+addon's own thread, which is the reason for the whole arrangement: a download is
+off the interface instead of on it.
+
+So a tab built from ``init`` reads the same whether the addon is on the GUI
+thread or its own. The round trip is microseconds, and an addon that asks for a
+hundred widgets pays one wait per widget.
+
+- ``api.win`` is the window itself and is refused from an addon's thread: it is
+  not part of what an addon is given to hold, and everything a widget can be
+  asked to do already has a name in the api.
+- [api.log](api:log) is told rather than asked, so a log line can neither wait
+  nor time out, and an addon that is only trying to say something cannot stall
+  itself on the way.
+
+## What waits for what
+
+A hook that blocks blocks only its own addon: the window keeps painting, every
+other addon keeps answering, and a button on the blocked addon's tab is queued
+rather than lost. [api.ui.question](api:ui.question) is the one call that waits
+on a person - it stands the dialog on the GUI thread and holds that addon's
+queue until the user answers, up to two minutes, after which it raises rather
+than hang. Ask in ``start`` or in a button, not in a timer that fires twice a
+second.
+
+An addon being stopped, or an app being closed, refuses the api calls that are
+still coming in with an ``AddonError`` that names the addon, rather than waiting
+out a two minute answer that can never arrive.
+
+## Coming up, and going down
+
+At startup every addon's import and ``init`` are handed to that addon's own
+thread at once, so a slow addon cannot make the others late; the splash then
+waits for those queues to empty before the tab bar and the remembered tab order
+are read, which is what makes the bar honest about what is installed. The wait
+is the slowest addon rather than the sum of them, and it gives up after a minute
+and leaves that addon's tabs to arrive behind the window - a window is worth
+opening for. On shutdown each addon is given its ``shutdown`` on its own queue
+and five seconds to finish what it queued, and is then refused the interface and
+left to run out - a hung addon delays the close by five seconds, not forever.
+
+## The two things that do not change
+
+A compiled addon was always its own program, and its hooks have always been
+answered off the interface; the same list of widget namespaces crosses the pipe
+here, which is why the two shapes are written the same way. And an addon that
+starts no thread of its own is now free to hold a session open across a long job
+without freezing anything - but a thread it starts itself is still its own
+business: its code cannot call ``api`` directly, since only the addon's own
+thread is given the crossing.
+
+## The hatch
+
+``BERRY_ADDON_THREADS=0`` puts every hook back on the GUI thread, exactly as
+before this existed, for a debugger that wants one thread or a harness with no
+event loop of its own. The app does the same by itself when there is no Qt event
+loop to hand a call back to.
 """),
 
     ("device", "The device: SSH and SFTP", """
@@ -5355,7 +6117,7 @@ GUIDE_FOR_NAMESPACE = {
     "settings_pages": "settings-pages",
     "theme": "themes",
     "config": "config",
-    "schedule": "anatomy",
+    "schedule": "threads",
     "paths": "anatomy",
     "peers": "anatomy",
     "conn": "device",
@@ -6051,8 +6813,8 @@ class AddonDevWidget(QWidget):
         column = QVBoxLayout(second)
         column.setContentsMargins(12, 10, 12, 8)
         self.holdings_table = make_table(
-            ["Addon", "Kind", "Tabs", "Timers", "Menu", "Listeners"],
-            stretch=5)
+            ["Addon", "Runs on", "Jobs", "Tabs", "Timers", "Menu", "Listeners"],
+            stretch=6)
         column.addWidget(self.holdings_table)
         layout.addWidget(second, 1)
         return page
@@ -7122,18 +7884,34 @@ class AddonDevWidget(QWidget):
         threads = [name for name in (getattr(thread, "name", "")
                                      for thread in threading.enumerate())
                    if name.startswith(("addon-", "addon"))]
-        self.thread_note.setText("threads serving the addons: "
-                                 + (", ".join(sorted(set(threads))) or "none"))
-
         held = [row for row in rows if row["kind"] == "python"]
+        # A thread standing idle is not worth naming next to one that is working,
+        # so the line says how many of them have something queued: that is the
+        # number that tells whether the addons are the reason for a slow moment.
+        busy = sorted({str(row.get("thread") or "")
+                       for row in held if row.get("queued")} - {""})
+        said = "threads serving the addons: " + (
+            ", ".join(sorted(set(threads))) or "none")
+        if busy:
+            said += f" - working now: {', '.join(busy)}"
+        self.thread_note.setText(said)
+
         self.holdings_table.blockSignals(True)
         self.holdings_table.setRowCount(len(held))
         for index, row in enumerate(held):
-            values = (row["id"], "imported", ", ".join(row["tabs"]) or "-",
+            runs = str(row.get("thread") or "") or "GUI thread"
+            values = (row["id"], runs, row.get("jobs", 0),
+                      ", ".join(row["tabs"]) or "-",
                       row["timers"], row["menu_items"],
                       ", ".join(row["listeners"]) or "-")
             for column, text in enumerate(values):
-                self.holdings_table.setItem(index, column, QTableWidgetItem(str(text)))
+                item = QTableWidgetItem(str(text))
+                if column == 2 and row.get("queued"):
+                    # Outstanding work is the thing a person is looking for here,
+                    # so it is coloured rather than left as a plain number.
+                    item.setForeground(state_color("running"))
+                    item.setToolTip(0, f"{row['queued']} job(s) queued or running")
+                self.holdings_table.setItem(index, column, item)
         self.holdings_table.blockSignals(False)
         fit_rows(self.holdings_table, cap=6)
 

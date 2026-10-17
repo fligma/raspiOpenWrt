@@ -222,6 +222,12 @@ manager_picked = ""
 manager_slugs: dict[str, dict] = {}
 manager_order: list[str] = []
 manager_building = False
+#: The settings pages the manager's bar is holding open: the addon's slug to the
+#: record its form was built from - the fields it edits, the captions and the
+#: file they belong to. ``refresh_manager`` lays these pages down again after a
+#: repaint, with whatever the controls held, so editing settings survives a
+#: toggle on the page above it, and closing one is the page's own business.
+config_pages: dict[str, dict] = {}
 
 #: A module name PyInstaller can import: anything else becomes an underscore.
 _SAFE = re.compile(r"[^A-Za-z0-9_]")
@@ -589,8 +595,9 @@ MANAGER_GATE_IDS = {identifier: name for name, identifier in MANAGER_TRANSPORTS}
 #: What can be done to the addon from its own page. The first button's words
 #: change with the addon it stands for: one whose tabs live in a window is
 #: raised, one whose tabs are in the main bar is merely shown. The settings button
-#: opens the form the addon's own ``fields.json`` declares, which is what the panel
-#: folded under its name in Settings used to be.
+#: opens the form the addon's own ``fields.json`` declares as a tab of the
+#: manager's bar - the same tab, not a window of its own - which is what the
+#: panel folded under its name in Settings used to be.
 MANAGER_BUTTONS = (("mg_window", "Show tab"), ("mg_restart", "Restart"),
                    ("mg_folder", "Open folder"), ("mg_data", "Open addon data"),
                    ("mg_config", "Edit settings"),
@@ -599,6 +606,12 @@ MANAGER_BUTTONS = (("mg_window", "Show tab"), ("mg_restart", "Restart"),
 #: The buttons by id alone, so a click on this page is answered here rather than
 #: looked for among the store's own handlers.
 MANAGER_IDS = tuple(identifier for identifier, _text in MANAGER_BUTTONS)
+
+#: The two buttons at the foot of an addon's settings page: one writes what the
+#: controls hold through the app, the other drops the page and changes nothing.
+#: Their ids carry the addon's slug like every other control on this bar, so a
+#: save means the addon whose form is open.
+MANAGER_CONFIG_BUTTONS = ("cfg_save", "cfg_cancel")
 
 TAB_ICON = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
@@ -680,7 +693,7 @@ def addons_page() -> dict:
     for a failure is written out at length.
     """
     return {"kind": "column", "label": PAGE_ADDONS, "children": [
-        {"kind": "row", "children": [
+        {"kind": "row", "id": "headrow", "children": [
             {"kind": "label", "text": "Berry addon store", "style": BANNER_STYLE},
             {"kind": "label", "id": "status", "text": "Ready.", "word_wrap": True,
              "expand": True, "style": _STATUS_TEXT},
@@ -701,7 +714,7 @@ def addons_page() -> dict:
                         "double-click - the line between the panes and it",
              "on": ["toggled"]},
         ]},
-        {"kind": "row", "children": [
+        {"kind": "row", "id": "filterrow", "children": [
             {"kind": "label", "text": "Find", "style": _FILTER_LABEL},
             {"kind": "line", "id": "filter", "expand": True,
              "placeholder": "Filter the list by name, author, id or what it needs",
@@ -767,7 +780,7 @@ def addons_page() -> dict:
              "placeholder": "Every step of the last install, as it happened",
              "tooltip": "The same lines go into the program's own log"},
         ]},
-        {"kind": "row", "children": [
+        {"kind": "row", "id": "actionrow", "children": [
             {"kind": "button", "id": identifier, "text": text,
              "on": ["clicked"]} for identifier, text in BUTTONS],
         },
@@ -2192,11 +2205,26 @@ def refresh_manager(_checked: bool = False) -> None:
         return
     managed = [dict(row) for row in (rows or []) if not row.get("settings_page")]
     was_open = manager_open()
+    was_pages = len(manager_pages())
+    # Whatever the open settings pages hold is read before the bar is emptied,
+    # so a toggle on an addon's page does not cost the person half-typed
+    # answers in a form one tab over.
+    held_configs = {slug: config_current_values(slug, record)
+                    for slug, record in config_pages.items()}
     manager_rows, manager_slugs, manager_order = {}, {}, []
     keep = was_open if 0 <= was_open < len(managed) else 0
+    # The bar is the addon pages and, after them, one settings page per addon
+    # being edited: an index past the addon run is a settings tab, and it is
+    # put back on its own page rather than on the first addon's.
+    was_addons = max(0, was_pages - len(config_pages))
+    if was_pages > was_addons and was_open >= was_addons:
+        place = len(managed) + min(was_open - was_addons,
+                                   max(0, len(config_pages) - 1))
+    else:
+        place = keep
     manager_building = True
     try:
-        for _page in range(len(manager_pages())):
+        for _page in range(was_pages):
             _detail(MANAGER_TABS, "remove_page", 0)
         for row in managed:
             slug = manager_unique_slug(manager_slug(row))
@@ -2208,10 +2236,16 @@ def refresh_manager(_checked: bool = False) -> None:
                     {"label": caption, "spec": manager_page(row, slug),
                      "current": False})
             _detail(mid("mg_icon", slug), "image", manager_picture(row))
+        for slug in list(config_pages):
+            held = held_configs.get(slug) or None
+            _detail(MANAGER_TABS, "add_page",
+                    {"label": config_pages[slug]["caption"],
+                     "spec": config_page_spec(slug, config_pages[slug], held),
+                     "current": False})
         _detail(MANAGER_TABS, "tab_colors",
                 ["" if row.get("enabled") else _STATE_OFF for row in managed])
-        if managed:
-            _detail(MANAGER_TABS, "current", keep)
+        if managed or config_pages:
+            _detail(MANAGER_TABS, "current", place)
     finally:
         manager_building = False
     manager_picked = (one_line((manager_slugs.get(manager_order[keep])
@@ -2496,18 +2530,20 @@ CONFIG_WIDGETS = {"text": "line", "number": "spin", "bool": "check",
 CONFIG_RAW = "rawconfig"
 
 
-def config_leaf(field: dict, value: Any) -> dict:
-    """One declared config key, as the leaf of a dialog spec that edits it.
+def config_leaf(field: dict, value: Any, ident: str = "") -> dict:
+    """One declared config key, as the leaf of a spec that edits it.
 
-    The key is the leaf's id, so what comes back from ``api.ui.dialog`` is read
-    under the name the addon itself wrote rather than under a position in a list.
+    The key is the leaf's id, so what is read back is taken under the name the
+    addon itself wrote rather than under a position in a list; a page of the
+    manager's bar passes ``ident`` instead, the key joined to the addon's slug,
+    since every page on that bar shares the tab's one registry.
     The kinds are the six a ``fields.json`` may name: a choice carries its own
     entries, a number the range it will accept, a list the words that say how it is
     typed, and every one of them wears the addon's hint as a tool tip.
     """
     kind = one_line(field.get("kind")).lower() or "text"
     leaf = {"kind": CONFIG_WIDGETS.get(kind, "line"),
-            "id": one_line(field.get("key")),
+            "id": str(ident or "") or one_line(field.get("key")),
             "label": one_line(field.get("label")) or one_line(field.get("key"))}
     if kind == "choice":
         leaf["items"] = [one_line(choice) for choice in (field.get("choices") or [])
@@ -2555,18 +2591,93 @@ def config_answer(field: dict, answer: Any) -> Any:
     return str(answer or "").strip()
 
 
-def manager_config(addon_id: str) -> None:
-    """Edit the picked addon's own settings, as the form it declared.
+def config_page_spec(slug: str, record: dict, values: dict | None = None) -> dict:
+    """One addon's settings form, as a page of the manager's own bar.
+
+    The same six controls the form has always been built out of, under the same
+    labels, but wearing the addon's slug in their ids like every other control on
+    this bar - and shut off with a save and a cancel that belong to the page, so
+    editing an addon's settings is one more tab rather than a window of its own.
+    An addon that declared no keys is offered the JSON text of its file itself.
+    """
+    held = values if isinstance(values, dict) else record.get("values") or {}
+    fields = record.get("fields") or []
+    if fields:
+        body = {"kind": "form", "children": [
+            config_leaf(field, config_get(held, one_line(field.get("key"))),
+                        mid(f"cfg_{one_line(field.get('key'))}", slug))
+            for field in fields]}
+    else:
+        body = {"kind": "multi", "id": mid(CONFIG_RAW, slug), "font_size": 10,
+                "value": str(held.get(CONFIG_RAW) or record.get("raw_text")
+                             or "{}")}
+    return {"kind": "scroll", "children": [{"kind": "column", "children": [
+        {"kind": "label", "text": f"{record.get('title')}\n{record.get('path')}",
+         "word_wrap": True, "style": _DETAIL_SUB},
+        body,
+        {"kind": "row", "children": [
+            {"kind": "button", "id": mid("cfg_save", slug), "text": "Save",
+             "tooltip": "Write what these controls hold to the addon's own "
+                        "settings file", "on": ["clicked"]},
+            {"kind": "button", "id": mid("cfg_cancel", slug), "text": "Cancel",
+             "tooltip": "Close this form without writing anything",
+             "on": ["clicked"]},
+        ]},
+    ]}]}
+
+
+def config_current_values(slug: str, record: dict) -> dict:
+    """What one open settings page holds, read before a repaint takes it away.
+
+    Every control answers to ``value`` - the tick of a check, the number in a
+    spin, the text of a line - and anything the tab cannot answer for keeps the
+    value the page was opened with, so a repaint of the manager lays the same
+    form back down with the person's half-written answers still in it.
+    """
+    held: dict = {}
+    if api is None:
+        return held
+    for field in record.get("fields") or []:
+        key = one_line(field.get("key"))
+        try:
+            got = api.tabs.widget_value(TAB, mid(f"cfg_{key}", slug), "value")
+        except (AddonError, TypeError, ValueError):
+            got = None
+        held[key] = config_get(record["values"], key) if got is None else got
+    if not record.get("fields"):
+        try:
+            raw = api.tabs.widget_value(TAB, mid(CONFIG_RAW, slug), "value")
+        except (AddonError, TypeError, ValueError):
+            raw = None
+        held[CONFIG_RAW] = record["raw_text"] if raw in (None, "") else raw
+    return held
+
+
+def config_close(slug: str) -> None:
+    """Take one addon's settings page off the manager's bar, by its caption."""
+    record = config_pages.pop(str(slug or ""), None)
+    if record is None or api is None:
+        return
+    _detail(MANAGER_TABS, "remove_page", record["caption"])
+
+
+def manager_config(addon_id: str, slug: str = "") -> None:
+    """Edit the picked addon's own settings, in a tab of the manager's bar.
 
     The app holds both the file and the keys, so nothing here reads
     ``addons/_data`` off the disk: ``api.session.addon_config`` answers with the
-    labels, kinds and current values the addon's ``fields.json`` names, and what
-    the dialog gives back is written through ``api.session.set_addon_config``,
-    which tells the addon its settings changed. An addon that declared no keys and
-    has written no file has nothing to edit and is told so plainly; one that keeps
-    a file nobody declared is offered the JSON text itself. A dialog closed with
-    Cancel has changed nothing at all.
+    labels, kinds and current values the addon's ``fields.json`` names, and the
+    form is laid into the manager's own bar as one more page - the same tab,
+    never a window of its own. Save reads what those controls hold and writes
+    it through ``api.session.set_addon_config``, which tells the addon its
+    settings changed; Cancel drops the page having changed nothing at all. An
+    addon that declared no keys and has written no file has nothing to edit and
+    is told so plainly; one that keeps a file nobody declared is offered the
+    JSON text itself.
     """
+    if api is None:
+        return
+    slug = str(slug or "") or clean_id(addon_id)
     try:
         card = api.session.addon_config(addon_id=addon_id)
     except Exception as error:
@@ -2584,30 +2695,53 @@ def manager_config(addon_id: str) -> None:
         manager_say(f"{addon_id} declared no settings keys and has written no "
                     f"file yet, so there is nothing to edit", bad=True)
         return
-    if fields:
-        spec = {"kind": "form", "children": [
-            config_leaf(field, config_get(values, one_line(field.get("key"))))
-            for field in fields]}
-    else:
-        spec = {"kind": "column", "children": [
-            {"kind": "label", "text": f"{title}\n{path}", "word_wrap": True,
-             "style": _DETAIL_SUB},
-            {"kind": "multi", "id": CONFIG_RAW, "font_size": 10,
-             "value": json.dumps(values, indent=2, ensure_ascii=False)}]}
+    config_close(slug)        # reopening starts from the file, not the last look
+    record = {"addon_id": addon_id, "caption": f"{addon_id} settings",
+              "fields": fields, "path": path, "title": title,
+              "values": dict(values) if isinstance(values, dict) else {},
+              "raw_text": json.dumps(values, indent=2, ensure_ascii=False)}
+    config_pages[slug] = record
     try:
-        answer = api.ui.dialog(spec, title=title)
+        api.tabs.set_widget(TAB, MANAGER_TABS, "add_page",
+                            {"label": record["caption"],
+                             "spec": config_page_spec(slug, record, values)})
     except Exception as error:
+        config_pages.pop(slug, None)
         manager_say(f"{addon_id}'s settings could not be shown: {error}", bad=True)
         return
-    if answer is None:
-        manager_say(f"{addon_id}'s settings were left as they were")
+    manager_say(f"{addon_id}'s settings are open in a tab of their own")
+
+
+def manager_config_save(slug: str) -> None:
+    """Write what one addon's settings page holds, then take the page away.
+
+    The answers are read off the live controls by their ids - the same six
+    conversions the form has always made, so a list of words stays a list and a
+    number stays a number - and go back through ``api.session.set_addon_config``,
+    which tells the addon its settings changed. The page stays open when nothing
+    could be written, so a bad JSON is corrected where it was written.
+    """
+    record = config_pages.get(str(slug or ""))
+    if record is None or api is None:
         return
+    addon_id = record["addon_id"]
+    fields = record["fields"]
     if fields:
-        written = {one_line(field.get("key")): config_answer(
-            field, answer.get(one_line(field.get("key")))) for field in fields}
+        written = {}
+        for field in fields:
+            key = one_line(field.get("key"))
+            try:
+                got = api.tabs.widget_value(TAB, mid(f"cfg_{key}", slug), "value")
+            except AddonError:
+                got = config_get(record["values"], key)
+            written[key] = config_answer(field, got)
     else:
         try:
-            written = json.loads(str(answer.get(CONFIG_RAW) or "{}"))
+            raw = str(api.tabs.widget_value(TAB, mid(CONFIG_RAW, slug), "value"))
+        except AddonError:
+            raw = record["raw_text"]
+        try:
+            written = json.loads(raw or "{}")
         except ValueError as error:
             manager_say(f"{addon_id}'s settings were not written: the text is not "
                         f"one JSON object ({error})", bad=True)
@@ -2628,9 +2762,20 @@ def manager_config(addon_id: str) -> None:
         # file was refused, and the reason is in the program's log.
         manager_say(f"{addon_id}'s settings were not written", bad=True)
         return
+    path = record["path"]
+    config_close(slug)
     words = f"wrote {addon_id}'s settings to {path or 'its own file'}"
     manager_say(words)
     note(words)
+
+
+def manager_config_cancel(slug: str) -> None:
+    """Close one addon's settings page having written nothing."""
+    record = config_pages.get(str(slug or ""))
+    if record is None:
+        return
+    config_close(slug)
+    manager_say(f"{record['addon_id']}'s settings were left as they were")
 
 
 def manager_delete(row: dict) -> None:
@@ -2671,6 +2816,7 @@ def manager_delete(row: dict) -> None:
         return
     _tidy(addon_id)
     manager_picked = ""
+    config_close(manager_slug(row))   # an open settings page goes with its addon
     words = f"deleted {addon_id} from the addons folder"
     if keeps is None:
         words += f"; its settings were left in addons/_data/{clean_id(addon_id)}/"
@@ -2711,7 +2857,7 @@ def manager_action(ident: str, slug: str = "") -> None:
     elif ident == "mg_data":
         reveal(addon_data_folder(addon_id))
     elif ident == "mg_config":
-        manager_config(addon_id)
+        manager_config(addon_id, slug)
     elif ident == "mg_shortcut":
         manager_shortcut(addon_id, not bool(row.get("shortcut")))
     elif ident == "mg_delete":
@@ -3129,6 +3275,10 @@ def _job_show(show: bool) -> bool:
     ``set_widget`` answers ``False`` for an id the tab does not hold, which is how
     a job started on a tab built without the pane - an older layout, or a bare
     test harness - finds out it has nowhere to print and carries on regardless.
+
+    The console is meant to own the whole tab while a job runs, so the header,
+    the filter line, the button row and the folded log under the panes all step
+    aside with it and come back on the same call.
     """
     if api is None:
         return False
@@ -3137,6 +3287,8 @@ def _job_show(show: bool) -> bool:
         api.tabs.set_widget(TAB, "browse", "visible", not show)
     except AddonError:
         return False
+    for quiet in ("headrow", "filterrow", "actionrow", "log"):
+        _detail(quiet, "visible", not show)
     return bool(placed)
 
 
@@ -3191,6 +3343,11 @@ def _lock_pages(hold: bool) -> None:
     anywhere - the window hands the bar back if the addon stops mid-job, and
     :func:`_finish` releases both on every ending, good or bad.
 
+    The same two bars are also stowed from sight (``api.tabs.bar_visible`` and
+    the ``bar_visible`` property), since a job that owns the whole window has
+    nothing left to switch to anyway; the pages keep their places and the bars
+    come back on the release.
+
     A tab built without the job pane has nothing to hold either, so the whole
     thing is quiet about it: an older layout, or a bare test harness, runs a job
     exactly as it always did.
@@ -3201,7 +3358,12 @@ def _lock_pages(hold: bool) -> None:
         api.tabs.lock(hold)
     except Exception:
         pass
+    try:
+        api.tabs.bar_visible(not hold)
+    except Exception:
+        pass
     _detail(SUBTABS, "locked", hold)
+    _detail(SUBTABS, "bar_visible", not hold)
 
 
 def _begin(verb: str, entry: dict | None = None) -> dict:
@@ -4240,6 +4402,7 @@ def shutdown() -> None:
     del manager_order[:]
     manager_picked = ""
     manager_building = False
+    config_pages.clear()      # open settings pages went with the tab's own bar
     del icon_queue[:]
     api = None
 
@@ -4275,6 +4438,12 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         return
     if slug and base in MANAGER_SWITCHES and name in ("toggled", "changed"):
         manager_toggle(base, slug, data)
+        return
+    if slug and base in MANAGER_CONFIG_BUTTONS and name == "clicked":
+        if base == "cfg_save":
+            manager_config_save(slug)
+        else:
+            manager_config_cancel(slug)
         return
     if name == "clicked":
         handler = HANDLERS.get(ident)

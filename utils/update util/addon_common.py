@@ -458,9 +458,32 @@ def addon_build_path() -> Path:
     return app_config_dir() / "_build.json"
 
 
+#: path -> [mtime_ns, size, the file as read]. Only ever the build file, which
+#: is why it is kept apart from the configs an addon may rewrite at any moment.
+_MARK_CACHE: dict[str, list] = {}
+
+
 def read_build_marks() -> dict:
-    """Every build record, or ``{}`` when the file is missing or broken."""
-    return read_config_json(addon_build_path())
+    """Every build record, or ``{}`` when the file is missing or broken.
+
+    Remembered between calls, and re-read when the file's own stamp moves: this
+    is asked once per addon by a scan and again by every row of the Addon Dev
+    tab, and on Windows opening and parsing the same small file two hundred times
+    a minute is the kind of work that shows as a sluggish window.
+    """
+    path = addon_build_path()
+    key = str(path)
+    try:
+        stamp = path.stat()
+    except OSError:
+        _MARK_CACHE.pop(key, None)
+        return {}
+    held = _MARK_CACHE.get(key)
+    if held is not None and held[:2] == [stamp.st_mtime_ns, stamp.st_size]:
+        return dict(held[2])
+    data = read_config_json(path)
+    _MARK_CACHE[key] = [stamp.st_mtime_ns, stamp.st_size, dict(data)]
+    return dict(data)
 
 
 def build_mark(addon_id: str) -> dict:
@@ -478,6 +501,10 @@ def write_build_mark(addon_id: str, values: dict) -> dict:
     record.update(jsonable(values or {}))
     marks[key] = record
     write_config_json(addon_build_path(), marks)
+    # Whatever the file's stamp says, the answer has to be the new one: a write
+    # of the same length in the same clock tick would otherwise be read as no
+    # change at all, and a build that has just finished is never too soon to show.
+    _MARK_CACHE.clear()
     return record
 
 
@@ -500,6 +527,10 @@ def write_config_json(path: Path, values: dict) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(text, encoding="utf-8")
     temporary.replace(path)
+    # The file has just been written, so no remembered reading of it is true
+    # any more - and a clock too coarse to notice the change is not a reason to
+    # keep answering from the last one.
+    _MARK_CACHE.pop(str(path), None)
 
 
 def merge_config(defaults: dict | None, stored: dict | None) -> dict:
@@ -753,14 +784,49 @@ def clean_child_env(env: Any = None) -> dict:
     return env
 
 
+#: The Windows flag that keeps a child from being given a console of its own.
+#: A program built without a console window - which is what Berry Manager is -
+#: still starts a console for any *console* program it spawns, because Windows
+#: hands a child a console when its parent has none to inherit. So every launch
+#: has to say it wants none, or the user watches PowerShell and Python windows
+#: flash over the interface every time a shortcut is written or a build is
+#: asked about. Zero everywhere else, and harmless there.
+NO_CONSOLE = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+
+def quiet_kwargs(kwargs: dict | None = None) -> dict:
+    """Launch arguments with the console pop-up switched off, unless told otherwise.
+
+    Only fills in ``creationflags`` when the caller named none, so a launch that
+    wants a console of its own - a relaunched copy that asks to be detached, a
+    build that must be its own process group - keeps exactly what it asked for.
+    """
+    filled = dict(kwargs or {})
+    if NO_CONSOLE and "creationflags" not in filled:
+        filled["creationflags"] = NO_CONSOLE
+    return filled
+
+
+def run_quiet(command: Any, **kwargs: Any) -> subprocess.CompletedProcess:
+    """``subprocess.run`` that never shows a window; the normal call for a helper.
+
+    For the one-line questions the app asks the machine - where is the Desktop,
+    can this interpreter build - which run while the interface is on screen and
+    have no business putting a terminal in front of the user.
+    """
+    return subprocess.run(command, **quiet_kwargs(kwargs))
+
+
 def popen_tree(command: Any, **kwargs: Any) -> subprocess.Popen:
     """``subprocess.Popen`` for a child that must never outlive the app.
 
     Takes the same arguments; the child starts in a place where
-    ``kill_process_tree`` reaches it and everything it spawns, and with an
-    environment that is its own rather than this program's.
+    ``kill_process_tree`` reaches it and everything it spawns, with an
+    environment that is its own rather than this program's, and with no console
+    window of its own unless the caller asked for one (see :func:`NO_CONSOLE`).
     """
     kwargs["env"] = clean_child_env(kwargs.get("env"))
+    kwargs = quiet_kwargs(kwargs)
     if os.name != "nt":
         kwargs.setdefault("start_new_session", True)
         proc = subprocess.Popen(command, **kwargs)

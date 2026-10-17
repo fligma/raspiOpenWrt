@@ -984,6 +984,32 @@ happens:
 | `on_widget(tab, id, event, payload)` | the user touched something in one of its tabs, or on one of its Settings pages - the page's name is where a tab's would be |
 | `on_config(payload)` | its `addons/_data/<id>/config.json` was saved, by Settings or by itself |
 
+Every one of those hooks - and every `api.schedule` callback - runs on that
+addon's own thread, one per addon, named `addon-<id>` in a debugger's thread
+list. The queue is the addon's alone: two of its jobs never run at once and a
+hook asked for first is run first, so there is nothing to lock between its hooks
+and a slow addon is slow only for itself while the window keeps painting.
+Nothing in the addon's code has to know about it. The namespaces that own a
+widget (`ui`, `tabs`, `session`, `events`, `settings`, `config`,
+`settings_pages`, `schedule`, `peers`, `theme`, `window`) are answered on the
+GUI thread however deeply inside a hook they are asked, and the two that reach a
+socket or a file - `device` and `paths` - are answered right there on the
+addon's thread, which is the whole point: a fetch, a log read or a download is
+off the interface instead of being the interface. `api.win` is the one thing
+refused from an addon's thread, because everything a widget can be asked to do
+already has a name in the API. An addon being stopped, or an app being closed,
+refuses the calls still coming in with an `AddonError` naming the addon rather
+than waiting out an answer that can never arrive; a `ui.question` raised from a
+hook holds that addon's queue until the user answers, so ask in `start` or in a
+button rather than in a timer. At startup every addon's import and `init` are
+handed to its own thread at once and the splash waits for those queues to empty
+- the wait is the slowest addon, not the sum of them - and on shutdown each
+addon is given its `shutdown` on its own queue with five seconds to finish what
+it queued before the interface is refused to it. `BERRY_ADDON_THREADS=0` puts
+every hook back on the GUI thread for a debugger or a harness with no event loop
+of its own, which is also what the app does by itself when there is no Qt
+application to hand a call back to.
+
 The object in `init` is the only door into the app:
 
 | Namespace | What it gives |
@@ -1019,8 +1045,9 @@ spec needs nothing, because the window repaints it under it.
 
 Device work runs in a small shared thread pool, so a slow command never
 freezes the window. `run()` waits for the result while keeping the interface
-responsive; `run_async()` hands it to a callback instead, which is what you
-want from `init`; and `run(command, block=False)` gives back a future -
+responsive; `run_async()` hands it to a callback instead, which arrives on the
+addon's own thread and is what you want from `init`; and
+`run(command, block=False)` gives back a future -
 `done()`, `result()`, `cancel()` - which is how one command goes to several
 devices at the same time and stays off the GUI thread. It is the same future
 whether the addon was imported into the app or built as its own program, which
@@ -1335,10 +1362,13 @@ written through the shell's own `WScript.Shell` so it is a real shortcut with th
 addon's picture on it, and `berry-<id>.desktop` on Linux, filed in
 `~/.local/share/applications` with a copy beside the Desktop folder when that
 exists. Taking the switch back down deletes both. The Desktop is asked for, never
-guessed - and asked once: the shell's answer is kept for the rest of the run,
-since an addon row drawn four times must not start PowerShell four times to learn
-the same path. `BERRY_DESKTOP_DIR` overrides the answer, which is how the tests
-write a link without touching the real Desktop.
+guessed, and it is asked in the cheap order first: `BERRY_DESKTOP_DIR` if it is
+set - which is how the tests write a link without touching the real Desktop -
+then the `User Shell Folders` key the registry already holds, then the shell, and
+only then the home folder. The answer is kept for the rest of the run, since an
+addon row drawn four times must not ask anything four times to learn the same
+path, and the registry costs a fraction of a millisecond where a shell costs half
+a second.
 
 The link starts this same program with `--popout <id>`, and that launch is
 deliberately small: no main window, no splash, no Settings, no profile picker,
@@ -2109,16 +2139,18 @@ patience - about two minutes - and the app gave up on the command first and hand
 the addon a `-1` that read as though the device had answered it. A command that
 still never comes back is now said as one, with the seconds it was given and the
 reason the app carried. A page that answers as the dashboard lands the tab on
-**Status**; a missing folder, a port that says nothing or a page that belongs to
-something else lands it on the **Installer**, where the work is. When the page's
-files are found under a folder other than the one the form names, the status line
-says which folder they are in and points at the button that moves them.
+**Status** and, with **Show the page in this tab when the device has it** left
+on, is put up inside the tab over the forms; a missing folder, a port that says
+nothing or a page that belongs to something else lands it on the **Installer**,
+where the work is. When the page's files are found under a folder other than the
+one the form names, the status line says which folder they are in and points at
+the button that moves them.
 
 | Button | What it does |
 | --- | --- |
 | **Re-check** | That one command again, and the tab rearranged around the answer |
 | **Check page** | `curl`, or busybox `wget`, against `127.0.0.1` and then the address in the connection panel, each ask bounded, and says whether the dashboard answered |
-| **Open dashboard** | The page in an embedded tab, following the profile's host |
+| **Open dashboard** | The page the device is serving, inside this tab over its forms, following the profile's host and the scheme the device's own uhttpd section says it listens on |
 | **Fetch files** | Asks GitHub what is in that folder at that branch or tag, downloads it into `addons/_data/berry_web/staging/`, asks the device what it already has, and fills the plan table. Writes nothing. |
 | **Install** | The same, and then, after one confirmation that lists what will happen: back the folder up on the device, write the files, tidy away the leftovers if the config asks, write `css/theme.css` from the theme the app is wearing, set the uhttpd section up with `uci`, `chmod 755` the CGI entry, run the restart command, and ask the device for its own page |
 | **Read** / **Refresh** | `uci show uhttpd.<section>` and `/etc/config/uhttpd` into the **Raw file** page, read-only: the file is shown here, never written from here |
@@ -2142,6 +2174,27 @@ is one row per file with its size, what the device has of it and what this job
 means to do - `new`, `already there`, `replaced`, `written again` - the row
 tinted by that action, so an update is read before it is run, and a look-around
 costs one API call and a download.
+
+The body of the tab is a splitter, and its left pane is a side bar of the places
+the tab can be looking at: **Dashboard page**, **Status**, **Installer**, **uhttpd
+settings**, then **Re-check** and the page's own **←**, **→** and **⟳**, a rule,
+and the two other places the page can be seen - **In a browser tab** and **In the
+system browser**. The button for what is showing is lit; the three forms are the
+notebook's pages and the dashboard is the web view put over them, so pressing one
+of the four takes the other back, and nothing else in the tab has to know which
+of the two is up. The side bar is kept out of the job's greying-out, so a person
+mid-install always has the way out, and its page moves are dead while the page is
+behind. **Show the page in this tab when the device has it** (on the uhttpd page,
+in the config as `auto_show`) decides whether a landing on a live dashboard and an
+install that verified itself put the page up by themselves; a re-check pressed by
+hand never does, since what the person is reading then are the forms they asked
+about. The embedded view is only the page: the browser tab keeps the address bar,
+**Home**, the bar shown when a page refuses and the switch to tolerate a
+self-signed certificate, which is why it stays one button away rather than going
+away - and a build with no QtWebEngine in it refuses the page, keeps its forms on
+screen and says to use that button instead. What the page says when it stops
+loading comes back as a `loaded` event, and a refusal is spoken about rather than
+left as a blank pane.
 
 - A file whose size matches what is there is left alone (**Leave a file alone
   when its size matches**), which is what makes a second install take a second
@@ -2190,7 +2243,8 @@ costs one API call and a download.
   in the browser is the same colours as the window that installed it. The
   committed copy under `src/www_rasconf/css/` carries the shipped default theme,
   so a folder copied across by hand still looks right.
-- The tab is a spec and its thirteen buttons report through `on_widget`. The
+- The tab is a spec and its thirteen buttons report through `on_widget`, as do
+  the ten on its side bar and the `loaded` news of the page it shows. The
   manifest says `connection: "both"`, so a person may put it on a connection of
   its own, which is also what lets a long transfer hold one session open instead
   of opening one per file; on the app's session the same writing code sends each
@@ -2201,10 +2255,14 @@ costs one API call and a download.
   held as text in `TAB_ICON`.
 
 `addon.store/_tests/test_berry_web.py` drives the whole route without a device -
-the tab built by Qt (its three pages, the nested uhttpd notebook, the tables and
-the step flow), a canned answer from a host read back six different ways (one of
+the tab built by Qt (its three pages, the nested uhttpd notebook, the side bar and
+the web view beside them, the tables and the step flow), a canned answer from a
+host read back six different ways (one of
 them a router holding the page under an older name, with no section of this
-addon's ever written), which page each answer lands the tab on, that every ask of
+addon's ever written), which page each answer lands the tab on, that the page is
+put up over the forms on a landing and after an install that verified but not on a
+re-check pressed by hand and not at all with the switch off, that the side bar
+leads back out and that a job never greys it out, that every ask of
 the page is bounded and that the whole probe fits inside the seconds it is given,
 how a command that never came back is worded (no bare `-1` offered as the
 device's answer), the `uci` script and every refusal in front of it, the move -

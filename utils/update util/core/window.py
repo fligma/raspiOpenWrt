@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QStatusBar,
     QStyle,
     QSystemTrayIcon,
@@ -627,7 +628,11 @@ class BerryManager(
         self._order_tab_bar.installEventFilter(self)
 
         self.tabs.tabCountChanged.connect(self._on_tab_count_changed)
-        root_layout.addWidget(self.tabs, 1)
+        # The tabs and the log console share the window through a splitter, so
+        # the console can be dragged to whatever height the moment asks for.
+        self.console_split = QSplitter(Qt.Orientation.Vertical)
+        self.console_split.addWidget(self.tabs)
+        root_layout.addWidget(self.console_split, 1)
 
         self.build_ssh_tab()
         self._web_tab_entries = []
@@ -657,8 +662,12 @@ class BerryManager(
 
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setMaximumHeight(130)
-        root_layout.addWidget(self.log_output)
+        self.console_split.addWidget(self.log_output)
+        # The console opens at the height it always had and the tabs keep the
+        # rest; the handle between them is what makes either side resizable.
+        self.console_split.setStretchFactor(0, 1)
+        self.console_split.setStretchFactor(1, 0)
+        self.console_split.setSizes([zoom_size(650), zoom_size(130)])
         self.apply_log_console_visibility()
 
         for field in (
@@ -1263,6 +1272,26 @@ class BerryManager(
             self.log(f"tab lock: {error}")
             return False
 
+    def set_tabs_bar_visible(self, visible: bool) -> bool:
+        """Show or hide the window's tab bar, leaving the pages themselves alone.
+
+        An addon that hands the whole window to a job's progress view asks for
+        this while the job runs - there is nothing to switch back to when one
+        pane owns everything - and gets the bar back on the same call with
+        ``visible`` on. Only the bar goes; the page stays exactly where it was,
+        and nothing is remembered in the window's settings.
+        """
+        if not hasattr(self, "tabs"):
+            return False
+        try:
+            self.tabs.tabBar().setVisible(bool(visible))
+            if visible:
+                self._stretch_tab_bar()
+            return True
+        except Exception as error:            # a bar that will not stow itself
+            self.log(f"tab bar visibility: {error}")
+            return False
+
     # Interface zoom
 
     def ui_zoom(self) -> int:
@@ -1298,9 +1327,8 @@ class BerryManager(
         # A few pieces are painted or styled outside the app sheet - a group
         # heading, the dots in a tab - and are re-poured from the theme here.
         refresh_theme_styles()
-        pane = getattr(self, "log_output", None)
-        if pane is not None:
-            pane.setMaximumHeight(zoom_size(130, percent))
+        # The log console is sized by its splitter now, so a zoom step leaves
+        # whatever height the person dragged it to standing where they put it.
         font = getattr(self, "terminal_font", None)
         if font is not None and hasattr(self, "terminal"):
             font.setPointSize(self.terminal_points())

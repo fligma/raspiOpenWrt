@@ -182,11 +182,18 @@ class Api(addon_client.StubAPI):
         self.host = host
         self.remote_root = remote_root
         self.question_answer = question
+        self.refuse_web = False
         self.form: dict = {}
         self.commands: list[str] = []
         self.asked_titles: list[str] = []
 
     def default(self, method: str, arguments: Any, named: Any) -> Any:
+        if method == "tabs.set_widget" and self.refuse_web:
+            # A build without QtWebEngine: the leaf that shows a page is a notice
+            # instead, and being given an address for it is refused.
+            if (self.argument(method, "identifier", arguments, named, "") == "dash"
+                    and self.argument(method, "prop", arguments, named, "") == "url"):
+                raise addon_client.AddonError("QtWebEngine is not available")
         if method == "device.run_async":
             command = self.argument(method, "command", arguments, named, "")
             callback = self.argument(method, "on_done", arguments, named)
@@ -376,12 +383,41 @@ def test_the_landing() -> None:
               "the check never asks the host for its own page")
         berry_web.shutdown()
 
-    # The live dashboard lands as a page: the web view opens by itself, with
-    # the corner menu the addon's own entries make up.
+    # A live dashboard is looked at inside this tab: the page leaf is given the
+    # address and the forms step back. No browser tab is opened by itself - that
+    # is a button on the side bar, and a landing that pressed it for nobody would
+    # be the addon putting a window over the person's work.
     api = fresh(answer=LIVE)
     berry_web.check_device()
+    opened = str(api.last_set("dash", "url") or "")
+    check("8989" in opened and opened.startswith("http"),
+          f"the page was not handed an address to show: {opened!r}")
+    check(api.last_set("dash", "visible") is True,
+          "the tab did not put the page over its forms")
+    check(api.last_set("views", "visible") is False,
+          "the forms were left showing under the page")
+    check(not api.called("tabs.add_web_tab"),
+          "a landing opened a browser tab that nobody asked for")
+    berry_web.shutdown()
+
+    # The same landing with the switch on the uhttpd page off: the forms stay.
+    api = fresh(answer=LIVE, values={"auto_show": False})
+    berry_web.check_device()
+    check(not api.last_set("dash", "url"),
+          "the page was fetched with the switch that says not to show it off")
+    check(api.last_set("dash", "visible") is not True
+          and api.last_set("views", "visible") is not False,
+          "the forms were covered anyway with the switch off")
+    check(api.last_set("views", "current") == berry_web.STATUS_PAGE,
+          "with the page off the tab did not at least stand on the status page")
+    berry_web.shutdown()
+
+    # The side bar's other two ways of seeing the page: a browser tab of its own,
+    # with the corner menu that leads back travel with it, and the system browser.
+    api = fresh(answer=LIVE)
+    berry_web.open_in_tab()
     check(api.called("tabs.add_web_tab"),
-          "a live dashboard did not land on the web view")
+          "the side bar's browser button opened nothing")
     menu = api.asked("tabs.add_web_tab", "menu") or []
     check(bool(menu) and all(str(one.get("id")) and str(one.get("label"))
                              for one in menu),
@@ -392,8 +428,8 @@ def test_the_landing() -> None:
     # in front of the buttons being read.
     api = fresh(answer=LIVE)
     berry_web.check_device(landing=False)
-    check(not api.called("tabs.add_web_tab"),
-          "a manual re-check opened a page over the status buttons")
+    check(not api.last_set("dash", "url"),
+          "a manual re-check covered the status buttons with the page")
     check(api.last_set("views", "current") == berry_web.STATUS_PAGE,
           "the re-check did not even leave the notebook on the status page")
     berry_web.shutdown()
@@ -906,16 +942,41 @@ def test_the_routes() -> None:
 
     api = fresh(answer=LIVE)
     berry_web.open_dashboard()
-    opened = api.asked("tabs.add_web_tab", "url")
-    check("8989" in str(opened), f"the dashboard was not opened at its port: {opened!r}")
+    opened = str(api.last_set("dash", "url") or "")
+    check("8989" in opened, f"the dashboard was not opened at its port: {opened!r}")
+    check(api.last_set("dash", "visible") is True,
+          "the button that shows the page left the forms up in front of it")
     berry_web.shutdown()
 
     api = fresh(answer=LIVE)
     berry_web.last_check.update(berry_web.parse_check(TLS_LIVE))
     berry_web.open_dashboard()
-    opened = str(api.asked("tabs.add_web_tab", "url") or "")
+    opened = str(api.last_set("dash", "url") or "")
     check(opened.startswith("https"),
           f"the https device was visited over plain http: {opened!r}")
+    berry_web.shutdown()
+
+    # The same address, in the other two places the page can be looked at.
+    api = fresh(answer=LIVE)
+    berry_web.last_check.update(berry_web.parse_check(TLS_LIVE))
+    berry_web.open_in_tab()
+    check(str(api.asked("tabs.add_web_tab", "url") or "").startswith("https"),
+          "the browser tab was handed a plain address for an https device")
+    berry_web.open_in_system()
+    check(api.called("ui.browse"), "the system browser was given nothing")
+    berry_web.shutdown()
+
+    # A build that cannot show a page inside a tab keeps its forms and says so,
+    # with the way round it named - a hidden notebook behind a blank pane would
+    # be the worst of both.
+    api = fresh(answer=LIVE)
+    api.refuse_web = True
+    berry_web.on_widget(berry_web.TAB, "open", "clicked", {})
+    check(api.last_set("dash", "visible") is not True,
+          "the forms were hidden behind a page this build cannot show")
+    check("browser tab" in str(api.last_set("status", "text")),
+          f"the refusal did not say how to see the page anyway: "
+          f"{api.last_set('status', 'text')!r}")
     berry_web.shutdown()
 
     api = fresh(answer=LIVE)
@@ -936,8 +997,66 @@ def test_the_routes() -> None:
     berry_web.shutdown()
 
 
+def test_the_side_bar() -> None:
+    """The bar down the left of the tab: the way out of the page, the way to the
+    other two places it can be seen, and the lit button that says where the tab
+    is looking."""
+    print("\n6d. the side bar")
+    # Back out to the forms, and the page's own moves.
+    api = fresh(answer=LIVE)
+    berry_web.open_dashboard()
+    berry_web.on_widget(berry_web.TAB, "nav_install", "clicked", {})
+    check(api.last_set("views", "current") == berry_web.INSTALL_PAGE
+          and api.last_set("dash", "visible") is False
+          and api.last_set("views", "visible") is True,
+          "the side bar's installer button did not get back out to the forms")
+    berry_web.on_widget(berry_web.TAB, "nav_reload", "clicked", {})
+    moves = [str(arguments[2]) for where, arguments, _named in api.calls
+             if where == "tabs.set_widget" and arguments[1:2] == ("dash",)]
+    check("visible" in moves and api.last_set("dash", "url") is not None,
+          f"a move pressed while the page was behind did not bring it up: {moves}")
+    berry_web.on_widget(berry_web.TAB, "nav_reload", "clicked", {})
+    moves = [str(arguments[2]) for where, arguments, _named in api.calls
+             if where == "tabs.set_widget" and arguments[1:2] == ("dash",)]
+    check("reload" in moves, f"the reload button reached no leaf: {moves}")
+    check(api.last_set("nav_reload", "enabled") is True,
+          "the page's moves were left greyed out with the page up")
+    berry_web.shutdown()
+
+    # What the page said of itself; a blank pane is not an answer.
+    api = fresh(answer=LIVE)
+    berry_web.on_widget(berry_web.TAB, "dash", "loaded", {"ok": False, "url": "x"})
+    check("did not load" in str(api.last_set("status", "text")),
+          "a page that refused to load said nothing about it")
+    berry_web.on_widget(berry_web.TAB, "dash", "loaded", {"ok": True, "url": "x"})
+    check("showing x" in str(api.last_set("status", "text")),
+          "a page that loaded was not said to be showing")
+    berry_web.on_widget(berry_web.TAB, "dash", "clicked", {})
+    berry_web.on_widget(berry_web.TAB, "some other leaf", "loaded", {})
+    berry_web.shutdown()
+
+    # The bar is lit for the page that is up, and a job does not grey it out.
+    api = fresh(answer=LIVE)
+    berry_web.view_page(berry_web.UHTTPD_PAGE)
+    check(api.last_set("nav_uci", "style") != api.last_set("nav_status", "style"),
+          "the side bar does not say which of its places the tab is looking at")
+    berry_web.open_dashboard()
+    check(api.last_set("nav_dash", "style") != api.last_set("nav_uci", "style"),
+          "the bar still said a form was showing with the page over it")
+    before = len(api.calls)
+    berry_web._buttons(False)
+    greyed = {str(arguments[1]) for where, arguments, _named in api.calls[before:]
+              if where == "tabs.set_widget" and arguments[2:3] == ("enabled",)}
+    check(api.last_set("open", "enabled") is False,
+          "a running job left its own buttons lit")
+    check(not [one for one in greyed if str(one).startswith("nav_")],
+          f"a running job greyed out the side bar, which is the way out: "
+          f"{sorted(greyed)}")
+    berry_web.shutdown()
+
+
 def test_the_stages() -> None:
-    print("\n6d. the stages a job walks")
+    print("\n6e. the stages a job walks")
     install = berry_web.route(berry_web.DEFAULTS, "install")
     fetch = berry_web.route(berry_web.DEFAULTS, "fetch")
     check(install[0] == "tree" and "fetch" in install,
@@ -957,7 +1076,7 @@ def test_the_stages() -> None:
     check(spans["write"][0] + spans["write"][1] <= units,
           "the last stage runs off the end of the bar")
 
-    print("\n6e. the two stages this addon adds to the old installer")
+    print("\n6f. the two stages this addon adds to the old installer")
     api = fresh(answer=LIVE)
     berry_web.job = {"stages": ["uci"], "stage": "uci", "index": 0, "items": [],
                      "values": dict(berry_web.DEFAULTS),
@@ -999,7 +1118,7 @@ def test_the_stages() -> None:
     berry_web.job = None
     berry_web.shutdown()
 
-    print("\n6f. the proof that the page works")
+    print("\n6g. the proof that the page works")
     api = fresh(answer=LIVE)
     berry_web.job = {"stages": ["verify"], "stage": "verify", "index": 0,
                      "items": [], "values": dict(berry_web.DEFAULTS),
@@ -1028,7 +1147,7 @@ def test_the_stages() -> None:
 
 
 def test_the_plan() -> None:
-    print("\n6g. what the plan table and the badges say")
+    print("\n6h. what the plan table and the badges say")
     api = fresh(answer=LIVE)
     items = [{"path": "js/main.js", "size": 640, "action": "queued", "remote": None},
              {"path": "css/main.css", "size": 4096, "action": "already there",
@@ -1246,6 +1365,7 @@ def main() -> int:
         test_the_tab(app)
         test_the_reports()
         test_the_routes()
+        test_the_side_bar()
         test_the_stages()
         test_the_plan()
         test_the_icon()

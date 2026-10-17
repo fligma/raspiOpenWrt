@@ -35,7 +35,7 @@ from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel,
                              QMenu, QPushButton, QTabWidget, QVBoxLayout, QWidget)
 
-from addon_common import find_addon_picture, find_icon
+from addon_common import find_addon_picture, find_icon, run_quiet
 from core.const import (ADDONS_DIR, ASSETS_DIR, BASE_DIR, current_zoom,
                         scaled_sheet, step_zoom, zoom_size)
 import core.ui
@@ -735,11 +735,37 @@ def popout_target() -> tuple[str, str]:
 
 
 #: What the shell answered about the Desktop this run, or None while it has not
-#: been asked. Starting PowerShell costs some two hundred milliseconds, and an
-#: addon row wants the folder it would write a link into - so a store tab with
-#: four addons in it would ask the same question four times, every time it is
-#: redrawn. The folder does not move while the program runs.
+#: been asked. An addon row wants the folder it would write a link into, so a
+#: store tab with four addons in it asks the same question four times, every time
+#: it is redrawn - and the folder does not move while the program runs.
 _DESKTOP_ASKED: str | None = None
+
+
+def _desktop_from_registry() -> str:
+    """The Desktop folder as the shell files it, read from the registry itself.
+
+    This is where Windows keeps the answer, so asking it costs a registry open
+    instead of starting a shell: the value is still ``%USERPROFILE%``-shaped, so a
+    localized Desktop, a redirected one and a OneDrive Desktop all come back
+    pointing at the folder the Desktop actually shows - which is the whole reason
+    for asking rather than guessing.
+    """
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion"
+                r"\Explorer\User Shell Folders") as key:
+            raw, _kind = winreg.QueryValueEx(key, "Desktop")
+    except OSError:
+        return ""
+    text = str(raw or "").strip()
+    if "%" in text:
+        # A REG_EXPAND_SZ is handed over unexpanded, on purpose: the shell keeps
+        # the address portable across accounts, and so do we.
+        text = os.path.expandvars(text)
+    return text.strip()
 
 
 def desktop_folder() -> Path:
@@ -747,8 +773,11 @@ def desktop_folder() -> Path:
 
     Never guessed: a localized Windows keeps its Desktop somewhere the name
     ``home/Desktop`` does not point at, and a link written there is invisible.
-    ``BERRY_DESKTOP_DIR`` says otherwise for a test, which must not touch the
-    real Desktop to prove that a link is written and removed.
+    The registry is asked first because it is free to ask; the shell is only
+    consulted when the registry has no answer, which is a rarer case than it
+    sounds but not a nonexistent one. ``BERRY_DESKTOP_DIR`` says otherwise for a
+    test, which must not touch the real Desktop to prove that a link is written
+    and removed.
     """
     global _DESKTOP_ASKED
     override = str(os.environ.get("BERRY_DESKTOP_DIR") or "").strip()
@@ -756,22 +785,40 @@ def desktop_folder() -> Path:
         return Path(override)
     if os.name == "nt":
         if _DESKTOP_ASKED is None:
-            # A blank answer is kept too: no PowerShell here is settled
+            # A blank answer is kept too: no shell folder here is settled
             # news for the rest of the run, not a question to ask again.
-            _DESKTOP_ASKED = _ask_powershell("[Environment]::GetFolderPath('Desktop')")
+            _DESKTOP_ASKED = _desktop_from_registry() or \
+                _ask_powershell("[Environment]::GetFolderPath('Desktop')")
         if _DESKTOP_ASKED:
             return Path(_DESKTOP_ASKED)
     return Path.home() / "Desktop"
 
 
 def _ask_powershell(statement: str) -> str:
-    """One line from PowerShell, stripped; empty when there is no PowerShell."""
+    """One line from PowerShell, stripped; empty when there is no PowerShell.
+
+    Asked without a window: this program has no console of its own, so a plain
+    launch would hand PowerShell a fresh one - a blue terminal flashing over the
+    interface for a question nobody asked out loud.
+    """
     try:
-        done = subprocess.run(["powershell", "-NoProfile", "-Command", statement],
-                              capture_output=True, text=True, timeout=20)
+        done = run_quiet(["powershell", "-NoProfile", "-Command", statement],
+                         capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError):
         return ""
     return str(done.stdout or "").strip()
+
+
+def warm_desktop() -> None:
+    """Settle where the Desktop is, before anything wants to draw a row.
+
+    The registry answers this in a fraction of a millisecond, which is why it is
+    asked first; the shell is only started when the registry has nothing, and that
+    is worth paying for here rather than in the middle of a store redraw. Nothing
+    is done with the answer but cache it, so a failure is only the next caller
+    paying for the question.
+    """
+    desktop_folder()
 
 
 def shortcut_file(addon: Any) -> Path:
@@ -878,8 +925,8 @@ def _write_lnk(where: Path, target: str, arguments: str, mark: str,
         "BERRY_DESC": f"{addon.name or addon.id} - Berry Manager addon",
     })
     try:
-        done = subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                              capture_output=True, text=True, timeout=30, env=env)
+        done = run_quiet(["powershell", "-NoProfile", "-Command", script],
+                         capture_output=True, text=True, timeout=30, env=env)
     except (OSError, subprocess.SubprocessError) as error:
         return f"powershell said nothing: {error}"
     if done.returncode != 0 or not where.is_file():

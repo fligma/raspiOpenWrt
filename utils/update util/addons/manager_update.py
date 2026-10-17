@@ -169,7 +169,7 @@ MAX_REDIRECTS = 8
 #: Below it the program predates how this addon stages and swaps a file, so a
 #: move that far back is more likely to leave a broken install than a working
 #: older copy, and is refused rather than attempted.
-OLDEST_ALLOWED = "1.6.0"
+OLDEST_ALLOWED = "2.0.0"
 
 #: The oldest version that may be installed with this copy's own setup left
 #: where it is. A way back below this line is only offered after everything
@@ -708,7 +708,7 @@ def tab_spec() -> dict:
     ended badly, which opens it by itself.
     """
     return {"kind": "column", "children": [
-        {"kind": "row", "children": [
+        {"kind": "row", "id": "headrow", "children": [
             {"kind": "label", "text": "Berry Manager update",
              "style": banner_style()},
             {"kind": "label", "id": "status", "text": "Ready.",
@@ -737,7 +737,7 @@ def tab_spec() -> dict:
              "placeholder": "every step of the last update, as it happened",
              "tooltip": "The same lines go into the program's own log"},
         ]},
-        {"kind": "row", "children": [
+        {"kind": "row", "id": "actionrow", "children": [
             {"kind": "button", "id": identifier, "text": text,
              "on": ["clicked"]} for identifier, text in BUTTONS],
         },
@@ -2609,12 +2609,20 @@ def _lock_pages(hold: bool) -> None:
     This tab has no sub-bar of its own, so the window's bar is all there is to
     hold - and the hold is the app's rather than this addon's, so stopping the
     addon lets go of it even if a job died halfway through.
+
+    The bar is stowed from sight for the same reason (``api.tabs.bar_visible``):
+    a job that owns the whole window has nothing left to switch to anyway, and
+    the bar comes back on the release.
     """
     if api is None:
         return
     try:
         api.tabs.lock(hold)
     except Exception:                        # noqa: BLE001 - a lock is a courtesy
+        pass
+    try:
+        api.tabs.bar_visible(not hold)
+    except Exception:                        # noqa: BLE001 - a look, not a hold
         pass
 
 
@@ -2624,6 +2632,10 @@ def _job_show(show: bool) -> bool:
     ``set_widget`` answers ``False`` for an id the tab does not hold, which is how
     a job started on a tab built without the pane - an older layout, or a bare
     test harness - finds out it has nowhere to print and carries on regardless.
+
+    The console is meant to own the whole tab while a job runs, so the header,
+    the button row and the folded log under the panes all step aside with it and
+    come back on the same call.
     """
     if api is None:
         return False
@@ -2632,6 +2644,8 @@ def _job_show(show: bool) -> bool:
         api.tabs.set_widget(TAB, "browse", "visible", not show)
     except AddonError:
         return False
+    for quiet in ("headrow", "actionrow", "log"):
+        _set(quiet, "visible", not show)
     return bool(placed)
 
 

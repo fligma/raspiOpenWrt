@@ -191,6 +191,7 @@ class ProcessAPI:
         "ui.menu_item": ("text", "callback", "menu", "shortcut"),
         "ui.dialog": ("spec", "title", "ok", "answers"),
         "ui.set_setting_widget": ("widget_or_spec",),
+        "ui.browse": ("url",),
         "tabs.add_web_tab": ("name", "url", "ip", "port", "path", "scheme",
                              "position", "pinned", "icon_only", "menu"),
         "tabs.add_tab": ("name", "widget", "spec", "style", "position",
@@ -982,6 +983,10 @@ class StubAPI:
             return None
         if method.startswith("ui."):
             if method == "ui.question":
+                return True
+            if method == "ui.browse":
+                # The app says whether a browser took the address; a test has
+                # none, and reading the call is what it is here for.
                 return True
             if method in ("ui.input", "ui.pick_color", "ui.pick_file"):
                 # A box that asks for something answers with nothing at all:

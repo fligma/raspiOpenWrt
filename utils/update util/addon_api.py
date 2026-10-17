@@ -274,7 +274,17 @@ other work done over a connection of its own.
 ``context`` (a right-click, carrying the text of the row under the cursor). A
 ``terminal`` answers to ``ready`` (its connection came up), ``closed`` (it went
 down, asked for or lost) and ``failed`` (carrying the reason), and to ``bell``
-and ``title`` (the screen's own news) when it is asked for them.
+and ``title`` (the screen's own news) when it is asked for them. A ``web`` leaf
+answers to ``loaded``, carrying ``{"ok": ..., "url": ...}``.
+A ``web`` leaf is the same page view an embedded tab gets, in a pane of the
+addon's own tab: its ``url``, or ``set_widget(tab, id, "url", ...)``, is the
+address, and an address given to a leaf that is not on show is held until the
+moment it is, while one it is showing already is not fetched again. ``back``,
+``forward``, ``reload`` and ``stop`` are asked the same way, and
+``widget_value`` reads ``"url"``, ``"title"``, ``"pending"`` and ``"loading"``
+back. Without QtWebEngine the leaf is a one-line notice and a ``"url"`` is
+refused with the reason; ``api.ui.browse`` is the machine's own browser for an
+addon that has to offer the page somewhere it will open.
 ``rows`` on a ``table``/``tree`` takes a list of cell lists, or of dicts:
 ``{"cells": [...], "color": "#rrggbb", "background": "...", "overlay": "...",
 "icon": "..."}`` - the colours ride along with the row, so one line can wear the
@@ -423,6 +433,24 @@ except ImportError:
     QWebEngineView = None
 
 
+def quiet_web_view() -> Any:
+    """A web view that never asks the window for more room than it has.
+
+    The same ``core.views.QuietWebView`` the app's own browser tabs are
+    built from: when the render process boots, a plain view's size hints
+    jump with the page's preferred size and the layout minimums drag the
+    window after them. Read late rather than imported at the top: a bare
+    addon harness builds specs without ``core.views`` in sight, and an
+    addon that never asks for a page should not be the reason it fails.
+    With no app beside the leaf, the plain view is all there is.
+    """
+    try:
+        from core.views import QuietWebView
+    except Exception:
+        QuietWebView = None
+    return (QuietWebView or QWebEngineView)()
+
+
 #: One shared pool, so twenty addons cannot open twenty SSH connections.
 POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="addon")
 
@@ -436,8 +464,23 @@ def _timeout(seconds: Any, default: float = 30.0) -> float:
     return min(max(value, 1.0), 600.0)
 
 
+#: How long a call that has to cross from an addon's thread to the interface waits
+#: for its answer, and the same wait the other way for a timer handle below. The
+#: interface answers in milliseconds when it is running its event loop at all, so a
+#: wait measured in whole minutes means the window is stuck - and the addon deserves
+#: to hear that as an error in its own log rather than to sit there until the app
+#: closes.
+GUI_ASK_TIMEOUT = 120.0
+
+
 def _await(future: concurrent.futures.Future, timeout: float) -> Any:
-    """Wait for a pooled task without freezing the interface; on the GUI thread a private event loop runs while the task is in flight."""
+    """Wait for a pooled task without freezing the interface; on the GUI thread a private event loop runs while the task is in flight.
+
+    Off the GUI thread the wait is a plain one: an addon's own thread owns no
+    event loop and has nobody to serve while it stands here, so blocking on the
+    future is both the cheapest and the honest answer - and it is what lets a
+    threaded addon still get a real result from a blocking ``device`` call.
+    """
     if on_gui_thread():
         loop = QEventLoop()
         future.add_done_callback(lambda _future: loop.quit())
@@ -448,6 +491,11 @@ def _await(future: concurrent.futures.Future, timeout: float) -> Any:
         if not future.done():
             loop.exec()
         watchdog.stop()
+    elif not future.done():
+        try:
+            future.result(timeout=float(timeout) + 2.0)
+        except concurrent.futures.TimeoutException:
+            pass
     if not future.done():
         raise AddonError("the device did not answer in time")
     try:
@@ -462,6 +510,29 @@ def on_gui_thread() -> bool:
     """Whether the caller is the thread that owns the GUI."""
     app = QApplication.instance()
     return app is not None and QThread.currentThread() is app.thread()
+
+
+def _there(api: Any, callback: Callable, *marks: Any) -> Callable[[Any], None]:
+    """Wrap one callback the app owes an addon, so it arrives on the addon's thread.
+
+    An answer that comes in from a pool - a command that finished, a script's
+    return value - used to be handed to the interface and run there, which meant
+    an addon's own callback could hold the window up like any other job. The
+    addon's code is one thread now, so the answer is queued there instead: the
+    callback is given the addon's queue and the same guard it always had, and an
+    addon that runs no thread of its own is called on this thread, as before.
+    """
+    def deliver(value: Any) -> None:
+        worker = getattr(getattr(api, "_addon", None), "worker", None)
+        job = lambda: guard(callback, value, *marks, reporter=api.error)
+        if worker is None:
+            job()
+        else:
+            # Refused means the addon is being stopped: its answer is gone rather
+            # than run on the wrong thread out of spite.
+            worker.post(job)
+
+    return deliver
 
 
 # --- addon config files: the Qt-free helpers live in addon_common ---
@@ -960,6 +1031,10 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
         widget.setSizePolicy(policy)
     if spec.get("checked") is not None and hasattr(widget, "setChecked"):
         widget.setChecked(bool(spec["checked"]))
+    if spec.get("url") is not None and getattr(widget, "_addon_web_load", None) is not None:
+        # A ``web`` leaf born with an address. It is still only loaded when it
+        # is first seen, so naming one in a spec costs nothing up front.
+        apply_widget_property(widget, "url", spec["url"])
     # Fill a combo or list first so "value" can pick from it.
     if spec.get("items") is not None and hasattr(widget, "addItems"):
         apply_widget_property(widget, "items", spec["items"])
@@ -1065,6 +1140,15 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
             widget.itemDoubleClicked.connect(
                 lambda item, _col=0: events(identifier, "selected", {
                     "text": item.text(0), "cells": _row_cells(item)}))
+    if "loaded" in names and getattr(widget, "_addon_web_load", None) is not None:
+        # A page's own news: whether it came up and what it ended up at, since
+        # a redirect or a refused certificate moves it off the address that was
+        # asked for. An addon that embeds a page needs this: a web view that
+        # shows nothing says nothing on its own.
+        widget.loadFinished.connect(
+            lambda ok, _view=widget: events(identifier, "loaded",
+                                            {"ok": bool(ok),
+                                             "url": _web_leaf_shown(_view)}))
     terminal = getattr(widget, "_addon_terminal", None)
     if terminal is not None:
         # A terminal's news comes from its shell thread and from the screen
@@ -1823,7 +1907,13 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
     if kind in ("web", "webview"):
         if QWebEngineView is None:
             return QLabel("QtWebEngine is not available in this installation.")
-        return QWebEngineView()
+        view = quiet_web_view()
+        # The leaf starts empty and only is given an address by the ``url``
+        # property, which is held until the leaf is first on show: see
+        # :class:`_WebLeafLoad`. An addon that builds a dashboard into a tab
+        # nobody has opened yet should not be paying a renderer for it.
+        view._addon_web_load = _WebLeafLoad(view)
+        return view
     if kind == "terminal":
         # The app's own terminal screen, for an addon that wants a shell of its
         # own. Read late rather than imported at the top: a bare addon test
@@ -2031,6 +2121,9 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
             _terminal_send(widget, value)
         else:
             _terminal_send(widget, value, line=True)
+    elif prop in WEB_LEAF_COMMANDS:
+        # A ``web`` leaf's address, and the moves inside the page it holds.
+        _web_leaf_command(widget, prop, value)
     elif prop == "sizes":
         # A splitter's panes: the shares each is given, where a 0 folds that
         # pane away and leaves its fold line to pull it back.
@@ -2057,6 +2150,14 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
 
         if not set_tab_lock(widget, bool(value)) and bool(value):
             raise AddonError("'locked' needs a tabs container")
+    elif prop == "bar_visible":
+        # Stow a tabs container's caption bar while its pages stay exactly
+        # where they are: what lets a job's pane own the whole of a container
+        # with nothing to click back to. The window's own bar answers to the
+        # same idea through ``api.tabs.bar_visible``.
+        if not isinstance(widget, QTabWidget):
+            raise AddonError("'bar_visible' stows the bar of a tabs container")
+        widget.tabBar().setVisible(bool(value))
     elif prop == "tab_colors":
         # One caption colour per page, given as a list of colours where an
         # empty entry means "as the theme draws it". A page that is switched
@@ -2328,6 +2429,146 @@ def _terminal_text(widget: QWidget) -> str:
     return "\n".join(rows)
 
 
+# --- a ``web`` leaf: an address held until it is seen, and the page's news ---
+
+#: What ``set_widget`` can ask of a ``web`` leaf beyond the properties every
+#: control answers to: an address to show, and the moves inside the page.
+WEB_LEAF_COMMANDS = ("url", "reload", "back", "forward", "stop")
+
+
+class _WebLeafLoad(QObject):
+    """Holds a ``web`` leaf's address until the leaf is actually looked at.
+
+    The same bargain a web tab is built on, in :mod:`core.views`: an addon that
+    points a page at a tab nobody has opened yet should pay a widget and no
+    renderer, so the address waits for the leaf's first Show event, which never
+    comes while the tab is hidden. Once a leaf has been shown the address is
+    loaded at once, and an address already showing is not loaded again - a page
+    that reloaded every time an addon hid its own form over it would throw the
+    user out of whatever they had reached.
+    """
+
+    def __init__(self, view: QWidget) -> None:
+        super().__init__(view)
+        self._view = view
+        self._asked = ""          # the address held back for a first Show
+        self._shown = ""          # the address the view was last sent to
+        view.installEventFilter(self)
+
+    def pending(self) -> str:
+        """The address held and not yet loaded, which is empty more often than not."""
+        return self._asked
+
+    def shown(self) -> str:
+        """The address this leaf was last sent to, loaded or not."""
+        return self._shown
+
+    def goto(self, address: Any) -> bool:
+        """Show ``address``: now when the leaf is on screen, else at its first Show.
+
+        Returns whether a load was sent off this time round; an address the
+        leaf is already showing is answered without one.
+        """
+        text = str(address or "").strip()
+        if not text:
+            return False
+        if text in (self._shown, self._asked):
+            return False          # already there, or already queued to go there
+        self._asked = text
+        if self._view.isVisible():
+            return self.fire()
+        return False
+
+    def fire(self) -> bool:
+        """Load what is held; ``False`` when there is nothing waiting."""
+        if not self._asked:
+            return False
+        self._shown, self._asked = self._asked, ""
+        self._view.load(QUrl(self._shown))
+        return True
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if self._asked and event.type() == QEvent.Type.Show:
+            try:
+                self.fire()
+            except Exception:                    # a page that will not start is quiet
+                self._asked = ""
+        return False
+
+
+def _is_web_leaf(widget: Any) -> bool:
+    """Whether this widget is an addon's ``web`` leaf, and so takes an address.
+
+    Only a real view: with QtWebEngine missing the kind is a label, and a label
+    is asked for its address the way any other control is - which is to say it
+    has none, and says so.
+    """
+    return getattr(widget, "_addon_web_load", None) is not None
+
+
+def _web_leaf_shown(widget: QWidget) -> str:
+    """The address a ``web`` leaf is at, or the one it is waiting to be taken to.
+
+    A leaf that has not been shown yet has no address of its own - Qt answers an
+    empty view with an empty url - so the one held back for it is what an addon
+    is told, which is how a tab that has never been opened still reports where
+    it is going.
+    """
+    hold = getattr(widget, "_addon_web_load", None)
+    try:
+        address = str(widget.url().toString() or "")
+    except (AttributeError, RuntimeError, TypeError):
+        address = ""
+    if address or hold is None:
+        return address
+    return hold.pending() or hold.shown()
+
+
+def _web_leaf_command(widget: QWidget, prop: str, value: Any) -> None:
+    """One ``url`` / ``reload`` / ``back`` / ``forward`` / ``stop`` on a web leaf."""
+    hold = getattr(widget, "_addon_web_load", None)
+    if hold is None:
+        raise AddonError(f"'{prop}' shows a page in a web leaf")
+    if prop == "url":
+        hold.goto(value)
+        return
+    try:
+        if prop == "reload":
+            widget.reload()
+        elif prop == "stop":
+            widget.stop()
+        elif prop == "back":
+            widget.back()
+        elif prop == "forward":
+            widget.forward()
+    except (AttributeError, RuntimeError) as error:
+        raise AddonError(f"the page would not {prop}: {error}") from error
+
+
+def _read_web_leaf(widget: QWidget, what: str) -> Any:
+    """What a ``web`` leaf answers to ``widget_value``, none of it a text widget's.
+
+    A view has no ``text()`` at all, so without this a ``"text"`` ask would fall
+    through to a call that does not exist and raise inside the app.
+    """
+    hold = getattr(widget, "_addon_web_load", None)
+    if what in ("url", "value", "text"):
+        return _web_leaf_shown(widget)
+    if what == "pending":
+        return hold.pending() if hold is not None else ""
+    if what == "title":
+        try:
+            return str(widget.title() or "")
+        except (AttributeError, RuntimeError):
+            return ""
+    if what == "loading":
+        try:
+            return bool(widget.isLoading())
+        except (AttributeError, RuntimeError):
+            return False
+    return None
+
+
 def _tabs_store(widget: QWidget) -> dict | None:
     """The build information a ``tabs`` container kept for itself, or ``None``."""
     return getattr(widget, "_addon_pages", None)
@@ -2411,6 +2652,9 @@ def read_widget_value(widget: QWidget, what: str = "value") -> Any:
     if what in ("text", "value") and _is_terminal(widget):
         # A terminal holds no text widget at all: the answer is the screen.
         return _terminal_text(widget)
+    if _is_web_leaf(widget):
+        # Nor does a web leaf hold text of its own; its state is the address.
+        return _read_web_leaf(widget, what)
     if what == "text":
         return widget.text() if hasattr(widget, "text") else widget.toPlainText()
     if what == "html":
@@ -3007,9 +3251,26 @@ class DeviceAPI:
     def _win(self) -> QWidget:
         return self._api.win
 
+    def _gui(self, job: Callable[[], Any]) -> Any:
+        """Read what only the interface can read, from whichever thread this was called on.
+
+        Most of what this class asks the window for is a Python value the window
+        keeps - a switch in ``app_config``, a connection object, a flag saying
+        whether a session is up - and reading those from an addon's thread is
+        safe. What is not safe is a value that lives inside a widget: the typed
+        host, the ticked box, the port on the spinner. Those are asked for here,
+        and the asking is the only hop a device call needs.
+        """
+        if on_gui_thread():
+            return job()
+        bus = getattr(self._api._manager, "bus", None)
+        if bus is None:
+            return job()        # a harness with no bus has no other thread either
+        return bus.ask(job, timeout=GUI_ASK_TIMEOUT)
+
     def _settings(self, override: dict | None = None) -> dict:
         """Connection details: profile, bound device and override, in order."""
-        base = self._win.current_settings(silent=True)
+        base = self._gui(lambda: self._win.current_settings(silent=True))
         settings = dict(base) if base else {}
         if self._bound:
             settings.update(self._bound)
@@ -3203,7 +3464,7 @@ class DeviceAPI:
 
     def run_async(self, command: str, on_done: Callable[[dict], None] | None = None,
                   timeout: Any = 30, device: dict | None = None) -> Any:
-        """``run`` without waiting: ``on_done(result)`` arrives on the GUI thread."""
+        """``run`` without waiting: ``on_done(result)`` arrives on the addon's own thread."""
         self._check_device(device)
         self._guard("ssh", uses_main=not bool(device))
         if device:
@@ -3211,13 +3472,14 @@ class DeviceAPI:
         self._mark("ssh")
         future = POOL.submit(self._exec, command, timeout, device)
         if on_done is not None:
+            answer = _there(self._api, on_done)
+
             def deliver(done: Any) -> None:
                 try:
                     result = done.result()
                 except Exception as error:
                     result = {"code": -1, "out": "", "err": str(error)}
-                self._api._manager.bus.post(
-                    lambda: guard(on_done, result, reporter=self._api.error))
+                answer(result)
             future.add_done_callback(deliver)
         return future
 
@@ -3771,6 +4033,21 @@ class UIAPI:
         """A message in the status line that goes away by itself after ``ms``."""
         self._win.statusBar().showMessage(str(text), max(500, int(ms)))
 
+    def browse(self, url: str) -> bool:
+        """Hand an address to the machine's own browser, and say whether it went.
+
+        The way out of an embedded page this app's web view cannot show: a
+        router with a self-signed certificate, or a page that wants something a
+        browser has already been agreed to. Nothing is fetched here, so the
+        answer is only ``False`` when this machine has no browser to open.
+        """
+        from PyQt6.QtGui import QDesktopServices
+
+        try:
+            return bool(QDesktopServices.openUrl(QUrl(str(url or ""))))
+        except Exception:                        # a headless box has no browser
+            return False
+
     def window(self) -> QWidget:
         """The main window. Use sparingly - it is the app itself."""
         return self._win
@@ -3778,10 +4055,15 @@ class UIAPI:
     def menu_item(self, text: str, callback: Callable[[], None],
                   menu: str = "Tools",
                   shortcut: str | None = None) -> QAction:
-        """Add an entry to the menu bar for as long as the addon stays enabled."""
+        """Add an entry to the menu bar for as long as the addon stays enabled.
+
+        The press is heard on the interface and the callback is then run on the
+        addon's own thread, like every other thing that addon's code does.
+        """
         target = self._find_menu(menu)
         action = target.addAction(str(text))
-        action.triggered.connect(lambda _checked=False: callback())
+        answer = _there(self._api, callback)
+        action.triggered.connect(lambda _checked=False: answer(None))
         if shortcut:
             from PyQt6.QtGui import QKeySequence
 
@@ -4227,6 +4509,27 @@ class TabsAPI:
         except Exception:                    # a bar that will not hold is a bar
             return False
 
+    def bar_visible(self, visible: bool) -> bool:
+        """Stow the window's tab bar away, or bring it back.
+
+        A job that fills its tab with a progress pane wants the whole window,
+        and a bar across the top is a strip of it spent showing tabs there is
+        no switching to while the bar is held anyway: this hides the bar, not
+        the pages, and the same call with ``visible`` on puts it back. It is
+        the look of the bar, not the order of the tabs - every tab keeps its
+        place, and an app-side jump to another page still works while it is
+        gone. A ``tabs`` container inside an addon's own page stows its bar
+        through the same ``bar_visible`` property. ``False`` comes back when
+        the window has no bar to stow.
+        """
+        show = getattr(self._win, "set_tabs_bar_visible", None)
+        if not callable(show):
+            return False
+        try:
+            return bool(show(bool(visible)))
+        except Exception:                    # a bar that will not stow is a bar
+            return False
+
     def url(self, name: str) -> str:
         """The address an embedded page is showing; empty for a custom tab."""
         entry = self._store.get(str(name))
@@ -4356,12 +4659,13 @@ class TabsAPI:
                   callback: Callable[[Any], None] | None = None,
                   identifier: str | None = None) -> None:
         """Run JavaScript in an embedded page; ``callback`` takes whatever the
-        script returns, on the GUI thread. A ``web`` widget inside a custom tab
-        is reached by its ``identifier``.
+        script returns, on the addon's own thread. A ``web`` widget inside a
+        custom tab is reached by its ``identifier``.
         """
         view = self._resolve_view(name, identifier)
+        answer = _there(self._api, callback) if callback else None
         self._api._manager.bus.post(
-            lambda: view.page().runJavaScript(str(code), callback) if callback
+            lambda: view.page().runJavaScript(str(code), answer) if answer
             else view.page().runJavaScript(str(code)))
 
     def set_cookie(self, name: str, cookie: Any, url: str = "",
@@ -4416,15 +4720,16 @@ class TabsAPI:
                      callback: Callable[[Any], None] | None = None) -> None:
         """Ask an embedded page what cookies its document can see (``document.cookie``).
 
-        ``callback`` gets the ``k=v; k=v`` text on the GUI thread. Cookies set
-        through :meth:`set_cookie` that are marked HttpOnly are not visible to
-        the page, so they are not reported here.
+        ``callback`` gets the ``k=v; k=v`` text on the addon's own thread.
+        Cookies set through :meth:`set_cookie` that are marked HttpOnly are not
+        visible to the page, so they are not reported here.
         """
         view = self._resolve_view(name, identifier)
+        answer = _there(self._api, callback)
 
         def wrapped(value: Any) -> None:
             if callable(callback):
-                callback(str(value or ""))
+                answer(str(value or ""))
 
         self._api._manager.bus.post(
             lambda: view.page().runJavaScript("document.cookie", wrapped))
@@ -5161,28 +5466,120 @@ class ConfigAPI:
         return guard(apply, reporter=self._api.error) or {}
 
 
+class ScheduledTimer:
+    """A timer an addon may command from its own thread.
+
+    The Qt object stays where it was made and where it fires - the interface's
+    thread - and this is the safe way to reach it from wherever the addon's code is
+    running. The answer used to be the ``QTimer`` itself, which an addon could only
+    stop correctly from the thread that built the window; a ``ticker.stop()`` from
+    its own thread was a Qt call across the line, right or wrong by chance.
+
+    Nothing here is asked of the addon's queue, so stopping a timer cannot be held
+    up by the work the timer was there to do.
+    """
+
+    def __init__(self, timer: "QTimer", api: "AddonAPI", ms: float,
+                 repeat: bool) -> None:
+        self._timer = timer
+        self._api = api
+        self._ms = float(ms)
+        self._repeat = bool(repeat)
+
+    def _gui(self, job: Callable[[], Any]) -> Any:
+        """Do this on the thread the timer lives on, from wherever it is asked."""
+        if on_gui_thread():
+            return job()
+        bus = getattr(self._api._manager, "bus", None)
+        if bus is None:
+            return job()        # a harness with no bus has no other thread either
+        return bus.ask(job, timeout=GUI_ASK_TIMEOUT)
+
+    def stop(self) -> None:
+        """End it: no further calls, and a repeating timer stops repeating."""
+        self._gui(self._timer.stop)
+
+    def start(self) -> None:
+        """Set it going again, from whatever it was last told to wait for."""
+        self._gui(self._timer.start)
+
+    def active(self) -> bool:
+        """Whether it is standing by to call."""
+        return bool(self._gui(lambda: self._timer.isActive()))
+
+    def set_seconds(self, seconds: Any) -> None:
+        """Change how long it waits between calls, keeping whether it is running."""
+        ms = max(1.0, float(seconds) * 1000.0)
+        self._ms = ms
+        running = bool(self._gui(lambda: self._timer.isActive()))
+
+        def move() -> None:
+            self._timer.stop()
+            self._timer.setInterval(int(ms))
+            if running:
+                self._timer.start()
+
+        self._gui(move)
+
+    @property
+    def seconds(self) -> float:
+        """What it was started with, in seconds."""
+        return self._ms / 1000.0
+
+    @property
+    def repeating(self) -> bool:
+        """Whether it calls again or once only."""
+        return self._repeat
+
+    def __repr__(self) -> str:
+        # Says nothing about the Qt timer, because a name printed in a log must not
+        # be a call that waits on another thread.
+        return (f"<scheduled {'every' if self._repeat else 'after'} "
+                f"{self._ms / 1000.0:g}s>")
+
+
 class SchedulerAPI:
-    """Timers that stop themselves when the addon is switched off."""
+    """Timers that stop themselves when the addon is switched off.
+
+    The timer belongs to the interface and the callback belongs to the addon, so
+    the two are joined by a hop: the moment fires on the GUI thread, and what it
+    calls is queued onto the thread the addon's own code runs on - which is what
+    lets an updater walk a dozen ``schedule.after(0.0, next_step)`` steps of a
+    download without the window being the thing that waits for the network.
+    """
 
     def __init__(self, api: "AddonAPI") -> None:
         self._api = api
 
-    def after(self, seconds: Any, callback: Callable[[], None]) -> QTimer:
-        """Call this once, ``seconds`` later, on the GUI thread."""
+    def after(self, seconds: Any, callback: Callable[[], None]) -> ScheduledTimer:
+        """Call this once, ``seconds`` later, on the addon's own thread."""
         return self._start(float(seconds) * 1000.0, callback, False)
 
-    def every(self, seconds: Any, callback: Callable[[], None]) -> QTimer:
+    def every(self, seconds: Any, callback: Callable[[], None]) -> ScheduledTimer:
         """Call this again every ``seconds`` until it is stopped or the addon is
         switched off."""
         return self._start(max(100.0, float(seconds) * 1000.0), callback, True)
 
-    def _start(self, ms: float, callback: Callable[[], None], repeat: bool) -> QTimer:
+    def _start(self, ms: float, callback: Callable[[], None],
+               repeat: bool) -> ScheduledTimer:
         timer = QTimer()
         timer.setSingleShot(not repeat)
-        timer.timeout.connect(lambda: _call(callback))
+        timer.timeout.connect(lambda: self._fire(callback))
         timer.start(int(ms))
+        # Kept for the teardown, which stops them on the thread that made them.
         self._api._addon.timers.append(timer)
-        return timer
+        return ScheduledTimer(timer, self._api, ms, repeat)
+
+    def _fire(self, callback: Callable[[], None]) -> None:
+        """Hand a due timer's callback to the thread the addon's code runs on."""
+        worker = getattr(self._api._addon, "worker", None)
+        if worker is None:
+            _call(callback)     # no thread of its own: called here, as it always was
+            return
+        # Not ``Addon.post``: an addon being stopped has its queue refused, and a
+        # callback that comes due in that moment is simply gone rather than run
+        # on the wrong thread out of spite.
+        worker.post(lambda: guard(callback, reporter=self._api.error))
 
 
 def _call(callback: Callable[[], None]) -> None:

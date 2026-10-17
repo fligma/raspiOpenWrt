@@ -221,6 +221,23 @@ def spec_of(spec: Any, ident: str) -> Any:
     return None
 
 
+def node_of_kind(spec: Any, kind: str) -> dict:
+    """The one node of a page spec drawn as this container kind, or nothing."""
+    if isinstance(spec, dict):
+        if spec.get("kind") == kind:
+            return spec
+        for value in spec.values():
+            found = node_of_kind(value, kind)
+            if found:
+                return found
+    elif isinstance(spec, (list, tuple)):
+        for value in spec:
+            found = node_of_kind(value, kind)
+            if found:
+                return found
+    return {}
+
+
 # --- the store, on a stub api ---
 
 def fresh(store: Any, rows: list[dict] | None = None,
@@ -789,25 +806,32 @@ def test_the_presses(store: Any) -> None:
     check(len(added_pages(api, store)) == 4,
           "the pages were not laid out again after that refusal either")
 
-    print("\n18. Edit settings opens the form the addon declared, and writes what "
-          "is typed into it")
+    print("\n18. Edit settings lays the form the addon declared into the bar, and "
+          "writes what is typed into it")
     api = fresh(store, answers={"session.addon_config": CONFIG_CARD,
-                                "ui.dialog": CONFIG_REPLY,
                                 "session.set_addon_config": CONFIG_WRITTEN})
     store.refresh_manager()
     api.calls.clear()
     store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
     check(asked(api, "session.addon_config", "addon_id") == "hello",
           "the settings were asked for somebody else than the page's addon")
-    spec = dialog_spec(api)
-    check(spec.get("kind") == "form",
+    check(not api.called("ui.dialog"),
+          "the settings were popped into a window of their own")
+    pages = added_pages(api, store)
+    check(len(pages) == 1,
+          f"the form did not arrive as one page of the manager's bar: {len(pages)}")
+    check(pages[0].get("label") == "hello settings"
+          and pages[0].get("current") is not False,
+          f"the settings page is not opened on its own caption: {pages[:1]}")
+    spec = pages[0].get("spec") or {}
+    check(bool(node_of_kind(spec, "form")),
           f"a declared form was not asked for as one: {spec.get('kind')!r}")
-    leaves = spec_leaves(spec)
-    check(list(leaves) == [str(field["key"]) for field in CONFIG_CARD["fields"]],
-          f"the form is not the addon's own keys, in its own order: {list(leaves)}")
-    check(api.asked("ui.dialog", "title") == "Hello settings",
-          f"the dialog is not titled what the app called it: "
-          f"{api.asked('ui.dialog', 'title')!r}")
+    leaves = {str(field["key"]): spec_of(
+        spec, store.mid(f"cfg_{field['key']}", "hello"))
+        for field in CONFIG_CARD["fields"]}
+    check(all(leaf is not None for leaf in leaves.values()),
+          f"the form is not the addon's own keys, in its own order: "
+          f"{[key for key, leaf in leaves.items() if leaf is None]}")
     for key, want in (("greeting", "line"), ("port", "spin"), ("loud", "check"),
                       ("mode", "combo"), ("paths", "line"), ("notes", "multi")):
         check((leaves.get(key) or {}).get("kind") == want,
@@ -827,58 +851,85 @@ def test_the_presses(store: Any) -> None:
     check(leaves["notes"].get("value") == "one\ntwo"
           and leaves["notes"].get("tooltip") == "one per line",
           f"the multiline lost its lines or its hint: {leaves['notes']}")
+    check(spec_of(spec, store.mid("cfg_save", "hello")) is not None
+          and spec_of(spec, store.mid("cfg_cancel", "hello")) is not None,
+          "the page has no save and cancel of its own to answer with")
+    # Save reads the live controls, not the file the form opened from.
+    held = {store.mid(f"cfg_{key}", "hello"): value
+            for key, value in CONFIG_REPLY.items()}
+    api.tabs.widget_value = lambda tab, ident, what="value": held.get(ident)
+    api.calls.clear()
+    store.on_widget(store.TAB, store.mid("cfg_save", "hello"), "clicked", {})
     check(asked(api, "session.set_addon_config", "addon_id") == "hello"
           and asked(api, "session.set_addon_config", "values") == CONFIG_WRITTEN,
           f"what was typed did not come back as the file's own shapes: "
           f"{api.last('session.set_addon_config')}")
+    check(prop(api, store.MANAGER_TABS, "remove_page") == "hello settings",
+          "the settings page was left standing after its own save")
     check("wrote hello's settings" in manager_status(api)
           and "hello\\config.json" in manager_status(api),
           f"a save was not said where it went: {manager_status(api)!r}")
 
-    print("\n19. a dialog nobody answers writes nothing, and an addon with "
-          "nothing set is told so")
+    print("\n19. a page nobody saves writes nothing, and an addon with nothing "
+          "set is told so")
     api = fresh(store, answers={"session.addon_config": CONFIG_CARD})
     store.refresh_manager()
     api.calls.clear()
     store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
-    check(api.called("ui.dialog") and not api.called("session.set_addon_config"),
-          "a dialog closed with Cancel was treated as an answer")
+    check(added_pages(api, store),
+          "the form never arrived for a Cancel to be asked about")
+    store.on_widget(store.TAB, store.mid("cfg_cancel", "hello"), "clicked", {})
+    check(not api.called("session.set_addon_config"),
+          "a page closed with Cancel was treated as an answer")
+    check(prop(api, store.MANAGER_TABS, "remove_page") == "hello settings",
+          "the cancelled page was left on the bar")
     check("left as they were" in manager_status(api),
           f"a cancelled save said nothing: {manager_status(api)!r}")
     api.answer("session.addon_config", {**CONFIG_CARD, "fields": [],
                                         "exists": False, "values": {}})
     api.calls.clear()
     store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
-    check(not api.called("ui.dialog"),
-          "an empty box was shown for an addon that declared no keys and keeps "
+    check(not added_pages(api, store),
+          "a page was laid down for an addon that declared no keys and keeps "
           "no file")
     check("nothing to edit" in manager_status(api),
           f"the addon with nothing to set was not told so: "
           f"{manager_status(api)!r}")
     api.answer("session.addon_config", {**CONFIG_CARD, "fields": [],
                                         "exists": True, "values": {"keep": 1}})
-    api.answer("ui.dialog", {store.CONFIG_RAW: '{"keep": 2}'})
     api.answer("session.set_addon_config", {"keep": 2})
     api.calls.clear()
     store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
-    spec = dialog_spec(api)
-    leaves = spec_leaves(spec)
-    check(spec.get("kind") == "column" and store.CONFIG_RAW in leaves
-          and leaves[store.CONFIG_RAW].get("kind") == "multi"
-          and '"keep": 1' in str(leaves[store.CONFIG_RAW].get("value")),
+    pages = added_pages(api, store)
+    spec = (pages[-1].get("spec") or {}) if pages else {}
+    raw = spec_of(spec, store.mid(store.CONFIG_RAW, "hello"))
+    check(raw is not None and raw.get("kind") == "multi"
+          and '"keep": 1' in str(raw.get("value")),
           f"an undeclared file was not offered as its own JSON: {spec}")
+    api.tabs.widget_value = lambda tab, ident, what="value": (
+        '{"keep": 2}' if ident == store.mid(store.CONFIG_RAW, "hello") else None)
+    api.calls.clear()
+    store.on_widget(store.TAB, store.mid("cfg_save", "hello"), "clicked", {})
     check(asked(api, "session.set_addon_config", "values") == {"keep": 2},
           f"the JSON was not written back as it was read: "
           f"{api.last('session.set_addon_config')}")
-    api.answer("ui.dialog", {store.CONFIG_RAW: "not json at all"})
-    api.calls.clear()
+    # A save that lands takes the page away, so the refusals below start from a
+    # fresh opening - and stay put when the text will not be written.
     store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
+    api.tabs.widget_value = lambda tab, ident, what="value": (
+        "not json at all" if ident == store.mid(store.CONFIG_RAW, "hello")
+        else None)
+    api.calls.clear()
+    store.on_widget(store.TAB, store.mid("cfg_save", "hello"), "clicked", {})
     check(not api.called("session.set_addon_config"),
           "a text that is not JSON was written anyway")
+    check(prop(api, store.MANAGER_TABS, "remove_page") is None,
+          "a page whose JSON would not parse was taken away anyway")
     check("not one JSON object" in manager_status(api),
           f"bad JSON was refused quietly: {manager_status(api)!r}")
-    api.answer("ui.dialog", {store.CONFIG_RAW: "[1, 2]"})
-    store.on_widget(store.TAB, store.mid("mg_config", "hello"), "clicked", {})
+    api.tabs.widget_value = lambda tab, ident, what="value": (
+        "[1, 2]" if ident == store.mid(store.CONFIG_RAW, "hello") else None)
+    store.on_widget(store.TAB, store.mid("cfg_save", "hello"), "clicked", {})
     check(not api.called("session.set_addon_config"),
           "a JSON list was taken for a settings file")
     check("one JSON object" in manager_status(api),

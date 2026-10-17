@@ -89,6 +89,12 @@ def main() -> int:
     # in, which changes nothing but the revision count.
     core.ui.show(boot_config)
 
+    # Settled before the first addon row is drawn, so the one question that can
+    # cost real time - where this machine's Desktop actually is - is asked behind
+    # the splash rather than in the middle of a store tab. The registry answers it
+    # instantly; a shell is only started on the machine that has no registry.
+    core.popout.warm_desktop()
+
     window = BerryManager()
     for line in cleared:
         window.log(line)
