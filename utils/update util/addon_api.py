@@ -5654,16 +5654,17 @@ class SchedulerAPI:
         """Hand a due timer's callback to the thread the addon's code runs on."""
         worker = getattr(self._api._addon, "worker", None)
         if worker is None:
-            _call(callback)     # no thread of its own: called here, as it always was
+            # No thread of its own: this fires straight from the Qt timer's
+            # timeout slot. Run it under the same guard the threaded hop uses,
+            # so an addon's own mistake is reported rather than left to reach the
+            # C++ event loop - an unhandled exception in a Qt slot takes the whole
+            # program down, not just the addon that made it.
+            guard(callback, reporter=self._api.error)
             return
         # Not ``Addon.post``: an addon being stopped has its queue refused, and a
         # callback that comes due in that moment is simply gone rather than run
         # on the wrong thread out of spite.
         worker.post(lambda: guard(callback, reporter=self._api.error))
-
-
-def _call(callback: Callable[[], None]) -> None:
-    callback()
 
 
 class PathsAPI:

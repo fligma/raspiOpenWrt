@@ -328,13 +328,19 @@ QTabBar::tab:hover:!selected { color: #d0d0d0; }
 BANNER_STYLE = ("QLabel { color: #e8e8e8; font-size: 13pt; font-weight: 600;"
                 " padding: 4px 2px 2px 2px; }")
 
-#: Step chip moods: reached, doing, waiting, off.
+#: Step chip moods: reached, doing, waiting, off. Every one is the same pill -
+#: same padding, same radius, a border of its own in each state so a chip does not
+#: change width as it is repainted - and only the colour moves. The jank of the
+#: old look was that the plain states carried no border and grew one when lit.
 _STEP_STYLES = {
-    "done":    "color: #23d18b; font-weight: 600; padding: 2px 4px;",
-    "active":  "color: #ffffff; background-color: #c51a4a; border-radius: 9px;"
-               " padding: 2px 9px; font-weight: 700;",
-    "pending": "color: #6f6f6f; padding: 2px 4px;",
-    "off":     "color: #454545; padding: 2px 4px;",
+    "done":    "color: #7ff3bf; background-color: #12251c; border: 1px solid #2f7d5b;"
+               " border-radius: 9px; padding: 3px 10px; font-weight: 600;",
+    "active":  "color: #ffffff; background-color: #c51a4a; border: 1px solid #c51a4a;"
+               " border-radius: 9px; padding: 3px 10px; font-weight: 700;",
+    "pending": "color: #c8c8c8; background-color: #202020; border: 1px solid #3c3c3c;"
+               " border-radius: 9px; padding: 3px 10px;",
+    "off":     "color: #6a6a6a; background-color: #1a1a1a; border: 1px solid #2c2c2c;"
+               " border-radius: 9px; padding: 3px 10px;",
 }
 _STEP_GLYPHS = {"done": "\u2713 ", "active": "\u25cf ", "pending": "\u25cb ",
                 "off": "\u00b7 "}
@@ -359,21 +365,23 @@ ACTION_COLORS = {"queued": "#5fb3ff", "new": "#5fb3ff", "written": "#23d18b",
                  "replaced": "#ffb020", "written again": "#ffb020",
                  "already there": "#777777"}
 
-#: The side bar's buttons: a narrow rail of marks, one under the next, each no
-#: wider than its icon needs. The words have gone - the picture and the tooltip
-#: say the place - so the column keeps out of the page's way rather than trading
-#: width with it. ``max-width`` holds each tile to the icon; the pane beside it is
-#: dragged wider or narrower by hand.
+#: The side bar's buttons: a column of identical square tiles, one under the next,
+#: each pinned to the same width and height so the rail is exactly as wide as one
+#: mark and never shifts as the lit button moves. The words have gone - the picture
+#: and the tooltip say the place - so the strip keeps clear of the page beside it.
 NAV_STYLE = ("QPushButton { color: #c8c8c8; background-color: #1b1b1b;"
-             " border: 1px solid #3c3c3c; border-radius: 6px;"
-             " padding: 6px; min-width: 16px; max-width: 44px; }"
-             "QPushButton:hover { color: #ffffff; border-color: #7c2140; }"
-             "QPushButton:disabled { color: #4a4a4a; }")
+             " border: 1px solid #3c3c3c; border-radius: 8px;"
+             " padding: 5px; min-width: 24px; max-width: 24px;"
+             " min-height: 24px; }"
+             "QPushButton:hover { color: #ffffff; border-color: #7c2140;"
+             " background-color: #232323; }"
+             "QPushButton:disabled { color: #4a4a4a; background-color: #171717; }")
 
-#: The one that says where the tab is looking now.
-NAV_ON_STYLE = ("QPushButton { color: #ffffff; background-color: #24141a;"
-                " border: 1px solid #c51a4a; border-radius: 6px;"
-                " padding: 6px; min-width: 16px; max-width: 44px; }")
+#: The one that says where the tab is looking now: the same tile, lit.
+NAV_ON_STYLE = ("QPushButton { color: #ffffff; background-color: #2a1218;"
+                " border: 1px solid #c51a4a; border-radius: 8px;"
+                " padding: 5px; min-width: 24px; max-width: 24px;"
+                " min-height: 24px; }")
 
 #: A rule across the side bar, splitting the places from the page's own moves and
 #: from the other places it can be seen. There is no divider in the spec language
@@ -462,11 +470,13 @@ NAV_PAGE_MOVES = ("nav_back", "nav_forward", "nav_reload")
 NAV_FOR_PAGE = {STATUS_PAGE: "nav_status", INSTALL_PAGE: "nav_install",
                 UHTTPD_PAGE: "nav_uci"}
 
-#: The header's own furniture - the step flow, the plan badges and the progress
-#: bar - that describes a job the forms run. None of it is anything to look at
-#: while the device's page fills the tab, so :func:`_body` stows it away and
-#: brings it back the moment the forms are shown again.
-HIDE_WITH_PAGE = ("steprow", "planrow", "bar")
+#: The header's furniture that describes a job run from the forms - its title
+#: line, the step flow, the progress bar and the plan badges. None of it is
+#: anything to look at while the device's page fills the tab, so :func:`_body`
+#: stows it away and brings it back the moment the forms are shown again. The one
+#: status line is kept: it is where a page that will not load says so, and a blank
+#: pane with no word about it is the worst of both.
+HIDE_WITH_PAGE = ("headrow", "steprow", "bar", "planrow")
 
 #: Shell chars that must never reach a command line.
 _UNSAFE = re.compile(r"[\"'`$;|&<>\\\n\r\t]")
@@ -978,8 +988,9 @@ def _body(page_up: bool) -> None:
         except (AddonError, AttributeError, TypeError):
             pass
     for identifier in HIDE_WITH_PAGE:
-        # The step flow, the plan badges and the bar describe a job run from the
-        # forms; a page that owns the whole tab has no use for them in front of it.
+        # The title line, the step flow, the status word, the bar and the plan
+        # badges all describe a job run from the forms; a page that owns the whole
+        # tab has no use for any of them in front of it.
         try:
             api.tabs.set_widget(TAB, identifier, "visible", not page_up)
         except (AddonError, AttributeError, TypeError):
@@ -1092,7 +1103,7 @@ def tab_spec(values: dict) -> dict:
                           "style": "color: #454545; padding: 0 1px;"})
         steps.append(step_chip(key, caption))
     return {"kind": "column", "children": [
-        {"kind": "row", "children": [
+        {"kind": "row", "id": "headrow", "children": [
             {"kind": "label", "text": "Berry web dashboard", "style": BANNER_STYLE},
             {"kind": "spacer"},
             {"kind": "label", "id": "target", "text": "",
@@ -1113,10 +1124,11 @@ def tab_spec(values: dict) -> dict:
              "style": _CHIP_STYLES["gray"]},
             {"kind": "spacer"},
         ]},
-        # The body is a splitter rather than a row so that it takes the room over
-        # the header the way the notebook did on its own, and so the side bar can
-        # be given more of the width - or less - by hand.
-        {"kind": "splitter", "sizes": [1, 5], "children": [
+        # The body is a plain row: the side bar holds to its own slim width and
+        # the page beside it is given everything left over. A splitter with the
+        # rail in a fixed share only wastes the room between the icons and the
+        # handle, so the webview never reached the edge it is owed.
+        {"kind": "row", "children": [
             nav_spec(),
             {"kind": "column", "expand": True, "children": [
                 {"kind": "tabs", "id": "views", "children": [
@@ -1154,23 +1166,23 @@ def nav_spec() -> dict:
 
     It stands beside both bodies rather than inside either, so it is the one
     thing always within reach - which is what it is here for, since a page that
-    fills the tab leaves nothing else to click. Each button is a bare mark and the
-    row of them is kept to the left by a trailing spacer, so the rail is as narrow
-    as its icons and never trades width with the page beside it.
+    fills the tab leaves nothing else to click. Each button is a bare mark, and
+    the column holds to its own width with a spring under it, so the icons pack
+    against the top and the whole strip stays as slim as one tile. Nothing of the
+    page's room is traded away to empty space beside the rail.
     """
     column: list[dict] = [_nav_button(one) for one, _t, _p in NAV_PLACES]
     column.append(_nav_rule())
     column.append(_nav_button("nav_recheck"))
-    column.append({"kind": "row",
-                   "children": [_nav_button(one) for one in NAV_PAGE_MOVES]})
+    # Back, forwards and reload stack down too: set side by side they would be
+    # the widest thing in the rail and force the whole strip wider than its marks.
+    column += [_nav_button(one) for one in NAV_PAGE_MOVES]
     column.append(_nav_rule())
     column += [_nav_button(one) for one, _t, _p in NAV_ELSEWHERE]
-    # The rail hugs the left edge and a spacer takes what is left, so the icons
-    # keep to their own width instead of being stretched across the pane.
-    return {"kind": "row", "children": [
-        {"kind": "column", "children": column},
-        {"kind": "spacer"},
-    ]}
+    # The spring keeps the marks at the top instead of spacing them down the full
+    # height of the pane; the rail is only as tall as its buttons need be.
+    column.append({"kind": "spacer"})
+    return {"kind": "column", "children": column}
 
 
 def dash_spec() -> dict:
@@ -1957,14 +1969,22 @@ def _again(delay: float = 0.01) -> None:
 
 
 def _tick() -> None:
-    """One unit of the current stage, then the next, until that stage is over."""
+    """One unit of the current stage, then the next, until that stage is over.
+
+    The whole step is kept under one guard. A stage with no per-file unit moves
+    on by calling :func:`_next` right here, and that walks into the next stage's
+    own setup - a session opened, a command sent, a table redrawn - so an error
+    anywhere along that run is this timer's error to catch. It fires from a Qt
+    slot; left to escape it would take the program down rather than just the
+    job, so it is turned into a clean stop with the reason said out loud.
+    """
     if job is None or not working:
         return
-    unit = UNITS.get(str(job.get("stage") or ""))
-    if unit is None:
-        _next()
-        return
     try:
+        unit = UNITS.get(str(job.get("stage") or ""))
+        if unit is None:
+            _next()
+            return
         unit()
     except Exception as error:            # an addon never takes the app down with it
         stop(f"the job stopped: {type(error).__name__}: {error}")
@@ -2084,7 +2104,12 @@ def _device(command: str, then: Callable[[dict], None], timeout: int = 90,
             note(line)
         if code != 0:
             _problem(_why_failed(result, step or "a command", timeout))
-        then(result)
+        # The continuation is the next stage's whole setup, reached from a pool
+        # answer; keep any mistake here from escaping the callback the app made.
+        try:
+            then(result)
+        except Exception as error:
+            stop(f"the job stopped: {type(error).__name__}: {error}")
 
     api.device.run_async(command, answered, timeout=timeout)
 
@@ -2660,7 +2685,10 @@ def _quick(command: str, told: Callable[[dict], None], step: str,
             say(_why_failed(result, step, timeout), bad=True)
             return
         bar_text("done")
-        told(result)
+        try:
+            told(result)
+        except Exception as error:        # a one-command job's reader is its own guard
+            say(f"{step} stopped: {type(error).__name__}: {error}", bad=True)
 
     api.device.run_async(command, answered, timeout=timeout)
 
