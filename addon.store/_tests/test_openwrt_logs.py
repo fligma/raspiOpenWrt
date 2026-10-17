@@ -42,8 +42,10 @@ from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")      # widgets, no window
 
+#: The repository root; Berry Manager and addon_client live under ``src``.
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+APP = ROOT / "src" / "berry_manager"
+sys.path.insert(0, str(APP))
 
 import addon_client                                          # noqa: E402
 import addon_common                                          # noqa: E402
@@ -53,7 +55,7 @@ import addon_common                                          # noqa: E402
 _HANDED = os.environ.get("RASCONF_ADDON_SOURCE")
 SOURCE = Path(_HANDED) if _HANDED else ROOT / "addon.store" / "openwrt_logs.py"
 if not _HANDED and not SOURCE.is_file():
-    SOURCE = ROOT / "addons" / "openwrt_logs.py"
+    SOURCE = APP / "addons" / "openwrt_logs.py"
 FAILURES: list[str] = []
 #: The addon module, set once in main().
 api_module = None

@@ -31,8 +31,10 @@ from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+#: The repository root; Berry Manager and addon_client live under ``src``.
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+APP = ROOT / "src" / "berry_manager"
+sys.path.insert(0, str(APP))
 
 import addon_client                                          # noqa: E402
 
@@ -40,7 +42,7 @@ import addon_client                                          # noqa: E402
 _HANDED = os.environ.get("RASCONF_ADDON_SOURCE")
 SOURCE = Path(_HANDED) if _HANDED else ROOT / "addon.store" / "multi_ssh.py"
 if not _HANDED and not SOURCE.is_file():
-    SOURCE = ROOT / "addons" / "multi_ssh.py"
+    SOURCE = APP / "addons" / "multi_ssh.py"
 
 #: A picture of the right shape, so the icon code has something to copy.
 PICTURE = b"\x89PNG\r\n\x1a\n" + b"0" * 32

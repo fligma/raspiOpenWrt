@@ -136,8 +136,8 @@ def test_the_helpers(store: Any) -> None:
 
     check(store.raw_address(store.source_values(store.MAIN_SOURCE),
                             "hello_store.py")
-          == "/fligma/raspiOpenWrt/main/utils/update%20util/addon.store/hello_store.py",
-          f"the store folder's space did not survive the address: "
+          == "/fligma/raspiOpenWrt/main/addon.store/hello_store.py",
+          f"the store folder did not come out in the address: "
           f"{store.raw_address(store.source_values(store.MAIN_SOURCE), 'hello_store.py')!r}")
 
     quoted = store.raw_address({"owner": "a b", "repo": "c/d", "ref": "v 1",
@@ -147,8 +147,8 @@ def test_the_helpers(store: Any) -> None:
 
     asset = store.raw_address(store.source_values(store.MAIN_SOURCE),
                               "assets/hello_store/icon.png")
-    check(asset == "/fligma/raspiOpenWrt/main/utils/update%20util/"
-                    "addon.store/assets/hello_store/icon.png",
+    check(asset == "/fligma/raspiOpenWrt/main/addon.store"
+                    "/assets/hello_store/icon.png",
           f"an asset in the store folder did not get an address: {asset!r}")
 
 
@@ -540,7 +540,7 @@ def test_the_pane(store: Any) -> None:
             address = store.commit_address(store.source_values(store.MAIN_SOURCE),
                                            "hello_store.py")
             check(address.startswith("/repos/fligma/raspiOpenWrt/commits?sha=main&path=")
-                  and "utils/update%20util/addon.store/hello_store.py" in address
+                  and "addon.store/hello_store.py" in address
                   and address.endswith("&per_page=1"),
                   f"the commit query is not an address GitHub answers: {address!r}")
             words = store._commit_words({
@@ -1135,7 +1135,7 @@ def test_the_sources(store: Any) -> None:
 
     main = store.read_sources({"sources": [dict(store.MAIN_SOURCE)], "token": ""})
     check(len(main) == 1 and main[0]["owner"] == "fligma"
-          and main[0]["store_path"] == "utils/update util/addon.store",
+          and main[0]["store_path"] == "addon.store",
           f"the shipped default is not this program's own repository: {main}")
     legacy = store.read_sources({"owner": "someone", "repo": "other", "ref": "v1",
                                  "store_path": "util/store"})
@@ -1158,7 +1158,7 @@ def test_the_sources(store: Any) -> None:
           "a half-typed source was kept, or a whole one not cleaned")
     check(store.source_values(store.normalize_source({"owner": "a", "repo": "b"}))
           == {"owner": "a", "repo": "b", "ref": "main",
-              "store_path": "utils/update util/addon.store"},
+              "store_path": "addon.store"},
           "a source did not come out as the flat address the fetches read, or it "
           "still carried a token of its own")
 
@@ -1281,7 +1281,7 @@ def test_the_sources(store: Any) -> None:
 
     both.calls.clear()
     both.ui = _Menus([store._ADD, "fligma", "raspiOpenWrt", "main",
-                      "utils/update util/addon.store", store._DONE])
+                      "addon.store", store._DONE])
     store.edit_sources()
     check("already a source" in last_status(both),
           f"a source added twice was not turned away: {last_status(both)!r}")
@@ -1349,7 +1349,7 @@ def test_bundled_assets(store: Any) -> None:
 # --- five: the catalog generator ---
 
 def load_generator() -> Any:
-    """Import buildtools.py from the top of the repository, over a path with a space."""
+    """Import buildtools.py from the top of the repository, beside ``src``."""
     path = ROOT.parents[1] / "buildtools.py"
     spec = importlib.util.spec_from_file_location("buildtools", str(path))
     module = importlib.util.module_from_spec(spec)
@@ -1619,16 +1619,16 @@ def test_the_harness(store: Any) -> None:
                 return ""
             store._fetch_file = write
 
-            check(store.app_folder(dict(main)) == "utils/update util",
+            check(store.app_folder(dict(main)) == "src/berry_manager",
                   f"the app's folder was not read off the store path: "
                   f"{store.app_folder(dict(main))!r}")
-            check(store.app_folder({"store_path": "addons"}) == "",
-                  "a store folder at the repository root made a folder out of nothing")
+            check(store.app_folder({"store_path": "deep/er/store"}) == "deep/er",
+                  "a store folder with a parent above it did not name that parent")
             check(store.raw_address(dict(main), "addon_client.py",
                                     store.app_folder(dict(main)))
-                  == "/fligma/raspiOpenWrt/main/utils/update%20util/addon_client.py",
+                  == "/fligma/raspiOpenWrt/main/src/berry_manager/addon_client.py",
                   f"the app's own folder did not survive the address: "
-                  f"{store.raw_address(dict(main), 'addon_client.py', 'utils/update util')!r}")
+                  f"{store.raw_address(dict(main), 'addon_client.py', 'src/berry_manager')!r}")
 
             # a checkout answers with its own folder and downloads nothing
             store._dev = lambda: _FakeDev()

@@ -38,9 +38,11 @@ from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")      # widgets, no window
 
-#: The folder Berry Manager and addon_client live in, two levels up from here.
+#: The repository root, two levels up from here; Berry Manager and addon_client
+#: live under it, in ``src/berry_manager``.
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+APP = ROOT / "src" / "berry_manager"
+sys.path.insert(0, str(APP))
 
 import addon_client                                          # noqa: E402
 
@@ -49,7 +51,7 @@ import addon_client                                          # noqa: E402
 _HANDED = os.environ.get("RASCONF_ADDON_SOURCE")
 SOURCE = Path(_HANDED) if _HANDED else ROOT / "addon.store" / "cert_manager.py"
 if not _HANDED and not SOURCE.is_file():
-    SOURCE = ROOT / "addons" / "cert_manager.py"
+    SOURCE = APP / "addons" / "cert_manager.py"
 FAILURES: list[str] = []
 
 #: The address the fake connection panel reports, which a blank Common name and

@@ -34,7 +34,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "Multi SSH",
-    "version": "1.2",
+    "version": "1.3",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],

@@ -1203,7 +1203,7 @@ def test_store(mgr: Any) -> None:
         # Addresses: the two doors every fetch and every commit lookup walks.
         values = mgr.source_values(mgr.MAIN_SOURCE)
         raw = mgr.raw_address(values, "deep sea.theme")
-        check(raw.startswith("/fligma/raspiOpenWrt/main/utils/update%20util/"
+        check(raw.startswith("/fligma/raspiOpenWrt/main/"
                              "themes.store/") and raw.endswith("deep%20sea.theme"),
               f"the raw address is shaped wrong: {raw!r}")
         commit = mgr.commit_address(values, "deep sea.theme")

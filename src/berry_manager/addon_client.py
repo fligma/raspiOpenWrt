@@ -240,6 +240,7 @@ class ProcessAPI:
         "ui.pick_file": ("title", "kind", "filter", "initial"),
         "session.web_url": ("tab",),
         "session.rescan_addons": (),
+        "session.request_app_restart": (),
         "session.set_addon_enabled": ("addon_id", "enabled"),
         "session.addon_state": ("addon_id",),
         "session.set_addon_running": ("addon_id", "running"),

@@ -1,5 +1,5 @@
 bkup
-utils/update util/config/
+src/berry_manager/config/
 .gitattributes
 .venv
 local tools
@@ -14,27 +14,27 @@ local tools
 *.crt
 *.key
 
-utils/update util/config/
-utils/update util/addons/_data/
+src/berry_manager/config/
+src/berry_manager/addons/_data/
 # The themes folder the program writes beside itself on first boot.
-utils/update util/themes/
+src/berry_manager/themes/
 
-utils/update util/addons/_build/
+src/berry_manager/addons/_build/
 # The bytecode a ``buildtools.py precompile-addons`` run leaves beside an addon's
 # own file. A build writes its own into the copy it stages and packs those,
 # which are never this folder's business.
 *.pyc
-utils/update util/addons/*.exe
-utils/update util/addons/*.bin
-utils/update util/addons/*/*.exe
-utils/update util/addons/*/*.bin
-utils/update util/addons/*/_internal/
+src/berry_manager/addons/*.exe
+src/berry_manager/addons/*.bin
+src/berry_manager/addons/*/*.exe
+src/berry_manager/addons/*/*.bin
+src/berry_manager/addons/*/_internal/
 *.new
 *tmp*
 *probe_*
 *_probe*
 # The folder the CI build stages the shipped addons in before packing them
 # inside the executable.
-utils/update util/_addon_bundle/
+src/berry_manager/_addon_bundle/
 # And the plain copy of the modules an addon imports, packed the same way.
-utils/update util/_addon_harness/
+src/berry_manager/_addon_harness/

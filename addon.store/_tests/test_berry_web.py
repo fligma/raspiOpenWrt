@@ -44,9 +44,11 @@ from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")      # widgets, no window
 
-#: The folder Berry Manager and addon_client live in, two levels up from here.
+#: The repository root, two levels up from here; Berry Manager and addon_client
+#: live under it, in ``src/berry_manager``.
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+APP = ROOT / "src" / "berry_manager"
+sys.path.insert(0, str(APP))
 
 import addon_client                                          # noqa: E402
 
@@ -55,7 +57,7 @@ import addon_client                                          # noqa: E402
 _HANDED = os.environ.get("RASCONF_ADDON_SOURCE")
 SOURCE = Path(_HANDED) if _HANDED else ROOT / "addon.store" / "berry_web.py"
 if not _HANDED and not SOURCE.is_file():
-    SOURCE = ROOT / "addons" / "berry_web.py"
+    SOURCE = APP / "addons" / "berry_web.py"
 FAILURES: list[str] = []
 
 #: The address the fake connection panel reports, and the folder a profile of
@@ -394,7 +396,7 @@ def test_the_landing() -> None:
           f"the page was not handed an address to show: {opened!r}")
     check(api.last_set("dash", "visible") is True,
           "the tab did not put the page over its forms")
-    check(api.last_set("views", "visible") is False,
+    check(api.last_set("forms", "visible") is False,
           "the forms were left showing under the page")
     check(not api.called("tabs.add_web_tab"),
           "a landing opened a browser tab that nobody asked for")
@@ -406,7 +408,7 @@ def test_the_landing() -> None:
     check(not api.last_set("dash", "url"),
           "the page was fetched with the switch that says not to show it off")
     check(api.last_set("dash", "visible") is not True
-          and api.last_set("views", "visible") is not False,
+          and api.last_set("forms", "visible") is not False,
           "the forms were covered anyway with the switch off")
     check(api.last_set("views", "current") == berry_web.STATUS_PAGE,
           "with the page off the tab did not at least stand on the status page")
@@ -756,7 +758,7 @@ def test_the_theme() -> None:
     check(not berry_web.theme_css({"base": "#12345"}), "a malformed hex was written")
 
     # The variables have to be the ones the page declares, or nothing changes.
-    sheet = (ROOT.parent.parent / "src" / "www_rasconf" / "css" / "main.css")
+    sheet = (ROOT / "src" / "www_rasconf" / "css" / "main.css")
     if sheet.is_file():
         declared = sheet.read_text(encoding="utf-8", errors="replace")
         missing = [variable for _token, variable in berry_web.THEME_VARS
@@ -811,6 +813,24 @@ def test_the_tab(app: Any) -> None:
     check(inner == ["Options", "Raw file"], f"the uhttpd pages are named {inner}")
     check(registry["install_views"].count() == 3,
           "the installer does not hold its plan, log and form")
+
+    # The page the device serves is a pane of the body's own row, beside the
+    # forms rather than nested under the notebook: a notebook never gives up
+    # the width its widest page needs, and a view sharing its column was
+    # squeezed by it - and moved whenever a switched page moved the measure.
+    body_row = next(node for node in spec["children"]
+                    if node.get("kind") == "row" and any(
+                        child.get("kind") == "web"
+                        for child in node.get("children") or []))
+    dash = berry_web.dash_spec()
+    check(dash.get("kind") == "web" and dash.get("expand") == "both",
+          "the dashboard neither is a web leaf nor claims the whole of its pane")
+    check(body_row.get("expand") == "both",
+          "the body's row does not claim the height, so a page that asks for no "
+          "room of its own collapses instead of filling the tab")
+    check(any(child.get("id") == "dash" for child in body_row["children"]),
+          "the dashboard is not a direct child of the body's row, so the forms "
+          "decide how wide the page the device serves may be")
 
     check(registry["summary"].columnCount() == 2,
           "the status summary is not a two-column table")
@@ -1008,7 +1028,7 @@ def test_the_side_bar() -> None:
     berry_web.on_widget(berry_web.TAB, "nav_install", "clicked", {})
     check(api.last_set("views", "current") == berry_web.INSTALL_PAGE
           and api.last_set("dash", "visible") is False
-          and api.last_set("views", "visible") is True,
+          and api.last_set("forms", "visible") is True,
           "the side bar's installer button did not get back out to the forms")
     berry_web.on_widget(berry_web.TAB, "nav_reload", "clicked", {})
     moves = [str(arguments[2]) for where, arguments, _named in api.calls
@@ -1278,7 +1298,7 @@ def served(answer: tuple[int, bytes]):
 def test_the_files() -> None:
     print("\n8. where the files come from")
     # --- a folder on this machine, which needs no internet at all ---
-    source = ROOT.parent.parent / "src" / "www_rasconf"
+    source = ROOT / "src" / "www_rasconf"
     if source.is_dir():
         paths, said = read_tree({"source": "Local folder", "local_dir": str(source)})
         check({"cgi-bin/index.py", "cgi-bin/sysinfo.py", "js/render.js",
@@ -1302,7 +1322,7 @@ def test_the_files() -> None:
         {"path": "src/www_rasconf/README.md", "type": "blob", "size": 40},
         {"path": "src/www_rasconf/cgi-bin/__pycache__/index.cpython-313.pyc",
          "type": "blob", "size": 70},
-        {"path": "utils/update util/README.md", "type": "blob", "size": 10},
+        {"path": "src/berry_manager/README.md", "type": "blob", "size": 10},
     ]}
     original = berry_web.Fetcher.get
     try:

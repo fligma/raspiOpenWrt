@@ -14,7 +14,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "OpenWrt Log Viewer",
-    "version": "3.1",
+    "version": "3.2",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],

@@ -44,6 +44,9 @@ The namespaces on ``api``
     it in the Addon manager, and empty when the field is - and
     ``github_headers()`` gives the two headers ``http.client`` wants for a
     private repository and the higher rate limit, or ``{}`` to ask anonymously.
+    ``request_app_restart()`` closes this copy of the app and starts a fresh
+    one once it has ended - the safe way to ask for a restart from an addon's
+    own thread, since the close happens on the interface thread.
 
 ``api.device``
     SSH and SFTP. The program keeps one main connection to the device and it
@@ -244,7 +247,8 @@ behind its swatch), ``terminal`` - all take ``id``, ``text``, ``tooltip``,
 worn beside a widget's words - a button's picture - from a file path, an SVG
 document or a base64 data URI), ``expand``
 (claim the width its row or column leaves over, so one status line can stretch
-while its neighbours keep the room their text needs).
+while its neighbours keep the room their text needs; ``"both"`` claims the
+height left over too, which is what lets one leaf fill the whole area).
 ``value`` sets whatever the kind holds: text, the chosen entry, the number, the
 tick for a ``check``, or the picture for an ``image``; ``widget_value`` reads it
 back the same way.
@@ -1055,9 +1059,12 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
     if spec.get("expand") and hasattr(widget, "setSizePolicy"):
         # Take the slack of the row or column it sits in: a long line then wraps
         # inside the room that is actually left, instead of being squeezed by a
-        # spacer and cut off.
+        # spacer and cut off. ``"both"`` claims the height over as well, which
+        # is what lets one leaf - a web view say - fill the whole area it is in.
         policy = widget.sizePolicy()
         policy.setHorizontalPolicy(policy.Policy.Expanding)
+        if str(spec["expand"]).strip().lower() in ("both", "v", "vertical"):
+            policy.setVerticalPolicy(policy.Policy.Expanding)
         widget.setSizePolicy(policy)
     if spec.get("checked") is not None and hasattr(widget, "setChecked"):
         widget.setChecked(bool(spec["checked"]))
@@ -2886,8 +2893,47 @@ class SessionAPI:
         and starts again every addon it re-reads - the caller among them - and
         answering this request first is what lets a process addon hear about it
         and close itself down politely instead of being cut off mid-call.
+
+        The reload is run under :func:`addon_common.guard`: it is a whole-world
+        job on a Qt timer, and an exception that left the timer slot would take
+        the window down with every addon half-stopped.
         """
-        QTimer.singleShot(0, self._api._manager.reload)
+        QTimer.singleShot(0, lambda: guard(self._api._manager.reload,
+                                           reporter=self._api.error))
+        return True
+
+    def request_app_restart(self) -> bool:
+        """Close this copy of the app and start a fresh one once it has ended.
+
+        The relaunch itself waits until this process is gone (the entry point
+        takes the request after the event loop ends), so the two copies never
+        share the config, the addons or the unpacked build folder at the same
+        time. This is the thread-safe way for an addon to ask for it: the call
+        lands on the interface thread - the only one allowed to close the
+        window - so nobody has to reach for ``api.win`` from their own thread.
+        ``False`` when there was no window to close or the close was turned
+        down; a pending restart is withdrawn in that case, so nothing
+        relaunches later by accident.
+        """
+        from core.views import cancel_restart_request, restart_process
+
+        win = getattr(self._api, "win", None)
+        if win is None or not hasattr(win, "close"):
+            return False
+        restart_process()
+        closed = False
+        try:
+            closed = bool(win.close())
+        finally:
+            if not closed:
+                # An abort question answered "cancel", or a close that died
+                # trying: the window stays up, so no relaunch may be owed.
+                cancel_restart_request()
+        if not closed:
+            return False
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
         return True
 
     def set_addon_enabled(self, addon_id: str, enabled: bool) -> dict:

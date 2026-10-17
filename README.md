@@ -8,7 +8,7 @@ from your desktop. The repository holds two products that work together:
 | Part | Lives in | What it is |
 | --- | --- | --- |
 | **Berry dashboard** | `src/www_rasconf` | A small web UI that runs *on the device*: Python CGI pages served by uhttpd, with interface status, wireless clients, temperature, load, traffic and storage, behind a PIN login |
-| **Berry Manager** | `utils/update util` | A PyQt6 desktop app that manages the device over SSH/SFTP: named profiles, a real terminal, file browsing, embedded web tabs, and an addon system |
+| **Berry Manager** | `src/berry_manager` | A PyQt6 desktop app that manages the device over SSH/SFTP: named profiles, a real terminal, file browsing, embedded web tabs, and an addon system |
 
 Berry Manager is the manager; the dashboard is one of the things it manages.
 The **Berry web dashboard** addon in the store (`berry_web`) can install the
@@ -36,11 +36,11 @@ sits in `fresh_install/`.
 
 ## The desktop side: Berry Manager
 
-`utils/update util` is the whole application - sixteen small modules, one
+`src/berry_manager` is the whole application - sixteen small modules, one
 entry point (`berry_manager.py`) and no build step to run it:
 
 ```sh
-cd "utils/update util"
+cd src/berry_manager
 pip install -r requirements.txt
 python berry_manager.py
 ```
@@ -74,7 +74,7 @@ all. The artifact is `berry_manager(.exe)` plus an empty `addons` folder for
 your own drop-ins.
 The full documentation - modules, every settings key, HTTPS certificate
 handling, the build - is in
-[utils/update util/README.md](<utils/update util/README.md>).
+[src/berry_manager/README.md](src/berry_manager/README.md).
 
 ## The addon API
 
@@ -108,7 +108,7 @@ An addon's tab mark costs no code either: one name, `<id>icon.png`, looked for
 first in an `assets/<id>/` folder beside the addon's own file - so
 `addon.store/assets/cert_manager/cert_managericon.png` for a store addon's
 source, `addons/assets/multi_ssh/multi_sshicon.png` for a program dropped in
-beside the `.exe` - and then in the program's own `utils/update util/assets`,
+beside the `.exe` - and then in the program's own `src/berry_manager/assets`,
 which is where the four bundled addons' pictures live. A square PNG is what the
 bar draws. With no file anywhere the tab wears the SVG the addon sends, and a
 tab that sends nothing wears `assets/defaulttabicon.png`.
@@ -119,8 +119,8 @@ named after it:
 - **Berry** - the file manager: device and local pages in one tab, with a
   syntax-coloured editor.
 - **Berry addon store** - the store itself: reads the catalog published in
-  `utils/update util/addon.store`, then downloads, tests and compiles any
-  addon listed there into a program of its own in `addons`.
+  `addon.store` at the root of the repository, then downloads, tests and
+  compiles any addon listed there into a program of its own in `addons`.
 - **Berry Manager update** - checks the repository's releases, and downloads,
   verifies and swaps in a newer build, with the previous file kept as a way
   back.
@@ -161,7 +161,9 @@ app reads it back without a restart.
 
 ```
 src/www_rasconf/     the web dashboard deployed to /www_berry on the device
-utils/update util/   Berry Manager: the desktop app, its bundled addons and the addon store
+src/berry_manager/   Berry Manager: the desktop app and its bundled addons
+addon.store/         the addons the store publishes, with their pictures and tests
+themes.store/        the themes the Theme Manager's store publishes
 fresh_install/       OpenWrt factory image for a fresh Pi
 media/               logo and screenshots
 .github/workflows/   the Windows + Linux build pipeline

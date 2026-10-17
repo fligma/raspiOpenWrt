@@ -33,7 +33,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Certificate manager",
-    "version": "1.5",
+    "version": "1.6",
     "author": "fligma",
     "description": "Shows the certificate on the device as a tidy summary or the raw "
                    "openssl text, and reissues the .crt and .key over SSH, with the "

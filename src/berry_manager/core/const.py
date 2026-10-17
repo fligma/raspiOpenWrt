@@ -23,8 +23,8 @@ else:
     # This file sits in core/, one down from the program's own folder.
     BASE_DIR = Path(__file__).resolve().parent.parent
     RESOURCE_DIR = BASE_DIR
-    # Walk up out of the util folder to the repo root.
-    REPOSITORY_ROOT = BASE_DIR.parents[2] if len(BASE_DIR.parents) >= 2 else BASE_DIR
+    # Walk up out of ``src/berry_manager`` to the repo root.
+    REPOSITORY_ROOT = BASE_DIR.parents[1] if len(BASE_DIR.parents) >= 1 else BASE_DIR
     IS_COMPILED = False
 
 DEFAULT_SOURCE = REPOSITORY_ROOT / "src" / "www_rasconf"
@@ -50,7 +50,7 @@ def find_asset(filename: str) -> Path | None:
 #: The program's own version, the one the About dialog shows and the update
 #: addon compares against the tags published on GitHub (``berry`` + this).
 #: One line to change per release, everything else reads it from here.
-APP_VERSION = "2.3.6"
+APP_VERSION = "2.4.6"
 UPDATE_TAG_PREFIX = "berry"
 
 # --- file names and fixed identifiers ---

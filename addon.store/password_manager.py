@@ -62,7 +62,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Password manager",
-    "version": "1.1",
+    "version": "1.2",
     "author": "fligma",
     "description": "Keeps logins in one encrypted file on this computer - no device, "
                    "no cloud - unlocked for the session with a master password, with "

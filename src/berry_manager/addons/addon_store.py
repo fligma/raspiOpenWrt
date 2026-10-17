@@ -261,7 +261,7 @@ MAIN_SOURCE = {
     "owner": "fligma",
     "repo": "raspiOpenWrt",
     "ref": "main",
-    "store_path": "utils/update util/addon.store",
+    "store_path": "addon.store",
 }
 
 #: What one source holds: the four pieces of a GitHub address, nothing else.
@@ -1230,12 +1230,13 @@ def app_folder(values: dict) -> str:
     """The folder the app's own modules are in: the store folder's parent.
 
     ``store_path`` points at the folder of addons; the files an addon imports
-    sit one level above it, and a store folder at the repository's own root
-    leaves nothing above it to name.
+    sit one level above it. A store folder at a repository's own root leaves
+    nothing above it to name, so for this program's own layout - the store at
+    the root - the app is the folder it is known to live in.
     """
     folder = one_line(config_get(values, "store_path",
                                  MAIN_SOURCE["store_path"])).strip("/")
-    return folder.rsplit("/", 1)[0] if "/" in folder else ""
+    return folder.rsplit("/", 1)[0] if "/" in folder else "src/berry_manager"
 
 
 def raw_address(values: dict, filename: str, folder: str | None = None) -> str:
@@ -2810,6 +2811,7 @@ def manager_delete(row: dict) -> None:
             "leave them where they are."):
         manager_say("the delete was declined")
         return
+    _stop_before_delete(addon_id)
     try:
         for path in removed:
             if path.is_dir():
@@ -4259,6 +4261,29 @@ def update_selected(_checked: bool = False) -> None:
     _start_next()
 
 
+def _stop_before_delete(id_value: str) -> None:
+    """Take a running copy down before its files are touched.
+
+    Windows holds a running program's own files, so a delete that walks in
+    while the addon is up would half-empty an onedir build around a live
+    process - the parts it cannot take leave the addon dying of missing
+    pieces, and the app pays for it with a rescan of a broken install. The
+    switch goes too: the addon is about to be deleted, and a rescan that
+    started it back from the folder would be the worst ending. A stop that
+    fails is said and left to the delete itself, which will fail honestly
+    on the locked file rather than behind a broken process.
+    """
+    if api is None:
+        return
+    try:
+        state = api.session.addon_state(addon_id=id_value)
+        if isinstance(state, dict) and (state.get("running")
+                                        or state.get("enabled")):
+            api.session.set_addon_running(addon_id=id_value, running=False)
+    except Exception as error:                       # noqa: BLE001 - the delete will speak
+        note(f"{id_value} could not be stopped before the delete: {error}")
+
+
 def _delete_paths(id_value: str) -> list[Path]:
     """What an install of this addon left in ``addons`` that delete may take back.
 
@@ -4311,6 +4336,7 @@ def delete_selected(_checked: bool = False) -> None:
             "them where they are."):
         say("the delete was declined")
         return
+    _stop_before_delete(id_value)
     try:
         for path in removed:
             if path.is_dir():

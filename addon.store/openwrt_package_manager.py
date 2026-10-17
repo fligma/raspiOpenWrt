@@ -21,7 +21,7 @@ SHQ = shlex.quote
 
 ADDON = {
     "name": "OpenWrt Package Manager",
-    "version": "1.5",
+    "version": "1.6",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh", "sftp"],

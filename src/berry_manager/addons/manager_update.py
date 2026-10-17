@@ -2600,37 +2600,28 @@ def swap_program(target: Path, staged: Path) -> str:
 
 def restart_app() -> None:
     """Close this copy and start the new program through the app's own
-    relaunch, which waits until this process has ended."""
+    relaunch, which waits until this process has ended.
+
+    The close is asked for through ``api.session`` rather than taken out of
+    ``api.win`` here: this addon's code runs on a thread of its own, and the
+    window belongs to the interface thread - the api call carries the job to
+    the only thread that may close it. Reaching for ``api.win`` from here
+    used to hand back a refusal, and the restart died on its ``close``.
+    """
     if api is None:
         return
     try:
-        from core.views import cancel_restart_request, restart_process
-    except Exception as error:                      # noqa: BLE001 - no app here
-        say(f"the new program is in place; start it yourself when ready ({error})",
-            bad=True)
-        return
-    restart_process()
-    win = getattr(api, "win", None)
-    if win is None:
-        note("this copy cannot close itself from where it runs; start the "
-             "new program when ready")
-        return
-    try:
-        if win.close():
-            from PyQt6.QtWidgets import QApplication
-
-            app = QApplication.instance()
-            if app is not None:
-                app.quit()
-        else:
-            # A 'save changes?' answer of cancel keeps the window up: the
-            # restart is no more owed than the close was carried out.
-            cancel_restart_request()
-            note("the restart was turned down; the new program is in place "
-                 "for the next start")
+        if api.session.request_app_restart():
+            return
     except Exception as error:                      # noqa: BLE001 - never fatal
         say(f"the new program is in place; start it yourself when ready ({error})",
             bad=True)
+        return
+    # False: no window here to close, or an abort question turned the close
+    # down - the restart was withdrawn with it, so the next start is the
+    # user's own doing either way.
+    note("the app did not close; the new program is in place for the "
+         "next start")
 
 
 # --- the job: download one step per tick, then swap ---

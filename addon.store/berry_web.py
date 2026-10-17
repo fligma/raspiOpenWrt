@@ -89,7 +89,7 @@ ADDON = {
     # offers the machine's browser. The page is put up by itself when the device
     # answers as the dashboard and again after an install that worked, while the
     # switch on the uhttpd page is on.
-    "version": "1.6",
+    "version": "1.7",
     "author": "fligma",
     "description": "Looks for the Berry dashboard on the connected host and, when "
                    "it is not there, installs src/www_rasconf from GitHub over "
@@ -970,11 +970,13 @@ def view_page(page: int) -> None:
 def _body(page_up: bool) -> None:
     """Put the device's page over the tab's forms, or take it back off again.
 
-    Two siblings in one column with one of them hidden: that is the whole swap,
-    and it is why the notebook's own captions go with it rather than staying to
-    be clicked under a page that has no use for them. The page keeps whatever it
-    has loaded when it goes behind, so a trip back to the installer and home
-    again does not bounce a person out of the dashboard they had reached.
+    Two panes of the body's own row, one of them hidden: that is the whole
+    swap, and it is why the notebook's own captions go with it rather than
+    staying to be clicked under a page that has no use for them - and why the
+    page can have the whole of the row the forms were sharing. The page keeps
+    whatever it has loaded when it goes behind, so a trip back to the
+    installer and home again does not bounce a person out of the dashboard
+    they had reached.
     """
     global showing_page
     page_up = bool(page_up)
@@ -982,7 +984,11 @@ def _body(page_up: bool) -> None:
         paint_nav()
         return
     showing_page = page_up
-    for identifier, up in (("dash", page_up), ("views", not page_up)):
+    # The whole forms column goes, not just the notebook inside it: a column
+    # that expands to fill its row keeps claiming that room while it is up, even
+    # with its notebook hidden, so the page beside it would never get the width
+    # it is owed. Hiding the column is what hands the row over to the page.
+    for identifier, up in (("dash", page_up), ("forms", not page_up)):
         try:
             api.tabs.set_widget(TAB, identifier, "visible", up)
         except (AddonError, AttributeError, TypeError):
@@ -1094,8 +1100,9 @@ def refresh_totals(items: list[dict] | None = None) -> None:
 
 
 def tab_spec(values: dict) -> dict:
-    """The whole tab: a header, the step flow, and the body - the side bar beside
-    either the notebook of three pages or the page the device serves."""
+    """The whole tab: a header, the step flow, and the body - the side bar
+    beside the tab's forms, or beside the page the device serves when the tab
+    has been switched over to it."""
     steps: list[dict] = []
     for index, (key, caption) in enumerate(STEPS):
         if index:
@@ -1125,19 +1132,25 @@ def tab_spec(values: dict) -> dict:
             {"kind": "spacer"},
         ]},
         # The body is a plain row: the side bar holds to its own slim width and
-        # the page beside it is given everything left over. A splitter with the
-        # rail in a fixed share only wastes the room between the icons and the
-        # handle, so the webview never reached the edge it is owed.
-        {"kind": "row", "children": [
+        # everything beside it is given the room that is left over. The page the
+        # device serves is a direct child of this row rather than a shelf under
+        # the notebook, because a notebook never gives up the width its widest
+        # page needs: nested beside its forms the page was squeezed into
+        # whatever sliver was left, and its width jumped every time a form page
+        # was switched and the notebook's own measure moved with it. The row
+        # claims the height over too (``"both"``), so the page fills the tab - a
+        # web view asks for no room of its own, and a plain Fixed row would
+        # otherwise collapse to nothing around it.
+        {"kind": "row", "expand": "both", "children": [
             nav_spec(),
-            {"kind": "column", "expand": True, "children": [
+            {"kind": "column", "id": "forms", "expand": True, "children": [
                 {"kind": "tabs", "id": "views", "children": [
                     _status_page(),
                     _installer_page(values),
                     _uci_page(values),
                 ]},
-                dash_spec(),
             ]},
+            dash_spec(),
         ]},
     ]}
 
@@ -1191,9 +1204,11 @@ def dash_spec() -> dict:
     Built with no address and out of sight, so nothing is asked of the device
     until the page is called for: the app holds an address given to a leaf that
     is not showing until the moment it is, which is what costs a person who
-    never opens the dashboard nothing at all.
+    never opens the dashboard nothing at all. It claims the whole body beside
+    the rail when it comes up - the forms hide for the swap and take their
+    room back when they return - and ``"both"`` is what claims the height too.
     """
-    return {"kind": "web", "id": "dash", "visible": False, "expand": True,
+    return {"kind": "web", "id": "dash", "visible": False, "expand": "both",
             "on": ["loaded", "icon"],
             "tooltip": "The page the device is serving. The side bar's Status, "
                        "Installer and uhttpd buttons put this tab's own forms "

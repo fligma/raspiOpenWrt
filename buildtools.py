@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every build-time tool Berry Manager needs, in the one file.
 
-Ten small programs used to sit in ``utils/update util/tools``: four that read
+Ten small programs used to sit in the app's own ``tools`` folder: four that read
 the source and stop a build over something that would only be noticed by whoever
 happens to open the page (``check_names``, ``check_api_docs``,
 ``check_guide_links``, ``check_connection_saying``), two that write the catalogs
@@ -60,12 +60,13 @@ from typing import Any
 #: The repository, which is where this file is.
 REPO = Path(__file__).resolve().parent
 
-#: ``utils/update util`` - the program itself, its addons and its assets.
-APP = REPO / "utils" / "update util"
+#: ``src/berry_manager`` - the program itself, its addons and its assets.
+APP = REPO / "src" / "berry_manager"
 
-#: The two catalogs' folders, and the picture folder the program ships in.
-ADDON_STORE = APP / "addon.store"
-THEME_STORE = APP / "themes.store"
+#: The two catalogs' folders, at the root of the repository beside the app,
+#: and the picture folder the program ships in.
+ADDON_STORE = REPO / "addon.store"
+THEME_STORE = REPO / "themes.store"
 ASSETS = APP / "assets"
 
 #: The dashboard's folder. It lives in the repository rather than beside the app
@@ -194,6 +195,21 @@ def _name_for_report(path: Path) -> str:
         return str(path.relative_to(APP))
     except ValueError:                        # named from somewhere else entirely
         return str(path)
+
+
+def _shown(path: Path) -> str:
+    """One picture's name, from the app's folder or the repository's own.
+
+    A shipped addon's mark sits under the app, a store addon's under the
+    repository's ``addon.store``; either reads shorter than a whole absolute
+    path, and only a file from elsewhere still shows as one.
+    """
+    for home in (APP, REPO):
+        try:
+            return str(path.relative_to(home))
+        except ValueError:
+            continue
+    return str(path)
 
 
 def names_sources(arguments: list[str]) -> list[Path]:
@@ -1278,7 +1294,7 @@ def cmd_make_addon_icons(argv: list[str]) -> int:
     for addon_id, source, folder in find_icon_addons(wanted):
         target = folder / icon_name(addon_id)
         if target.is_file() and not args.force:
-            kept.append(str(target.relative_to(APP)))
+            kept.append(_shown(target))
             continue
         svg = read_tab_icon(source)
         if not svg:
@@ -1290,7 +1306,7 @@ def cmd_make_addon_icons(argv: list[str]) -> int:
             continue
         if args.check:
             missing.append(addon_id)
-            print(f"missing  {target.relative_to(APP)} "
+            print(f"missing  {_shown(target)} "
                   f"(a drawing is held in {source.name})")
             continue
         image = raster(svg, side)
@@ -1303,7 +1319,7 @@ def cmd_make_addon_icons(argv: list[str]) -> int:
             print(f"could not write {target}")
             missing.append(addon_id)
             continue
-        written.append(str(target.relative_to(APP)))
+        written.append(_shown(target))
 
     for path in written:
         print(f"wrote    {path}")
@@ -2239,10 +2255,7 @@ def cmd_test(argv: list[str]) -> int:
     failed: list[str] = []
     for path in scripts:
         code, out, err, seconds = results[path.name]
-        try:
-            shown = str(path.relative_to(APP))
-        except ValueError:
-            shown = str(path)
+        shown = _shown(path)          # the suite folders sit in both halves now
         if code == 0:
             if args.brief:
                 print(f"PASS  {shown}  ({seconds:.1f}s)")

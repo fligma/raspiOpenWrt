@@ -50,10 +50,10 @@ jobs:
               case "$file" in
                 # The catalog is made of the store's addons, their pictures,
                 # their tests, and the tool that writes index.json from them.
-                "utils/update util/addon.store/"*) store=true ;;
+                "addon.store/"*) store=true ;;
                 # The theme store is cut from the same cloth: its folder of
                 # .theme files and the tool that writes its index.json.
-                "utils/update util/themes.store/"*) store=true ;;
+                "themes.store/"*) store=true ;;
                 # Every build-time tool is the one file at the top of the
                 # repository: it writes both catalogs and it holds every gate
                 # below, so a change to it moves a catalog and has to be
@@ -65,7 +65,7 @@ jobs:
                 # recipe is proved by the build it just described. Anything
                 # outside these is in neither list: a push of the web
                 # dashboard, or of a README, builds nothing at all.
-                "utils/update util/"*|.github/workflows/build.yml) manager=true ;;
+                "src/berry_manager/"*|.github/workflows/build.yml) manager=true ;;
               esac
             done <<< "$files"
           fi
@@ -93,14 +93,13 @@ jobs:
         cache: 'pip'
 
     - name: Regenerate the store catalogs
-      working-directory: "utils/update util"
       run: |
         # index.json is the catalog the store reads off GitHub at runtime, so it
         # has to be committed, not just built. Rebuild it from the addons sitting
         # in addon.store (name, version, author, assets, new/updated marks) and
         # push it back only when it actually moved. [skip ci] keeps this commit
         # from re-triggering the very workflow that makes it.
-        python ../../buildtools.py gen-addon-store-index
+        python buildtools.py gen-addon-store-index
         git config user.name "github-actions[bot]"
         git config user.email "4198681+github-actions[bot]@users.noreply.github.com"
         wrote=false
@@ -113,7 +112,7 @@ jobs:
         fi
         # The theme store's catalog is made the same way, from the .theme files
         # in themes.store; both push back together, or not at all.
-        python ../../buildtools.py gen-theme-store-index
+        python buildtools.py gen-theme-store-index
         if [ -n "$(git status --porcelain -- themes.store/index.json)" ]; then
           git add themes.store/index.json
           git commit -m "Update theme store catalog [skip ci]"
@@ -158,7 +157,7 @@ jobs:
         sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libgl1 libegl1 libnss3 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0
 
     - name: Install Python dependencies
-      working-directory: "utils/update util"
+      working-directory: "src/berry_manager"
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller Pillow
@@ -259,7 +258,7 @@ jobs:
 
     - name: Run the addon test scripts
       shell: pwsh
-      working-directory: "utils/update util"
+      working-directory: "src/berry_manager"
       env:
         # A Windows runner's console speaks cp1252 and the tests print the
         # marks their tabs wear (● ○ ✓), which would abort the print itself.
@@ -304,7 +303,7 @@ jobs:
 
     - name: Stage the addons that ship inside the program
       shell: pwsh
-      working-directory: "utils/update util"
+      working-directory: "src/berry_manager"
       run: |
         # Every addon in addons/ is packed into the executable under the name the
         # app reads as its shipped addons. Such an addon can be switched on and
@@ -363,7 +362,7 @@ jobs:
 
     - name: Precompile the addons packed inside the program
       shell: pwsh
-      working-directory: "utils/update util"
+      working-directory: "src/berry_manager"
       run: |
         # The addons a build packs sit in a folder that is unpacked again on
         # every start, so nothing the interpreter caches carries over from one
@@ -389,7 +388,7 @@ jobs:
 
     - name: Stage the modules an addon imports
       shell: pwsh
-      working-directory: "utils/update util"
+      working-directory: "src/berry_manager"
       run: |
         # Compiling and testing an addon run in a Python of their own, outside
         # the archive, and read addon_client and addon_common off disk: a built
@@ -418,7 +417,7 @@ jobs:
 
     - name: Build with PyInstaller (Windows)
       if: runner.os == 'Windows'
-      working-directory: "utils/update util"
+      working-directory: "src/berry_manager"
       shell: cmd
       run: >
         pyinstaller --noconfirm --onefile --windowed --icon="assets\icon.png"
@@ -429,7 +428,7 @@ jobs:
 
     - name: Build with PyInstaller (Linux)
       if: runner.os == 'Linux'
-      working-directory: "utils/update util"
+      working-directory: "src/berry_manager"
       run: >
         pyinstaller --noconfirm --onefile --windowed --icon="assets/icon.png"
         --add-data="assets:assets" --add-data="config.example.json:."
@@ -440,7 +439,7 @@ jobs:
 
     - name: Ship the drop-in addons folder
       shell: pwsh
-      working-directory: "utils/update util"
+      working-directory: "src/berry_manager"
       run: |
         # The addons that came with the program are inside the executable, so the
         # folder beside it starts empty and is the user's own: what they drop
@@ -468,9 +467,9 @@ jobs:
       with:
         name: berry_manager-${{ runner.os }}
         path: |
-          utils/update util/dist/berry_manager.exe
-          utils/update util/dist/berry_manager
-          utils/update util/dist/addons/
+          src/berry_manager/dist/berry_manager.exe
+          src/berry_manager/dist/berry_manager
+          src/berry_manager/dist/addons/
         retention-days: 7
 
   # A build that passed its tests and packaged its two programs *is* a release:
@@ -511,7 +510,7 @@ jobs:
         # no button to press. Each archive is named for the system it holds -
         # the update addon tells the two apart by exactly that word.
         version=$(sed -n 's/^APP_VERSION *= *"\([^"]*\)".*/\1/p' \
-                  'utils/update util/core/const.py')
+                  'src/berry_manager/core/const.py')
         if [ -z "$version" ]; then
           echo "APP_VERSION could not be read from core/const.py"; exit 1
         fi

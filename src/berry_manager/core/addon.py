@@ -1697,20 +1697,42 @@ class AddonManager:
         keep = {addon.id: addon for addon in self.addons}
         active = self._active_tab()
         for addon in list(self.addons):
-            self.unload(addon)
-        discovered = self.scan()
+            # One addon that refuses to die must not take the rescan - and the
+            # window, since this runs from a Qt slot - down with it, the same
+            # way :meth:`shutdown_all` survives a broken unload.
+            try:
+                self.unload(addon)
+            except Exception as error:              # noqa: BLE001 - the rest still go
+                self.log(addon.id, f"stopping for the rescan: {error}",
+                         warning=True)
+        try:
+            discovered = self.scan()
+        except Exception as error:                  # noqa: BLE001 - keep the old list
+            # Nothing was read: leave the stopped addons listed as they are,
+            # say why, and let the next rescan try again rather than carry a
+            # half-built world into the load below.
+            self.log("addons", f"the folder could not be read again: {error}",
+                     warning=True)
+            self.refresh_rows()
+            return
         if wanted:
             discovered = [addon for addon in discovered
                           if str(addon.id).lower() in wanted]
         for addon in discovered:
-            self.apply_record(addon)
-            if force:
-                addon.enabled = True
-            previous = keep.get(addon.id)
-            if previous is not None and previous.loaded \
-                    and previous not in discovered:
-                # Same id still on: tear the old one down so new code runs.
-                self.unload(previous)
+            # A broken record or a stale tab slot is this addon's problem
+            # alone: the row carries the error and every other addon comes up.
+            try:
+                self.apply_record(addon)
+                if force:
+                    addon.enabled = True
+                previous = keep.get(addon.id)
+                if previous is not None and previous.loaded \
+                        and previous not in discovered:
+                    # Same id still on: tear the old one down so new code runs.
+                    self.unload(previous)
+            except Exception as error:              # noqa: BLE001 - one row, not the world
+                addon.error = f"rescan: {error}"
+                self.log(addon.id, str(error), warning=True)
         self.addons = discovered
         wanted_addons = [addon for addon in self.addons if addon.enabled]
         started: list[AddonWorker | None] = []
@@ -1721,7 +1743,12 @@ class AddonManager:
             # Every addon's import and ``init`` go to that addon's own thread and
             # this does not wait, so they come up beside one another; the queue of
             # each is noted and drained at the end of the loop.
-            started.append(self._load_note(addon, later=True))
+            try:
+                started.append(self._load_note(addon, later=True))
+            except Exception as error:              # noqa: BLE001 - load() guards itself
+                addon.error = f"rescan: {error}"
+                addon.loaded = False
+                self.log(addon.id, f"failed to load: {error}", warning=True)
         self._wait_boot([worker for worker in started if worker is not None])
         self.refresh_rows()
         self._restore_window_tabs()
@@ -5351,7 +5378,7 @@ class NewAddonDialog(QDialog):
 #: The README as published. A packaged program carries no markdown, so the
 #: guide's "whole manual" link falls back to this when ``README.md`` is not on
 #: disk next to the running program.
-README_URL = PROJECT_GITHUB_URL + "/blob/main/utils/update%20util/README.md"
+README_URL = PROJECT_GITHUB_URL + "/blob/main/src/berry_manager/README.md"
 
 #: The pane's reading order: a guide, its title, and the markdown it is written
 #: in. Links of the form ``[text](api:tabs.add_tab)`` and ``[text](guide:tabs)``

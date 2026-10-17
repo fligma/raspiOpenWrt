@@ -119,7 +119,7 @@ MAIN_SOURCE = {
     "owner": "fligma",
     "repo": "raspiOpenWrt",
     "ref": "main",
-    "store_path": "utils/update util/themes.store",
+    "store_path": "themes.store",
 }
 
 #: What one source holds: the four pieces of a GitHub address, nothing else.
@@ -711,9 +711,10 @@ def load_catalog(config: dict) -> list[dict]:
 def local_folder() -> Path | None:
     """The ``themes.store`` folder bundled with this program, when it is there.
 
-    A checkout has it beside the app; a built program has it only if the pack
-    carried it along. Either way the built-in looks can be listed and installed
-    without a single request leaving the machine.
+    A checkout has it at the repository's root, above the app's own folder; a
+    built program has it only if the pack carried it along. Either way the
+    built-in looks can be listed and installed without a single request leaving
+    the machine.
     """
     homes: list[Path] = []
     try:
@@ -721,7 +722,10 @@ def local_folder() -> Path | None:
             homes.append(Path(str(api.paths.base)))
     except (AddonError, AttributeError, TypeError, OSError):
         pass
-    homes.append(Path(__file__).resolve().parents[1])
+    here = Path(__file__).resolve()
+    homes.append(here.parents[1])                       # the app's own folder
+    if len(here.parents) >= 4:
+        homes.append(here.parents[3])                   # the repository's root
     for home in homes:
         try:
             folder = home / "themes.store"

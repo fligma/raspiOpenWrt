@@ -123,7 +123,7 @@ page, and the rest of the tool works normally.
 
 Every app module is imported statically at the top of its user, which is what
 lets PyInstaller collect them. Commit a new module with the rest of
-`utils/update util`, or the build fails on the missing import. The two
+`src/berry_manager`, or the build fails on the missing import. The two
 third-party libraries with real import weight behind them are the exception,
 and they are read on use rather than on the way up: `core.net` brings in
 paramiko inside the one call that opens an SSH connection, and `core.window`
@@ -1426,7 +1426,9 @@ Common attributes: `id`, `text`,
 `enabled`, `visible`, `font_size`, `items`, `rows`, `value`, `checked`,
 `placeholder`, `readonly`, `minimum`, `maximum`, `columns`, `word_wrap`,
 `expand` (claim the width its row or column leaves over - what lets one status
-line stretch across a header instead of being squeezed by a spacer), and
+line stretch across a header instead of being squeezed by a spacer; `"both"`
+claims the height left over too, which is what lets one leaf - a web view say -
+fill the whole area it is given), and
 `format` for a progress bar - the words painted inside it, where Qt expands
 `%p`, `%v` and `%m` into the percentage and the numbers. An `image` leaf holds a
 picture of its own: `size` is the most it may measure in either direction (drawn
