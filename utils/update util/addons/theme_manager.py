@@ -2,8 +2,9 @@
 """Theme Manager: make, edit, try and download the looks this program is drawn from.
 
 Adds a ``Theme Manager`` tab - pinned icon-only in the task bar, beside
-Settings - with four sub-tabs: **Themes**, **Store**, **Theme Maker** and
-**Docs**. It is the program's own way of doing what a ``.theme`` file is for:
+Settings - with three sub-tabs, **Themes**, **Store** and **Docs**, and a
+**Theme Maker** window of its own for the editor. It is the program's own way
+of doing what a ``.theme`` file is for:
 a look is one small JSON file in the ``themes`` folder next to the program, and
 this addon reads, writes and applies it through ``api.theme`` rather than
 touching the disk or the window itself, so the same file works whether the addon
@@ -36,9 +37,11 @@ memory, changed a token or a knob at a time and shown as JSON that can be typed
 into directly. A colour can be changed in one move - press **Change colour...**
 or right-click a token and pick the wheel - and the **Live preview** beside the
 editor repaints on every change, so the look is seen as it is made. The maker
-is the busiest page in the tab, so it opens in a window of its own by default:
-the tab lifts out of the bar into a top-level window that follows the interface
-zoom and can be docked back with a press. Nothing reaches the disk until
+is the busiest part of the program, so it is a window of its own - raised when
+a theme is put up for editing, or at start-up when the settings ask - that
+follows the interface zoom and hides with its own Close button. It never docks
+back into the tab bar, because it never left it: the Theme Manager tab stays
+pinned in the bar the whole time. Nothing reaches the disk until
 **Save**, and nothing reaches the window until **Apply**, so a look can be
 ruined without anyone noticing.
 
@@ -64,7 +67,7 @@ from addon_common import (AddonError, config_get, find_addon_picture, jsonable,
 
 ADDON = {
     "name": "Theme Manager",
-    "version": "1.4",
+    "version": "1.5",
     "author": "fligma",
     "description": "Makes, edits and downloads the .theme files the program is "
                    "drawn from: every look on disk with a live preview beside "
@@ -73,8 +76,9 @@ ADDON = {
                    "theme came from), an editor that works on one theme at a "
                    "time - colours by their groups (change one with the wheel "
                    "in a click, against a live preview), the tab bar by its "
-                   "knobs, or the JSON direct - in a window of its own that "
-                   "follows the interface zoom - and a reference of every "
+                   "knobs, or the JSON direct - in a Theme Maker window of "
+                   "its own that follows the interface zoom - and a reference "
+                   "of every "
                    "api.theme call. Themes are set in Settings > Appearance, "
                    "which the tab links to.",
     "requires": [],
@@ -129,10 +133,11 @@ DEFAULTS = {
     "confirm_delete": True,
     "save_applies": True,
     "expand_groups": True,
-    # The maker opens in a window of its own: the editor is four panes deep
-    # and the tab bar gives it only the width of the window. Off, the editor
-    # stays in the tab like every other page.
-    "edit_popout": True,
+    # Whether the editor window is raised by itself when the program starts.
+    # Off (the default) the Theme Manager sits quietly in the tab bar and the
+    # maker window only appears when a theme is opened for editing or the
+    # banner's button is pressed - the editor never lifts the whole tab out.
+    "edit_popout": False,
     # The store: which repositories the catalog is read from. The same shape
     # the addon store keeps; the GitHub token is not kept here, since a profile
     # has exactly one of those and it is read through ``profile_token``.
@@ -153,12 +158,13 @@ FIELDS = [
      "kind": "bool",
      "hint": "The editor's trees list every token, grouped by what it is used "
              "for. Closed, only the first group of each is opened for you."},
-    {"key": "edit_popout", "label": "Open the editor in a window of its own",
+    {"key": "edit_popout", "label": "Open the editor window when the program starts",
      "kind": "bool",
-     "hint": "The Theme Maker lifts out of the tab bar into a window that "
-             "follows the interface zoom and gets the whole screen. Docking "
-             "it back from that window switches this off; the banner's "
-             "button opens or docks the window either way."},
+     "hint": "The Theme Maker is a window of its own - the editor and a live "
+             "preview with the whole screen - and this decides only whether it "
+             "is raised on its own at start-up. Off, it opens when a theme is "
+             "put up for editing or the banner's button is pressed; the Theme "
+             "Manager tab stays in the bar either way."},
 ]
 
 #: The store's GitHub token is not one of these: it belongs to the profile and is
@@ -208,13 +214,30 @@ _STATUS_STYLE = "color: #23d18b; padding: 2px 4px;"
 
 _STATUS_BAD = "color: #ffb020; padding: 2px 4px;"
 
-#: The sub-tabs, in order. The app owns the outer tab bar; these belong to the
-#: addon's page and are what the editor switches between.
+#: The caption of the maker's own tab, which stands in a window rather than in
+#: the bar. It is a second tab of this addon, so its widgets are reached by
+#: name exactly as the main tab's are - only under ``MAKER``.
+MAKER = "Theme Maker"
+
+#: The sub-tabs of the main tab, in order. The app owns the outer tab bar; these
+#: belong to the addon's page. The Theme Maker is not among them - it lives in
+#: its own window (``MAKER``), so the editor gets a whole screen to itself.
 SUB = "subtabs"
-SUB_PAGES = ("Themes", "Store", "Theme Maker", "Docs")
+SUB_PAGES = ("Themes", "Store", "Docs")
 
 #: The sub-tab each jump lands on, by the order of ``SUB_PAGES``.
-PAGE_THEMES, PAGE_STORE, PAGE_MAKER, PAGE_DOCS = range(4)
+PAGE_THEMES, PAGE_STORE, PAGE_DOCS = range(3)
+
+#: The controls that live on the maker's tab rather than on the main one.
+#: ``put``/``get`` route a write by these words, so an editor function can name
+#: its control and land on whichever tab the maker is standing in.
+MAKER_IDS = frozenset({
+    "mstatus", "mclose", "draft", "draftas", "applylive", "newdraft",
+    "tokens", "tokennote", "hex", "chgcolor", "setcolor", "knobs", "knobnum",
+    "knobbool", "setknob", "source", "draftstate", "tpl", "newname", "create",
+    "tplnote", "mpreview", "mprevnote", "mprevtokens",
+    "getsource", "putsource", "save", "saveapply", "discard",
+})
 
 #: The buttons under the theme list, split the way a person works with it: the
 #: three things done every day, and the three done occasionally - the odd ones
@@ -321,15 +344,21 @@ def accent() -> str:
 
 
 def say(text: str, bad: bool = False) -> None:
-    """One line on the tab's status, and nothing once this copy is gone."""
+    """One line on the status, and nothing once this copy is gone.
+
+    The word is written on both the tab's line and the maker window's own, so
+    the same notice is read wherever the person is looking; the half whose page
+    is not built simply ignores the write.
+    """
     if api is None:
         return
-    try:
-        api.tabs.set_widget(TAB, "status", "text", str(text))
-        api.tabs.set_widget(TAB, "status", "style",
-                            _STATUS_BAD if bad else _STATUS_STYLE)
-    except AddonError:
-        pass
+    style = _STATUS_BAD if bad else _STATUS_STYLE
+    for tab, identifier in ((TAB, "status"), (MAKER, "mstatus")):
+        try:
+            api.tabs.set_widget(tab, identifier, "text", str(text))
+            api.tabs.set_widget(tab, identifier, "style", style)
+        except AddonError:
+            pass
 
 
 def note(text: str) -> None:
@@ -340,11 +369,13 @@ def note(text: str) -> None:
 
 
 def put(identifier: str, value: Any, prop: str = "value") -> None:
-    """Write one widget on this tab, ignoring a pane that is not built."""
+    """Write one widget, on whichever of the two tabs owns it; ignore a pane
+    that is not built."""
     if api is None:
         return
+    tab = MAKER if str(identifier) in MAKER_IDS else TAB
     try:
-        api.tabs.set_widget(TAB, identifier, prop, value)
+        api.tabs.set_widget(tab, identifier, prop, value)
     except (AddonError, TypeError):
         pass
 
@@ -353,8 +384,9 @@ def get(identifier: str, what: str = "value", fallback: Any = "") -> Any:
     """Read one widget back; the fallback when the pane or the widget is gone."""
     if api is None:
         return fallback
+    tab = MAKER if str(identifier) in MAKER_IDS else TAB
     try:
-        found = api.tabs.widget_value(TAB, identifier, what)
+        found = api.tabs.widget_value(tab, identifier, what)
     except (AddonError, AttributeError, TypeError):
         return fallback
     return fallback if found is None else found
@@ -1525,9 +1557,9 @@ def edit_page() -> dict:
 
     The working panes take the left of the page and the preview the whole right,
     so the sample stands as tall as the trees it is read against; the draft's
-    own file lies under them, folded down until it is wanted. This is the page
-    the editor window opens on - see ``edit_popout`` - and it is built to use
-    the room a window of its own gives.
+    own file lies under them, folded down until it is wanted. This is the body
+    of the Theme Maker window - see ``maker_spec`` - and it is built to use
+    the room a whole screen gives.
     """
     return {"kind": "splitter", "sizes": [5, 3], "children": [
         {"kind": "column", "children": [
@@ -1634,6 +1666,32 @@ def edit_page() -> dict:
     ]}
 
 
+def maker_spec() -> dict:
+    """The Theme Maker window: a head line over the editor and its preview.
+
+    The maker is a second tab of this addon that lives in the addon's window
+    and never in the bar: it is built on the first open (see
+    :func:`ensure_maker`) and raised by :func:`open_window`, so the editor
+    gets a whole screen while the Theme Manager tab stays pinned as it was.
+    The head carries the maker's own status line and the button that hides
+    the window - the draft is kept either way, and any **Edit it** brings it
+    back.
+    """
+    return {"kind": "column", "children": [
+        {"kind": "row", "children": [
+            {"kind": "label", "text": MAKER, "style": _BANNER_STYLE},
+            {"kind": "label", "id": "mstatus", "text": "Ready.",
+             "word_wrap": True, "expand": True, "style": _STATUS_STYLE},
+            {"kind": "button", "id": "mclose", "text": "Close window",
+             "on": ["clicked"],
+             "tooltip": "Hide the Theme Maker window; the draft is kept and "
+                        "the next Edit it - or the banner's button - opens "
+                        "the window again"},
+        ]},
+        edit_page(),
+    ]}
+
+
 def docs_page() -> dict:
     """The reference, laid out like the Addon Dev panel's own docs pane."""
     return {"kind": "splitter", "sizes": [1, 2], "children": [
@@ -1651,14 +1709,14 @@ def docs_page() -> dict:
 
 
 def tab_spec() -> dict:
-    """The whole tab: a banner over the four sub-tabs.
+    """The whole tab: a banner over the three sub-tabs.
 
     Declarative, so the same file runs in the app's process or outside it, and
     every widget is reached by name through ``set_widget`` afterwards. The
     banner's Appearance button is the one link out: themes are worn on the
     whole window, and where they are picked is Settings > Appearance. The
-    window button is the editor's own: it lifts the tab into a window of its
-    own, or brings it back.
+    other button raises the Theme Maker - the editor's own window, which is
+    not a page of this tab and never docks back into it.
     """
     return {"kind": "column", "children": [
         {"kind": "row", "children": [
@@ -1666,11 +1724,11 @@ def tab_spec() -> dict:
             {"kind": "label", "id": "status", "text": "Ready.", "word_wrap": True,
              "expand": True, "style": _STATUS_STYLE},
             {"kind": "label", "id": "where", "text": "", "style": _HEAD_STYLE},
-            {"kind": "button", "id": "win", "text": "Editor window...",
+            {"kind": "button", "id": "win", "text": "Theme Maker window...",
              "on": ["clicked"],
-             "tooltip": "Lift this tab into a window of its own - the editor "
-                        "gets the whole screen, and the window follows the "
-                        "interface zoom - or dock it back into the tab bar"},
+             "tooltip": "Open the Theme Maker - the editor and its live "
+                        "preview in a window of its own that follows the "
+                        "interface zoom"},
             {"kind": "button", "id": "appearance", "text": "Appearance...",
              "on": ["clicked"],
              "tooltip": "Themes are worn on the whole window and are picked "
@@ -1679,8 +1737,7 @@ def tab_spec() -> dict:
         {"kind": "tabs", "id": SUB, "children": [
             dict(themes_page(), label=SUB_PAGES[0]),
             dict(store_page(), label=SUB_PAGES[1]),
-            dict(edit_page(), label=SUB_PAGES[2]),
-            dict(docs_page(), label=SUB_PAGES[3]),
+            dict(docs_page(), label=SUB_PAGES[2]),
         ]},
     ]}
 
@@ -1702,91 +1759,119 @@ def show_page(page: int) -> None:
     put(SUB, int(page), "current")
 
 
-# --- the editor window: the maker with the whole screen around it ---
+# --- the Theme Maker window: the editor with a whole screen around it ---
 
 def wants_window() -> bool:
-    """Whether the settings ask the editor to open in a window."""
-    return bool(config_get(values(), "edit_popout", True))
+    """Whether the settings ask the maker window to be raised at start-up.
+
+    Off - the default - the window only comes up when a theme is put up for
+    editing or the banner's button is pressed; the Theme Manager tab itself
+    never lifts out of the bar under any setting.
+    """
+    return bool(config_get(values(), "edit_popout", False))
 
 
 def window_shown() -> bool:
-    """Whether this tab stands in a window of its own just now.
+    """Whether the maker stands on screen in its own window just now.
 
     ``False`` is the right answer for a bare process or a program with no
-    window support: the tab then simply stays in the bar and every call below
-    does nothing loud.
+    window support: every call below then does nothing loud.
     """
     if api is None:
         return False
     try:
-        return bool(api.window.popped(TAB))
+        state = api.window.state(MAKER) or {}
+        return bool(state.get("popped") and state.get("visible"))
     except (AddonError, AttributeError, TypeError):
         return False
 
 
-def open_window() -> bool:
-    """Put this tab's window on screen, making it by popping the tab out."""
+def ensure_maker() -> bool:
+    """Build the maker's page once; from then on it is simply there.
+
+    The Theme Maker is a second tab of this addon that is never worn in the
+    bar by itself: it is built on the first open and lifted into the addon's
+    window by the same call, so the main tab - pinned, icon-only - stays put
+    and the docking that used to stretch a popped page is on no path this
+    window takes.
+    """
     if api is None:
         return False
     try:
-        opened = bool(api.window.open(TAB))
+        if api.tabs.exists(MAKER):
+            return True
+    except (AddonError, AttributeError, TypeError):
+        return False
+    try:
+        api.tabs.add_tab(MAKER, spec=maker_spec(), style=page_style())
     except AddonError:
-        opened = False
-    update_window_button()
-    return opened
+        return False
+    refresh_themes()
+    show_draft()
+    note_template()
+    return True
 
 
-def toggle_window(_checked: bool = False) -> None:
-    """The banner's button: move the tab between the bar and a window."""
+def open_window() -> bool:
+    """Put the maker's window on screen, building the page first if need be."""
+    if api is None:
+        return False
+    if not ensure_maker():
+        return False
+    try:
+        return bool(api.window.open(MAKER))
+    except AddonError:
+        return False
+
+
+def close_window(_checked: bool = False) -> None:
+    """Hide the maker window; the draft stays in hand, the page stays built."""
     if api is None:
         return
-    if window_shown():
-        if guarded(lambda: api.window.popout(TAB, False), "dock the theme editor"):
-            say("the editor is back in the tab bar")
-    elif open_window():
-        show_page(PAGE_MAKER)
-        say("the editor is in a window of its own - it follows the interface "
-            "zoom; Dock back puts it home")
-    update_window_button()
-
-
-def update_window_button() -> None:
-    """The banner's button wears the word for where the tab stands."""
-    put("win", "Dock the editor" if window_shown() else "Editor window...",
-        "text")
-
-
-def on_window(payload: dict) -> None:
-    """The tab's window came or went: say so on the tab itself.
-
-    Coming back with **Dock back** is a choice worth remembering, so the
-    editor-window setting goes off with it: an editor that pops straight back
-    out after a person has just put it away is not one they will trust.
-    """
-    update_window_button()
-    event = str((payload or {}).get("event") or "")
-    if event in ("undocked", "docked"):
-        where = ("in its own window" if event == "undocked"
-                 else "back in the tab bar")
-        say(f"the theme editor is {where}")
-    if event == "docked" and api is not None and wants_window():
-        try:
-            api.config.update({"edit_popout": False})
-        except (AddonError, AttributeError, TypeError):
-            pass
+    try:
+        api.window.show(MAKER, False)
+    except (AddonError, AttributeError, TypeError):
+        pass
 
 
 def show_maker() -> None:
-    """Move to the Theme Maker, opening the editor window first when asked for.
+    """Raise the maker window: every road to the editor comes through here.
 
-    Every road onto the maker - the Tools menu, the theme list's **Edit it**,
-    a template's **Create**, the editor's own combo - comes through here, so
-    the setting decides once, in one place.
+    Every way onto the maker - the Tools menu, the theme list's **Edit it**,
+    a template's **Create**, the editor's own combo - calls this, so the
+    window is raised from one place and never by itself at start-up unless
+    the settings ask for it; a window standing open already is left alone.
     """
-    if wants_window() and not window_shown():
+    if not window_shown():
         open_window()
-    show_page(PAGE_MAKER)
-    update_window_button()
+
+
+def toggle_window(_checked: bool = False) -> None:
+    """The banner's button: bring the maker window, or hide it away."""
+    if window_shown():
+        close_window()
+        say("the Theme Maker is hidden; the window button brings it back")
+    elif open_window():
+        say("the Theme Maker is open in a window of its own")
+
+
+def update_window_button() -> None:
+    """Nothing to update: the banner's button wears the same words either way."""
+    return None
+
+
+def on_window(payload: dict) -> None:
+    """The maker window came or went: say so on the status line.
+
+    The maker hides and shows; it is never docked back into the bar, so the
+    old journeys of a popped tab - undocked and docked - cannot be told here
+    at all, and nothing about them is remembered in the settings.
+    """
+    event = str((payload or {}).get("event") or "")
+    if event == "opened":
+        say("the Theme Maker is open in its own window")
+    elif event == "closed":
+        say("the Theme Maker is hidden")
 
 
 # --- the Themes sub-tab ---
@@ -2678,15 +2763,16 @@ def wrap(text: str) -> str:
 # --- the hooks the app calls ---
 
 def focus_editor(_checked: bool = False) -> None:
-    """The Tools menu entry: the tab, on the maker.
+    """The Tools menu entry: raise the Theme Maker window.
 
-    A tab that stands in a window is brought forward by the same call: the
-    window answers to the tab's name wherever the tab is worn.
+    The maker is a window of its own, so the menu lands there rather than on
+    a sub-tab; the page inside is brought forward too, in case the window
+    came up beside something else.
     """
     if api is None:
         return
     show_maker()
-    api.tabs.activate(TAB)
+    api.tabs.activate(MAKER)
 
 
 def refresh_all(_ignored: Any = None) -> None:
@@ -2731,7 +2817,7 @@ COMMANDS = {
     "ssources": edit_sources,
     "newdraft": blank_draft, "setcolor": set_colour, "wheel": pick_colour,
     "chgcolor": change_picked_colour,
-    "win": toggle_window,
+    "win": toggle_window, "mclose": close_window,
     "setknob": set_knob, "getsource": show_source, "putsource": use_source,
     "save": lambda: save_draft(False),
     "saveapply": lambda: save_draft(True), "discard": discard_draft,
@@ -2807,7 +2893,7 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     so a test - or a hot patch - that swaps one of these functions on the
     module truly gets the click.
     """
-    if str(tab) != TAB:
+    if str(tab) not in (TAB, MAKER):
         return
     name = str(identifier)
     kind = str(event)
@@ -2885,10 +2971,11 @@ def init(plugin_api: Any) -> None:
         api.events.on("window", lambda data: on_window(data))
     except (AddonError, AttributeError, TypeError):
         pass                       # a program with no windows says nothing back
-    update_window_button()
     refresh_all()
     load_local_store()
     say(f"{len(api.theme.names())} themes, the window drawn from {in_force()}")
+    if wants_window():
+        open_window()              # the settings asked for the maker at start-up
     return None
 
 
@@ -2923,7 +3010,6 @@ def on_config(payload: dict) -> None:
     config = values()
     put("applylive", bool(config_get(config, "save_applies", True)), "checked")
     show_tokens()
-    update_window_button()
     apply_schedule(config)
 
 
