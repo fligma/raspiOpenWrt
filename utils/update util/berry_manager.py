@@ -107,8 +107,7 @@ def main() -> int:
     # The window is on screen: the card has said everything it had to say.
     core.ui.finish()
     return app.exec()
-
-
+    
 if __name__ == "__main__":
     _code = main()
     if take_restart_request() and not relaunch_process():
