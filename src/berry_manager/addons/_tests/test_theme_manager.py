@@ -1211,6 +1211,24 @@ def test_store(mgr: Any) -> None:
               and "themes.store" in commit and "deep%20sea.theme" in commit
               and commit.endswith("&per_page=1"),
               f"the commits query is shaped wrong: {commit!r}")
+        # A source saved by an install predating the repository move names the
+        # retired folder; read, it folds onto the root the themes live at now,
+        # or a refresh 404s and no theme can be installed. A third-party folder
+        # is left exactly as its author wrote it.
+        retired = mgr.normalize_source({"owner": "fligma", "repo": "raspiOpenWrt",
+                                        "ref": "main",
+                                        "store_path": "utils/update util/themes.store"})
+        check(retired["store_path"] == "themes.store",
+              f"a retired theme store folder was not folded onto the current root: "
+              f"{retired['store_path']!r}")
+        retired_raw = mgr.raw_address(mgr.source_values(retired), "ember.theme")
+        check(retired_raw.startswith("/fligma/raspiOpenWrt/main/"
+                                     "themes.store/ember.theme"),
+              f"a retired folder still decided the theme's address: {retired_raw!r}")
+        left = mgr.normalize_source({"owner": "someone", "repo": "theirs",
+                                     "ref": "main", "store_path": "their/store"})
+        check(left["store_path"] == "their/store",
+              f"a third-party theme folder was rewritten: {left['store_path']!r}")
         # The preview: one theme's own sheet on the sample frame, or nothing.
         mgr.preview_theme({}, "x", "tpreview", "tprevnote", "tprevtokens")
         check(api.sent("tpreview", "style") == ""

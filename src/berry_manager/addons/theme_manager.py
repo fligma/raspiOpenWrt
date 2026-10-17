@@ -470,18 +470,48 @@ def profile_token() -> str:
 
 # --- the sources: which repositories the theme catalog is read from ---
 
+#: The folder the themes lived in before the repository was reorganised into
+#: ``src/berry_manager`` with the store at its root. A source saved by an older
+#: install keeps carrying that retired prefix, and GitHub has no file under it
+#: any more - so a refresh or install 404s and the themes cannot be reached.
+#: Read from, a saved store folder that still names the old location is folded
+#: back onto the folder's own name, which is where it lives on the current root.
+RETIRED_STORE_MARKERS = ("update util",)
+
+
+def modernize_store_path(text: str) -> str:
+    """A saved store folder brought onto the current layout, if it predates it.
+
+    Only this program's own retired location is folded, and only when the path
+    names it; a source pointed at somebody else's repository is left exactly as
+    its author wrote it. Whatever follows the retired folder is what is kept, so
+    ``utils/update util/themes.store`` reads back as ``themes.store``.
+    """
+    clean = str(text or "").replace("\\", "/").strip("/")
+    for marker in RETIRED_STORE_MARKERS:
+        if marker in clean:
+            tail = clean.rsplit(marker, 1)[-1].strip("/")
+            return tail or str(MAIN_SOURCE["store_path"])
+    return text
+
+
 def normalize_source(raw: Any) -> dict:
     """One source, cleaned: what a person typed, turned into the parts of an
     address.
 
     A branch that was left blank is ``main``, and a store folder left blank is
     this program's own, since that is the layout a published theme store uses.
+    A folder that names this program's retired location is folded onto the
+    current one, so a source saved before the repository was reorganised still
+    reaches the themes rather than 404ing on a folder GitHub no longer has.
     """
     data = raw if isinstance(raw, dict) else {}
     out: dict[str, str] = {}
     for key in SOURCE_KEYS:
         text = (one_line(data.get(key)) if key != "store_path" else
                 one_line(data.get(key)).strip("/"))
+        if key == "store_path":
+            text = modernize_store_path(text)
         if not text:
             text = str(SOURCE_HINTS.get(key) or "")
         out[key] = (safe_segment(text) if key in ("owner", "repo", "store_path")

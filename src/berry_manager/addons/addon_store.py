@@ -151,6 +151,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -319,17 +320,47 @@ def clean_token(value: Any) -> str:
 
 # --- the sources: which repositories the catalog is read from ---
 
+#: The folder the store's addons sat in before the repository was reorganised
+#: into ``src/berry_manager`` with the store at its root. A source saved by an
+#: older install keeps carrying that retired prefix, and GitHub has no file under
+#: it any more - so a refresh or install 404s and the addons cannot be reached.
+#: Read from, a saved store folder that still names the old location is folded
+#: back onto the folder's own name, which is where it lives on the current root.
+RETIRED_STORE_MARKERS = ("update util",)
+
+
+def modernize_store_path(text: str) -> str:
+    """A saved store folder brought onto the current layout, if it predates it.
+
+    Only this program's own retired location is folded, and only when the path
+    names it; a source pointed at somebody else's repository is left exactly as
+    its author wrote it. Whatever follows the retired folder is what is kept, so
+    ``utils/update util/addon.store`` reads back as ``addon.store``.
+    """
+    clean = str(text or "").replace("\\", "/").strip("/")
+    for marker in RETIRED_STORE_MARKERS:
+        if marker in clean:
+            tail = clean.rsplit(marker, 1)[-1].strip("/")
+            return tail or str(MAIN_SOURCE["store_path"])
+    return text
+
+
 def normalize_source(raw: Any) -> dict:
     """One source, cleaned: what a person typed, turned into the parts of an address.
 
     A branch that was left blank is ``main``, and a store folder left blank is
     this program's own, since that is the layout a published addon store uses.
+    A folder that names this program's retired location is folded onto the
+    current one, so a source saved before the repository was reorganised still
+    reaches the addons rather than 404ing on a folder GitHub no longer has.
     """
     data = raw if isinstance(raw, dict) else {}
     out: dict[str, str] = {}
     for key in SOURCE_KEYS:
         text = (one_line(data.get(key)) if key != "store_path" else
                 one_line(data.get(key)).strip("/"))
+        if key == "store_path":
+            text = modernize_store_path(text)
         if not text:
             text = str(SOURCE_HINTS.get(key) or "")
         out[key] = (safe_segment(text) if key in ("owner", "repo", "store_path")
@@ -975,6 +1006,17 @@ def build_tab() -> None:
     api.tabs.set_icon(TAB, tab_icon())
 
 
+# What a download worker keeps off the widgets. A store file is fetched on a
+# side thread so the round-trips overlap, but a side thread may not touch Qt or
+# ask the session for a token - both belong to the main one. So a worker sets
+# these two thread-local fields: ``buf`` holds the log lines it would have said
+# (flushed by the caller once it has joined), and ``token`` is the credential the
+# main thread resolved for it in advance. Unset on the main thread, everything
+# works exactly as it did before the batch.
+_LOCAL = threading.local()
+MAX_DOWNLOAD_WORKERS = 4
+
+
 def say(text: str, bad: bool = False) -> None:
     """One line on the tab's status, and nothing once this copy has been reloaded."""
     if api is None:
@@ -993,6 +1035,10 @@ def note(text: str) -> None:
     which is what that pane is for: a step is read as it arrives rather than
     scrolled back to once the job has ended.
     """
+    buf = getattr(_LOCAL, "buf", None)
+    if buf is not None:      # a download worker: hold its lines off the widgets
+        buf.append(str(text))
+        return
     if api is None:
         return
     try:
@@ -1141,6 +1187,9 @@ def profile_token() -> str:
     """
     if api is None:
         return ""
+    preset = getattr(_LOCAL, "token", None)
+    if preset is not None:   # resolved on the main thread for a download worker
+        return str(preset)
     try:
         return clean_token(api.session.git_token())
     except (AddonError, AttributeError, TypeError):
@@ -1200,7 +1249,7 @@ class Fetcher:
                     pass
 
 
-_fetchers: dict[str, Fetcher] = {}
+_fetchers: dict[tuple[str, int], Fetcher] = {}
 
 
 def _http(values: dict) -> Fetcher:
@@ -1211,11 +1260,16 @@ def _http(values: dict) -> Fetcher:
     is read with that one. Keying the pool by the token rather than by the source
     is therefore what keeps a switched-off addon, or a profile that never wrote
     one, on the anonymous fetcher - the only kind there was before the field.
+
+    A socket is not safe to share across threads, so a connection is pooled per
+    (token, thread): repeated reads on one thread reuse their connection, while a
+    parallel download hands each worker thread its own. The workers drop theirs
+    when they finish (see _drop_thread_fetchers); _drop_http clears the lot.
     """
-    key = profile_token()
+    key = (profile_token(), threading.get_ident())
     fetcher = _fetchers.get(key)
     if fetcher is None:
-        fetcher = Fetcher(token=key)
+        fetcher = Fetcher(token=key[0])
         _fetchers[key] = fetcher
     return fetcher
 
@@ -1224,6 +1278,19 @@ def _drop_http() -> None:
     for fetcher in _fetchers.values():
         fetcher.close()
     _fetchers.clear()
+
+
+def _drop_thread_fetchers() -> None:
+    """Close the connections this thread opened, when a download worker ends.
+
+    Only the calling thread's own entries are touched, so a worker leaving does
+    not disturb the main thread's reused connection or a sibling still running.
+    """
+    ident = threading.get_ident()
+    for key in [k for k in _fetchers if k[1] == ident]:
+        fetcher = _fetchers.pop(key, None)
+        if fetcher is not None:
+            fetcher.close()
 
 
 def app_folder(values: dict) -> str:
@@ -3669,13 +3736,69 @@ def _fetch_file(values: dict, remote: str, target: Path,
     return ""
 
 
-def _compile(id_value: str) -> None:
-    """Fetch the addon's .py and any assets into staging, then build it here.
+def _fetch_many(values: dict, specs: list[tuple[str, Path]],
+                folder: str | None = None) -> list[str]:
+    """Fetch a batch of store files at once, on a few side threads.
 
-    A picture that will not arrive is said and skipped rather than refused: the
-    assets are decoration, and every addon can draw its own tab mark, so losing
-    one is worth a line in the log and nothing more. The source itself is not -
-    without it there is no addon to build.
+    Each file is one GitHub round-trip; fetched in turn an install pays the sum
+    of them all, so overlapping them costs only the slowest. A side thread may
+    neither touch the widgets nor ask the session for a token, so the token is
+    read here on the main thread and handed to each worker through ``_LOCAL``,
+    and a worker's log lines are buffered and re-said by this thread once every
+    worker has joined. ``_http`` gives each worker its own connection and the
+    worker closes it on the way out. The download is still one ``_fetch_file``
+    per file, so a caller that has replaced ``_fetch_file`` (a test) is honoured
+    exactly as it was before the batch.
+
+    ``specs`` is a list of ``(remote name, target path)``; the answer is the
+    per-file reasons - empty text where a file arrived - in the order given.
+    """
+    results = [""] * len(specs)
+    if not specs:
+        return results
+    if len(specs) == 1:
+        remote, target = specs[0]
+        return [_fetch_file(values, remote, target, folder)]
+    token = profile_token()             # read once here, off the side threads
+    count = min(len(specs), MAX_DOWNLOAD_WORKERS)
+    lanes = [list(range(start, len(specs), count)) for start in range(count)]
+    buckets: list[list[str]] = [[] for _ in range(count)]
+
+    def work(lane: list[int], bucket: list[str]) -> None:
+        _LOCAL.buf = bucket
+        _LOCAL.token = token
+        try:
+            for index in lane:
+                remote, target = specs[index]
+                results[index] = _fetch_file(values, remote, target, folder)
+        finally:
+            _LOCAL.buf = None
+            _LOCAL.token = None
+            _drop_thread_fetchers()
+
+    threads = [threading.Thread(target=work, args=(lanes[n], buckets[n]),
+                                daemon=True)
+               for n in range(count) if lanes[n]]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for bucket in buckets:              # the workers are done; their lines come out
+        for line in bucket:
+            note(line)
+    return results
+
+
+def _compile(id_value: str) -> None:
+    """Fetch the addon's .py, its pictures and its test at once, then build it.
+
+    The program, its assets and its test are unrelated files, so each is asked
+    for side by side rather than waiting on the last (see _fetch_many). A picture
+    that will not arrive is said and skipped rather than refused: the assets are
+    decoration, and every addon can draw its own tab mark, so losing one is worth
+    a line in the log and nothing more. The source is not - without it there is
+    no addon to build - and neither is a test that was named but could not land,
+    since the check that guards the build would then have nothing to run.
     """
     if job is None:
         return
@@ -3686,33 +3809,33 @@ def _compile(id_value: str) -> None:
         return
     _reset_staging()
     source = staging() / f"{id_value}.py"
-    _progress(f"downloading {entry['filename']}...", 0.15)
-    why = _fetch_file(values, entry["filename"], source)
-    if why:
-        _finish(why, bad=True)
-        return
-    # Read before the build, since the source is gone by the time it is installed
-    job["details"] = _details(source)
     names = list(entry.get("assets") or [])
     if entry.get("icon") and entry["icon"] not in names:
         names.append(entry["icon"])
     assets = staging() / "assets"
+    test_name = entry.get("test") or ""
+    specs: list[tuple[str, Path]] = [(entry["filename"], source)]
+    specs += [(f"assets/{id_value}/{name}", assets / name) for name in names]
+    if test_name:
+        specs.append((f"_tests/{test_name}", staging() / test_name))
+    _progress(f"downloading {len(specs)} file(s)...", 0.15)
+    reasons = _fetch_many(values, specs)
+    if reasons[0]:
+        _finish(reasons[0], bad=True)
+        return
+    # Read before the build, since the source is gone by the time it is installed
+    job["details"] = _details(source)
     left = []
-    for index, name in enumerate(names, 1):
-        _progress(f"downloading asset {name} ({index} of {len(names)})...",
-                  0.15 + 0.20 * index / max(1, len(names)))
-        why = _fetch_file(values, f"assets/{id_value}/{name}", assets / name)
-        if why:
-            note(f"{name} could not be fetched: {why}")
+    for index, name in enumerate(names, 1):        # reasons[0] is the source
+        if reasons[index]:
+            note(f"{name} could not be fetched: {reasons[index]}")
             left.append(name)
     if left:
         say(f"{len(left)} asset(s) are not packed with it; the addon still builds "
             "and wears the mark it draws itself")
     test_path = None
-    test_name = entry.get("test") or ""
     if test_name:
-        _progress(f"downloading {test_name} to check the addon first...", 0.38)
-        why = _fetch_file(values, f"_tests/{test_name}", staging() / test_name)
+        why = reasons[-1]                            # the test is the last spec
         if why:
             _finish(f"the addon's test could not be fetched: {why}", bad=True)
             return

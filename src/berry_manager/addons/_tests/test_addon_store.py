@@ -151,6 +151,28 @@ def test_the_helpers(store: Any) -> None:
                     "/assets/hello_store/icon.png",
           f"an asset in the store folder did not get an address: {asset!r}")
 
+    # A source saved by an install predating the repository move still names
+    # the retired folder; read, it must be folded onto the root layout, or a
+    # refresh 404s and no addon can be installed. A third-party folder is left
+    # exactly as its author wrote it.
+    retired = store.normalize_source({"owner": "fligma", "repo": "raspiOpenWrt",
+                                      "ref": "main",
+                                      "store_path": "utils/update util/addon.store"})
+    check(retired["store_path"] == "addon.store",
+          f"a store folder saved under the retired layout was not folded onto the "
+          f"current root: {retired['store_path']!r}")
+    check(store.raw_address(store.source_values(retired), "hello_store.py")
+          == "/fligma/raspiOpenWrt/main/addon.store/hello_store.py",
+          "a retired store folder still decided the address the addons are read from")
+    check(store.app_folder(retired) == "src/berry_manager",
+          f"the modules an addon imports were still looked for in the retired "
+          f"app folder: {store.app_folder(retired)!r}")
+    other = store.normalize_source({"owner": "someone", "repo": "theirs",
+                                    "ref": "main", "store_path": "their/store"})
+    check(other["store_path"] == "their/store",
+          f"a third-party store folder was rewritten when it should be left alone: "
+          f"{other['store_path']!r}")
+
 
 # --- two: the tab on a stub api ---
 
@@ -2163,6 +2185,102 @@ def test_the_install(store: Any) -> None:
         store.addons_dir = real_addons
 
 
+def test_the_parallel_download(store: Any) -> None:
+    """An install's files come down side by side, and the widgets stay clear.
+
+    ``_fetch_many`` overlaps the round-trips an addon needs - program, pictures,
+    test - so an install pays for the slowest rather than the sum. That only
+    holds if a side thread never touches what belongs to the main one: the log
+    and the credential. This drives the batch with ``_fetch_file`` replaced (no
+    network), and checks the four promises the callers lean on: the per-file
+    reasons come back lined up with the files asked for, every file is fetched
+    exactly once, a worker's log line is buffered rather than said on its own
+    thread (and reaches the widgets only when the caller flushes it), and the
+    token is read once on the main thread so no worker asks the session for it.
+    """
+    print("\n11p. an install fetches an addon's files at once, off the widgets")
+    import threading as _th
+    api = fresh(store)
+    real_fetch, real_job = store._fetch_file, store.job
+    try:
+        store.job = None
+        # one: the reasons line up with the specs and each file is fetched once
+        seen: list[str] = []
+        lock = _th.Lock()
+
+        def fake_fetch(values, remote, target, folder=None):
+            with lock:
+                seen.append(remote)
+            return "E" if remote.startswith("assets/") else ""
+        store._fetch_file = fake_fetch
+        specs = [("a.py", Path("/tmp/a")), ("assets/x/a.png", Path("/tmp/a.png")),
+                 ("assets/x/b.png", Path("/tmp/b.png")), ("c.py", Path("/tmp/c"))]
+        reasons = store._fetch_many({}, specs)
+        check(reasons == ["", "E", "E", ""],
+              f"the per-file reasons did not line up with the files asked for: {reasons}")
+        check(sorted(seen) == sorted(r for r, _t in specs),
+              f"a file was fetched more or less than once: {seen}")
+
+        # two: the single-file batch still goes straight through _fetch_file
+        seen.clear()
+        check(store._fetch_many({}, [("only.py", Path("/tmp/o"))]) == [""],
+              "one file was not fetched as one")
+        check(seen == ["only.py"], f"a lone file was not handed to _fetch_file: {seen}")
+
+        # three: note() on a worker thread is held off the widgets, then flushed
+        api.logs.clear()
+        held: list[str] = []
+        store._LOCAL.buf = held
+        try:
+            store.note("a worker's line")
+        finally:
+            store._LOCAL.buf = None
+        check(held == ["a worker's line"],
+              f"a worker's log line was not buffered: {held}")
+        check("a worker's line" not in api.logs,
+              "a buffered line still reached the widgets on its own thread")
+        store.note("a main-thread line")
+        check("a main-thread line" in api.logs,
+              "a line said on the main thread never reached the log")
+
+        # four: the token is read once on the main thread, never by a worker
+        store._fetch_file = fake_fetch
+        before = api.times("session.git_token")
+        store._fetch_many({}, [("p.py", Path("/tmp/p")), ("q.py", Path("/tmp/q")),
+                               ("r.py", Path("/tmp/r"))])
+        after = api.times("session.git_token")
+        check(after - before == 1,
+              f"the batch asked the session for a token on more than the main "
+              f"thread: {after - before} times for three files")
+
+        # five: a worker's connection is its own, and it is closed on the way out
+        main_ident = _th.get_ident()
+        ids: dict = {}
+
+        def cap_fetch(values, remote, target, folder=None):
+            ids[remote] = _th.get_ident()
+            store._http(values)                  # the fetcher this thread will use
+            return ""
+        store._fetch_file = cap_fetch
+        store._fetch_many({}, [("m.py", Path("/tmp/m")), ("n.py", Path("/tmp/n")),
+                               ("o.py", Path("/tmp/o"))])
+        check(ids and all(ident != main_ident for ident in ids.values()),
+              f"a downloaded file was fetched on the main thread: {ids}")
+        # The pool is keyed by (token, thread), so a worker never shares the main
+        # thread's socket, and each worker drops its own when it finishes - so
+        # nothing but main-thread entries (none made here) are left behind.
+        left = [k for k in store._fetchers if k[1] != main_ident]
+        check(not left,
+              f"a worker left its connection in the pool: {left}")
+        check(store._http({}) is store._http({}),
+              "repeated fetches on one thread did not share a connection")
+        store._drop_http()
+    finally:
+        store._fetch_file = real_fetch
+        store.job = real_job
+        store._drop_http()
+
+
 def test_delete_toggle(store: Any) -> None:
     """What the two toggles do to a delete, and what a delete never takes.
 
@@ -2811,6 +2929,7 @@ def main() -> int:
     test_the_interpreter(store)
     test_the_pip_fallback(store)
     test_the_install(store)
+    test_the_parallel_download(store)
     test_delete_toggle(store)
     test_the_manifest(store)
     test_the_child_env()
