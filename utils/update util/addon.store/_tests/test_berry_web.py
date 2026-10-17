@@ -1416,4 +1416,12 @@ def main() -> int:
 berry_web = None
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    STATUS = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # The verdict is printed: go out now, without walking Qt through the
+    # interpreter's shutdown. Its destructors run there in whatever order the
+    # garbage collection picks, and an offscreen widget suite has been seen to
+    # raise an access violation on a busy machine after all checks passed -
+    # which is how a green run turns into a 0xC0000005.
+    os._exit(STATUS)

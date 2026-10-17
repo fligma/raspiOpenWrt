@@ -279,7 +279,11 @@ jobs:
         # before anything is packaged: they drive the addon against a stubbed app
         # offscreen, so no device and no window are involved. A failing test fails
         # the build. The tests themselves never reach the executable - the staging
-        # step below skips _folders.
+        # step below skips _folders. One command does the whole set now: the
+        # runner in buildtools.py finds every test_*.py in the two folders and
+        # runs the suites side by side - they share nothing but the disk - then
+        # prints their blocks in folder order, so this log reads as the serial
+        # one did. A new addon's test is found without anything being told.
         # Say what machine these answers came off, and with what. When one of
         # these tests passes on a runner and fails on the other, it is either Qt
         # laying out or painting to that platform's font, or a record inside the
@@ -295,20 +299,8 @@ jobs:
         # widths and row heights of its own, and that is the one thing a text
         # width here shows up before the checks that lean on it do.
         python -c "import os; os.environ['QT_QPA_PLATFORM']='offscreen'; from PyQt6.QtWidgets import QApplication; from PyQt6.QtGui import QFont, QFontMetrics; app = QApplication([]); print('text width of Hello in Sans 11:', QFontMetrics(QFont('Sans', 11)).horizontalAdvance('Hello'))"
-        $failed = $false
-        foreach ($folder in @("addons/_tests", "addon.store/_tests")) {
-          if (-not (Test-Path $folder -PathType Container)) { continue }
-          foreach ($test in (Get-ChildItem -Path $folder -Filter test_*.py -File)) {
-            Write-Output "=== $($test.Name)"
-            python $test.FullName
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "FAILED: $($test.Name) (exit $LASTEXITCODE)"
-              $failed = $true
-            }
-          }
-        }
-        if ($failed) { exit 1 }
-        Write-Output "all addon tests passed"
+        python ../../buildtools.py test
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Stage the addons that ship inside the program
       shell: pwsh

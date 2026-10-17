@@ -506,15 +506,17 @@ def window_for(manager: Any, addon: Any, create: bool = False) -> PopoutWindow |
 
 
 def addon_mark(manager: Any, addon: Any) -> QIcon | None:
-    """The addon's own picture, the one its tab wears, as a window icon."""
+    """The addon's own picture, the one its tab and its desktop link wear,
+    as a window icon.
+
+    This is what a popped-out window is drawn with, in the app and in a
+    program launched from a link, so the two halves of a shortcut - the
+    file on the Desktop and the window it opens - wear one picture.
+    """
     from addon_api import build_icon
 
-    declared = str((addon.manifest or {}).get("icon") or "")
-    for folder in (addon.home, addon.data_dir):
-        found = find_icon(folder, addon.id, declared) if folder else ""
-        if found:
-            return build_icon(found)
-    return None
+    picture = addon_picture(addon)
+    return build_icon(picture) if picture else None
 
 
 def is_popped(manager: Any, addon: Any, name: str) -> bool:
@@ -844,8 +846,7 @@ def icon_for_shortcut(addon: Any) -> str:
     """
     from core.addon import ico_from_png, ico_scaled
 
-    picture = find_addon_picture(_Paths(addon), addon.id,
-                                 str((addon.manifest or {}).get("icon") or ""))
+    picture = addon_picture(addon)
     if not picture:
         return ""
     source = Path(picture)
@@ -872,6 +873,30 @@ class _Paths:
         self.addon = getattr(addon, "home", None)
         self.data = getattr(addon, "data_dir", None)
         self.assets = ASSETS_DIR
+
+
+def addon_picture(addon: Any) -> str:
+    """The addon's own picture as a path; nothing when no folder holds it.
+
+    One lookup serves both halves of a desktop shortcut: the icon the link
+    file wears (``icon_for_shortcut``) and the icon the window it launches
+    wears (``addon_mark``) have to be the same picture, or a person opens a
+    link marked with one thing onto a window titled by another. The three
+    install layouts - a store's ``assets/<id>``, the program's ``assets``
+    where a shipped addon's mark lives, the addon's own data folder - are
+    what ``find_addon_picture`` reads; the plain two-folder look stays as the
+    fallback it never was, for a picture kept at an addon's home root, where
+    no layout says to look.
+    """
+    declared = str((addon.manifest or {}).get("icon") or "")
+    found = find_addon_picture(_Paths(addon), addon.id, declared)
+    if found:
+        return found
+    for folder in (getattr(addon, "home", None), getattr(addon, "data_dir", None)):
+        found = find_icon(folder, addon.id, declared) if folder else ""
+        if found:
+            return found
+    return ""
 
 
 def write_shortcut(addon: Any) -> tuple[bool, str]:

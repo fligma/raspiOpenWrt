@@ -1525,9 +1525,14 @@ class Fetcher:
 
     def get(self, host: str, path: str,
             accept: str = "application/octet-stream") -> tuple[int, bytes]:
-        """``(status, body)`` for one GET, retried once on a dropped connection."""
+        """``(status, body)`` for one GET, retried before it is given up.
+
+        Three tries with a longer pause each time: a dropped keep-alive or a
+        momentary refusal used to cost a whole file of the download, and the
+        dashboard is two dozen of those in a row.
+        """
         status, body = 0, b""
-        for attempt in (0, 1):
+        for attempt in (0, 1, 2):
             headers = {"User-Agent": "berry-manager", "Accept": accept}
             if self.token:
                 headers["Authorization"] = f"token {self.token}"
@@ -1537,13 +1542,13 @@ class Fetcher:
                 answer = connection.getresponse()
                 body = answer.read()
                 status = int(answer.status)
-                if status < 500:
+                if status < 500 or attempt == 2:
                     return status, body
             except (http.client.HTTPException, OSError):
                 self.close(host)
-                if attempt:
+                if attempt == 2:
                     raise
-                time.sleep(0.4)
+            time.sleep(0.4 * (attempt + 1))
         return status, body
 
     def json(self, host: str, path: str) -> Any:

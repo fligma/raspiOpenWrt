@@ -4502,13 +4502,20 @@ the app: nothing is opened on screen, nothing is sent to a device, and every
 call the addon makes is written down. So the test checks what the addon *asked
 for*, which is the part an addon author owns.
 
-Four questions are worth asking of any addon, and the checks below are grouped
-by them:
+Every suite in this folder asks the same seven questions first, in this order,
+and the checks below are grouped by them; the file grows from here as the
+addon does, keeping the numbered sections:
 
-- does ``init`` build what the addon promises, and name its controls?
-- does a value the user set reach the code that uses it?
-- does every button do the thing it sits there for?
-- and does the addon go quiet once ``shutdown`` has taken the API back?
+1. the manifest - the name, version and description the store shows, the api
+   version, and what the addon says about connections;
+2. init - it builds what the addon promises, and no two controls on a surface
+   share an id, because on_widget routes by (tab, id) and twins would answer
+   to each other's clicks;
+3. the values the user set reach the code that uses them;
+4. every control does the thing it sits there for, and says so;
+5. the news from the app and from other addons gets an answer;
+6. a config change is read again rather than remembered from init;
+7. shutdown really is the end: after it the addon says nothing to the app.
 
 What the app answers is the test's to decide: ``api.answer("device.run", {"code": 1})``
 makes a command look as if it failed, and ``api.asked("tabs.add_tab", "spec")``
@@ -4517,11 +4524,16 @@ reads back the spec the addon handed the app.
 Run it from the Build & test pane, or on the command line::
 
     python addons/_tests/test_$id.py
+
+and ``python buildtools.py test`` from the repository runs every addon's
+suite, several at once - a test written for a new addon is picked up there
+without anything else being told about it.
 """
 
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -4545,6 +4557,18 @@ def check(condition: Any, text: str) -> None:
     CHECKS += 1
     if not condition:
         FAILURES.append(text)
+    print(("  ok   " if condition else "  FAIL ") + text)
+
+
+def look(text: str) -> None:
+    """A detail under a check, for whoever has to read a failure later."""
+    print(f"       {text}")
+
+
+def section(number: int, title: str) -> None:
+    """One numbered question, the way every suite in _tests prints its blocks."""
+    print()
+    print(f"{number}. {title}")
 
 
 def nodes(spec: Any):
@@ -4558,8 +4582,9 @@ def nodes(spec: Any):
             yield from nodes(item)
 
 
-def ids_of(spec: Any) -> set:
-    return {str(node["id"]) for node in nodes(spec) if node.get("id")}
+def ids_of(spec: Any) -> list:
+    """The ids a spec gives its controls, in order; a repeat is a routing bug."""
+    return [str(node["id"]) for node in nodes(spec) if node.get("id")]
 
 
 def shown(entry: tuple) -> str:
@@ -4579,40 +4604,85 @@ def main() -> int:
     api = addon_client.stub_api("$id", config={"greeting": "hello from the test"})
     addon = addon_client.load_addon(SOURCE)
 
-    # --- init: what the addon asks the app to build ---
+    # --- 1. what the manifest promises the store and Settings will show ---
+    section(1, "the manifest")
+    manifest = getattr(addon, "ADDON", None)
+    check(isinstance(manifest, dict), "the file holds no ADDON manifest to read")
+    if isinstance(manifest, dict):
+        check(bool(str(manifest.get("name") or "").strip()),
+              "the manifest names no addon")
+        check(bool(str(manifest.get("version") or "").strip()),
+              "the manifest carries no version")
+        check(bool(str(manifest.get("description") or "").strip()),
+              "the manifest describes nothing")
+        check(str(manifest.get("api")) == "1",
+              f"the addon is not on api version 1: {manifest.get('api')!r}")
+        needs = manifest.get("requires")
+        check(needs is None or isinstance(needs, (list, tuple)),
+              f"requires has to be a list of transports: {needs!r}")
+        saying = str(manifest.get("connection") or "")
+        check(saying in ("", "app", "own", "both", "none"),
+              f"connection says something the app cannot read: {saying!r}")
+        check(not needs or saying in ("app", "own", "both"),
+              "the addon asks for a transport but never says whose connection uses it")
+
+    # --- 2. init: what the addon asks the app to build ---
+    section(2, "init builds what the addon promises")
     addon.init(api)
     check(api.called("config.declare"), "init did not declare its config keys")
     check(api.asked("config.declare", "fields"), "the declared schema is empty")
     check(api.called("tabs.add_tab"), "init did not add a tab")
     named = api.asked("tabs.add_tab", "name")
     check(named == TAB, f"the tab is not named as the addon says: {named!r}")
-    ids = ids_of(api.asked("tabs.add_tab", "spec"))
-    check({"press", "status"} <= ids,
-          f"the tab spec gives its controls no ids to write back to: {sorted(ids)}")
+    tab_ids = ids_of(api.asked("tabs.add_tab", "spec"))
+    check({"press", "status"} <= set(tab_ids),
+          f"the tab spec gives its controls no ids to write back to: {sorted(tab_ids)}")
+    check(len(tab_ids) == len(set(tab_ids)),
+          f"two controls on the tab share an id: {tab_ids}")
     check(api.called("ui.menu_item"), "init did not add its Tools menu entry")
     check(api.times("events.on") >= 1, "init did not listen for any event")
     if api.called("settings_pages.add"):
         page_ids = ids_of(api.asked("settings_pages.add", "spec"))
         check(bool(page_ids),
               f"the Settings page has no named controls: {sorted(page_ids)}")
+        check(len(page_ids) == len(set(page_ids)),
+              f"two controls on the page share an id: {page_ids}")
 
-    # --- what the user set reaches the code that uses it ---
+    # --- 3. what the user set reaches the code that uses it ---
+    section(3, "the config reaches the addon")
     check(api.config.get("greeting") == "hello from the test",
           "the config value did not reach the addon")
-
-    # --- start: a record of its own, kept per profile ---
     addon.start()
     check(api.times("settings.set") >= 1, "start recorded nothing in api.settings")
 
-    # --- every control does the thing it is there for ---
+    # --- 4. every control does the thing it is there for ---
+    section(4, "the controls do their jobs")
     api.logs.clear()
+    mark = len(api.calls)
     addon.on_widget(TAB, "press", "clicked", {})
     check(any("hello from the test" in line for line in api.logs),
           "pressing the button left nothing in the log to show for it")
+    check(any(method == "tabs.set_widget" for method, _a, _n in api.calls[mark:]),
+          "the button changed no control on the tab - what did it do at all?")
     addon.on_widget(PAGE, "about", "clicked", {})
     check(api.called("ui.information"), "the page's button opened no dialog")
+    mark = len(api.calls)
+    addon.on_widget(PAGE, "show_page", "changed", {"checked": False})
+    check(len(api.calls) > mark,
+          "moving the page's switch wrote nothing and asked for nothing")
 
-    # --- another addon speaking to this one, if it listens ---
+    # --- 5. news from the app and from another addon gets an answer ---
+    section(5, "events and peers")
+    news = getattr(addon, "on_connected", None)
+    if callable(news):
+        api.logs.clear()
+        news({})
+        check(bool(api.logs), "the ssh-connected news was taken in and never said")
+    events = getattr(addon, "on_event", None)
+    if callable(events):
+        api.logs.clear()
+        events("operation_done", {"operation": "a test job"})
+        check(bool(api.logs), "the app's event was taken in and never said")
     peer = getattr(addon, "on_message", None)
     if callable(peer):
         api.logs.clear()
@@ -4620,17 +4690,25 @@ def main() -> int:
         check(any("tester" in line for line in api.logs),
               "on_message took a peer's message and said nothing of it")
 
-    # --- a config change is read again, not remembered from init ---
+    # --- 6. a config change is read again, not remembered from init ---
+    section(6, "a config change is re-read")
     mark = len(api.calls)
     addon.on_config({"addon": "$id", "source": "test", "file": "x"})
     check(len(api.calls) > mark, "on_config asked the app for nothing at all")
 
-    # --- and shutdown is really the end of it ---
+    # --- 7. and shutdown is really the end of it ---
+    section(7, "shutdown is the end")
     addon.shutdown()
     mark = len(api.calls)
     addon.start()
     addon.on_widget(TAB, "press", "clicked", {})
     addon.on_config({"addon": "$id"})
+    for extra, echoes in (("on_event", ("operation_done", {})),
+                          ("on_message", ("tester", {})),
+                          ("on_connected", ({},))):
+        hook = getattr(addon, extra, None)
+        if callable(hook):
+            hook(*echoes)
     check(len(api.calls) == mark,
           "the addon still talks to the app after shutdown()")
 
@@ -4639,16 +4717,13 @@ def main() -> int:
     for method, _arguments, _named in api.calls:
         where = str(method).split(".")[0]
         tally[where] = tally.get(where, 0) + 1
-    print(f"$id: {len(api.calls)} api call(s)"
-          + (", " + ", ".join(f"{count} {where}"
-                             for where, count in sorted(tally.items())) if tally else ""))
-    for entry in api.calls[:20]:
+    print()
+    print(f"$id: {len(api.calls)} api call(s), "
+          + ", ".join(f"{count} {where}" for where, count in sorted(tally.items())))
+    for entry in api.calls[:10]:
         print(f"  {shown(entry)}")
-    if len(api.calls) > 20:
-        print(f"  ... and {len(api.calls) - 20} more")
-    print("log lines written by the addon:")
-    for line in api.logs:
-        print(f"  {line}")
+    if len(api.calls) > 10:
+        print(f"  ... and {len(api.calls) - 10} more")
     if FAILURES:
         print()
         for text in FAILURES:
@@ -4661,7 +4736,16 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    STATUS = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # The verdict is printed: go out now, without walking Qt through the
+    # interpreter's shutdown. Its destructors run there in whatever order the
+    # garbage collection picks, and a suite that grows into building real
+    # offscreen widgets has been seen to raise an access violation on a busy
+    # machine after all checks passed - which is how a green run turns into a
+    # 0xC0000005.
+    os._exit(STATUS)
 ''')
 
 _LAUNCHER = Template('''#!/usr/bin/env python3
@@ -6041,7 +6125,9 @@ The Test panel runs ``addons/_tests/test_<id>.py`` as its own program, using the
 recording stub in ``addon_client``: the addon is loaded and driven, nothing is
 drawn, nothing is sent to a device, and every call it made is written down. So
 the test checks what the addon *asked for*, which is the part an addon author
-owns.
+owns. From the command line, ``python buildtools.py test`` runs every addon's
+suite - several at once, in any folder that holds ``test_*.py`` - and picks up
+a new addon's test without anything being registered first.
 
     api = addon_client.stub_api("myaddon", config={"greeting": "hi"})
     addon = addon_client.load_addon(SOURCE)
@@ -6049,6 +6135,13 @@ owns.
     check(api.called("tabs.add_tab"), "init added no tab")
     addon.on_widget("My addon", "go", "clicked", {})
     check(any("hi" in line for line in api.logs), "the button said nothing")
+
+The script a new addon starts from asks seven questions, in this order, and
+every suite in the tree keeps the numbered sections: the manifest, what init
+builds (with no two controls on a surface sharing an id, since ``on_widget``
+routes by tab and id), the config reaching the code, every control doing its
+job, the news from the app and from peers getting an answer, a config change
+being re-read, and shutdown really being the end. Grow the file from there.
 
 - ``stub_api(id, config=..., settings=..., answers=...)``: ``config`` is what
   the config file would hold, ``settings`` the profile's keys, and ``answers``
@@ -6058,6 +6151,11 @@ owns.
   hand it the values the addon will read back.
 - Check everything and print every failure: one run should say all is well, not
   stop at the first crack.
+- Print the verdict, flush the two streams, and leave with ``os._exit``: a
+  suite that builds real widgets offscreen must not drag Qt through the
+  interpreter's shutdown, where its destructors run in whatever order the
+  garbage collection picks and have been seen to crash a run that already
+  passed everything.
 - The same script runs from the command line, which is what the store's index
   and the app's CI can do before an addon is published.
 """),

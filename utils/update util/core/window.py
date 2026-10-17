@@ -2233,6 +2233,7 @@ class BerryManager(
         self.addons.shutdown_all()
         self.addons.bus.dead = True           # late jobs only reach deleted widgets
         self._quiesce_web_views()
+        self._release_snap_guard()            # no native filter outlives the window
         self._close_shared_conn()
         if self.tray is not None:
             self.tray.hide()    # a dead app must not leave a mark to click

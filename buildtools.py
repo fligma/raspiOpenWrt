@@ -28,6 +28,7 @@ Name the tool to run it, from any folder::
     python buildtools.py make-web-icons [--side 512] [--force] [--check]
     python buildtools.py pack-pngs [--check] [file or folder ...]
     python buildtools.py precompile-addons [--check] [--clean] [file or folder ...]
+    python buildtools.py test [--brief] [--jobs N] [--timeout S] [match ...]
 
     python buildtools.py --list            # what is here, and what it is for
 
@@ -47,7 +48,9 @@ import json
 import os
 import re
 import struct
+import subprocess
 import sys
+import time
 import zlib
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -2100,11 +2103,190 @@ def cmd_precompile_addons(argv: list[str]) -> int:
     return 0
 
 
+# ============================================================== the test runner
+
+#: Where every addon's own test script lives, beside the addons they test: the
+#: shipped ones in ``addons/_tests``, the store's in ``addon.store/_tests``.
+#: A new addon written by the Addon Dev tab lands in the first folder, so its
+#: test is discovered and run without anything ever being registered here.
+TEST_FOLDERS = (APP / "addons" / "_tests", ADDON_STORE / "_tests")
+
+#: How many suites may run at once by default. Each is its own Python loading
+#: Qt, so the cap is about memory and noise rather than cores; a machine with
+#: four cores still overlaps the slow suite behind the quick ones.
+TEST_MAX_JOBS = 8
+
+
+def test_scripts() -> list[Path]:
+    """Every ``test_*.py`` in the two folders, in a stable order."""
+    found: list[Path] = []
+    for folder in TEST_FOLDERS:
+        if not folder.is_dir():
+            continue
+        found.extend(sorted(folder.glob("test_*.py")))
+    return found
+
+
+def _run_one_script(path: Path, env: dict, cwd: Path, seconds: float) -> tuple[int, str, str, float]:
+    """One suite in a child Python: (exit code, out, err, seconds taken)."""
+    started = time.monotonic()
+    try:
+        done = subprocess.run([sys.executable, str(path)], env=env, cwd=str(cwd),
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=seconds)
+    except subprocess.TimeoutExpired as stuck:
+        out = (stuck.stdout or "") if isinstance(stuck.stdout, str) else ""
+        return (124, out + "\n(no answer after " + str(seconds) + "s; killed)",
+                "", time.monotonic() - started)
+    except OSError as error:
+        return (127, "", f"the child could not start: {error}\n",
+                time.monotonic() - started)
+    return (done.returncode, done.stdout or "", done.stderr or "",
+            time.monotonic() - started)
+
+
+def _run_set(scripts: list[Path], env: dict, workers: int,
+             seconds: float) -> dict:
+    """Run a set of suites, all at once or one after another, keyed by name."""
+    results: dict[str, tuple[int, str, str, float]] = {}
+    if workers == 1:
+        for path in scripts:
+            results[path.name] = _run_one_script(path, env, APP, seconds)
+        return results
+    from concurrent import futures
+    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        # map keeps the order of the list, and the dict is keyed by the
+        # file name: threads only fill it, they never print over each other.
+        for path, answer in zip(scripts, pool.map(
+                lambda p: _run_one_script(p, env, APP, seconds), scripts)):
+            results[path.name] = answer
+    return results
+
+
+def cmd_test(argv: list[str]) -> int:
+    """Run every addon's test script, several at a time.
+
+    Each suite is a standalone program that drives one addon against the
+    recording stub, offscreen, with no device and no window - so the suites
+    share nothing but the disk and can all run at once. They used to be run
+    one after another (two minutes of watching import lines crawl by on a
+    nine-core machine); this spends the cores instead and prints the same
+    blocks in the same order afterwards, so a failing suite reads exactly as
+    it always did. ``--brief`` keeps only the failing output, for a run whose
+    question is "is anything broken" rather than "what does berry say". And a
+    suite that came back failed is asked once more while nobody else is running:
+    an offscreen Qt suite can lose a background C++ thread to the exit race on a
+    busy machine after it has already printed its verdict - a crash code over an
+    "all checks passed". A second opinion off the queue tells that from a real
+    failure; a deterministic one says the same thing twice.
+    """
+    _utf8_stdout()
+    parser = argparse.ArgumentParser(
+        prog="buildtools.py test",
+        description="Run the addon test scripts in parallel; a failing "
+                    "suite fails the command.")
+    parser.add_argument("match", nargs="*",
+                        help="only suites whose file name holds one of these words")
+    parser.add_argument("--brief", action="store_true",
+                        help="one line per passing suite; print output only for failures")
+    parser.add_argument("--jobs", type=int, default=0,
+                        help=f"suites at once (0 = up to {TEST_MAX_JOBS}, 1 = one after another)")
+    parser.add_argument("--timeout", type=float, default=900.0,
+                        help="seconds a single suite may take before it is killed")
+    args = parser.parse_args(argv)
+
+    scripts = test_scripts()
+    if args.match:
+        scripts = [p for p in scripts
+                   if any(word.lower() in p.name.lower() for word in args.match)]
+    if not scripts:
+        # Nothing matched: worth a refusal rather than a green "0 of 0", which
+        # a mistyped word in a workflow would otherwise pass straight over.
+        print("no test scripts to run"
+              + (f" for {', '.join(args.match)}" if args.match else "")
+              + "; looked in " + ", ".join(str(f) for f in TEST_FOLDERS))
+        return 2
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")   # widgets, no window
+    env.setdefault("PYTHONIOENCODING", "utf-8")      # the marks ● ○ ✓ the tests print
+    workers = args.jobs if args.jobs > 0 else min(len(scripts), os.cpu_count() or 4,
+                                                  TEST_MAX_JOBS)
+    print(f"running {len(scripts)} suite(s), {workers} at a time "
+          f"({sys.platform}, Python {sys.version.split()[0]})")
+    started = time.monotonic()
+    results = _run_set(scripts, env, workers, args.timeout)
+    notes: dict[str, str] = {}
+    for path in scripts:
+        code, out, err, _seconds = results[path.name]
+        if code == 0:
+            continue
+        # One quiet re-run per failure, whatever the first said. Its own output
+        # becomes the answer on screen; the crowded attempt is kept below so a
+        # crash after a printed verdict stays visible in the log.
+        alone = _run_set([path], env, 1, args.timeout)[path.name]
+        if alone[0] == 0:
+            notes[path.name] = (f"re-run alone passed after the crowded run exited "
+                                f"{code}; the suite's own verdict had been printed")
+        else:
+            notes[path.name] = (f"failed twice: exit {code} in the crowded run, "
+                                f"exit {alone[0]} alone")
+        results[path.name] = (alone[0], out + ("\n(second attempt, run alone:)\n"
+                                               + alone[1] if alone[0] else
+                                               "\n(second attempt, run alone: passed)")
+                              + "\n" + err, alone[2], alone[3])
+    took = time.monotonic() - started
+
+    failed: list[str] = []
+    for path in scripts:
+        code, out, err, seconds = results[path.name]
+        try:
+            shown = str(path.relative_to(APP))
+        except ValueError:
+            shown = str(path)
+        if code == 0:
+            if args.brief:
+                print(f"PASS  {shown}  ({seconds:.1f}s)")
+            else:
+                print(f"\n=== {shown}")
+                print(out.rstrip("\n"))
+                if err.strip():
+                    print(f"--- {shown}: wrote to stderr ---")
+                    print(err.rstrip("\n"))
+            if path.name in notes:
+                print(f"note: {shown}: {notes[path.name]}")
+            continue
+        failed.append(shown)
+        print(f"\n=== {shown}  (exit {code})")
+        print(out.rstrip("\n"))
+        if err.strip():
+            print(f"--- {shown}: wrote to stderr ---")
+            print(err.rstrip("\n"))
+        print(f"FAILED: {shown} (exit {code})")
+        if path.name in notes:
+            print(f"note: {notes[path.name]}")
+    print()
+    if failed:
+        print(f"TOTAL {len(scripts) - len(failed)} of {len(scripts)} "
+              f"suites passed, {len(failed)} failed ({took:.1f}s, "
+              f"{workers} at a time)")
+        for shown in failed:
+            print(f"  {shown}")
+        return 1
+    print(f"TOTAL all {len(scripts)} suites passed ({took:.1f}s, "
+          f"{workers} at a time)")
+    print("all addon tests passed")
+    return 0
+
+
 # ============================================================== the command bar
 
 #: ``name -> (what it does, the line the help shows)`` in the order a build runs
-#: them: read the source, rebuild what is derived from it, then draw the pictures.
+#: them: run the tests, read the source, rebuild what is derived from it, then
+#: draw the pictures.
 COMMANDS: dict[str, tuple[Any, str]] = {
+    "test": (
+        cmd_test,
+        "run every addon's test script, several suites at once"),
     "check-names": (
         cmd_check_names,
         "every module read for a name nothing binds (needs pyflakes)"),
@@ -2171,7 +2353,7 @@ def main(argv: list[str] | None = None) -> int:
     found = COMMANDS.get(wanted)
     if found is None:
         # A name typed wrong is worth the list rather than a bare exit code:
-        # a workflow log that says nothing about the nine names is how a build
+        # a workflow log that says nothing about the other names is how a build
         # gets re-run three times over a hyphen.
         print(f"there is no command {argv[0]!r}\n")
         print(usage())

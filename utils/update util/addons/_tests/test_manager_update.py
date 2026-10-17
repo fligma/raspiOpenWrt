@@ -48,7 +48,9 @@ What gets looked at:
   ran, the leftover goes, nothing else moved;
 * the job machine: what Install refuses with nothing picked, with a version
   below the floor and with no file attached, the full redirect-to-swap walk
-  driven through a patched scheduler, the list re-placed afterwards without a
+  driven through a patched scheduler, a read that breaks mid-body picked up
+  from the byte it stopped at and the giving up after a few such pickups, the
+  list re-placed afterwards without a
   second read, and the schedule set up and taken down again.
 
 No internet, no GitHub and no device are needed. Run it from the Test panel,
@@ -208,15 +210,39 @@ class FakeResp:
         self.closed = True
 
 
+class FlakyResp(FakeResp):
+    """An answer that hands back ``fail_after`` bytes quietly and then breaks.
+
+    This is the failure that used to cost a whole download: the answer starts
+    normally, the wire stalls mid-body and the read raises the way a timed
+    out socket does - "The read operation timed out" being the exact words
+    the field reports.
+    """
+
+    def __init__(self, status: int, body: bytes, headers: dict | None = None,
+                 fail_after: int = 0) -> None:
+        super().__init__(status, body, headers)
+        self.left = fail_after
+
+    def read(self, amount: int = -1) -> bytes:
+        if amount is not None and amount > 0 and self.left <= 0:
+            raise OSError("The read operation timed out")
+        out = super().read(amount)
+        if amount is not None and amount > 0:
+            self.left -= len(out)
+        return out
+
+
 class FakeFetcher:
     """``_http`` answers with queued fakes; nothing ever leaves the machine."""
 
     def __init__(self, responses: list[FakeResp]) -> None:
         self.responses = list(responses)
-        self.opened: list[tuple[str, str]] = []
+        self.opened: list[tuple[str, str, dict]] = []
 
-    def open(self, host: str, path: str) -> FakeResp:
-        self.opened.append((host, path))
+    def open(self, host: str, path: str,
+             extra: dict | None = None) -> FakeResp:
+        self.opened.append((host, path, dict(extra or {})))
         return self.responses.pop(0)
 
     def close(self, host: str = "") -> None:
@@ -1179,6 +1205,63 @@ def test_the_job(upd: Any) -> None:
                   f"the list read the versions again after installing one: "
                   f"{TAILS[tails_before:]}")
 
+        print("\n17b. a read that breaks mid-body is picked up from the byte "
+              "it stopped at")
+        target.write_bytes(b"the old program")
+        upd.check_now()
+        upd.pick_row(0)
+        head_len = 4096        # the peek connect_step takes before the read loop
+        fetcher = FakeFetcher([
+            FlakyResp(200, body, {"Content-Length": str(len(body))},
+                      fail_after=head_len),
+            FakeResp(206, body[head_len:],
+                     {"Content-Length": str(len(body) - head_len)}),
+        ])
+        with patched(upd, program_path=lambda: target,
+                     staging_target=lambda name: stage / name,
+                     system_name=lambda: THE_SYSTEM,
+                     _http=lambda values: fetcher,
+                     _later=lambda seconds, callback: callback(),
+                     restart_app=lambda: None):
+            upd.update_selected()
+        check(target.read_bytes() == body,
+              "a resumed download did not land the whole program")
+        asks = [one for _h, _p, one in fetcher.opened]
+        check(len(fetcher.opened) == 2 and asks[0] == {}
+              and asks[1].get("Range") == f"bytes={head_len}-",
+              f"the pickup did not ask for the rest of the body: {fetcher.opened}")
+        check(not upd.working and upd.job is None,
+              "the resumed job left the addon working")
+
+        print("\n17c. a read that keeps breaking is picked up a few times, "
+              "then given up on")
+        target.write_bytes(b"the old program")
+        upd.check_now()
+        upd.pick_row(0)
+        fetcher2 = FakeFetcher([
+            FlakyResp(200, body, {"Content-Length": str(len(body))},
+                      fail_after=head_len),
+        ] + [FlakyResp(206, body[head_len:], fail_after=0)
+             for _n in range(upd.MAX_RESUMES)])
+        with patched(upd, program_path=lambda: target,
+                     staging_target=lambda name: stage / name,
+                     system_name=lambda: THE_SYSTEM,
+                     _http=lambda values: fetcher2,
+                     _later=lambda seconds, callback: callback(),
+                     restart_app=lambda: None):
+            upd.update_selected()
+        status = last_status(api)
+        check("broke off" in status,
+              f"a download that never stopped breaking was not given up on "
+              f"cleanly: {status!r}")
+        check(target.read_bytes() == b"the old program",
+              "a given-up download still touched the program")
+        check(not upd.working and upd.job is None,
+              "the given-up job left the addon working")
+        check(len(fetcher2.opened) == upd.MAX_RESUMES + 1,
+              f"the download was picked up the wrong number of times: "
+              f"{len(fetcher2.opened)} opens")
+
         print("\n18. going back above the keep line asks three answers, and the one "
               "that keeps the setup lands")
         target.write_bytes(b"the old program")
@@ -1672,4 +1755,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    STATUS = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # The verdict is printed: go out now, without walking Qt through the
+    # interpreter's shutdown. Its destructors run there in whatever order the
+    # garbage collection picks, and an offscreen widget suite has been seen to
+    # raise an access violation on a busy machine after all checks passed -
+    # which is how a green run turns into a 0xC0000005.
+    os._exit(STATUS)

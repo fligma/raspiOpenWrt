@@ -571,8 +571,17 @@ import sys
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, QUrl, Qt
-from PyQt6.QtGui import QDesktopServices, QIcon
+from PyQt6.QtCore import (
+    QAbstractNativeEventFilter,
+    QElapsedTimer,
+    QEvent,
+    QObject,
+    QPoint,
+    QSize,
+    QUrl,
+    Qt,
+)
+from PyQt6.QtGui import QDesktopServices, QIcon, QShowEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -738,15 +747,165 @@ if QWebEngineView is not None:
         window on its own. The view fills whatever room it is given, and
         that is the only size it should ever have asked for - both hints
         are pinned at nothing here, and the layout's own stretch keeps
-        the page as big as the tab it sits in."""
+        the page as big as the tab it sits in.
+
+        The hints are only the layout's half of the boot. The other half is
+        native: the moment this view's Chromium window is embedded the top
+        level is re-placed around it, and a window that is re-placed loses
+        its snap to a screen edge and springs back to the size it kept
+        before. A fresh view therefore arms that guard as it comes up, and
+        every address put to it arms one too (see :class:`_SnapKeeper`)."""
+
+        #: Whether this view has ever been seen: the embed disturbs a window
+        #: once in its life, so only the first showing is worth guarding.
+        _snap_armed = False
 
         def minimumSizeHint(self) -> QSize:
             return QSize(0, 0)
 
         def sizeHint(self) -> QSize:
             return QSize(0, 0)
+
+        def showEvent(self, event: QShowEvent) -> None:
+            super().showEvent(event)
+            if not self._snap_armed:
+                self._snap_armed = True
+                steady_snap(self)
+
+        def setUrl(self, url: QUrl) -> None:
+            steady_snap(self)
+            super().setUrl(url)
+
+        def setHtml(self, *args, **kwargs) -> None:
+            steady_snap(self)
+            super().setHtml(*args, **kwargs)
 else:
     QuietWebView = None
+
+
+if sys.platform == "win32":
+    import ctypes
+
+    _WM_WINDOWPOSCHANGING = 0x0046
+    _SWP_NOSIZE = 0x0001
+    _SWP_NOMOVE = 0x0002
+
+    class _MSG(ctypes.Structure):
+        _fields_ = [("hwnd", ctypes.c_void_p),
+                    ("message", ctypes.c_uint),
+                    ("wParam", ctypes.c_void_p),
+                    ("lParam", ctypes.c_void_p),
+                    ("time", ctypes.c_uint),
+                    ("pt_x", ctypes.c_long),
+                    ("pt_y", ctypes.c_long)]
+
+    class _WINDOWPOS(ctypes.Structure):
+        _fields_ = [("hwnd", ctypes.c_void_p),
+                    ("hwndInsertAfter", ctypes.c_void_p),
+                    ("x", ctypes.c_int), ("y", ctypes.c_int),
+                    ("cx", ctypes.c_int), ("cy", ctypes.c_int),
+                    ("flags", ctypes.c_uint)]
+
+
+class _SnapKeeper(QAbstractNativeEventFilter):
+    """Holds the window where the user put it while Chromium moves in.
+
+    The first view shown under a window makes QtWebEngine embed a render
+    window of its own, and that embed re-shuffles the native window the UI
+    sits in: on Windows the top level then gets a placement call for the
+    size it had before the user snapped it to a screen edge, so the snap
+    springs loose and the window jumps at the moment a browser tab opens.
+    Nothing the app asked for - it is Qt's doing at the instant of the
+    embed, and the quiet hints (QuietWebView) cannot reach it. So for one
+    breath after a view arrives every request to move or resize the top
+    level is refused at the door: the flags on WM_WINDOWPOSCHANGING gain
+    NOMOVE and NOSIZE, and Windows leaves the window exactly where it
+    was. Z-order, styles and child windows carry on untouched, the unchanged
+    geometry is reported back to Qt so the two never drift apart, and once
+    the breath is spent the window is the user's again.
+
+    Only the main window is guarded; a popout is its own story. Off Windows
+    there is no snap to lose and no message pump to watch, so this never
+    runs there - :func:`steady_snap` is where the two halves meet."""
+
+    #: How long a fresh embed is allowed to disturb the window, in
+    #: milliseconds: the shuffle is one burst, and this is a wide margin.
+    HELD_MS = 1500
+
+    def __init__(self, window: QWidget) -> None:
+        # PyQt gives this filter no parent to keep it; the window holds it
+        # by name instead (steady_snap), and hands it back on the close
+        # path - the reference and the uninstall together mean it can
+        # neither die early nor outlive the window.
+        super().__init__()
+        self._window = window
+        self._hwnd = 0
+        self._since = QElapsedTimer()
+        app = QApplication.instance()
+        if app is not None:
+            app.installNativeEventFilter(self)
+
+    def arm(self) -> None:
+        """Guard the window from now for one breath.
+
+        A maximised or fullscreen window has nothing of the kind to lose -
+        the snap this protects is the normal-state placement - and a window
+        that is not on screen yet has no native handle to watch, so both
+        leave the guard unarmed rather than half-armed."""
+        win = self._window
+        if not win.isVisible() or win.isMaximized() or win.isMinimized() \
+                or win.isFullScreen():
+            return
+        handle = win.windowHandle()
+        if handle is None:
+            return
+        self._hwnd = int(handle.winId())
+        if self._since.isValid():
+            self._since.restart()
+        else:
+            self._since.start()
+
+    def uninstall(self) -> None:
+        """Stop guarding: the application must never be left holding a
+        native filter whose window has gone; the close path calls
+        :meth:`BrowserMixin._release_snap_guard` for exactly that."""
+        app = QApplication.instance()
+        if app is not None:
+            app.removeNativeEventFilter(self)
+        self._hwnd = 0
+
+    def nativeEventFilter(self, event_type, message):  # noqa: N802 - Qt's name
+        if self._hwnd == 0 or not self._since.isValid() \
+                or self._since.elapsed() > self.HELD_MS:
+            return False, 0
+        if bytes(event_type) != b"windows_msg":
+            return False, 0
+        try:
+            msg = _MSG.from_address(int(message))
+            if msg.message != _WM_WINDOWPOSCHANGING \
+                    or int(msg.hwnd or 0) != self._hwnd:
+                return False, 0
+            pos = _WINDOWPOS.from_address(int(msg.lParam))
+            pos.flags = int(pos.flags) | _SWP_NOMOVE | _SWP_NOSIZE
+        except (OSError, ValueError, OverflowError):
+            return False, 0
+        return False, 0
+
+
+def steady_snap(widget: QWidget) -> None:
+    """Give the main window a breath of protection, now that a web view
+    under it has appeared or been given an address - the two moments the
+    embed can disturb it. See :class:`_SnapKeeper`; any other top level, and
+    every platform with no snap to lose, is left alone."""
+    if sys.platform != "win32":
+        return
+    win = widget.window()
+    if not isinstance(win, BrowserMixin):
+        return
+    keeper = getattr(win, "_snap_keeper", None)
+    if keeper is None:
+        keeper = win._snap_keeper = _SnapKeeper(win)
+    keeper.arm()
 
 
 class _CornerKeeper(QObject):
@@ -813,6 +972,15 @@ class _FirstShowLoad(QObject):
 
 class BrowserMixin:
     """Embedded browser tabs, mixed into the main window; its attributes come from ``core.window.BerryManager``."""
+
+    def _release_snap_guard(self) -> None:
+        """Take the embed guard off the window on the way down: a native
+        event filter outliving its window would be called back with a dead
+        object behind it (see :class:`_SnapKeeper`)."""
+        keeper = getattr(self, "_snap_keeper", None)
+        if keeper is not None:
+            keeper.uninstall()
+            self._snap_keeper = None
 
     def _build_web_like_tab(self, initial_url: str, title: str,
                             position: int | None = None,

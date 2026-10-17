@@ -165,6 +165,21 @@ MIN_PROGRAM_BYTES = 200_000
 #: How many redirect hops one download may follow before it is called lost.
 MAX_REDIRECTS = 8
 
+#: How many times a read that breaks mid-body is picked up from the byte it
+#: stopped at before the download is called lost, and the pause before each
+#: pickup. A twenty-megabyte program over a home connection loses a packet
+#: now and then; that used to throw away every byte already in hand.
+MAX_RESUMES = 4
+RESUME_WAIT = 0.8
+
+#: The patience a body read gets, once the answer has started. The short
+#: timeout a request wears keeps a dead API question from holding the tab,
+#: but applied to a long body it is far too impatient: a CDN that goes quiet
+#: for twenty seconds between packets is having a normal afternoon, and that
+#: is exactly the stall that read "the download broke off: The read
+#: operation timed out" and gave up.
+DOWNLOAD_READ_TIMEOUT = 90
+
 #: The oldest version the swap will go back to when the config says nothing.
 #: Below it the program predates how this addon stages and swaps a file, so a
 #: move that far back is more likely to leave a broken install than a working
@@ -897,29 +912,49 @@ class Fetcher:
 
     def get(self, host: str, path: str,
             accept: str = "application/octet-stream") -> tuple[int, bytes]:
-        """``(status, body)`` for one small GET, retried once on a drop."""
+        """``(status, body)`` for one small GET, retried before it is given up.
+
+        Three tries with a longer pause each time: a momentary refusal or a
+        dropped keep-alive used to cost a whole listing, and on the download
+        path a whole file. A 5xx is worth another ask for the same reason.
+        """
         status, body = 0, b""
-        for attempt in (0, 1):
+        for attempt in (0, 1, 2):
             try:
                 connection = self._connection(host)
                 connection.request("GET", path, headers=self.headers(accept))
                 answer = connection.getresponse()
                 body = answer.read()
                 status = int(answer.status)
-                if status < 500 or attempt:
+                if status < 500 or attempt == 2:
                     return status, body
             except (http.client.HTTPException, OSError):
                 self.close(host)
-                if attempt:
+                if attempt == 2:
                     raise
-                time.sleep(0.4)
+            time.sleep(0.4 * (attempt + 1))
         return status, body
 
-    def open(self, host: str, path: str) -> Any:
-        """One GET whose answer is handed over unread, for a large body."""
+    def open(self, host: str, path: str,
+             extra: dict | None = None) -> Any:
+        """One GET whose answer is handed over unread, for a large body.
+
+        ``extra`` adds headers to the ask - the Range of a download picked
+        up from where a broken read left off. The socket's patience goes up
+        for the body too: the short timeout that keeps a dead API question
+        from holding the tab is far too impatient for a program of many
+        megabytes, where a long quiet stretch between packets is normal.
+        """
         connection = self._connection(host)
-        connection.request("GET", path,
-                           headers=self.headers("application/octet-stream"))
+        head = self.headers("application/octet-stream")
+        head.update(extra or {})
+        try:
+            if connection.sock is None:
+                connection.connect()
+            connection.sock.settimeout(DOWNLOAD_READ_TIMEOUT)
+        except (AttributeError, OSError):
+            pass                        # the ask goes out on the old patience
+        connection.request("GET", path, headers=head)
         return connection.getresponse()
 
     def close(self, host: str = "") -> None:
@@ -2720,11 +2755,28 @@ def _progress(text: str, frac: float | None = None) -> None:
 
 
 def _bytes_line() -> str:
-    """How far the download has come, in the words the card and the console wear."""
-    got = int((job or {}).get("got") or 0)
-    total = int((job or {}).get("total") or 0)
-    return (f"downloading... {_size(got)}"
-            + (f" of {_size(total)}" if total else ""))
+    """How far the download has come and how fast, in the words the card and
+    the console wear.
+
+    The pace only appears once at least two seconds have passed since it was
+    last measured: a line that invented a speed from the first two ticks
+    would be a number that moves for no reason.
+    """
+    if job is None:
+        return "downloading..."
+    got = int(job.get("got") or 0)
+    total = int(job.get("total") or 0)
+    words = (f"downloading... {_size(got)}"
+             + (f" of {_size(total)}" if total else ""))
+    now = time.monotonic()
+    then = float(job.get("rate_at") or 0.0)
+    if now - then >= 2.0:
+        base = int(job.get("rate_got") or 0)
+        job["rate_at"], job["rate_got"] = now, got
+        per = (got - base) / (now - then)
+        if per > 0:
+            words += f" \u00b7 {_size(int(per))}/s"
+    return words
 
 
 def _begin(verb: str, values: dict, name: str = "") -> dict:
@@ -2743,7 +2795,11 @@ def _begin(verb: str, values: dict, name: str = "") -> dict:
     working = True
     job = {"verb": verb, "values": values, "host": "", "path": "",
            "response": None, "chunks": [], "got": 0, "total": 0,
-           "hops": 0, "ticks": 0, "pane": False}
+           "hops": 0, "ticks": 0, "pane": False,
+           # A broken read is picked up from where it stopped; these keep
+           # the score, and the pace the line shows is measured between
+           # the two rate marks.
+           "tries": 0, "rate_at": time.monotonic(), "rate_got": 0}
     _buttons(False)
     try:
         api.tabs.set_widget(TAB, "log", "value", "")
@@ -2848,8 +2904,14 @@ def connect_step() -> None:
         job["got"] = len(peek)
         _progress(_bytes_line())
         _later(0.0, read_step)
-    except (AddonError, http.client.HTTPException, OSError, ValueError) as error:
+    except AddonError as error:
+        # An address this addon refuses - a redirect that is not https - is
+        # not a wire that broke; asking again would say the same thing.
         _finish(f"the download could not start: {error}", bad=True)
+    except (http.client.HTTPException, OSError, ValueError) as error:
+        # A start that broke is worth the same pickup as a read that did: the
+        # job has nothing in hand yet, so the retry simply asks again.
+        resume_step(error)
 
 
 def read_step() -> None:
@@ -2872,7 +2934,98 @@ def read_step() -> None:
             return
         finish_download()
     except (http.client.HTTPException, OSError, ValueError) as error:
+        resume_step(error)
+
+
+def resume_step(error: Exception) -> None:
+    """A read that broke: pick the body up from the byte it stopped at.
+
+    Losing a packet mid-download is normal for a program of many megabytes,
+    and the old answer was to throw every byte already in hand away and call
+    the update lost. The chunks stay in the job; a fresh connection asks the
+    same address for the rest, which GitHub's download hosts answer with a
+    206 and the read carries on from there. Only reads that raise are picked
+    up: an answer that runs out quietly below what it promised is still the
+    early stop it always was.
+    """
+    if job is None:
+        return
+    tries = int(job.get("tries") or 0) + 1
+    job["tries"] = tries
+    response, job["response"] = job.get("response"), None
+    if response is not None:
+        try:
+            response.close()
+        except (http.client.HTTPException, OSError):
+            pass
+    _http(job["values"]).close(job["host"])        # a dead channel gets a new one
+    if tries > MAX_RESUMES:
         _finish(f"the download broke off: {error}", bad=True)
+        return
+    got = int(job.get("got") or 0)
+    _progress(f"the read stopped ({error}); "
+              + (f"picking it up at {_size(got)}" if got else "asking again")
+              + f", try {tries} of {MAX_RESUMES}...")
+    _later(RESUME_WAIT, reopen_step)
+
+
+def reopen_step() -> None:
+    """The same address again, for the bytes that are still missing."""
+    if job is None:
+        return
+    got = int(job.get("got") or 0)
+    extra = {"Range": f"bytes={got}-"} if got and job.get("total") else None
+    try:
+        response = _http(job["values"]).open(job["host"], job["path"], extra)
+        status = int(response.status)
+        if status in (301, 302, 303, 307, 308):
+            location = one_line(response.getheader("Location"))
+            try:
+                response.read()
+            except (http.client.HTTPException, OSError):
+                pass
+            job["hops"] += 1
+            if not location or job["hops"] > MAX_REDIRECTS:
+                _finish("the download kept being pointed somewhere else and "
+                        "was given up on", bad=True)
+                return
+            job["host"], job["path"] = split_url(location)
+            _later(0.0, reopen_step)
+            return
+        if status == 206:
+            # The rest as asked for: every byte already in hand still counts.
+            job["response"] = response
+            _later(0.0, read_step)
+            return
+        if status == 200:
+            # The far side ignored the ask and is starting the body over,
+            # so whatever was in hand goes with it - two halves of
+            # different answers are not one program.
+            if got:
+                job["chunks"], job["got"] = [], 0
+            length = one_line(response.getheader("Content-Length"))
+            if length.isdigit():
+                job["total"] = int(length)
+            job["response"] = response
+            peek = response.read(4096)
+            if not peek:
+                _finish("the download answered with nothing at all", bad=True)
+                return
+            job["chunks"] = [peek]
+            job["got"] = len(peek)
+            _progress(_bytes_line())
+            _later(0.0, read_step)
+            return
+        try:
+            response.close()
+        except (http.client.HTTPException, OSError):
+            pass
+        _finish(_refused(status, f"{job['host']}{job['path'].split('?')[0]}"),
+                bad=True)
+    except AddonError as error:
+        _finish(f"the download could not start again: {error}", bad=True)
+    except (http.client.HTTPException, OSError, ValueError) as error:
+        resume_step(error)
 
 
 def _size(count: int) -> str:
