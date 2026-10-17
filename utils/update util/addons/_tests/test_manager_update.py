@@ -513,6 +513,8 @@ def test_the_tab(upd: Any) -> None:
           f"{None if held is None else held[2]}")
 
     print("\n4. the check reads the published versions, in two requests")
+    # The floor is left at the module's own default here - nothing in this
+    # record installs anything - so the log is read against the clamp as shipped.
     del asked[:]
     upd.check_now()
     check(asked.count("tags?per_page=100") == 1
@@ -535,7 +537,7 @@ def test_the_tab(upd: Any) -> None:
           f"{[(e['tag'], e['previous']) for e in upd.published]}")
     check("berry1.6.1 is out" in last_status(api) and "1 update ahead" in last_status(api),
           f"an update out did not lead the status line: {last_status(api)!r}")
-    check("floor for going back is 1.6.0" in " ".join(api.logs),
+    check(f"floor for going back is {upd.OLDEST_ALLOWED}" in " ".join(api.logs),
           f"the log does not account for the floor: {api.logs[-2:]}")
 
 
@@ -571,7 +573,9 @@ def spec_leaf(node: Any, identifier: str) -> Any:
 
 def test_the_list_and_the_pane(upd: Any) -> None:
     print("\n5. the lines, and the pane beside them, say the same thing")
-    api = fresh(upd)
+    # The floor is pinned under the fixtures so 1.5.9 stands as the version
+    # below the line this record refuses, whatever the shipped clamp says now.
+    api = fresh(upd, config={"min_version": "1.6.0"})
     del TAILS[:]
     upd.check_now()
     # three published versions on two lines: 1.6 with two builds, 1.5 with one.
@@ -833,7 +837,7 @@ def test_the_list_and_the_pane(upd: Any) -> None:
 
 def test_the_way_back(upd: Any) -> None:
     print("\n8. going back, and the floor that says how far")
-    api = fresh(upd, version="1.6.1")
+    api = fresh(upd, version="1.6.1", config={"min_version": "1.6.0"})
     upd.check_now()
     check([entry["stance"] for entry in upd.published]
           == ["this", "older", "too old"],
@@ -1073,7 +1077,10 @@ def test_the_swap(upd: Any) -> None:
 
 def test_the_job(upd: Any) -> None:
     print("\n16. Install refuses what it has no business doing")
-    api = fresh(upd, version="1.6.0")
+    # The floor is pinned at the fixtures' own line: this record is about what
+    # the floor refuses and what the swap does, so it reads the same however far
+    # the shipped clamp has been drawn.
+    api = fresh(upd, version="1.6.0", config={"min_version": "1.6.0"})
     upd.update_selected()
     check("no version picked yet" in last_status(api),
           f"Install with nothing picked did not say so: {last_status(api)!r}")
@@ -1179,7 +1186,8 @@ def test_the_job(upd: Any) -> None:
         # published fixtures sit at 1.6.x, so it is moved down to them rather
         # than the versions being moved up to it. Its default is the clamp.
         api2 = fresh(upd, version="1.6.1",
-                     config={"keep_min_version": "1.5.0"})
+                     config={"min_version": "1.6.0",
+                             "keep_min_version": "1.5.0"})
         api2.answer("ui.dialog", {"answer": upd.KEEP_ANSWER})
         api2.answer("ui.question", True)
         upd.check_now()
@@ -1232,7 +1240,10 @@ def test_the_job(upd: Any) -> None:
 
         print("\n18a. below the keep line the middle answer is not on offer")
         target.write_bytes(b"the old program")
-        api5 = fresh(upd, version="1.6.1")      # the shipped 2.0.0 clamp holds
+        # The keep line is left at the shipped 2.0.0 clamp, which is what puts
+        # these fixtures under it; the floor is pinned at their own line so the
+        # way back reaches the question instead of the floor's refusal first.
+        api5 = fresh(upd, version="1.6.1", config={"min_version": "1.6.0"})
         api5.answer("ui.dialog", {"answer": upd.KEEP_ANSWER})
         api5.answer("ui.question", True)
         upd.check_now()
@@ -1285,7 +1296,8 @@ def test_the_job(upd: Any) -> None:
 
         print("\n18b. the third answer leaves everything where it is")
         target.write_bytes(b"the old program")
-        api3 = fresh(upd, version="1.6.1")
+        api3 = fresh(upd, version="1.6.1",
+                     config={"min_version": "1.6.0"})
         api3.answer("ui.dialog", {"answer": upd.CANCEL_ANSWER})
         upd.check_now()
         upd.pick_row(1)
@@ -1345,7 +1357,10 @@ def test_the_job(upd: Any) -> None:
                 {"id": "some_addon", "bundled": False, "running": True,
                  "enabled": True},
                 {"id": upd.OWN_ID, "bundled": False, "running": True, "enabled": True}]
-        api4 = fresh(upd, version="1.6.1")
+        # The keep line stays at the shipped 2.0.0 clamp, which is what puts
+        # these fixtures under it; the floor is pinned at their own line so the
+        # way back is refused by the clamp alone, not by the floor as well.
+        api4 = fresh(upd, version="1.6.1", config={"min_version": "1.6.0"})
         api4.answer("ui.dialog", {"answer": upd.ERASE_ANSWER})
         api4.answer("ui.question", False)      # no restart at the end of this one
         api4.answer("session.addons", rows)
