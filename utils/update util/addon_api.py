@@ -240,7 +240,9 @@ behind its swatch), ``terminal`` - all take ``id``, ``text``, ``tooltip``,
 ``style`` (a stylesheet, so an addon can style its own tab), ``enabled``,
 ``visible``, ``font_size`` (drawn at the interface zoom), ``items``, ``value``,
 ``placeholder``, ``checked``, ``minimum``,
-``maximum``, ``columns``, ``word_wrap``, ``readonly``, ``multi``, ``expand``
+``maximum``, ``columns``, ``word_wrap``, ``readonly``, ``multi``, ``icon`` (a mark
+worn beside a widget's words - a button's picture - from a file path, an SVG
+document or a base64 data URI), ``expand``
 (claim the width its row or column leaves over, so one status line can stretch
 while its neighbours keep the room their text needs).
 ``value`` sets whatever the kind holds: text, the chosen entry, the number, the
@@ -275,7 +277,9 @@ other work done over a connection of its own.
 ``terminal`` answers to ``ready`` (its connection came up), ``closed`` (it went
 down, asked for or lost) and ``failed`` (carrying the reason), and to ``bell``
 and ``title`` (the screen's own news) when it is asked for them. A ``web`` leaf
-answers to ``loaded``, carrying ``{"ok": ..., "url": ...}``.
+answers to ``loaded``, carrying ``{"ok": ..., "url": ...}``, and to ``icon``,
+carrying ``{"icon": <PNG data URI>}`` when the page it holds reports a favicon of
+its own - the way an addon puts a served page's mark on one of its buttons.
 A ``web`` leaf is the same page view an embedded tab gets, in a pane of the
 addon's own tab: its ``url``, or ``set_widget(tab, id, "url", ...)``, is the
 address, and an address given to a leaf that is not on show is held until the
@@ -932,10 +936,28 @@ _PICTURE_CACHE: dict[str, QPixmap] = {}
 _PICTURE_CACHE_MAX = 128
 
 
+def _decode_data_uri(text: str) -> bytes | None:
+    """The bytes a ``data:...;base64,`` URI holds, or nothing when it is malformed.
+
+    This is how a picture that has no file behind it - a page's own favicon, read
+    off the device and handed back to an addon - is carried as text, the one shape
+    that survives a trip to a process addon over JSON.
+    """
+    import base64
+
+    head, split, tail = text.partition(",")
+    if not split or "base64" not in head.lower():
+        return None
+    try:
+        return base64.b64decode(tail)
+    except (ValueError, TypeError):
+        return None
+
+
 def load_picture(source: Any) -> QPixmap | None:
-    """A picture out of an SVG document (as text) or an image file at a path;
-    nothing readable is ``None``, so a missing file leaves a blank, not a
-    traceback."""
+    """A picture out of an SVG document (as text), an image file at a path, or a
+    base64 ``data:`` URI; nothing readable is ``None``, so a missing file leaves a
+    blank, not a traceback."""
     from PyQt6.QtCore import QByteArray
 
     text = str("" if source is None else source).strip()
@@ -945,7 +967,15 @@ def load_picture(source: Any) -> QPixmap | None:
     if held is not None:
         return held
     image: QPixmap | None = None
-    if text.startswith(("<svg", "<?xml")):
+    if text.startswith("data:"):
+        raw = _decode_data_uri(text)
+        if raw is None:
+            return None
+        made = QPixmap()
+        if not made.loadFromData(QByteArray(raw)):
+            return None
+        image = None if made.isNull() else made
+    elif text.startswith(("<svg", "<?xml")):
         made = QPixmap()
         if not made.loadFromData(QByteArray(text.encode("utf-8")), "SVG"):
             return None
@@ -1042,6 +1072,10 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
         apply_widget_property(widget, "value", spec["value"])
     if spec.get("tooltip") is not None:
         widget.setToolTip(str(spec["tooltip"]))
+    if spec.get("icon") is not None:
+        # A button (or any mark-wearing widget) born with its picture: an SVG
+        # document, a file path or a data URI, the shapes ``set_icon`` takes.
+        apply_widget_property(widget, "icon", spec["icon"])
     if spec.get("style") is not None:
         style_sheet(widget, str(spec["style"]))
     if spec.get("object_name") is not None:
@@ -1149,6 +1183,19 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
             lambda ok, _view=widget: events(identifier, "loaded",
                                             {"ok": bool(ok),
                                              "url": _web_leaf_shown(_view)}))
+    if "icon" in names and getattr(widget, "_addon_web_load", None) is not None:
+        # The page's own favicon, as the device serves one. It is handed back as a
+        # PNG data URI - the one shape that also reaches an addon running in a
+        # process of its own - so an addon can put the dashboard's mark on a button
+        # without ever having to fetch the file itself.
+        def _page_icon(icon, _id=identifier, _emit=events):
+            uri = _icon_data_uri(icon)
+            if uri:
+                _emit(_id, "icon", {"icon": uri})
+        _page = getattr(widget, "page", None)
+        _page = _page() if callable(_page) else None
+        if _page is not None and hasattr(_page, "iconChanged"):
+            _page.iconChanged.connect(_page_icon)
     terminal = getattr(widget, "_addon_terminal", None)
     if terminal is not None:
         # A terminal's news comes from its shell thread and from the screen
@@ -2080,6 +2127,13 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
     elif prop == "image":
         if isinstance(widget, QLabel):
             set_widget_picture(widget, value)
+    elif prop == "icon":
+        # A mark worn beside a widget's own words - a button's picture - named by
+        # a file path, an SVG document or a base64 data URI, the three shapes a
+        # tab's mark already takes. An empty source clears it again.
+        if hasattr(widget, "setIcon"):
+            mark = build_icon(value)
+            widget.setIcon(mark if mark is not None else QIcon())
     elif prop in ("current", "index"):
         # Which page a ``tabs`` container shows, or a list's picked row.
         if hasattr(widget, "setCurrentRow"):
@@ -4159,11 +4213,13 @@ def app_icon_path(win: Any) -> str:
 
 
 def build_icon(source: Any, home: Path | None = None) -> QIcon | None:
-    """A tab's mark out of an SVG document (as text) or a picture file (absolute, or beside the addon's folder); anything unreadable returns None."""
+    """A tab's mark out of an SVG document (as text), a picture file (absolute, or beside the addon's folder), or a base64 data URI; anything unreadable returns None."""
     text = str("" if source is None else source).strip()
     if not text:
         return None
-    if not text.startswith(("<svg", "<?xml")):
+    if not text.startswith(("<svg", "<?xml", "data:")):
+        # A file, named absolutely or beside the addon's folder. An SVG document
+        # and a base64 data URI are already the picture, so they go straight on.
         path = Path(text)
         if not path.is_absolute() and home is not None:
             path = Path(home) / text
@@ -4174,6 +4230,30 @@ def build_icon(source: Any, home: Path | None = None) -> QIcon | None:
     image = image.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
     return None if image.isNull() else QIcon(image)
+
+
+def _icon_data_uri(icon: Any) -> str:
+    """A QIcon as a PNG data URI, or nothing when it holds no picture.
+
+    A favicon is drawn small and sent as text, so the same event reaches an addon
+    imported into the app and one running in a process of its own; ``build_icon``
+    reads the URI straight back when the addon hands it to a button.
+    """
+    import base64
+    from PyQt6.QtCore import QBuffer, QIODevice
+
+    try:
+        pixmap = icon.pixmap(32, 32)
+    except (AttributeError, RuntimeError, TypeError):
+        return ""
+    if pixmap is None or pixmap.isNull():
+        return ""
+    buffer = QBuffer()
+    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+        return ""
+    pixmap.save(buffer, "PNG")
+    buffer.close()
+    return "data:image/png;base64," + base64.b64encode(bytes(buffer.data())).decode("ascii")
 
 
 class TabsAPI:

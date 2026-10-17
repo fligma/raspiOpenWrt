@@ -89,7 +89,7 @@ ADDON = {
     # offers the machine's browser. The page is put up by itself when the device
     # answers as the dashboard and again after an install that worked, while the
     # switch on the uhttpd page is on.
-    "version": "1.5",
+    "version": "1.6",
     "author": "fligma",
     "description": "Looks for the Berry dashboard on the connected host and, when "
                    "it is not there, installs src/www_rasconf from GitHub over "
@@ -359,18 +359,21 @@ ACTION_COLORS = {"queued": "#5fb3ff", "new": "#5fb3ff", "written": "#23d18b",
                  "replaced": "#ffb020", "written again": "#ffb020",
                  "already there": "#777777"}
 
-#: The side bar's buttons: one wide column of them, the words to the left so the
-#: row of them reads as a list of places rather than a row of actions.
+#: The side bar's buttons: a narrow rail of marks, one under the next, each no
+#: wider than its icon needs. The words have gone - the picture and the tooltip
+#: say the place - so the column keeps out of the page's way rather than trading
+#: width with it. ``max-width`` holds each tile to the icon; the pane beside it is
+#: dragged wider or narrower by hand.
 NAV_STYLE = ("QPushButton { color: #c8c8c8; background-color: #1b1b1b;"
              " border: 1px solid #3c3c3c; border-radius: 6px;"
-             " padding: 7px 10px; text-align: left; }"
+             " padding: 6px; min-width: 16px; max-width: 44px; }"
              "QPushButton:hover { color: #ffffff; border-color: #7c2140; }"
              "QPushButton:disabled { color: #4a4a4a; }")
 
 #: The one that says where the tab is looking now.
 NAV_ON_STYLE = ("QPushButton { color: #ffffff; background-color: #24141a;"
                 " border: 1px solid #c51a4a; border-radius: 6px;"
-                " padding: 7px 10px; text-align: left; font-weight: 600; }")
+                " padding: 6px; min-width: 16px; max-width: 44px; }")
 
 #: A rule across the side bar, splitting the places from the page's own moves and
 #: from the other places it can be seen. There is no divider in the spec language
@@ -391,9 +394,12 @@ NAV_MOVES = (
     ("nav_recheck", "Re-check the device",
      "Ask the host what it has again; the tab's pages move to match, but the "
      "page is not put over them"),
-    ("nav_back", "\u2190", "One step back inside the page"),
-    ("nav_forward", "\u2192", "One step forward inside the page"),
-    ("nav_reload", "\u21ba", "Ask the device for the page again"),
+    ("nav_back", "Back",
+     "One step back inside the page"),
+    ("nav_forward", "Forward",
+     "One step forward inside the page"),
+    ("nav_reload", "Reload",
+     "Ask the device for the page again"),
 )
 NAV_ELSEWHERE = (
     ("nav_tab", "In a browser tab",
@@ -405,12 +411,62 @@ NAV_ELSEWHERE = (
 NAV_ITEMS = NAV_PLACES + NAV_MOVES + NAV_ELSEWHERE
 NAV_BY_ID = {identifier: (text, tip) for identifier, text, tip in NAV_ITEMS}
 
+
+def _nav_svg(inner: str) -> str:
+    """One side-bar mark: a 24-wide line drawing in the rail's own pale colour.
+
+    Kept as an SVG document rather than a file so the side bar wears its icons
+    whether or not the assets folder came along - the same trick the tab's own
+    :data:`TAB_ICON` is drawn by.
+    """
+    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"'
+            ' fill="none" stroke="#d6d6d6" stroke-width="1.6"'
+            ' stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>')
+
+
+#: Each button's picture, by id. ``nav_dash`` starts as a page on a stand and is
+#: overpainted with the dashboard's own favicon the moment the served page
+#: reports one (see :func:`dash_favicon`), so the button ends up wearing the very
+#: mark the device's tab shows.
+NAV_ICON = {
+    "nav_dash": _nav_svg('<rect x="3" y="4" width="18" height="16" rx="2"/>'
+                         '<path d="M3 8h18"/>'
+                         '<circle cx="12" cy="14" r="2.3" fill="#c51a4a"'
+                         ' stroke="none"/>'),
+    "nav_status": _nav_svg('<circle cx="12" cy="12" r="8"/>'
+                           '<path d="M12 11v5"/>'
+                           '<circle cx="12" cy="7.7" r="0.7" fill="#d6d6d6"'
+                           ' stroke="none"/>'),
+    "nav_install": _nav_svg('<path d="M12 4v9"/><path d="M8 10l4 4 4-4"/>'
+                            '<path d="M5 19h14"/>'),
+    "nav_uci": _nav_svg('<circle cx="12" cy="12" r="3"/>'
+                        '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M6 6l2 2'
+                        'M16 16l2 2M18 6l-2 2M8 16l-2 2"/>'),
+    "nav_recheck": _nav_svg('<path d="M20 12a8 8 0 1 1-2.3-5.6"/>'
+                            '<path d="M20 4v4h-4"/>'),
+    "nav_back": _nav_svg('<path d="M14 6l-6 6 6 6"/>'),
+    "nav_forward": _nav_svg('<path d="M10 6l6 6-6 6"/>'),
+    "nav_reload": _nav_svg('<path d="M4 12a8 8 0 1 0 2.3-5.6"/>'
+                           '<path d="M4 4v4h4"/>'),
+    "nav_tab": _nav_svg('<rect x="3" y="5" width="18" height="14" rx="2"/>'
+                        '<path d="M3 9h18"/><path d="M13 14h5M16 11l3 3-3 3"/>'),
+    "nav_system": _nav_svg('<circle cx="12" cy="12" r="8"/>'
+                           '<path d="M4 12h16M12 4c2.6 2.6 2.6 13 0 16'
+                           'M12 4c-2.6 2.6-2.6 13 0 16"/>'),
+}
+
 #: The three moves inside the page, which only answer while the page is up.
 NAV_PAGE_MOVES = ("nav_back", "nav_forward", "nav_reload")
 
 #: Which side-bar button stands for each page of the notebook.
 NAV_FOR_PAGE = {STATUS_PAGE: "nav_status", INSTALL_PAGE: "nav_install",
                 UHTTPD_PAGE: "nav_uci"}
+
+#: The header's own furniture - the step flow, the plan badges and the progress
+#: bar - that describes a job the forms run. None of it is anything to look at
+#: while the device's page fills the tab, so :func:`_body` stows it away and
+#: brings it back the moment the forms are shown again.
+HIDE_WITH_PAGE = ("steprow", "planrow", "bar")
 
 #: Shell chars that must never reach a command line.
 _UNSAFE = re.compile(r"[\"'`$;|&<>\\\n\r\t]")
@@ -921,6 +977,13 @@ def _body(page_up: bool) -> None:
             api.tabs.set_widget(TAB, identifier, "visible", up)
         except (AddonError, AttributeError, TypeError):
             pass
+    for identifier in HIDE_WITH_PAGE:
+        # The step flow, the plan badges and the bar describe a job run from the
+        # forms; a page that owns the whole tab has no use for them in front of it.
+        try:
+            api.tabs.set_widget(TAB, identifier, "visible", not page_up)
+        except (AddonError, AttributeError, TypeError):
+            pass
     for identifier in NAV_PAGE_MOVES:
         # Back, forwards and a reload are nothing to do while the page is behind.
         try:
@@ -1037,11 +1100,11 @@ def tab_spec(values: dict) -> dict:
             {"kind": "label", "id": "state", "text": "",
              "style": _CHIP_STYLES["gray"]},
         ]},
-        {"kind": "row", "children": steps},
+        {"kind": "row", "id": "steprow", "children": steps},
         {"kind": "label", "id": "status", "text": "Ready.", "word_wrap": True,
          "style": "color: #23d18b; padding: 2px 4px;"},
         {"kind": "progress", "id": "bar", "maximum": 100, "value": 0},
-        {"kind": "row", "children": [
+        {"kind": "row", "id": "planrow", "children": [
             {"kind": "label", "id": "sum_write", "text": "no plan yet",
              "style": _CHIP_STYLES["gray"]},
             {"kind": "label", "id": "sum_same", "text": "",
@@ -1068,9 +1131,16 @@ def tab_spec(values: dict) -> dict:
 
 
 def _nav_button(identifier: str) -> dict:
-    """One button of the side bar, from the table of what each is called."""
+    """One button of the side bar: its mark and nothing else.
+
+    The words are gone from the face of it and kept on the tooltip - name, then
+    what it does - so the rail reads as a column of icons and still says what
+    each one is when the pointer rests on it.
+    """
     text, tip = NAV_BY_ID[identifier]
-    return {"kind": "button", "id": identifier, "text": text, "tooltip": tip,
+    return {"kind": "button", "id": identifier, "text": "",
+            "icon": NAV_ICON.get(identifier, ""),
+            "tooltip": f"{text} \u2013 {tip}",
             "style": NAV_STYLE, "on": ["clicked"]}
 
 
@@ -1084,8 +1154,9 @@ def nav_spec() -> dict:
 
     It stands beside both bodies rather than inside either, so it is the one
     thing always within reach - which is what it is here for, since a page that
-    fills the tab leaves nothing else to click. The spacer underneath keeps the
-    buttons at their own height instead of stretching them down the side of it.
+    fills the tab leaves nothing else to click. Each button is a bare mark and the
+    row of them is kept to the left by a trailing spacer, so the rail is as narrow
+    as its icons and never trades width with the page beside it.
     """
     column: list[dict] = [_nav_button(one) for one, _t, _p in NAV_PLACES]
     column.append(_nav_rule())
@@ -1094,8 +1165,12 @@ def nav_spec() -> dict:
                    "children": [_nav_button(one) for one in NAV_PAGE_MOVES]})
     column.append(_nav_rule())
     column += [_nav_button(one) for one, _t, _p in NAV_ELSEWHERE]
-    column.append({"kind": "spacer"})
-    return {"kind": "column", "children": column}
+    # The rail hugs the left edge and a spacer takes what is left, so the icons
+    # keep to their own width instead of being stretched across the pane.
+    return {"kind": "row", "children": [
+        {"kind": "column", "children": column},
+        {"kind": "spacer"},
+    ]}
 
 
 def dash_spec() -> dict:
@@ -1107,7 +1182,7 @@ def dash_spec() -> dict:
     never opens the dashboard nothing at all.
     """
     return {"kind": "web", "id": "dash", "visible": False, "expand": True,
-            "on": ["loaded"],
+            "on": ["loaded", "icon"],
             "tooltip": "The page the device is serving. The side bar's Status, "
                        "Installer and uhttpd buttons put this tab's own forms "
                        "back up"}
@@ -3041,6 +3116,26 @@ def page_loaded(payload: dict) -> None:
          "the device's certificate")
 
 
+def dash_favicon(payload: dict) -> None:
+    """Wear the dashboard's own favicon on the side bar's Dashboard button.
+
+    The page says what its mark is when it loads, and the app hands it across as a
+    picture this addon can set - so the button that calls the page up shows the
+    very icon the page wears, rather than the stand-in drawn into the spec. A leaf
+    that never reports one is left with that stand-in, so nothing breaks.
+    """
+    if api is None:
+        return
+    news = payload if isinstance(payload, dict) else {}
+    icon = str(news.get("icon") or "")
+    if not icon:
+        return
+    try:
+        api.tabs.set_widget(TAB, "nav_dash", "icon", icon)
+    except (AddonError, AttributeError, TypeError):
+        pass
+
+
 # --- the buttons ---
 
 def _buttons(usable: bool) -> None:
@@ -3250,10 +3345,15 @@ def shutdown() -> None:
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     """A button on the tab, or an entry of the dashboard page's own corner
     menu, was clicked: run what its id means. The embedded page's own news -
-    that it loaded, or did not - comes back the same way."""
+    that it loaded, that it did not, or the mark it wears - comes back the same
+    way."""
     if str(tab) == TAB and str(event) == "loaded":
         if str(identifier) == "dash":
             page_loaded(payload or {})
+        return
+    if str(tab) == TAB and str(event) == "icon":
+        if str(identifier) == "dash":
+            dash_favicon(payload or {})
         return
     if str(event) != "clicked":
         return

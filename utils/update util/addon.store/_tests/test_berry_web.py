@@ -1035,6 +1035,35 @@ def test_the_side_bar() -> None:
     berry_web.on_widget(berry_web.TAB, "some other leaf", "loaded", {})
     berry_web.shutdown()
 
+    # The header's job furniture - the step flow, the plan badges and the bar -
+    # is stowed while the page owns the tab and brought back with the forms.
+    api = fresh(answer=LIVE)
+    berry_web.open_dashboard()
+    for tucked in berry_web.HIDE_WITH_PAGE:
+        check(api.last_set(tucked, "visible") is False,
+              f"{tucked} was left in front of the page that fills the tab")
+    berry_web.on_widget(berry_web.TAB, "nav_status", "clicked", {})
+    for tucked in berry_web.HIDE_WITH_PAGE:
+        check(api.last_set(tucked, "visible") is True,
+              f"{tucked} was not brought back with the forms")
+    berry_web.shutdown()
+
+    # The dashboard's own favicon, handed back by the page, wears the button.
+    api = fresh(answer=LIVE)
+    berry_web.on_widget(berry_web.TAB, "nav_dash", "clicked", {})
+    berry_web.on_widget(berry_web.TAB, "dash", "icon",
+                        {"icon": "data:image/png;base64,AAAA"})
+    check(api.last_set("nav_dash", "icon") == "data:image/png;base64,AAAA",
+          "the favicon the page reported never reached its button")
+    berry_web.on_widget(berry_web.TAB, "dash", "icon", {"icon": ""})
+    check(api.last_set("nav_dash", "icon") == "data:image/png;base64,AAAA",
+          "an empty favicon overwrote the mark that was there")
+    berry_web.on_widget(berry_web.TAB, "some other leaf", "icon",
+                        {"icon": "data:image/png;base64,BBBB"})
+    check("data:image/png;base64,BBBB" not in api.sets("nav_dash", "icon"),
+          "a leaf that is not the dashboard repainted its button")
+    berry_web.shutdown()
+
     # The bar is lit for the page that is up, and a job does not grey it out.
     api = fresh(answer=LIVE)
     berry_web.view_page(berry_web.UHTTPD_PAGE)
