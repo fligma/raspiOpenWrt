@@ -21,9 +21,9 @@
     {
       "id": "berryvm",
       "name": "BerryVM",
-      "version": "1.0",
+      "version": "2.0",
       "author": "fligma",
-      "description": "A virtual desktop in one tab: free-floating, draggable windows for Main SSH, an SFTP view, the local disk, other machines and the addon's own home folder, with text files opened in Berrypad - an editor per file that writes back where the file came from.",
+      "description": "A Windows XP-styled desktop in one tab: wallpaper, Start menu, taskbar and desktop icons, with a two-paned local + device file manager, Notepad for local and remote files, a picture viewer, a local command prompt, SSH terminals, a calculator and Display Properties for the look.",
       "filename": "berryvm.py",
       "requires": [
         "ssh",
@@ -34,7 +34,8 @@
         "berryvmicon.png"
       ],
       "icon": "berryvmicon.png",
-      "test": "test_berryvm.py"
+      "test": "test_berryvm.py",
+      "status": "updated"
     },
     {
       "id": "cert_manager",
