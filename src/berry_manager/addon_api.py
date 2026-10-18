@@ -235,7 +235,19 @@ stacks its children in one area: the first is the background and fills it, every
 one after it keeps to its own size and floats on top at the place named by its
 ``align`` (``center`` - the default - ``top``, ``bottom``, ``left``, ``right``),
 and is re-centred when the pane is resized. This is how a job's console can show
-what it is doing while the addon it is working on sits in the middle of it.
+what it is doing while the addon it is working on sits in the middle of it. A
+``windows`` container is a desktop: it lays nothing out, and instead holds
+free-floating frames the person drags by their title bar, sizes from a corner and
+shuts with a button - each one carrying a spec built into the same registry, so a
+shell or an editor inside a window is driven exactly like a control on any other
+tab. ``set_widget(tab, canvas, "open_window", {"id": ..., "title": ..., "spec":
+..., "x": ..., "y": ..., "width": ..., "height": ...})`` puts one up (a window
+whose id is already open is reused, not rebuilt, so what runs inside it keeps
+running); ``"raise_window"``, ``"move_window"``, ``"resize_window"`` and
+``"close_window"`` - each naming the window by ``"id"`` - steer it, and
+``widget_value(tab, canvas, "windows")`` reads back every open window's id. A
+``windows`` canvas answers to ``activated``, ``moved``, ``resized`` and ``closed``
+through ``on``, each carrying the window's id and its new place or size.
 ``label``, ``button``, ``line``, ``multi`` (plain text edit), ``check``,
 ``combo``, ``list``, ``tree``, ``table``, ``progress``, ``spin``, ``slider``,
 ``spacer``, ``image``, ``web``, ``color`` (a hex line with the colour wheel
@@ -376,6 +388,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -589,6 +602,15 @@ OVERLAY_ALIGN = {
 #: something to grab - and a pane folded away is only worth having if the line
 #: to pull it back is to be found.
 PANE_HANDLE = 7
+
+#: A ``windows`` canvas is a desktop: free-floating frames the person drags, sizes
+#: and shuts by hand. These are the fixed heights that frame is built from, taken
+#: at the interface zoom like a pane handle - the strip a window is dragged along
+#: by, the corner it is sized from, and the smallest a frame may be squeezed to
+#: before its own controls would disappear.
+WINDOW_TITLE = 26
+WINDOW_GRIP = 14
+WINDOW_MIN = 120
 
 #: How narrow a table column may be drawn, and where one starts when the addon
 #: pinned no width for it. Both are only a beginning: every column is dragged
@@ -1815,6 +1837,16 @@ def _build_one(spec: dict, registry: dict,
         _apply_common(holder, spec, registry, events)
         return holder
 
+    if kind == "windows":
+        # A desktop: a plain area whose children are free-floating frames the
+        # person drags by their title bar, sizes from a corner and shuts with a
+        # button - not a stack the layout lines up. Each frame carries one spec
+        # built into the same registry, so a shell or an editor inside a window
+        # is reached and driven exactly like a control on any other tab.
+        canvas = _make_windows(spec, registry, events)
+        _apply_common(canvas, spec, registry, events)
+        return canvas
+
     if kind == "tabs":
         tabs = QTabWidget()
         # Keep how to build more: a container can be handed a sub-page after
@@ -2237,6 +2269,12 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
             _tabs_add_page(widget, value)
         else:
             _tabs_remove_page(widget, value)
+    elif prop in WINDOW_PROPS:
+        # The desktop: open a free-floating window into a ``windows`` canvas,
+        # then raise, move, size or shut it. Everything is addressed by the
+        # window's own id, so the same id a later ``set_widget`` reaches its
+        # controls with is the id that steers the frame around.
+        _window_command(widget, prop, value)
     elif prop == "locked":
         # Hold a tabs container on the page it is showing: no click on its own
         # sub-bar, and no keyboard or wheel move, until it is let go. Used for a
@@ -2727,6 +2765,381 @@ def _tabs_remove_page(widget: QWidget, value: Any) -> bool:
     return True
 
 
+# --- the desktop: a ``windows`` canvas and the free-floating frames on it ---
+
+#: The ``set_widget`` properties that steer the windows of a ``windows`` canvas.
+#: Every one is sent to the canvas's own id; the window is named inside its value,
+#: so the id the addon gave a window when it opened it is the id that raises,
+#: moves, sizes or shuts it again - and, being in the tab's registry, the id that
+#: reaches the controls inside it like any other widget on the tab.
+WINDOW_PROPS = ("open_window", "close_window", "raise_window",
+                "move_window", "resize_window")
+
+
+def _windows_store(widget: QWidget) -> dict | None:
+    """The build information a ``windows`` canvas kept for itself, or ``None``."""
+    return getattr(widget, "_addon_windows", None)
+
+
+def _window_id(value: Any) -> str:
+    """The window a command names: an id on its own, or held in a dict as ``id``."""
+    if isinstance(value, dict):
+        return str(value.get("id") or "").strip()
+    return str(value or "").strip()
+
+
+def _window_size(wanted: Any, default: int) -> int:
+    """One side of a window at the interface zoom; ``default`` when it said none."""
+    try:
+        return zoom_size(max(1, int(wanted)))
+    except (TypeError, ValueError):
+        return zoom_size(default)
+
+
+def _window_position(canvas: "_WindowCanvas", entry: dict) -> tuple[int, int]:
+    """Where a new window starts. Named by the addon it goes there, zoomed; left
+    out, windows cascade from the top-left so a row of them stays grabbable."""
+    if entry.get("x") is None and entry.get("y") is None:
+        off = zoom_size(24)
+        step = int(_windows_store(canvas).get("cascade", 0)) \
+            if _windows_store(canvas) else 0
+        return (off + step * off, off + step * off)
+    return (zoom_size(int(entry.get("x") or 0)),
+            zoom_size(int(entry.get("y") or 0)))
+
+
+def _clamp_position(canvas: QWidget, width: int, height: int,
+                    x: int, y: int) -> tuple[int, int]:
+    """Keep a window on the desktop: never so far off to one side that no corner
+    of its title bar can be reached to drag it back."""
+    room = canvas.size()
+    if room.width() <= 0 or room.height() <= 0:
+        return (max(0, int(x)), max(0, int(y)))
+    keep = min(width, zoom_size(60))
+    return (max(0, min(int(x), max(0, room.width() - keep))),
+            max(0, min(int(y), max(0, room.height() - zoom_size(20)))))
+
+
+class _WindowCanvas(QWidget):
+    """The desktop area a ``windows`` container is: it lays nothing out, because
+    its children are frames the addon and the person place by hand."""
+
+    def _report(self, win_id: str, event: str, payload: dict | None) -> None:
+        """Tell the addon what a window just did, only if the canvas asked to
+        hear it - the same opt-in a control's ``on`` list gives its own news."""
+        store = _windows_store(self)
+        if store is None or str(event) not in store["asked"]:
+            return
+        emit = store.get("events")
+        if callable(emit):
+            emit(str(win_id), str(event), dict(payload or {}))
+
+
+class _WindowTitleBar(QFrame):
+    """The strip a window is dragged along by, wearing its title and a close
+    button. Everything under it is the addon's; this part the desktop draws."""
+
+    def __init__(self, frame: "_WindowFrame", title: str, closable: bool) -> None:
+        super().__init__(frame)
+        self._frame = frame
+        self._press: Any = None
+        self._origin: Any = None
+        self.setObjectName("addonWindowBar")
+        self.setFixedHeight(zoom_size(WINDOW_TITLE))
+        bar = QHBoxLayout(self)
+        bar.setContentsMargins(zoom_size(8), 0, zoom_size(4), 0)
+        bar.setSpacing(zoom_size(4))
+        label = QLabel(str(title or ""), self)
+        # Words the person should never select while grabbing the bar to move it.
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        bar.addWidget(label, 1)
+        self._label = label
+        self._close = QPushButton("\u00d7", self)
+        self._close.setFixedSize(zoom_size(18), zoom_size(18))
+        self._close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close.setToolTip("Close this window")
+        self._close.setVisible(bool(closable))
+        self._close.clicked.connect(self._frame.request_close)
+        bar.addWidget(self._close, 0)
+
+    def set_title(self, title: str) -> None:
+        self._label.setText(str(title or ""))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.globalPosition().toPoint()
+            self._origin = self._frame.pos()
+            self._frame.activate()
+            event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press is None:
+            return
+        delta = event.globalPosition().toPoint() - self._press
+        self._frame.move_to(self._origin.x() + delta.x(),
+                            self._origin.y() + delta.y(), dragged=True)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._press is None:
+            return
+        self._press = None
+        self._frame.finish_move()
+        event.accept()
+
+
+class _WindowGrip(QWidget):
+    """The bottom-right corner a window is sized from; it rides the frame's edge
+    and drags it wider or taller, the way the bar drags it along."""
+
+    def __init__(self, frame: "_WindowFrame") -> None:
+        super().__init__(frame)
+        self._frame = frame
+        self._press: Any = None
+        self._size: Any = None
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.setFixedSize(zoom_size(WINDOW_GRIP), zoom_size(WINDOW_GRIP))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.globalPosition().toPoint()
+            self._size = (self._frame.width(), self._frame.height())
+            event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press is None:
+            return
+        delta = event.globalPosition().toPoint() - self._press
+        self._frame.size_to(self._size[0] + delta.x(),
+                            self._size[1] + delta.y(), dragged=True)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._press is None:
+            return
+        self._press = None
+        self._frame.finish_resize()
+        event.accept()
+
+
+class _WindowFrame(QFrame):
+    """One floating window on a :class:`_WindowCanvas`: a title bar over a body
+    that holds whatever spec the addon opened it with. It comes to the front when
+    touched, is dragged by its bar and sized from its corner, and shuts with its
+    own button - all inside the desktop area, never as a top-level window."""
+
+    def __init__(self, canvas: "_WindowCanvas", win_id: str, title: str,
+                 content: QWidget | None, closable: bool = True,
+                 resizable: bool = True) -> None:
+        super().__init__(canvas)
+        self._canvas = canvas
+        self._win_id = str(win_id)
+        self._dragged = False
+        self._resized_flag = False
+        self.setObjectName("addonWindow")
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._bar = _WindowTitleBar(self, title, closable)
+        lay.addWidget(self._bar, 0)
+        body = QWidget(self)
+        blay = QVBoxLayout(body)
+        blay.setContentsMargins(zoom_size(6), zoom_size(6), zoom_size(6),
+                                zoom_size(6))
+        blay.addWidget(content if content is not None else QLabel("", body), 1)
+        lay.addWidget(body, 1)
+        self._grip = _WindowGrip(self)
+        self._grip.setVisible(bool(resizable))
+        self._place_grip()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place_grip()
+
+    def _place_grip(self) -> None:
+        side = self._grip.width()
+        self._grip.move(self.width() - side, self.height() - side)
+        self._grip.raise_()
+
+    def set_title(self, title: Any) -> None:
+        self._bar.set_title(title)
+
+    def activate(self) -> None:
+        """Came to the front under a hand: raise it, show it if it was stowed,
+        and tell the addon - which is how a taskbar button learns which window
+        is the live one."""
+        self.raise_()
+        if not self.isVisible():
+            self.setVisible(True)
+        self._canvas._report(self._win_id, "activated", {})
+
+    def move_to(self, x: int, y: int, dragged: bool = False) -> None:
+        self.move(*_clamp_position(self._canvas, self.width(), self.height(), x, y))
+        if dragged:
+            self._dragged = True
+
+    def finish_move(self) -> None:
+        if self._dragged:
+            self._dragged = False
+            self._canvas._report(self._win_id, "moved",
+                                 {"x": int(self.x()), "y": int(self.y())})
+
+    def size_to(self, width: int, height: int, dragged: bool = False) -> None:
+        self.resize(max(zoom_size(WINDOW_MIN), int(width)),
+                    max(zoom_size(WINDOW_MIN), int(height)))
+        if dragged:
+            self._resized_flag = True
+
+    def finish_resize(self) -> None:
+        if self._resized_flag:
+            self._resized_flag = False
+            self._canvas._report(self._win_id, "resized",
+                                 {"width": int(self.width()),
+                                  "height": int(self.height())})
+
+    def request_close(self) -> None:
+        """The window's own close button: the desktop says so, then lets go."""
+        self._canvas._report(self._win_id, "closed", {"by": "user"})
+        _windows_close(self._canvas, self._win_id)
+
+
+def _make_windows(spec: dict, registry: dict,
+                  events: Callable[[str, str, dict], None] | None) -> QWidget:
+    """Build a ``windows`` desktop: the canvas, and any window its children name.
+
+    The children here are not laid out side by side - each one is a window
+    descriptor (an ``id``, a ``title``, a place and a size and the ``spec`` it
+    carries), put on the canvas through the same door an addon opens one later.
+    """
+    canvas = _WindowCanvas()
+    wanted = spec.get("on")
+    if isinstance(wanted, (list, tuple)):
+        asked = {str(one) for one in wanted}
+    elif wanted is not None:
+        asked = {str(wanted)}
+    else:
+        asked = set()
+    canvas._addon_windows = {"registry": registry, "events": events,
+                             "frames": {}, "ids": {}, "order": [],
+                             "asked": asked, "cascade": 0}
+    canvas.setStyleSheet(scaled_sheet(
+        "#addonWindow { background: #202020; border: 1px solid #3c3c3c; }"
+        "#addonWindowBar { background: #2c2c2c; }"
+        "#addonWindowBar QLabel { color: #e6e6e6; }"
+        "#addonWindowBar QPushButton { border: none; color: #ff6b6b;"
+        " font-weight: bold; }"
+        "#addonWindowBar QPushButton:hover { background: #c51a4a;"
+        " color: #ffffff; }"))
+    for child in (spec.get("children") or []):
+        if isinstance(child, dict):
+            _windows_open(canvas, child)
+    return canvas
+
+
+def _windows_open(canvas: "_WindowCanvas", entry: Any) -> str:
+    """Put one window on the desktop, or bring back the one already there.
+
+    A window whose id is already open is *not* rebuilt: a shell or an editor
+    inside it keeps running, and opening it again only raises it and, with a new
+    title, wears that. So an addon can make each of its programs a single window
+    and have the desktop reuse it, exactly as it reuses a connection's page."""
+    store = _windows_store(canvas)
+    if store is None:
+        raise AddonError("'open_window' needs a windows canvas")
+    entry = entry if isinstance(entry, dict) else {"spec": entry}
+    win_id = str(entry.get("id") or "").strip()
+    if not win_id:
+        raise AddonError("open_window needs an id for the window")
+    existing = store["frames"].get(win_id)
+    if existing is not None:
+        if entry.get("title") is not None:
+            existing.set_title(entry.get("title"))
+        if bool(entry.get("current", True)):
+            existing.setVisible(True)
+            existing.raise_()
+        return win_id
+    registry, events = store["registry"], store["events"]
+    spec = entry.get("spec")
+    content = None
+    owned: list[str] = []
+    if isinstance(spec, dict):
+        before = set(registry)
+        content = _build_one(spec, registry, events)
+        owned = [key for key in registry if key not in before]
+    frame = _WindowFrame(canvas, win_id, str(entry.get("title") or win_id),
+                         content, bool(entry.get("closable", True)),
+                         bool(entry.get("resizable", True)))
+    width = _window_size(entry.get("width"), 520)
+    height = _window_size(entry.get("height"), 360)
+    x, y = _window_position(canvas, entry)
+    frame.resize(width, height)
+    frame.move(*_clamp_position(canvas, width, height, x, y))
+    store["frames"][win_id] = frame
+    store["ids"][win_id] = owned
+    store["order"].append(win_id)
+    store["cascade"] = int(store.get("cascade", 0)) + 1
+    registry[win_id] = frame
+    frame.setVisible(True)
+    if bool(entry.get("current", True)):
+        frame.raise_()
+    return win_id
+
+
+def _windows_close(canvas: "_WindowCanvas", win_id: str) -> bool:
+    """Take a window off the desktop: its controls leave the tab's registry, any
+    terminal inside it is stopped, and the frame itself goes."""
+    store = _windows_store(canvas)
+    if store is None:
+        raise AddonError("'close_window' needs a windows canvas")
+    win_id = str(win_id)
+    frame = store["frames"].pop(win_id, None)
+    if frame is None:
+        return False
+    for identifier in store["ids"].pop(win_id, []):
+        control = store["registry"].pop(identifier, None)
+        if _is_terminal(control):
+            _terminal_stop(control)
+    store["registry"].pop(win_id, None)
+    if win_id in store["order"]:
+        store["order"].remove(win_id)
+    frame.deleteLater()
+    return True
+
+
+def _window_command(canvas: QWidget, prop: str, value: Any) -> None:
+    """One window-management call on a ``windows`` canvas; the window is named in
+    ``value`` and steered by that id, silently for the app and reported for the
+    hand that drags, sizes or shuts."""
+    store = _windows_store(canvas)
+    if store is None:
+        raise AddonError(f"'{prop}' needs a windows canvas")
+    if prop == "open_window":
+        _windows_open(canvas, value)
+        return
+    win_id = _window_id(value)
+    if prop == "close_window":
+        _windows_close(canvas, win_id)
+        return
+    frame = store["frames"].get(win_id)
+    if frame is None:
+        raise AddonError(f"the desktop has no window {win_id!r} to {prop}")
+    entry = value if isinstance(value, dict) else {}
+    if prop == "raise_window":
+        frame.setVisible(True)
+        frame.raise_()
+    elif prop == "move_window":
+        x = frame.x() if entry.get("x") is None else zoom_size(int(entry["x"] or 0))
+        y = frame.y() if entry.get("y") is None else zoom_size(int(entry["y"] or 0))
+        frame.move_to(x, y)
+    elif prop == "resize_window":
+        w = (frame.width() if entry.get("width") is None
+             else _window_size(entry.get("width"), frame.width()))
+        h = (frame.height() if entry.get("height") is None
+             else _window_size(entry.get("height"), frame.height()))
+        frame.size_to(w, h)
+
+
 def _authorize_terminal(api: "AddonAPI", prop: str, widget: QWidget) -> None:
     """Refuse a terminal action that reaches a machine until the addon has said
     it may use SSH and has a connection of its own to do it on.
@@ -2789,6 +3202,16 @@ def read_widget_value(widget: QWidget, what: str = "value") -> Any:
         # Every caption a ``tabs`` container holds, in order.
         return [str(widget.tabText(index))
                 for index in range(widget.count())] if hasattr(widget, "tabText") else None
+    if what == "windows" and _windows_store(widget) is not None:
+        # The id of every window the desktop is holding, newest last - how an
+        # addon keeps its taskbar in step with the frames without remembering
+        # them somewhere else.
+        return list(_windows_store(widget)["order"])
+    if what == "geometry" and isinstance(widget, _WindowFrame):
+        frame = widget
+        return {"x": int(frame.x()), "y": int(frame.y()),
+                "width": int(frame.width()), "height": int(frame.height()),
+                "visible": bool(frame.isVisible())}
     if what == "sizes" and isinstance(widget, QSplitter):
         return _splitter_sizes(widget)
     if what == "panes" and isinstance(widget, QSplitter):
