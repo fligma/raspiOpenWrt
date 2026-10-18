@@ -75,7 +75,7 @@ from PyQt6.QtWidgets import (
 #: the newest ``berry`` tag - see :func:`resolve_tag` - the same way the Manager
 #: update addon does. This value is only the tag used when that ask cannot be
 #: made: an offline machine, or a fork with no releases published yet.
-APP_VERSION = "0x3.0x2.0x1"
+APP_VERSION = "0x3.0x2.0x2"
 OWNER = "fligma"
 REPO = "raspiOpenWrt"
 TAG_PREFIX = "berry"

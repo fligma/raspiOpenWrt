@@ -166,7 +166,7 @@ from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_manifest_p
 
 ADDON = {
     "name": "Berry addon store",
-    "version": "4.0",
+    "version": "4.1",
     "author": "fligma",
     "description": "Lists the addons published in the repository's addon.store "
                    "folder, downloads a chosen one into a staging folder and "
@@ -1419,12 +1419,14 @@ def addons_dir() -> Path:
 
 
 #: Folder listings remembered between rows, keyed ``folder -> [mtime_ns, names]``.
-#: A store repaint asks "is this installed" and "what is its picture" once per
-#: row; without this that is a directory scan (or three stat() calls) per row,
-#: so a few dozen addons cost a hundred-plus disk trips on every filter
-#: keystroke. One scan serves the whole pass, and the folder's own stamp moves
-#: the moment a file is added or taken away - an install that just landed is
-#: never answered from the last listing.
+#: A store repaint asks "what is its picture" once per row, and that answer is a
+#: prefix search only a listing can serve; without this a few dozen addons mean
+#: a directory scan on every filter keystroke. The stamp is a hint, not the
+#: promise it was taken for: NTFS moves a folder's stamp only on its clock's
+#: coarse tick, so a file added or taken away within one tick leaves it unmoved
+#: and the kept listing stale. What a caller finally answers is therefore
+#: confirmed by a stat on the named child, and a confirmation that fails drops
+#: the entry so the next call re-scans.
 _LISTINGS: dict[str, list] = {}
 
 
@@ -1452,8 +1454,14 @@ def installed(id_value: str) -> bool:
     name = clean_id(id_value)
     if not name:
         return False
-    names = _folder_names(addons_dir())
-    return f"{name}.exe" in names or f"{name}.bin" in names or name in names
+    folder = addons_dir()
+    # Named stats rather than the kept listing: an install made a moment ago
+    # can leave a folder's stamp unmoved (NTFS ticks coarse), and the listing
+    # then answers from the last scan. Three stats on named children are what
+    # a listing saves, and they never speak for a file the disk does not hold.
+    return ((folder / f"{name}.exe").exists()
+            or (folder / f"{name}.bin").exists()
+            or (folder / name).exists())
 
 
 def installed_version(id_value: str) -> str:
@@ -1637,7 +1645,15 @@ def cached_icon(id_value: str) -> str:
     wanted = sorted(item for item in _folder_names(folder)
                     if item.startswith(prefix)
                     and Path(item).suffix.lower() in _PICTURES)
-    return str(folder / wanted[0]) if wanted else ""
+    for item in wanted:
+        found = folder / item
+        if found.exists():
+            return str(found)
+    if wanted:
+        # The listing named a picture the disk no longer holds - the folder's
+        # stamp did not move when it was taken away - so it cannot be kept.
+        _LISTINGS.pop(str(folder), None)
+    return ""
 
 
 def fallback_icon() -> str:
