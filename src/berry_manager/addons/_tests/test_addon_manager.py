@@ -50,8 +50,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -155,11 +158,14 @@ CONFIG_WRITTEN = {"greeting": "Hey", "port": 8022, "loud": False,
 
 #: Every widget id the store's own page has always carried. The subtab wrapper is
 #: new; none of these is allowed to have moved, or the jobs, the pane and the log
-#: the store's other tests drive would be reaching at nothing.
-PAGE_ONE_IDS = ("status", "source", "delcfg", "showlog", "filter", "count",
+#: the store's other tests drive would be reaching at nothing. ``delcfg`` left the
+#: header with the end-user redesign - what Delete takes back is set on the
+#: store's Settings page only - and the card gained ``jobdetails``, the one
+#: control that pulls the folded console out from behind it.
+PAGE_ONE_IDS = ("status", "source", "showlog", "filter", "count",
                 "logpane", "list", "browse", "dicon", "dtitle", "dby", "dstate",
                 "dabout", "dfacts", "jobpane", "jobterm", "jobcard", "jobicon",
-                "jobname", "jobstep", "jobbar", "log",
+                "jobname", "jobstep", "jobbar", "jobdetails", "log",
                 "refresh", "install", "update", "delete", "sources")
 
 #: The header's ids, which belong to the page rather than to any one addon. The
@@ -465,8 +471,9 @@ def test_the_spec(store: Any) -> None:
     print("\n5. and Qt really builds both pages, and two addons' pages are not one")
     try:
         import addon_api
-        from PyQt6.QtWidgets import (QApplication, QCheckBox, QPlainTextEdit,
-                                     QPushButton, QTabWidget, QTreeWidget)
+        from PyQt6.QtWidgets import (QApplication, QCheckBox, QListWidget,
+                                     QPlainTextEdit, QPushButton, QTabWidget,
+                                     QTreeWidget)
 
         global _QT_APP
         _QT_APP = QApplication.instance() or QApplication([])
@@ -486,8 +493,8 @@ def test_the_spec(store: Any) -> None:
     check(isinstance(inner, QTabWidget) and inner.count() == 0,
           f"the manager's bar was built with pages in it rather than waiting for "
           f"the app to answer: {inner!r}")
-    check(isinstance(registry.get("list"), QTreeWidget),
-          "the store's own list is no longer the table it was")
+    check(isinstance(registry.get("list"), QListWidget),
+          "the store's own list is no longer the shelf it was")
     check("managed" not in registry and "managerpane" not in registry,
           "the old table and its splitter are still being built")
     check(isinstance(registry.get("log"), QPlainTextEdit),
@@ -1365,6 +1372,146 @@ def test_the_window_moves() -> None:
           "the switch went off and the tab still offers to leave the bar")
 
 
+#: How long a requester is told to wait for the app, and how long the fake app
+#: keeps one answer back: the wait has to run out first, since the point of the
+#: pair is an answer that arrives after nobody is asking any more.
+GIVE_UP = 0.15
+KEEP_BACK = 0.7
+
+#: The marker whose answer comes late, and the ones that follow it.
+LATE = "late"
+AFTER = 99
+AGAIN = 100
+
+#: An id of its own, so it cannot meet the id of a request the test really made.
+TWICE = 777
+
+
+def test_the_pipe(client: Any) -> None:
+    """The pipe a compiled addon answers on: ids, their owners, and a late reply.
+
+    A process addon's api is called from its dispatcher thread and from the
+    timer thread a scheduled callback runs on, while a third thread - the reader
+    - hands every answer back to whoever asked for it. Three things have to hold
+    or the addon is stuck for the rest of its life: two requests must never be
+    handed the same id, an answer that arrives after its requester gave up must
+    be dropped rather than raised, and the reader must still be there to route
+    the next line. The app is a stand-in here: the answers are written straight
+    into the client's stdin, so no child process and no Qt is needed to drive it.
+    """
+    print("\n34. the pipe a compiled addon answers on")
+    api = client.ProcessAPI("widget", "Widget")
+    lines: queue.Queue = queue.Queue()
+
+    class Stream:
+        """A stdin that hands out the lines the fake app writes and waits."""
+
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> str:
+            return lines.get()
+
+    def send(message: dict) -> bool:
+        identifier = message.get("id")
+        if identifier is None:            # a log line: the app reads it, owes nothing
+            return True
+        marker = (message.get("args") or {}).get("marker")
+
+        def answer() -> None:
+            if marker == LATE:
+                time.sleep(KEEP_BACK)     # late enough that the requester gives up
+            lines.put(json.dumps({"id": identifier, "result": marker}) + "\n")
+
+        threading.Thread(target=answer, daemon=True).start()
+        return True
+
+    api.send = send                       # type: ignore[method-assign] - the pipe
+    real_stdin, real_wait = sys.stdin, client.REPLY_TIMEOUT
+    sys.stdin = Stream()
+    api.reader = threading.Thread(target=api.read_loop, daemon=True)
+    api.reader.start()
+    try:
+        asked = list(range(1, 41))        # every id asked once, from many threads
+        got: list[Any] = []
+        stranded: list[str] = []
+
+        def ask(marker: int) -> None:
+            try:
+                got.append(api.request("peers.info", named={"marker": marker}))
+            except Exception as error:    # noqa: BLE001 - the verdict is the point
+                stranded.append(f"{marker}: {error}")
+
+        workers = [threading.Thread(target=ask, args=(marker,), daemon=True)
+                   for marker in asked]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(20)
+        check(not stranded, f"a request over the pipe did not come back: {stranded}")
+        check(sorted(got) == asked,
+              f"an answer reached the wrong requester: {sorted(got)}")
+        check(api.reader.is_alive(), "the reader thread died routing those replies")
+        check(not api.pending,
+              f"a finished request left its queue behind: {list(api.pending)}")
+
+        # a line with no id of an asking request is the dispatcher's, not a crash
+        lines.put(json.dumps({"op": "event", "name": "tick", "payload": {}}) + "\n")
+        try:
+            pushed = api.inbox.get(timeout=5)
+        except queue.Empty:
+            pushed = {}
+        check(pushed.get("name") == "tick",
+              f"an event line was not passed on: {pushed}")
+
+        # Two lines answering one id is what a shared id comes to: the counter and
+        # the map of waiters were not taken together, so two requests could be
+        # written under one number and the app would then answer that number twice.
+        # The second answer has no waiter, and a reader parked on a queue that is
+        # already full - or reaching for one the requester has just taken away -
+        # is an addon that never routes another reply for the rest of its life.
+        held_out: queue.Queue = queue.Queue(maxsize=1)
+        api.pending[TWICE] = held_out
+        for _ in range(2):
+            lines.put(json.dumps({"id": TWICE, "result": TWICE}) + "\n")
+        time.sleep(0.2)                 # both lines have been read by now
+        check(api.reader.is_alive(),
+              "the reader died routing when a second answer came for an id "
+              "that had already been answered")
+        again = api.request("peers.info", named={"marker": AGAIN})
+        check(again == AGAIN,
+              "the pipe stopped answering after one answer too many")
+        check(held_out.qsize() == 1,
+              f"an id answered twice gave its requester both answers: {held_out.qsize()}")
+        check(not api.pending,
+              f"the second answer left the map with an entry in it: {list(api.pending)}")
+
+        # an answer that comes after the requester gave up must not stop the reader
+        client.REPLY_TIMEOUT = GIVE_UP
+        try:
+            kept: list[str] = []
+            try:
+                api.request("peers.info", named={"marker": LATE})
+                kept.append("an answer that never came in time was taken for one")
+            except client.AddonError as error:
+                if "in time" not in str(error):
+                    kept.append(str(error))
+            except Exception as error:    # noqa: BLE001 - the wrong failure
+                kept.append(repr(error))
+            check(not kept, f"a request the app did not answer was not reported: {kept}")
+            check(not api.pending,
+                  f"a timed-out request left its queue behind: {list(api.pending)}")
+            time.sleep(KEEP_BACK + 0.3)   # the late answer lands in the meantime
+            check(api.reader.is_alive(),
+                  "the reader died on an answer that arrived after the wait ran out")
+            back = api.request("peers.info", named={"marker": AFTER})
+            check(back == AFTER, "the pipe stopped answering once a reply was late")
+        finally:
+            client.REPLY_TIMEOUT = real_wait
+    finally:
+        sys.stdin = real_stdin
+
+
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         # The Test pane wants it live; and a Windows console often speaks
@@ -1384,6 +1531,7 @@ def main() -> int:
     test_the_rows_from_the_app()
     test_the_button_in_settings()
     test_the_window_moves()
+    test_the_pipe(addon_client)
 
     if FAILURES:
         print()

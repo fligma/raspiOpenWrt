@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -1099,6 +1100,138 @@ def test_the_swap(upd: Any) -> None:
                   f"a missing staged file said the wrong thing: {error}")
 
 
+# --- five b: the script that finishes a folder update, run for real ---
+
+#: A pid that is not on the machine: the updater's first job is to wait for this
+#: copy to close, and a test has no reason to wait for anything.
+GONE_PID = 999999
+
+
+def _updater_text(upd: Any, system: str) -> str:
+    """The updater script of one system, with its last step made harmless.
+
+    Both scripts end by starting the new program; here the program files are
+    text pretending to be programs, so that one line is swapped for an echo and
+    everything else is exactly what an update writes out and runs.
+    """
+    if system == "windows":
+        return upd._windows_updater().replace('start "" ', "echo started ")
+    return upd._unix_updater().replace('"$APP/$DEST" >/dev/null 2>&1 &',
+                                       'echo started "$APP/$DEST"')
+
+
+def _run_updater(upd: Any, system: str, base: Path, app: Path,
+                 staged: Path, program: str) -> None:
+    """Write one system's updater and run it the way arm_folder_update does."""
+    helper = base / ("berry_update.bat" if system == "windows"
+                     else "berry_update.sh")
+    helper.write_text(_updater_text(upd, system),
+                      encoding="mbcs" if system == "windows" else "utf-8")
+    if system != "windows":
+        helper.chmod(0o755)
+    arguments = (["cmd", "/c", str(helper)] if system == "windows"
+                 else ["/bin/sh", str(helper)])
+    subprocess.run([*arguments, str(GONE_PID), str(app), program, program,
+                    str(staged), str(helper)],
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=60,
+                   creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                                  if system == "windows" else 0))
+
+
+def _build_pair(base: Path, tag: str, program: str) -> tuple[Path, Path]:
+    """An installed one-dir build and a staged new one, each file saying which."""
+    app, staged = base / "app", base / "staged"
+    for root, marker in ((app, tag), (staged, f"{tag} new")):
+        (root / upd_INTERNAL).mkdir(parents=True)
+        (root / upd_INTERNAL / "one.dll").write_text(marker, encoding="utf-8")
+        (root / program).write_text(f"{marker} program", encoding="utf-8")
+    return app, staged
+
+
+upd_INTERNAL = "_internal"
+
+
+def test_the_updater_script(upd: Any) -> None:
+    """The script an armed folder update runs after this copy closes.
+
+    Nothing else in the addon moves a live program: the whole swap happens in
+    this text, in a process that outlives the test, so it is run here for real
+    rather than read. Two things it must never do: leave the two halves of a
+    swap side by side, and take away what it was going to put back. Both have
+    happened - the first because a move that was not checked still let the new
+    build be filed *inside* the old ``_internal``, the second because the roll
+    back deleted the live ``_internal`` to make room for a moved-aside copy that
+    had never been made.
+    """
+    print("\n15b. the script that finishes a folder update")
+    here = "windows" if os.name == "nt" else "linux"
+    other = "linux" if here == "windows" else "windows"
+    program = SYSTEM_FILE[here]
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        app, staged = _build_pair(base, "one", program)
+        _run_updater(upd, here, base, app, staged, program)
+        tree = {p.relative_to(app).as_posix():
+                p.read_text(encoding="utf-8")
+                for p in app.rglob("*") if p.is_file()}
+        check(tree.get(f"{upd_INTERNAL}/one.dll") == "one new"
+              and tree.get(program) == "one new program",
+              f"the swap did not land the staged build: {tree}")
+        check(not any(".old" in part for part in tree),
+              f"the moved-aside copies were left beside the new one: {tree}")
+        check(not staged.exists(),
+              "the staged build was left on disk after it landed")
+
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        app, staged = _build_pair(base, "two", program)
+        (staged / program).unlink()           # a build that cannot be completed
+        _run_updater(upd, here, base, app, staged, program)
+        tree = {p.relative_to(app).as_posix():
+                p.read_text(encoding="utf-8")
+                for p in app.rglob("*") if p.is_file()}
+        check(tree.get(f"{upd_INTERNAL}/one.dll") == "two"
+              and tree.get(program) == "two program",
+              f"a swap that could not be finished did not give the old build "
+              f"back whole: {tree}")
+        check(not any(".old" in part for part in tree),
+              f"the roll back left an aside copy standing: {tree}")
+        look(f"what the refused swap left: {sorted(tree)}")
+
+    if here == "windows":
+        # A library still held is the case the first version got wrong: the
+        # aside is refused, and nothing may be deleted after that.
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            app, staged = _build_pair(base, "three", program)
+            held = (app / upd_INTERNAL / "one.dll").open("rb")
+            try:
+                _run_updater(upd, here, base, app, staged, program)
+            finally:
+                held.close()
+            names = sorted(p.relative_to(app).as_posix() for p in app.rglob("*"))
+            check(names == sorted([program, f"{upd_INTERNAL}",
+                                   f"{upd_INTERNAL}/one.dll"]),
+                  f"a refused aside did not leave the live build alone: {names}")
+    else:
+        look("the held-library aside cannot be refused on this system, so that "
+             "half of the story is told by the Windows runner")
+
+    # The script this machine cannot run still has to answer for itself.
+    text = _updater_text(upd, other)
+    checks = sum(1 for line in text.splitlines() if "errorlevel 1" in line
+                 or "if !" in line or "|| exit" in line or "|| true" in line)
+    check(checks >= 3,
+          f"the {other} updater asks nothing to check after it moves: "
+          f"{checks} guard(s)")
+    if other == "windows":
+        check("timeout /t" not in text,
+              "the wait loop is back to a sleep that refuses redirected input")
+        check("ping -n" in text,
+              "the wait loop has no pause of any kind in it")
+
+
 # --- six: what Install refuses, and the job all the way through ---
 
 def test_the_job(upd: Any) -> None:
@@ -1630,6 +1763,21 @@ def test_the_job_view(upd: Any) -> None:
                   f"{last_set(api, 'jobname', 'text')!r}")
             check(bool(last_set(api, "jobicon", "image")),
                   "the card wears no mark of its own")
+            # the console is there but folded: the card alone is up, and only
+            # the card's own button pulls the terminal out from behind it
+            check(last_set(api, "jobterm", "visible") is False
+                  and str(last_set(api, "jobdetails", "text")) == "Show details",
+                  f"the job put its console up unasked: "
+                  f"{last_set(api, 'jobterm', 'visible')!r} / "
+                  f"{last_set(api, 'jobdetails', 'text')!r}")
+            upd.on_widget(upd.TAB, "jobdetails", "clicked", {})
+            check(last_set(api, "jobterm", "visible") is True
+                  and str(last_set(api, "jobdetails", "text")) == "Hide details",
+                  "pressing Show details did not open the console")
+            upd.on_widget(upd.TAB, "jobdetails", "clicked", {})
+            check(last_set(api, "jobterm", "visible") is False
+                  and str(last_set(api, "jobdetails", "text")) == "Show details",
+                  "pressing Hide details did not fold the console back away")
 
             # the answer's head is the first line on the screen, in both places
             steps.pop(0)()                      # connect_step, by hand
@@ -1696,7 +1844,8 @@ def test_the_job_view(upd: Any) -> None:
         check(not [arguments for where, arguments, _n in api2.calls
                    if where == "tabs.set_widget" and len(arguments) >= 3
                    and arguments[1] in ("jobterm", "jobcard", "jobicon",
-                                        "jobname", "jobstep", "jobbar")],
+                                        "jobname", "jobstep", "jobbar",
+                                        "jobdetails")],
               "a job with no pane wrote to the console and card that are not there")
         check(not api2.called("ui.progress_notice")
               and not api2.called("tabs.lock"),
@@ -1742,6 +1891,7 @@ def main() -> int:
         test_the_schedule(upd)
         test_the_bytes(upd)
         test_the_swap(upd)
+        test_the_updater_script(upd)
         test_the_job(upd)
         test_the_job_view(upd)
 

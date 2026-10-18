@@ -243,9 +243,17 @@ shell or an editor inside a window is driven exactly like a control on any other
 tab. ``set_widget(tab, canvas, "open_window", {"id": ..., "title": ..., "spec":
 ..., "x": ..., "y": ..., "width": ..., "height": ...})`` puts one up (a window
 whose id is already open is reused, not rebuilt, so what runs inside it keeps
-running); ``"raise_window"``, ``"move_window"``, ``"resize_window"`` and
-``"close_window"`` - each naming the window by ``"id"`` - steer it, and
-``widget_value(tab, canvas, "windows")`` reads back every open window's id. A
+running); ``"raise_window"``, ``"move_window"``, ``"resize_window"``,
+``"lower_window"`` and ``"close_window"`` - each naming the window by ``"id"`` -
+steer it, and ``widget_value(tab, canvas, "windows")`` reads back every open
+window's id, while ``widget_value(tab, canvas, "zorder")`` reads the same ids
+front to back as they actually stand. A window may be opened with ``"lower":
+True`` to set it behind the rest from its first showing, with ``"chrome":
+False`` to draw it with no title bar at all - the plain floor an icon layer
+wants - and with ``"min_size": [w, h]`` or ``"min_width"``/``"min_height"`` -
+in unscaled pixels, like the window's own ``width`` - to give it a floor a
+hand cannot drag it under, which is what lets an icon layer fill a desktop
+without losing itself. A
 ``windows`` canvas answers to ``activated``, ``moved``, ``resized`` and ``closed``
 through ``on``, each carrying the window's id and its new place or size.
 ``label``, ``button``, ``line``, ``multi`` (plain text edit), ``check``,
@@ -271,6 +279,15 @@ text - the same two shapes a tab's ``set_icon`` takes. Nothing there is an error
 the leaf goes blank rather than showing a path to the user.
 A ``list`` entry may be a bare string or ``{"text": ..., "icon": ...}``, so one
 row can wear a mark of its own.
+A ``list`` that says ``"grid": True`` is laid out as tiles instead of rows - the
+way a store shelf spreads its apps - with the picture above the words. ``icon_size``
+is the tile's picture in pixels at 100% zoom (sixty-four by default) and
+``tile_width`` pins the room each tile claims across, so the columns fall out of
+the pane's width instead of a hand; ``spacing`` is the gap between tiles. Tiles
+cannot be dragged about, and a ``rows`` write lays them out exactly as it lays a
+``table``'s rows: the first cell names the tile under its picture, the rest read
+as its lines of detail, and a pick or a right-click comes back with the same
+``text`` (the name alone) and ``cells`` a table row would carry.
 A ``multi`` may name a ``highlight`` language (``python``, ``json``, ``html``,
 ``css``, ``javascript``, ``ini``) for syntax colors; change it later with
 ``set_widget(tab, id, "highlight", lang)``.
@@ -288,7 +305,9 @@ is attached to (never the password) and ``"grid"`` its shape. It needs
 ``"requires": ["ssh"]`` and ``"connection": "own"`` in the manifest, like any
 other work done over a connection of its own.
 ``on`` lists the events sent back to the addon: ``clicked``, ``toggled``,
-``changed``, ``returned``, ``selected`` and, for a ``table``/``tree``/``list``,
+``changed``, ``returned``, ``selected``, ``activated`` (a double-click on a
+``list``/``table``/``tree`` row, carrying that row's ``text`` and ``cells``)
+and, for a ``table``/``tree``/``list``,
 ``context`` (a right-click, carrying the text of the row under the cursor). A
 ``terminal`` answers to ``ready`` (its connection came up), ``closed`` (it went
 down, asked for or lost) and ``failed`` (carrying the reason), and to ``bell``
@@ -398,6 +417,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QListView,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
@@ -1177,6 +1197,26 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
                 "checked": item.checkState(_col) == Qt.CheckState.Checked,
                 "cells": _row_cells(item)})
         widget.itemChanged.connect(_row_toggled)
+    if "toggled" in names and isinstance(widget, QListWidget) \
+            and getattr(widget, "_addon_grid", None) is not None:
+        # A tile's tick flipped by hand, in a grid that lays its rows down
+        # with "check": the same report a table row gives, so an addon acts
+        # on the entry without a second round trip. A repaint sets the ticks
+        # behind the silent flag and is never reported.
+        def _tile_toggled(item, _col):
+            if getattr(widget, "_addon_check_silent", False):
+                return
+            if not item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                return
+            stored = item.data(Qt.ItemDataRole.UserRole)
+            cells = ([str(cell) for cell in stored]
+                     if isinstance(stored, (list, tuple))
+                     else [str(item.text() or "").split("\n")[0]])
+            events(identifier, "toggled", {
+                "text": cells[0] if cells else "",
+                "checked": item.checkState(0) == Qt.CheckState.Checked,
+                "cells": cells})
+        widget.itemChanged.connect(_tile_toggled)
     if "returned" in names and isinstance(widget, QLineEdit):
         widget.returnPressed.connect(lambda: emit("returned"))
     if "changed" in names:
@@ -1213,18 +1253,53 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
             widget.customContextMenuRequested.connect(
                 lambda pos: events(identifier, "context", {"text": _context_text(
                     widget.itemAt(pos))}))
+    if "activated" in names and isinstance(widget, QListWidget):
+        # A double-click on a tile or line: the item comes back in the shape
+        # a pick reports - first line in ``text``, whole row in ``cells`` -
+        # so an addon opens what the person pointed at without a second trip.
+        def _list_activated(item):
+            label = str(item.text() or "").split("\n")[0]
+            stored = item.data(Qt.ItemDataRole.UserRole)
+            events(identifier, "activated", {
+                "row": widget.row(item), "text": label,
+                "cells": ([str(cell) for cell in stored]
+                          if isinstance(stored, (list, tuple)) else [label])})
+        widget.itemDoubleClicked.connect(_list_activated)
+    if "activated" in names and isinstance(widget, QTreeWidget):
+        widget.itemDoubleClicked.connect(
+            lambda item, _col=0: events(identifier, "activated", {
+                "text": item.text(0), "cells": _row_cells(item)}))
     if "selected" in names:
         if isinstance(widget, QListWidget):
-            widget.itemSelectionChanged.connect(
-                lambda: events(identifier, "selected",
-                               {"rows": [widget.row(item) for item in widget.selectedItems()],
-                                "texts": [item.text() for item in widget.selectedItems()]}))
+            def _list_selection():
+                # A grid reports a pick in the same shape a table does - the
+                # name alone in ``text``, the whole row in ``cells`` - so one
+                # addon handler reads both shelves; ``rows`` and ``texts``
+                # stay for the lists that were laid out before tiles.
+                chosen = widget.selectedItems()
+                texts = [str(item.text() or "") for item in chosen]
+                payload: dict[str, Any] = {
+                    "rows": [widget.row(item) for item in chosen],
+                    "texts": texts,
+                    "count": len(chosen),
+                    "text": texts[0].split("\n")[0] if texts else ""}
+                if chosen:
+                    stored = chosen[0].data(Qt.ItemDataRole.UserRole)
+                    payload["cells"] = ([str(cell) for cell in stored]
+                                         if isinstance(stored, (list, tuple))
+                                         else [payload["text"]])
+                events(identifier, "selected", payload)
+            widget.itemSelectionChanged.connect(_list_selection)
         elif isinstance(widget, QTreeWidget):
             widget.itemSelectionChanged.connect(
                 lambda: events(identifier, "selected", _tree_selection(widget)))
-            widget.itemDoubleClicked.connect(
-                lambda item, _col=0: events(identifier, "selected", {
-                    "text": item.text(0), "cells": _row_cells(item)}))
+            if "activated" not in names:
+                # Without its own double-click event a double-click reports
+                # as a plain pick, which is what addons written before
+                # ``activated`` learned to expect.
+                widget.itemDoubleClicked.connect(
+                    lambda item, _col=0: events(identifier, "selected", {
+                        "text": item.text(0), "cells": _row_cells(item)}))
     if "loaded" in names and getattr(widget, "_addon_web_load", None) is not None:
         # A page's own news: whether it came up and what it ended up at, since
         # a redirect or a refused certificate moves it off the address that was
@@ -1287,12 +1362,19 @@ def _tree_selection(widget: QTreeWidget) -> dict:
 
 
 def _context_text(item: Any) -> str:
-    """The first-column label of the row a right-click landed on, or nothing."""
+    """The first-column label of the row a right-click landed on, or nothing.
+
+    A tree row's label is read by column; a list tile's is the item's whole
+    text, and its ``text()`` takes no argument at all, so both shapes answer
+    through whichever call the item actually has."""
     if item is None:
         return ""
     getter = getattr(item, "text", None)
     if callable(getter):
-        return str(getter(0) or "")
+        try:
+            return str(getter(0) or "")
+        except TypeError:                        # a list item takes no column
+            return str(getter() or "")
     return str(getattr(item, "text", "") or "")
 
 
@@ -1945,6 +2027,38 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         listing.setSelectionMode(
             QListWidget.SelectionMode.ExtendedSelection
             if spec.get("multi") else QListWidget.SelectionMode.SingleSelection)
+        if spec.get("grid"):
+            # Tiles, the way a store shelf lays its apps out: a picture over
+            # its words, one press to pick it. The tiles do not drift when
+            # nudged and do not keep a hidden second dimension - the grid
+            # re-flows its columns when the pane is moved and never grows a
+            # bar sideways to scroll words nobody asked to hide.
+            side = zoom_size(int(spec.get("icon_size") or 64))
+            listing.setViewMode(QListView.ViewMode.IconMode)
+            listing.setIconSize(QSize(side, side))
+            listing.setWordWrap(True)
+            listing.setTextElideMode(Qt.TextElideMode.ElideNone)
+            listing.setResizeMode(QListView.ResizeMode.Adjust)
+            listing.setMovement(QListView.Movement.Static)
+            listing.setUniformItemSizes(True)
+            listing.setSpacing(zoom_size(int(spec.get("spacing") or 12)))
+            listing.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            wide = int(spec.get("tile_width") or 0)
+            if wide:
+                listing.setGridSize(QSize(zoom_size(wide),
+                                          side + zoom_size(56)))
+            listing._addon_grid = {"icon": side, "tile": wide}
+        if spec.get("checkbox") is not None:
+            # The column a tile's tick lives in; a grid has one column of
+            # its own, and rows laid down with "check" become user-tickable
+            # through it. See _place_grid_tile and the toggled event.
+            listing._addon_check_column = 0
+        asked = spec.get("on")
+        names = {str(one) for one in
+                 (asked if isinstance(asked, (list, tuple)) else [asked or ""])}
+        if "context" in names:
+            listing.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         return listing
     if kind == "tree":
         tree = QTreeWidget()
@@ -2218,6 +2332,7 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
             widget.setCurrentIndex(int(value or 0))
     elif prop == "rows":
         silent = getattr(widget, "_addon_check_column", None) is not None
+        grid = getattr(widget, "_addon_grid", None) is not None
         if silent:
             # Laying rows down sets each tick, which fires itemChanged; the
             # table must not report those as the user flipping them.
@@ -2226,7 +2341,10 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
             if hasattr(widget, "clear"):
                 widget.clear()
             for row in value or []:
-                _place_row(widget, row, None)
+                if grid:
+                    _place_grid_tile(widget, row)
+                else:
+                    _place_row(widget, row, None)
         finally:
             if silent:
                 widget._addon_check_silent = False
@@ -2399,6 +2517,46 @@ def _place_row(widget: QWidget, row: Any, parent: QTreeWidgetItem | None) -> Non
         _place_row(widget, child, item)
     if open_it:
         item.setExpanded(True)
+
+
+def _place_grid_tile(listing: QListWidget, row: Any) -> None:
+    """Lay one row down as a tile in a grid ``list``.
+
+    The shapes are the ones a ``table`` row already takes - cells, a colour,
+    a picture, an optional tick - but stacked instead of spread sideways:
+    the first cell names the tile under its picture and the rest read as its
+    lines of detail. The cells ride on the item itself, so a pick or a tick
+    comes back through the events with the whole row beside the name, and
+    the addon needs no second round trip to know what was touched.
+    """
+    data = row if isinstance(row, dict) else {}
+    cells = data.get("cells")
+    if not isinstance(cells, (list, tuple)):
+        cells = [str(data.get("text", "")) if data
+                 else str("" if row is None else row)]
+    lines = [str(cell) for cell in cells]
+    item = QListWidgetItem("\n".join(line for line in lines if line))
+    mark = data.get("icon")
+    if mark:
+        icon = build_icon(mark)
+        if icon is not None:
+            item.setIcon(icon)
+    tint = data.get("color")
+    if tint:
+        paint = QColor(str(tint))
+        if paint.isValid():
+            item.setForeground(QBrush(paint))
+    tip = data.get("tip") or data.get("tooltip")
+    if tip:
+        item.setToolTip(str(tip))
+    item.setData(Qt.ItemDataRole.UserRole, lines)
+    if "check" in data:
+        # Only a tile that says so wears a tick: the store switches the
+        # addons it can act on and leaves the rest plain.
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(0, Qt.CheckState.Checked if data.get("check")
+                           else Qt.CheckState.Unchecked)
+    listing.addItem(item)
 
 
 # --- a terminal's own connection, and sub-pages built after the fact ---
@@ -2773,12 +2931,44 @@ def _tabs_remove_page(widget: QWidget, value: Any) -> bool:
 #: moves, sizes or shuts it again - and, being in the tab's registry, the id that
 #: reaches the controls inside it like any other widget on the tab.
 WINDOW_PROPS = ("open_window", "close_window", "raise_window",
-                "move_window", "resize_window")
+                "move_window", "resize_window", "lower_window")
 
 
 def _windows_store(widget: QWidget) -> dict | None:
     """The build information a ``windows`` canvas kept for itself, or ``None``."""
     return getattr(widget, "_addon_windows", None)
+
+
+def _window_minimum(frame: "_WindowFrame", entry: dict) -> None:
+    """Give a frame the floor its icon layer or dialog needs to be drawn with.
+
+    An entry may name ``min_size`` for both sides or ``min_width``/``min_height``
+    for one; each is in unscaled pixels, like a window's own ``width``. A frame
+    with no floor keeps Qt's, which is its contents' - enough for a form, not
+    for a desktop of icons that must stay wide when the person drags it."""
+    want_w = want_h = None
+    pair = entry.get("min_size")
+    if isinstance(pair, (list, tuple)) and len(pair) == 2:
+        want_w, want_h = pair
+    elif isinstance(pair, (int, float)):
+        want_w = want_h = pair
+    want_w = entry.get("min_width", want_w)
+    want_h = entry.get("min_height", want_h)
+    floor = (zoom_size(WINDOW_MIN), zoom_size(WINDOW_MIN))
+    have = frame.minimumSize()
+    low = (have.width(), have.height())
+    if have.width() <= 0 or have.height() <= 0:
+        low = floor
+    out = list(low)
+    for index, wanted in ((0, want_w), (1, want_h)):
+        if wanted is None:
+            continue
+        try:
+            side = zoom_size(max(1, int(wanted)))
+        except (TypeError, ValueError):
+            continue
+        out[index] = max(floor[index], min(out[index], side))
+    frame.setMinimumSize(out[0], out[1])
 
 
 def _window_id(value: Any) -> str:
@@ -2930,7 +3120,7 @@ class _WindowFrame(QFrame):
 
     def __init__(self, canvas: "_WindowCanvas", win_id: str, title: str,
                  content: QWidget | None, closable: bool = True,
-                 resizable: bool = True) -> None:
+                 resizable: bool = True, chrome: bool = True) -> None:
         super().__init__(canvas)
         self._canvas = canvas
         self._win_id = str(win_id)
@@ -2942,11 +3132,15 @@ class _WindowFrame(QFrame):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         self._bar = _WindowTitleBar(self, title, closable)
+        # A chromeless frame is the desktop's own floor: no title bar to
+        # drag and no margins stealing the corner pixels from what sits
+        # on it. An icon layer is opened this way and styled away.
+        self._bar.setVisible(bool(chrome))
         lay.addWidget(self._bar, 0)
         body = QWidget(self)
         blay = QVBoxLayout(body)
-        blay.setContentsMargins(zoom_size(6), zoom_size(6), zoom_size(6),
-                                zoom_size(6))
+        edge = 0 if not chrome else zoom_size(6)
+        blay.setContentsMargins(edge, edge, edge, edge)
         blay.addWidget(content if content is not None else QLabel("", body), 1)
         lay.addWidget(body, 1)
         self._grip = _WindowGrip(self)
@@ -3069,7 +3263,9 @@ def _windows_open(canvas: "_WindowCanvas", entry: Any) -> str:
         owned = [key for key in registry if key not in before]
     frame = _WindowFrame(canvas, win_id, str(entry.get("title") or win_id),
                          content, bool(entry.get("closable", True)),
-                         bool(entry.get("resizable", True)))
+                         bool(entry.get("resizable", True)),
+                         bool(entry.get("chrome", True)))
+    _window_minimum(frame, entry)
     width = _window_size(entry.get("width"), 520)
     height = _window_size(entry.get("height"), 360)
     x, y = _window_position(canvas, entry)
@@ -3081,7 +3277,9 @@ def _windows_open(canvas: "_WindowCanvas", entry: Any) -> str:
     store["cascade"] = int(store.get("cascade", 0)) + 1
     registry[win_id] = frame
     frame.setVisible(True)
-    if bool(entry.get("current", True)):
+    if bool(entry.get("lower", False)):
+        frame.lower()
+    elif bool(entry.get("current", True)):
         frame.raise_()
     return win_id
 
@@ -3138,6 +3336,13 @@ def _window_command(canvas: QWidget, prop: str, value: Any) -> None:
         h = (frame.height() if entry.get("height") is None
              else _window_size(entry.get("height"), frame.height()))
         frame.size_to(w, h)
+        _window_minimum(frame, entry)
+        frame.resize(max(frame.minimumWidth(), w),
+                     max(frame.minimumHeight(), h))
+    elif prop == "lower_window":
+        # Behind every other window: what lets an icon layer go back under
+        # the frames it should sit behind, the way a desktop does.
+        frame.lower()
 
 
 def _authorize_terminal(api: "AddonAPI", prop: str, widget: QWidget) -> None:
@@ -3207,6 +3412,18 @@ def read_widget_value(widget: QWidget, what: str = "value") -> Any:
         # addon keeps its taskbar in step with the frames without remembering
         # them somewhere else.
         return list(_windows_store(widget)["order"])
+    if what == "zorder" and _windows_store(widget) is not None:
+        # The same ids front to back, which is not the order they were opened:
+        # an addon that stacks a desktop paints its icon layer from this.
+        # Qt does not expose its stacking order, so the frames' own places
+        # stand in for it - a layer kept at the desktop's top-left corner
+        # reads as the back of the stack, which is what it is lowered to be.
+        store = _windows_store(widget)
+        tops = [frame for frame in widget.findChildren(_WindowFrame)
+                if frame.isVisible()]
+        tops.sort(key=lambda frame: (frame.pos().y(), frame.pos().x()))
+        front = [str(frame._win_id) for frame in reversed(tops)]
+        return [one for one in front if one in store["frames"]]
     if what == "geometry" and isinstance(widget, _WindowFrame):
         frame = widget
         return {"x": int(frame.x()), "y": int(frame.y()),

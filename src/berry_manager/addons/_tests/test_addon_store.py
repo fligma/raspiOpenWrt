@@ -293,35 +293,36 @@ def test_the_tab(store: Any) -> None:
 # --- three: the header and the two panes really are put where they are said ---
 
 def test_the_layout(store: Any) -> None:
-    """Qt builds the header, the filter line, the list with its pane, and the log."""
-    print("\n3b. the status line, the list, its detail pane and the log are put as promised")
+    """Qt builds the header, the filter line, the tile shelf with its pane, and the log."""
+    print("\n3b. the status line, the shelf, its detail pane and the log are put as promised")
     global _QT_APP
     try:
         import addon_api
         from PyQt6.QtCore import Qt
-        from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QLineEdit,
-                                     QPlainTextEdit, QProgressBar, QSplitter,
-                                     QTreeWidget)
+        from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel,
+                                     QLineEdit, QListView, QListWidget,
+                                     QPlainTextEdit, QProgressBar, QPushButton,
+                                     QSplitter, QTreeWidget)
 
         _QT_APP = QApplication.instance() or QApplication([])
     except Exception as error:                      # noqa: BLE001 - Qt is optional
         look(f"no Qt here, so the layout itself is not built: {error}")
         return
     _body, registry = addon_api.build_spec(store.tab_spec())
-    table = registry.get("list")
+    shelf = registry.get("list")
     log = registry.get("log")
-    check(isinstance(table, QTreeWidget) and isinstance(log, QPlainTextEdit),
-          f"the tab built no list and no log: {table!r} / {log!r}")
-    if not isinstance(table, QTreeWidget) or not isinstance(log, QPlainTextEdit):
+    check(isinstance(shelf, QListWidget) and isinstance(log, QPlainTextEdit),
+          f"the tab built no list and no log: {shelf!r} / {log!r}")
+    if not isinstance(shelf, QListWidget) or not isinstance(log, QPlainTextEdit):
         return
-    bar = table.parentWidget()
+    bar = shelf.parentWidget()
     check(isinstance(bar, QSplitter)
           and bar.orientation() == Qt.Orientation.Horizontal and bar.count() == 2,
-          f"the list is not one side of a horizontal splitter: {bar!r}")
+          f"the shelf is not one side of a horizontal splitter: {bar!r}")
     pane = bar.widget(1) if isinstance(bar, QSplitter) else None
     check(pane is not None and not isinstance(pane, QSplitter)
           and pane.findChild(QTreeWidget) is not None,
-          f"the detail pane beside the list is not the pair it was said to be: {pane!r}")
+          f"the detail pane beside the shelf is not the pair it was said to be: {pane!r}")
     # The browsing panes are only half of what sits above the log: the job's own
     # console is laid over them, so the two are held in a column and that column
     # is what the vertical splitter carries.
@@ -346,6 +347,18 @@ def test_the_layout(store: Any) -> None:
     term = registry.get("jobterm")
     check(term is not None and getattr(term, "_addon_terminal", None) is not None,
           f"the job has no terminal to show its work in: {term!r}")
+    # The console is there but folded: a job says only what its card wears
+    # until somebody presses the card's own button.
+    check((spec_of(store.tab_spec(), "jobterm") or {}).get("visible") is False,
+          "the job's console is promised up before anyone asked for it")
+    check(term is not None and not term.isVisible(),
+          "the job's console is built open on a tab that is only being browsed")
+    details = registry.get("jobdetails")
+    check(isinstance(details, QPushButton)
+          and str(details.text()) == "Show details",
+          f"the card does not offer its console behind a plain word: {details!r}")
+    check((spec_of(store.tab_spec(), "jobdetails") or {}).get("on") == ["clicked"],
+          "the card's details button does not report being pressed")
     card = registry.get("jobcard")
     check(card is not None and shown is not None
           and card.parentWidget() is shown and card is not term,
@@ -373,13 +386,17 @@ def test_the_layout(store: Any) -> None:
     check(header is not None and len(header.findChildren(QLabel)) == 3,
           f"the header is not just title, status and chip: "
           f"{header.findChildren(QLabel) if header is not None else None}")
-    # The delete-settings box is in the header too, beside the chip, and it is
-    # the one thing up there the addon has to hear about when it is moved.
-    box = registry.get("delcfg")
+    # The delete-settings box has left the header: what Delete takes back is
+    # set on the store's Settings page only, and the one switch left up there
+    # is the box that pulls the log out of its fold - the only thing an
+    # end user is asked to decide while they are browsing.
+    check(registry.get("delcfg") is None,
+          "the header still wears the delete-settings switch")
+    box = registry.get("showlog")
     check(isinstance(box, QCheckBox) and header is not None
           and box is header.findChild(QCheckBox),
           f"the header carries no check box beside the source: {box!r}")
-    check((spec_of(store.tab_spec(), "delcfg") or {}).get("on") == ["toggled"],
+    check((spec_of(store.tab_spec(), "showlog") or {}).get("on") == ["toggled"],
           "the check box does not report the tick being moved")
     # It has to claim the width the other two leave over, or a spacer would take
     # the slack and a long report would be squeezed into a narrow column.
@@ -403,26 +420,27 @@ def test_the_layout(store: Any) -> None:
     for ident in ("dtitle", "dby", "dstate"):
         check(isinstance(registry.get(ident), QLabel),
               f"the pane is missing its own {ident}")
-    labels = [table.headerItem().text(column) for column in range(table.columnCount())]
-    check(labels == list(store.LIST_COLUMNS),
-          f"the columns are not in the promised order: {labels}")
-    # How wide a column is drawn is the platform's business - its font, its
-    # style, its dots per inch - so the promise is read from the spec and the
-    # widget is only asked not to render a pinned column narrower than it was
-    # told: a style grows a section, it does not ignore one that was pinned.
-    asked = (spec_of(store.tab_spec(), "list") or {}).get("col_widths") or []
-    check(len(asked) == 3 and asked[1] > 0 and asked[2] > asked[1],
-          f"the list pins no room for a version and more for how it stands: "
-          f"{asked}")
-    widths = [table.columnWidth(column) for column in range(table.columnCount())]
-    check(all(width >= asked[column]
-              for column, width in enumerate(widths) if column < len(asked)),
-          f"a column was drawn narrower than the tab pinned for it: {asked} / "
-          f"{widths}")
-    look(f"{sys.platform} laid the list out at {widths}")
+    # The shelf lays its addons as tiles: a picture over the words, static,
+    # re-flowing its columns with the pane - the way a store spreads its apps.
+    check(shelf.viewMode() == QListView.ViewMode.IconMode
+          and shelf.movement() == QListView.Movement.Static
+          and shelf.resizeMode() == QListView.ResizeMode.Adjust
+          and shelf.uniformItemSizes() and shelf.wordWrap(),
+          f"the store list is not laid out as a tile shelf: "
+          f"{shelf.viewMode()!r} / {shelf.movement()!r}")
+    asked = spec_of(store.tab_spec(), "list") or {}
+    check(asked.get("grid") is True
+          and int(asked.get("icon_size") or 0) >= 32
+          and int(asked.get("tile_width") or 0) >= 120,
+          f"the shelf promises no tiles of a readable size: {asked}")
+    side = shelf.iconSize().width()
+    check(side >= 32, f"the tiles were drawn with no room for a picture: "
+                      f"{shelf.iconSize()!r}")
+    look(f"{sys.platform} laid the shelf out at {side}px pictures, "
+         f"{shelf.gridSize().width()}px tiles")
 
 
-# --- three a: the pane beside the list, the filter over it, the pictures ---
+# --- three a: the pane beside the shelf, the filter over it, the pictures ---
 
 def test_the_pane(store: Any) -> None:
     """What picking a row shows, what the filter leaves, and where a picture comes from.
@@ -650,7 +668,7 @@ def test_the_updates(store: Any) -> None:
     real_dir = store.addons_dir
     real_entries, real_updates = store.entries, store.updates
     real_begin, real_python = store._begin_job, store._ensure_python
-    real_dev, real_compile = store._dev, store._compile
+    real_dev, real_download = store._dev, store._download_all
     try:
         with tempfile.TemporaryDirectory() as where:
             folder = Path(where)
@@ -738,19 +756,14 @@ def test_the_updates(store: Any) -> None:
             check("declined" in last_status(api),
                   f"a refused update still went ahead: {last_status(api)!r}")
 
-            # say yes, and the job that starts is an update remembering its version
+            # say yes, and the job that starts is an update remembering its
+            # versions, opening on the phase that downloads the whole batch
             api.answer("ui.question", True)
             began: list = []
 
             def fake_begin(verb, items):
                 began.append((verb, (items[0] or {}).get("id")))
-                store.job = {"verb": verb, "values": {}, "source": "",
-                             "stream": None, "on_ok": None, "fail": "",
-                             "lines": [], "harness": None, "widened": False,
-                             "details": {}, "id": "", "queue": list(items),
-                             "total": len(items), "done": 0, "restore": {},
-                             "did": []}
-                return store.job
+                return real_begin(verb, items)
             store._begin_job = fake_begin
             store._ensure_python = lambda: "python"
 
@@ -759,16 +772,18 @@ def test_the_updates(store: Any) -> None:
                 def pyinstaller_ready():
                     return True, ""
             store._dev = lambda: _Ready()
-            compiled: list = []
-            store._compile = lambda ident: compiled.append(ident)
+            downloaded: list = []
+            store._download_all = lambda: downloaded.append(
+                [entry["id"] for entry in (store.job or {}).get("queue") or []])
             api.calls.clear()
             store.update_selected()
             check(began == [("update", "hello_store")],
                   f"a going update did not begin as an update job: {began}")
-            check(compiled == ["hello_store"],
-                  f"the accepted update did not reach the compile: {compiled}")
-            check(store.job.get("id") == "hello_store"
-                  and store.job.get("from_version") == "0.9",
+            check(downloaded == [["hello_store"]],
+                  f"the accepted update did not open on its batch downloads: "
+                  f"{downloaded}")
+            check(store.job.get("total") == 1
+                  and store.job.get("from_versions", {}).get("hello_store") == "0.9",
                   f"the job did not remember what it was updating from: {store.job}")
             # the switch is only stopped when the app says the addon is really
             # running here: the stub answers that nothing is installed, so the
@@ -779,7 +794,7 @@ def test_the_updates(store: Any) -> None:
         store.addons_dir = real_dir
         store.entries, store.updates = real_entries, real_updates
         store._begin_job, store._ensure_python = real_begin, real_python
-        store._dev, store._compile = real_dev, real_compile
+        store._dev, store._download_all = real_dev, real_download
         store.job = None
         store.working = False
         store.shutdown()
@@ -801,9 +816,9 @@ def test_the_switches(store: Any) -> None:
     real_dir = store.addons_dir
     real_entries, real_updates = store.entries, store.updates
     real_begin_job, real_python = store._begin_job, store._ensure_python
-    real_dev, real_compile = store._dev, store._compile
+    real_dev, real_download = store._dev, store._download_all
     real_tidy, real_reload = store._tidy, store._reload
-    real_start, real_show = store._start_next, store.show_entries
+    real_start, real_show = store._start_job, store.show_entries
     try:
         with tempfile.TemporaryDirectory() as where:
             folder = Path(where)
@@ -970,7 +985,7 @@ def test_the_switches(store: Any) -> None:
             api.answer("tabs.widget_value",
                        ["Hello from the store  \u25cf new", "Odd"])
             api.answer("ui.question", True)
-            compiled: list = []
+            phases: list = []
             store._ensure_python = lambda: "python"
 
             class _Ready:
@@ -978,31 +993,32 @@ def test_the_switches(store: Any) -> None:
                 def pyinstaller_ready():
                     return True, ""
             store._dev = lambda: _Ready()
-            store._compile = lambda ident: compiled.append(ident)
+            store._download_all = lambda: phases.append(
+                [entry["id"] for entry in (store.job or {}).get("queue") or []])
             api.calls.clear()
             store.install_selected()
             check(store.job is not None and store.job.get("total") == 2
-                  and [entry["id"] for entry in store.job["queue"]] == ["odd_id"],
-                  f"the batch did not start with the second addon queued: "
+                  and [entry["id"] for entry in store.job["queue"]]
+                  == ["hello_store", "odd_id"],
+                  f"the batch did not hold the whole pick for its downloads: "
                   f"{store.job}")
             check("install starting" in last_status(api),
                   f"the page never heard the job begin: {last_status(api)!r}")
-            check(compiled == ["hello_store"],
-                  f"the batch did not set the first addon building: {compiled}")
+            check(phases == [["hello_store", "odd_id"]],
+                  f"the batch did not open on the whole queue's downloads: "
+                  f"{phases}")
             check([arguments for where, arguments, _n in api.calls
                    if where == "ui.question"]
                   and api.calls and "Install 2 addons" in
                   str([a for _w, a, _n in api.calls if _w == "ui.question"][-1][1]),
                   "a two-addon install asked per addon, or not at all")
 
-            # and the queue goes on from a finished addon; only its last one
-            # ends the job and asks for the rescan
-            started: list = []
+            # and the batch lands addon by addon as its builds finish: each
+            # install step places one program on its own, and only the batch's
+            # own ending closes the job and asks for the rescan
             reloads: list = []
             store._tidy = lambda ident: None
             store._reload = lambda: reloads.append("reload")
-            store._start_next = lambda: started.append(
-                [entry["id"] for entry in (store.job or {}).get("queue") or []])
 
             class _Step:
                 def staged_name(self, ident, onefile, root=None):
@@ -1018,15 +1034,19 @@ def test_the_switches(store: Any) -> None:
             store._dev = lambda: _Step()
             api.calls.clear()
             store._install_step("hello_store")
-            check(started == [["odd_id"]] and store.job is not None
-                  and store.job["done"] == 1,
-                  f"the first addon of the batch did not hand on to the next: "
-                  f"{started} / {store.job}")
+            check(store.job is not None and store.job["done"] == 1
+                  and store.job["did"] == ["hello_store"],
+                  f"the batch's first addon did not land on its own step: "
+                  f"{store.job}")
             check(not reloads,
                   "the rescan came before the batch's last addon")
-            store._start_next = real_start
-            store.job["queue"] = []
             store._install_step("odd_id")
+            check(store.job is not None
+                  and store.job["did"] == ["hello_store", "odd_id"],
+                  f"the batch's last addon did not land on its own step: "
+                  f"{store.job}")
+            api.calls.clear()
+            store._finish_all()
             check("installed 2 addons - hello_store, odd_id" in last_status(api),
                   f"the batch did not end by naming what it installed: "
                   f"{last_status(api)!r}")
@@ -1051,7 +1071,7 @@ def test_the_switches(store: Any) -> None:
             began: list = []
             store._begin_job = lambda verb, items: (
                 began.append((verb, [entry["id"] for entry in items])), None)[1]
-            store._start_next = lambda: None
+            store._start_job = lambda: None
             api.calls.clear()
             store.update_selected()
             check(began == [("update", ["hello_store", "odd_id"])],
@@ -1065,9 +1085,120 @@ def test_the_switches(store: Any) -> None:
         store.addons_dir = real_dir
         store.entries, store.updates = real_entries, real_updates
         store._begin_job, store._ensure_python = real_begin_job, real_python
-        store._dev, store._compile = real_dev, real_compile
+        store._dev, store._download_all = real_dev, real_download
         store._tidy, store._reload = real_tidy, real_reload
-        store._start_next, store.show_entries = real_start, real_show
+        store._start_job, store.show_entries = real_start, real_show
+        store.job = None
+        store.working = False
+        store.shutdown()
+
+
+def test_the_batch_order(store: Any) -> None:
+    """The batch's own order: every download, then the gates, then threes.
+
+    The install used to walk the picked addons one at a time - one addon's
+    whole download, test and compile before the next was even fetched. This
+    drives the phases themselves: the whole queue staged to disk before the
+    first gate opens, the builds kept to three at a time with a finished one
+    handing its slot to the next waiting addon, and a build that dies taking
+    its siblings down rather than leaving them printing to nobody.
+    """
+    print("\n5h. the batch's phases: every download, then gates, then threes")
+    api = fresh(store)
+    real = (store.job, store._stage_entry, store._start_tests,
+            store._begin_build, store._install_step, store._finish_all,
+            store.harness_folder, store._reset_staging)
+    slots: dict = {}
+    try:
+        hello = {"id": "hello_store", "name": "Hello"}
+        odd = {"id": "odd_id", "name": "Odd"}
+
+        class _SlotStream:
+            """A build process the test finishes by hand, slot by slot."""
+
+            def __init__(self, ident: str) -> None:
+                self.ident = ident
+                self.finished = False
+                self.code = 0
+                self.killed = False
+
+            def start(self) -> None:
+                pass
+
+            def drain(self, limit: int = 400) -> list:
+                return []
+
+            def kill(self) -> None:
+                self.killed = True
+
+        def batch(items: list) -> dict:
+            """A job dict whole enough for every phase to walk over."""
+            return {"verb": "install", "values": {}, "source": "",
+                    "stream": None, "on_ok": None, "fail": "", "lines": [],
+                    "harness": None, "widened": False, "details": {},
+                    "console": False, "id": "", "queue": list(items),
+                    "phase": "", "staged": {}, "waiting": [], "building": {},
+                    "test_ids": [], "test_at": 0, "from_versions": {},
+                    "total": len(items), "done": 0, "restore": {},
+                    "did": [], "pane": False}
+
+        # one: every file of the whole batch lands before the first gate opens
+        staged: list = []
+        gates: list = []
+        store._reset_staging = lambda id_value="": None
+        store.harness_folder = lambda values: ROOT
+        store._stage_entry = lambda entry: (staged.append(entry["id"]), "")[1]
+        store._start_tests = lambda: gates.append(list(staged))
+        store.job = batch([hello, odd])
+        store._download_all()
+        check(staged == ["hello_store", "odd_id"],
+              f"the download phase did not take the whole queue first: {staged}")
+        check(gates == [["hello_store", "odd_id"]],
+              f"the gates did not open after every download: {gates}")
+
+        # two: the builds keep to three at a time, and a finished one hands
+        # its slot to the next waiting addon rather than ending the batch
+        started: list = []
+
+        def fake_begin(ident: str) -> None:
+            made = _SlotStream(ident)
+            slots[ident] = made
+            store.job["building"][ident] = {"stream": made, "lines": [],
+                                            "fail": f"{ident} failed"}
+            started.append(ident)
+        landed: list = []
+        store._begin_build = fake_begin
+        store._install_step = lambda ident: landed.append(ident)
+        store._finish_all = lambda: landed.append("end")
+        ids = [f"a{n}" for n in range(5)]
+        store.job = batch([{"id": one} for one in ids])
+        store.job["test_ids"] = list(ids)
+        store._start_builds()
+        check(started == ["a0", "a1", "a2"],
+              f"the batch did not open exactly three builds: {started}")
+        slots["a0"].finished = True
+        store._poll_builds()
+        check(landed == ["a0"] and started == ["a0", "a1", "a2", "a3"],
+              f"a finished build did not hand its slot on: {landed} / {started}")
+        check(store.job is not None and "a4" in store.job["waiting"],
+              "the batch ended while a build and a waiting addon remained")
+
+        # three: a build that dies ends the whole job and takes its siblings
+        # down with it - nobody is left to read what they go on printing
+        slots["a1"].finished = True
+        slots["a1"].code = 1
+        api.calls.clear()
+        store._poll_builds()
+        check(store.job is None and not store.working,
+              "a failed build left the batch running")
+        check(slots["a2"].killed and slots["a3"].killed,
+              "a failed build left its siblings compiling")
+        check("a1 failed" in last_status(api),
+              f"the failed build did not say so: {last_status(api)!r}")
+    finally:
+        (store.job, store._stage_entry, store._start_tests,
+         store._begin_build, store._install_step, store._finish_all,
+         store.harness_folder, store._reset_staging) = real
         store.job = None
         store.working = False
         store.shutdown()
@@ -1662,7 +1793,10 @@ def test_the_harness(store: Any) -> None:
             # a program with nothing on disk asks for both, from the app's folder
             store._dev = lambda: _FrozenDev()
             found = store.harness_folder(dict(main))
-            check([name for name, _folder in fetched] == list(store.HARNESS_FILES),
+            # Both are asked for at once, so which lands first is the network's
+            # business; what matters is that neither was left out.
+            check({name for name, _folder in fetched} == set(store.HARNESS_FILES)
+                  and len(fetched) == len(store.HARNESS_FILES),
                   f"both modules were not fetched: {fetched}")
             check({folder for _name, folder in fetched} == {store.app_folder(main)},
                   f"the modules were looked for in the store folder, not the app's: "
@@ -1898,7 +2032,7 @@ def test_the_pip_fallback(store: Any) -> None:
         check("ended" in asked[-1] and "pip" in asked[-1]["ended"].lower(),
               f"giving up said nothing about pip: {asked[-1]}")
 
-        # a pip that goes through simply carries on to the compile
+        # a pip that goes through simply carries on to the batch downloads
         asked.clear()
         def clean(command, cwd, on_ok, env=None, fail="", on_bad=None):
             asked.append({"command": command})
@@ -1914,17 +2048,17 @@ def test_the_pip_fallback(store: Any) -> None:
             def forget_interpreter() -> None:
                 pass
         real_dev = store._dev
-        real_compile = store._compile
+        real_download = store._download_all
         store._stream = clean
         store._dev = lambda: Ready
-        store._compile = lambda id_value: asked.append({"compiled": id_value})
+        store._download_all = lambda: asked.append({"downloaded": True})
         try:
             store.job["id"] = "widget"
             store._pip_install("python")
-            check(any("compiled" in item for item in asked),
-                  f"a clean install did not carry on to the compile: {asked}")
+            check(any("downloaded" in item for item in asked),
+                  f"a clean pip did not carry on to the batch downloads: {asked}")
         finally:
-            store._compile = real_compile
+            store._download_all = real_download
             store._dev = real_dev
     finally:
         store._stream = real_stream
@@ -1933,6 +2067,22 @@ def test_the_pip_fallback(store: Any) -> None:
 
 
 # --- eight: where an install leaves its work, and what it must not touch after ---
+
+class _IdleStream:
+    """A build process stood in for: it prints nothing and ends clean."""
+
+    finished = True
+    code = 0
+
+    def start(self) -> None:
+        pass
+
+    def drain(self, limit: int = 400) -> list:
+        return []
+
+    def kill(self) -> None:
+        pass
+
 
 class _BuildDev:
     """The dev machinery as the store sees it, with nothing really compiled."""
@@ -2003,6 +2153,12 @@ class _BuildDev:
         target.write_text("x", encoding="utf-8")
         return target
 
+    def _Stream(self, command, cwd=None, env=None):
+        """The process a build is started as: watched, never really run."""
+        self.seen["command"] = list(command)
+        self.seen["cwd"] = cwd
+        return _IdleStream()
+
 
 class _FakeApp:
     """The two app calls an install ends with, recorded instead of carried out.
@@ -2049,17 +2205,13 @@ def test_the_install(store: Any) -> None:
             addons = data / "addons"
             store.addons_dir = lambda: addons
 
-            # the build is asked for inside the store's own data folder
-            streamed: dict = {}
-
-            def watch(command, cwd, on_ok, env=None, fail="", on_bad=None):
-                streamed["command"] = command
-                streamed["cwd"] = cwd
-            store._stream = watch
+            # the build is asked for inside the store's own data folder, and
+            # taken up as a slot of its own - a batch may have three in flight
             dist = build / "widget" / "dist"
             dev = _BuildDev(dist, addons)
             store._dev = lambda: dev
-            store.job = {"values": {}, "harness": ROOT}
+            store.job = {"values": {}, "harness": ROOT, "building": {},
+                         "total": 1, "done": 0}
             source = data / "widget.py"
             source.write_text("x", encoding="utf-8")
             store._build("widget", source)
@@ -2071,14 +2223,19 @@ def test_the_install(store: Any) -> None:
             check(dev.seen.get("paths") == [str(ROOT)],
                   f"the build was not told where the modules a launcher imports are: "
                   f"{dev.seen.get('paths')!r}")
-            check(Path(streamed.get("cwd", "/")) == build / "widget",
-                  f"PyInstaller ran from elsewhere: {streamed.get('cwd')!r}")
+            check(Path(dev.seen.get("cwd", "/")) == build / "widget",
+                  f"PyInstaller ran from elsewhere: {dev.seen.get('cwd')!r}")
+            slot = store.job["building"].get("widget") or {}
+            check(slot.get("stream") is not None,
+                  f"the build was not taken up as a slot the batch can drain: "
+                  f"{store.job['building']}")
 
             # the finished program: copied, cleared, marked off, and only then
             # the rescan, which takes the api away from the running code
             dist.mkdir(parents=True)
-            (stage / "assets").mkdir(parents=True)
-            (stage / "assets" / "pic.png").write_text("x", encoding="utf-8")
+            (stage / "widget" / "assets").mkdir(parents=True)
+            (stage / "widget" / "assets" / "pic.png").write_text(
+                "x", encoding="utf-8")
             (dist / "widget").mkdir()
             (dist / "widget" / "widget.exe").write_text("x", encoding="utf-8")
             order: list[str] = []
@@ -2101,7 +2258,11 @@ def test_the_install(store: Any) -> None:
             api.calls.clear()
             broken: list[str] = []
             try:
+                # the build ended clean: the step places this addon's program,
+                # and the batch's own ending closes the job and asks for the
+                # rescan
                 store._install_step("widget")
+                store._finish_all()
             except Exception as error:                  # noqa: BLE001 - the crash itself
                 broken.append(f"{type(error).__name__}: {error}")
             check(not broken, f"the install could not finish itself: {broken}")
@@ -2125,8 +2286,9 @@ def test_the_install(store: Any) -> None:
                   f"the profile was not told to keep it off: {manager.written}")
             check(not (build / "widget").exists(),
                   "the build folder was left behind next to the installed program")
-            check(stage.is_dir() and not any(stage.iterdir()),
-                  f"the downloads were left in staging: {list(stage.iterdir())}")
+            left = sorted(p.name for p in (stage / "widget").iterdir())
+            check(stage.is_dir() and not left,
+                  f"the addon's downloads were left in its staging folder: {left}")
 
             # and it said what it had installed, in the two places the app looks
             keeps = store.addon_data_folder("widget")
@@ -2550,8 +2712,9 @@ def test_the_pictures(store: Any) -> None:
             store.say = lambda text, bad=False: words.append((str(text), bool(bad)))
             store.note = lambda text: words.append((str(text), False))
             store._finish = lambda text, bad=False: ended.append((str(text), bool(bad)))
-            store._maybe_test = lambda id_value, source, test_path: reached.append(
-                (id_value, str(test_path) if test_path else None))
+            store._maybe_test = lambda id_value, source, test_path, then=None: (
+                reached.append(
+                    (id_value, str(test_path) if test_path else None)))
 
             def only_the_source(values: dict, remote: str, target: Path,
                                 folder: str | None = None) -> str:
@@ -2561,17 +2724,24 @@ def test_the_pictures(store: Any) -> None:
                 Path(target).write_text("# addon\n", encoding="utf-8")
                 return ""
             store._fetch_file = only_the_source
-            store.job = {"values": store.source_values(store.MAIN_SOURCE)}
-            store._compile("hello_store")
+            store.job = {"verb": "install", "id": "", "source": "",
+                         "values": store.source_values(store.MAIN_SOURCE),
+                         "queue": [hello], "total": 1, "done": 0, "did": [],
+                         "restore": {}, "staged": {}, "waiting": [],
+                         "building": {}, "test_ids": [], "test_at": 0,
+                         "from_versions": {}, "harness": None, "lines": [],
+                         "widened": False, "details": {}}
+            store._download_all()
             check(not [pair for pair in ended if pair[1]],
                   f"a picture that would not download refused the install: {ended}")
             check(len(reached) == 1 and reached[0][0] == "hello_store"
                   and str(reached[0][1] or "").endswith("test_hello_store.py"),
-                  f"the install stopped before the addon was compiled: {reached}")
-            check((data / "staging" / "hello_store.py").is_file(),
-                  "the addon's own file did not make it into staging")
-            check(not (data / "staging" / "assets").exists(),
-                  "an asset that was not fetched was still left in the staging folder")
+                  f"the download phase stopped before the addon's gate: {reached}")
+            check((data / "staging" / "hello_store" / "hello_store.py").is_file(),
+                  "the addon's own file did not make it into its staging folder")
+            check(not (data / "staging" / "hello_store" / "assets").exists(),
+                  "an asset that was not fetched was still left in the staging "
+                  "folder")
             said = " ".join(text for text, _bad in words)
             check("helloicon.png could not be fetched" in said,
                   f"the missing picture was never said out loud: {said!r}")
@@ -2702,7 +2872,7 @@ def test_the_kept_picture(store: Any) -> None:
                   f"{hello['icon']!r}")
             program = store.addons_dir() / hello["id"] / f"{hello['id']}.exe"
             program.parent.mkdir(parents=True)
-            assets = store.staging() / "assets"
+            assets = store.staged_folder(hello["id"]) / "assets"
             assets.mkdir(parents=True, exist_ok=True)
             kept = store.addon_data_folder(hello["id"]) / hello["icon"]
 
@@ -2815,6 +2985,24 @@ def test_the_job_view(store: Any) -> None:
                   and set_as("jobicon", "image") != "",
                   f"the card wears no picture of its own: {set_as('jobicon', 'image')!r}")
 
+            # the console starts folded: the card alone is up, and only the
+            # card's own button pulls the terminal out from behind it
+            check(set_as("jobterm", "visible") is False
+                  and set_as("jobdetails", "text") == "Show details",
+                  f"the job put its console up unasked: "
+                  f"{set_as('jobterm', 'visible')!r} / "
+                  f"{set_as('jobdetails', 'text')!r}")
+            api.calls.clear()
+            store.on_widget(store.TAB, "jobdetails", "clicked", {})
+            check(set_as("jobterm", "visible") is True
+                  and set_as("jobdetails", "text") == "Hide details",
+                  "pressing Show details did not open the console")
+            api.calls.clear()
+            store.on_widget(store.TAB, "jobdetails", "clicked", {})
+            check(set_as("jobterm", "visible") is False
+                  and set_as("jobdetails", "text") == "Show details",
+                  "pressing Hide details did not fold the console back away")
+
             # every line the job logs goes onto the console as well, in its own
             # words and with the carriage a terminal needs
             api.calls.clear()
@@ -2879,7 +3067,8 @@ def test_the_job_view(store: Any) -> None:
             check(not [arguments for name, arguments, _n in api2.calls
                        if name == "tabs.set_widget" and len(arguments) >= 3
                        and arguments[1] in ("jobterm", "jobcard", "jobicon",
-                                            "jobname", "jobstep", "jobbar")],
+                                            "jobname", "jobstep", "jobbar",
+                                            "jobdetails")],
                   "a job with no pane wrote to the console and card that are "
                   "not there")
             check(not api2.called("tabs.lock"),
@@ -2920,6 +3109,7 @@ def main() -> int:
     test_installed(store)
     test_the_updates(store)
     test_the_switches(store)
+    test_the_batch_order(store)
     test_the_job_view(store)
     test_the_sources(store)
     test_bundled_assets(store)

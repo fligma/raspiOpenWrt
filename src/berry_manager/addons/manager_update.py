@@ -184,6 +184,22 @@ RESUME_WAIT = 0.8
 #: operation timed out" and gave up.
 DOWNLOAD_READ_TIMEOUT = 90
 
+#: The patience a request's own socket is built with, and the patience an API
+#: question is put back to afterwards. A long body raises it (see
+#: ``DOWNLOAD_READ_TIMEOUT``) on the connection it is fetched over, and that
+#: connection is kept and reused - so without this the next ask that came down
+#: the same channel would wait a minute and a half on a dead answer instead of
+#: the twenty-odd seconds that keeps a tab from looking stuck.
+REQUEST_TIMEOUT = 25
+
+#: Suffixes granted the run bit without sniffing, because on the one system this
+#: walk runs (never Windows) they are always code to load: ``.so`` objects, whole
+#: or versioned (``libcrypto.so.1.1``). ``_internal`` is mostly made of them, so
+#: this is where the walk saves the most. Any file whose suffix does not say
+#: "executable" still has its first four bytes read, so no ELF is missed - the
+#: same bargain the setup's own copy of this walk makes.
+KNOWN_EXEC_SUFFIXES = (".so",)
+
 #: The oldest version the swap will go back to when the config says nothing.
 #: It sits at the onefile-to-onedir line: a build below it predates how this
 #: addon stages and swaps a program, so a move that far back is more likely to
@@ -576,16 +592,27 @@ OLDER_HEAD = "molderhead"
 
 # --- the view a job puts over the browsing panes ---
 
-#: The card that floats in the middle of the job's console. It has to be read
-#: over the output moving behind it, so it is drawn on its own dark plate rather
-#: than on the terminal's own ground, and kept to a width that leaves the lines
-#: behind it visible at the sides.
+#: The card that owns the job's pane on its own. It is drawn on its own dark
+#: plate rather than on the page's ground, so it reads as one thing - what is
+#: being installed and how far it has got - whether or not the console behind
+#: it has been asked for.
 def job_card_style() -> str:
-    """The plate a job's name and its bar sit on, over the moving console."""
+    """The plate a job's name and its bar sit on - the whole of the view."""
     return (f"#jobcard {{ background-color: rgba(24, 24, 24, 236);"
             f" border: 1px solid {_colour('border', '#3c3c3c')};"
             f" border-radius: {_metric('radius_px', 6) + 4}px;"
-            f" padding: {_room() + 4}px; max-width: 340px; }}")
+            f" padding: {_room() + 6}px; max-width: 380px; }}")
+
+
+def job_details_style() -> str:
+    """The one button the card wears: it opens the console, or folds it back."""
+    return (f"QPushButton {{ background-color: #2d2d2d;"
+            f" border: 1px solid {_colour('border', '#4a4a4a')};"
+            f" border-radius: 6px; padding: 4px 14px;"
+            f" color: {_colour('note', '#c8c8c8')}; font-size: 9pt; }}"
+            f" QPushButton:hover {{ border-color:"
+            f" {_colour('accent', '#c51a4a')};"
+            f" color: {_colour('bright', '#f2f2f2')}; }}")
 
 
 def job_title_style() -> str:
@@ -606,16 +633,20 @@ _JOB_STEP_LEN = 52
 
 
 def _job_view() -> dict:
-    """The pane a download puts over the version list: its console, and the version in hand.
+    """The pane a download puts over the version list: the version in hand, and its console.
 
-    The ``terminal`` is never connected to anything - it is used for what it is as
-    a screen as well as a shell, so the bytes coming down are counted onto it as
-    they arrive. The card floats over it through an ``overlay``, which keeps it
-    centred when the tab is resized rather than leaving the addon to count pixels;
-    the pane starts hidden, since an install is only one press of a button away.
+    The card is the whole of the view until asked otherwise: the release's mark,
+    its name, the step it is on and the bar counting the bytes down. The
+    ``terminal`` behind it is never connected to anything - it is used for what
+    it is as a screen as well as a shell, so the bytes coming down keep being
+    counted onto it as they arrive - but it starts hidden, and the card's own
+    button pulls it up for anyone who wants to read it. The card floats over the
+    whole pane through an ``overlay``, which keeps it centred when the tab is
+    resized rather than leaving the addon to count pixels; the pane itself starts
+    hidden, since an install is only one press of a button away.
     """
     return {"kind": "overlay", "id": "jobpane", "visible": False, "children": [
-        {"kind": "terminal", "id": "jobterm", "font_size": 10},
+        {"kind": "terminal", "id": "jobterm", "font_size": 10, "visible": False},
         {"kind": "column", "id": "jobcard", "object_name": "jobcard",
          "align": "center", "style": job_card_style(), "children": [
              {"kind": "image", "id": "jobicon", "size": 64},
@@ -624,6 +655,12 @@ def _job_view() -> dict:
              {"kind": "label", "id": "jobstep", "text": "",
               "style": job_sub_style(), "word_wrap": True},
              {"kind": "progress", "id": "jobbar", "maximum": 100, "value": 0},
+             {"kind": "button", "id": "jobdetails", "text": "Show details",
+              "style": job_details_style(),
+              "tooltip": "The download's own console, behind this card. It "
+                         "keeps taking every line as it arrives whether it is "
+                         "open or not",
+              "on": ["clicked"]},
          ]},
     ]}
 
@@ -921,9 +958,23 @@ class Fetcher:
         connection = self.connections.get(host)
         if connection is None:
             connection = http.client.HTTPSConnection(
-                host, timeout=25, context=ssl.create_default_context())
+                host, timeout=REQUEST_TIMEOUT, context=ssl.create_default_context())
             self.connections[host] = connection
         return connection
+
+    def _patience(self, connection: http.client.HTTPSConnection,
+                  seconds: float) -> None:
+        """Set how long a live socket will wait for the next packet.
+
+        Only a socket already in hand can be told: a connection that has not
+        connected yet takes the timeout it was built with, and a channel that
+        will not answer the question is no reason to stop the job.
+        """
+        try:
+            if connection.sock is not None:
+                connection.sock.settimeout(seconds)
+        except (AttributeError, OSError):
+            pass
 
     def headers(self, accept: str) -> dict:
         head = {"User-Agent": "berry-manager", "Accept": accept}
@@ -943,6 +994,7 @@ class Fetcher:
         for attempt in (0, 1, 2):
             try:
                 connection = self._connection(host)
+                self._patience(connection, REQUEST_TIMEOUT)
                 connection.request("GET", path, headers=self.headers(accept))
                 answer = connection.getresponse()
                 body = answer.read()
@@ -972,9 +1024,9 @@ class Fetcher:
         try:
             if connection.sock is None:
                 connection.connect()
-            connection.sock.settimeout(DOWNLOAD_READ_TIMEOUT)
         except (AttributeError, OSError):
             pass                        # the ask goes out on the old patience
+        self._patience(connection, DOWNLOAD_READ_TIMEOUT)
         connection.request("GET", path, headers=head)
         return connection.getresponse()
 
@@ -2681,10 +2733,12 @@ def _restore_exec_bits(root: Path) -> None:
     sets the run bit, so a helper like ``QtWebEngineProcess`` lands
     unrunnable - and Chromium's zygote dies on the failed exec with a fatal
     CHECK, which to the user is the updated program vanishing the moment it
-    opens. Four bytes decide it: the ELF magic means code to run or load, and
-    ``+x`` on a library costs nothing it did not already have. The swap that
-    moves this tree in place is a rename, so what is repaired here is what
-    the new copy launches with.
+    opens. A suffix that gives the file away settles it without an open (see
+    ``KNOWN_EXEC_SUFFIXES``); everything else has its first four bytes read, the
+    ELF magic being the authority. The swap that moves this tree in place is a
+    rename, so what is repaired here is what the new copy launches with - and an
+    update reads as slow when this walk opens every one of the several hundred
+    files in ``_internal`` to look at four bytes of it.
     """
     for here, _dirs, files in os.walk(root):
         for name in files:
@@ -2692,9 +2746,11 @@ def _restore_exec_bits(root: Path) -> None:
             try:
                 if not path.is_file() or path.is_symlink():
                     continue
-                with path.open("rb") as handle:
-                    if handle.read(4) != b"\x7fELF":
-                        continue
+                if not any(suffix in KNOWN_EXEC_SUFFIXES
+                           for suffix in path.suffixes):
+                    with path.open("rb") as handle:
+                        if handle.read(4) != b"\x7fELF":
+                            continue
                 path.chmod(path.stat().st_mode | 0o111)
             except OSError:
                 continue
@@ -2769,7 +2825,7 @@ rm -f "$SELF"
 
 
 def _windows_updater() -> str:
-    """The batch the folder swap runs on, once this copy has closed.
+    r"""The batch the folder swap runs on, once this copy has closed.
 
     Windows frees a running exe to be renamed but not the libraries loaded inside
     ``_internal`` to be touched, so the whole swap waits for this process to end
@@ -2777,6 +2833,25 @@ def _windows_updater() -> str:
     old dance as the shell version, and starts the new copy itself. ``%6`` removes
     the script last. A move that fails rolls the old file and folder back before
     restarting the previous copy, so a half-applied update never strands the user.
+
+    It rolls back only what it actually moved, which is why every step is checked
+    and every undo hangs on its own ``.old`` existing. The first version of this
+    asked nothing: an ``_internal`` that would not rename aside - an addon's own
+    helper still holding a library, say - fell through to the rollback anyway,
+    and that rollback deleted ``%APP%\_internal`` to make room for a
+    ``_internal.old`` that had never been made. The live libraries went with it,
+    and the program that was then started had nothing left to load: the update
+    did not fail, it destroyed what it was updating.
+
+    The pause in the wait is a ``ping``, not ``timeout``. ``timeout`` refuses a
+    redirected input: it prints its error and returns at once. Whether it finds
+    one depends on the console the script happens to be started with, and that is
+    the trap - run with a hidden console it comes back in about 0.08 s, which
+    turns this loop into a spin that hammers ``tasklist`` for as long as the app
+    is open, while run the way ``arm_folder_update`` runs it (detached, every
+    handle on NUL) it does wait its second. ``ping -n 2`` to the loopback address
+    waits about a second whatever the console is, never looks at stdin, and needs
+    no extra program, so the pause cannot go missing here or on the next machine.
     """
     return ("@echo off\r\n"
             "setlocal\r\n"
@@ -2789,14 +2864,20 @@ def _windows_updater() -> str:
             ":wait\r\n"
             "tasklist /fi \"PID eq %PID%\" 2>nul | find \"%PID%\" >nul\r\n"
             "if not errorlevel 1 (\r\n"
-            "    timeout /t 1 /nobreak >nul\r\n"
+            "    ping -n 2 127.0.0.1 >nul\r\n"
             "    goto wait\r\n"
             ")\r\n"
             "cd /d \"%APP%\" || exit /b 1\r\n"
             "if exist \"%APP%\\_internal.old\" rmdir /s /q \"%APP%\\_internal.old\"\r\n"
-            "if exist \"%APP%\\_internal\" move \"%APP%\\_internal\" \"%APP%\\_internal.old\"\r\n"
             "if exist \"%APP%\\%DEST%.old\" del /q \"%APP%\\%DEST%.old\"\r\n"
-            "if exist \"%APP%\\%DEST%\" move \"%APP%\\%DEST%\" \"%APP%\\%DEST%.old\"\r\n"
+            "if exist \"%APP%\\_internal\" (\r\n"
+            "    move \"%APP%\\_internal\" \"%APP%\\_internal.old\"\r\n"
+            "    if errorlevel 1 goto :rollback\r\n"
+            ")\r\n"
+            "if exist \"%APP%\\%DEST%\" (\r\n"
+            "    move \"%APP%\\%DEST%\" \"%APP%\\%DEST%.old\"\r\n"
+            "    if errorlevel 1 goto :rollback\r\n"
+            ")\r\n"
             "move \"%STAGED%\\_internal\" \"%APP%\\_internal\"\r\n"
             "if errorlevel 1 goto :rollback\r\n"
             "move \"%STAGED%\\%SRC%\" \"%APP%\\%DEST%\"\r\n"
@@ -2808,10 +2889,14 @@ def _windows_updater() -> str:
             "del \"%SELF%\"\r\n"
             "goto :eof\r\n"
             ":rollback\r\n"
-            "if exist \"%APP%\\_internal\" rmdir /s /q \"%APP%\\_internal\"\r\n"
-            "if exist \"%APP%\\_internal.old\" move \"%APP%\\_internal.old\" \"%APP%\\_internal\"\r\n"
-            "if exist \"%APP%\\%DEST%\" del /q \"%APP%\\%DEST%\"\r\n"
-            "if exist \"%APP%\\%DEST%.old\" move \"%APP%\\%DEST%.old\" \"%APP%\\%DEST%\"\r\n"
+            "if exist \"%APP%\\_internal.old\" (\r\n"
+            "    if exist \"%APP%\\_internal\" rmdir /s /q \"%APP%\\_internal\"\r\n"
+            "    move \"%APP%\\_internal.old\" \"%APP%\\_internal\"\r\n"
+            ")\r\n"
+            "if exist \"%APP%\\%DEST%.old\" (\r\n"
+            "    if exist \"%APP%\\%DEST%\" del /q \"%APP%\\%DEST%\"\r\n"
+            "    move \"%APP%\\%DEST%.old\" \"%APP%\\%DEST%\"\r\n"
+            ")\r\n"
             "start \"\" \"%APP%\\%DEST%\"\r\n"
             "del \"%SELF%\"\r\n")
 
@@ -2935,15 +3020,16 @@ def _lock_pages(hold: bool) -> None:
 
 
 def _job_show(show: bool) -> bool:
-    """Swap the browsing panes for the job's console, or hand them back.
+    """Swap the browsing panes for the job's card, or hand them back.
 
     ``set_widget`` answers ``False`` for an id the tab does not hold, which is how
     a job started on a tab built without the pane - an older layout, or a bare
     test harness - finds out it has nowhere to print and carries on regardless.
 
-    The console is meant to own the whole tab while a job runs, so the header,
+    The card is meant to own the whole tab while a job runs, so the header,
     the button row and the folded log under the panes all step aside with it and
-    come back on the same call.
+    come back on the same call. The console behind the card keeps to the fold:
+    it is pulled up only by the card's own button.
     """
     if api is None:
         return False
@@ -2955,6 +3041,22 @@ def _job_show(show: bool) -> bool:
     for quiet in ("headrow", "actionrow", "log"):
         _set(quiet, "visible", not show)
     return bool(placed)
+
+
+def toggle_job_details() -> None:
+    """Pull the job's console up from behind the card, or fold it back away.
+
+    The download prints to the screen the whole time it is hidden, so opening
+    it late loses nothing of the job - the lines are already there, and the
+    card keeps its place floating over whatever share of the pane is showing.
+    """
+    if api is None or job is None or not job.get("pane"):
+        return
+    showing = not bool(job.get("console"))
+    job["console"] = showing
+    _set("jobterm", "visible", showing)
+    _set("jobdetails", "text",
+         "Hide details" if showing else "Show details")
 
 
 def _job_write(text: str) -> None:
@@ -3068,7 +3170,7 @@ def _begin(verb: str, values: dict, name: str = "") -> dict:
     working = True
     job = {"verb": verb, "values": values, "host": "", "path": "",
            "response": None, "chunks": [], "got": 0, "total": 0,
-           "hops": 0, "ticks": 0, "pane": False,
+           "hops": 0, "ticks": 0, "pane": False, "console": False,
            # A broken read is picked up from where it stopped; these keep
            # the score, and the pace the line shows is measured between
            # the two rate marks.
@@ -3085,6 +3187,11 @@ def _begin(verb: str, values: dict, name: str = "") -> dict:
             api.tabs.set_widget(TAB, "jobterm", "clear", True)
         except AddonError:
             pass
+        # Every job starts with the console folded away, whatever the last
+        # one left open behind it: the card is the view, and the button
+        # says "Show details" because that is what it will do.
+        _set("jobterm", "visible", False)
+        _set("jobdetails", "text", "Show details")
         _job_card(name, step="", picture=tab_icon())
     say(f"{verb} starting...")
     _progress(f"{verb} starting...", 0.0)
@@ -3320,6 +3427,12 @@ def finish_download() -> None:
     back = str((found or {}).get("stance") or "") == "older"
     erased = bool((found or {}).get("erased"))
     data = b"".join(job["chunks"])
+    # The one copy is made and the many halves go at once. A build folder's zip
+    # is tens of megabytes, and on the small machines this app is installed on a
+    # body kept twice over - the chunks beside the join - is the difference
+    # between a slow swap and one that stalls the whole window.
+    job["chunks"] = []
+    job["got"] = len(data)
     try:
         job["response"].close()
     except (http.client.HTTPException, OSError):
@@ -3629,6 +3742,9 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         return
     if name == "showlog" and str(event) in ("toggled", "changed"):
         show_log((payload or {}).get("checked"))
+        return
+    if name == "jobdetails" and str(event) == "clicked":
+        _run("toggle_job_details")
         return
     if str(event) != "clicked":
         return

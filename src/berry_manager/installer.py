@@ -164,6 +164,35 @@ PROGRESS_MIN_INTERVAL = 0.1
 #: "executable" still has its first four bytes read, so no ELF is missed.
 KNOWN_EXEC_SUFFIXES = (".so",)
 
+#: What the compile door needs a machine's Python to already hold. One name here,
+#: so the door's probe and the job's own check cannot drift apart mid-install.
+TOOLCHAIN_MODULES = ("PyInstaller", "PyQt6", "paramiko", "keyring")
+
+#: A setup window has no console of its own, and on Windows every program it
+#: starts would be given one unless this says otherwise: a black box flashing for
+#: a toolchain probe, and one held open for the whole PyInstaller run. The app
+#: keeps the same hygiene for its addons (see ``addon_common.NO_CONSOLE``); it is
+#: repeated here because the setup is a standalone file that imports none of it.
+NO_CONSOLE = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+#: How long a stuck job is given to come out of itself when the person insists on
+#: leaving, in the milliseconds ``QThread.wait`` counts in (the app's own window
+#: waits the same way - see ``core/window.py``). The job checks its cancel flag
+#: between the reads of a download and between the lines a build prints, so this
+#: is normally a short pause; a run blocked in something a cancel cannot reach -
+#: a socket that has stopped answering - is not, and a QThread destroyed while it
+#: still runs takes the program down with it, so the wait is bounded and the
+#: thread is then stopped by force.
+#: A wait here is never a bare ``wait(3)``: that is three milliseconds, which
+#: gives up on a thread that would have landed a second later and jumps straight
+#: to ``terminate()``, and killing a thread that is between Python bytecodes is
+#: how the setup aborts instead of closing.
+FORCE_WAIT_MS = 3000
+
+#: The same bargain for a toolchain probe, which holds an interpreter for as long
+#: as that interpreter cares to take.
+PROBE_WAIT_MS = 1500
+
 
 class _Resumable(Exception):
     """A download body that broke off, keeping how many bytes reached disk."""
@@ -636,6 +665,17 @@ def staging_dir(target: Path, prefix: str = "berry_stage_") -> Path:
     return Path(tempfile.mkdtemp(prefix=prefix))
 
 
+def _take_away(path: Path) -> None:
+    """Throw out a leftover, best-effort: by now it is only garbage."""
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def place_build(build_root: Path, target: Path) -> None:
     """Move an unpacked build to where the user asked for it, and make it run.
 
@@ -643,22 +683,61 @@ def place_build(build_root: Path, target: Path) -> None:
     folder is added if the archive did not carry one, so the first start has the
     folder the program looks for already beside it. Anything of the same name
     already at the target is taken first - this is a fresh install, not a merge.
+
+    Taken first means moved aside under a ``.old`` name, not deleted up front. A
+    delete can half-happen: Windows refuses to clear a folder whose files the
+    running app is holding, and doing that with the errors swallowed used to
+    leave the target holding some of the old build and some of the new one - a
+    program that does not fail to install, but fails to start, which is a far
+    worse thing to meet. A rename is all or nothing, what cannot be renamed
+    aside is said as the refusal it is (close the app and try again), and a stop
+    part way through puts every name back the way it found it: a folder holding
+    the new program beside the old ``_internal`` is the same half build this
+    function exists to avoid.
     """
     target.mkdir(parents=True, exist_ok=True)
     program = program_file_name()
-    for name in (program, INTERNAL_DIR):
-        source = build_root / name
-        landing = target / name
-        if landing.exists():
-            if landing.is_dir():
-                shutil.rmtree(landing, ignore_errors=True)
-            else:
-                landing.unlink(missing_ok=True)
-        # A rename is one syscall whatever the size; a copy moves every byte.
-        # The build is staged on the target's own filesystem (see
-        # ``staging_dir``), so this is normally the rename - and ``shutil.move``
-        # still falls back to copying across devices when it is not.
-        shutil.move(str(source), str(landing))
+    moved: list[tuple[Path, Path]] = []       # landing -> aside, undone on a stop
+    half: Path | None = None                  # an aside a refused move left part
+    try:
+        for name in (program, INTERNAL_DIR):
+            source = build_root / name
+            landing = target / name
+            aside = target / f"{name}.old"
+            half = aside
+            if aside.exists():
+                _take_away(aside)         # a leftover of an earlier attempt
+            if landing.exists():
+                try:
+                    shutil.move(str(landing), str(aside))
+                except OSError as error:
+                    raise OSError(f"{landing} could not be moved out of the way "
+                                  f"- close Berry Manager and install again "
+                                  f"({error})") from error
+                moved.append((landing, aside))
+            # A rename is one syscall whatever the size; a copy moves every byte.
+            # The build is staged on the target's own filesystem (see
+            # ``staging_dir``), so this is normally the rename - and ``shutil.move``
+            # still falls back to copying across devices when it is not.
+            try:
+                shutil.move(str(source), str(landing))
+            except OSError as error:
+                raise OSError(f"the new build could not be put at {landing}: "
+                              f"{error}") from error
+            half = None
+    except OSError:
+        for landing, aside in reversed(moved):
+            if landing.exists():          # the new copy came: take it back out
+                _take_away(landing)
+            try:
+                shutil.move(str(aside), str(landing))
+            except OSError:               # nothing more to do but say where it stands
+                pass
+        if half is not None:
+            _take_away(half)              # a refused move may have copied part of it
+        raise
+    for _landing, aside in moved:
+        _take_away(aside)                 # replaced now, so the old copy goes
     if os.name != "nt":
         _restore_exec_bits(target)
         try:
@@ -815,6 +894,11 @@ def _stage_harness(source: Path, into: Path) -> None:
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
 
+def quiet_kwargs() -> dict:
+    """How to start a child of the setup without it showing a console window."""
+    return {"creationflags": NO_CONSOLE} if os.name == "nt" else {}
+
+
 def which_python() -> str | None:
     """A real interpreter a compile can drive, or ``None``.
 
@@ -844,7 +928,7 @@ def python_has(py: str, modules: tuple[str, ...]) -> tuple[bool, list[str]]:
               "print('\\n'.join(missing))")
     try:
         answer = subprocess.run([py, "-c", script], capture_output=True,
-                                text=True, timeout=60)
+                                text=True, timeout=60, **quiet_kwargs())
     except (OSError, subprocess.SubprocessError) as error:
         return False, [f"could not run {py}: {error}"]
     if answer.returncode != 0:
@@ -900,7 +984,8 @@ def run_compile(source: Path, target: Path, py: str, report,
         process = subprocess.Popen(arguments, cwd=str(stage),
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True,
-                                   encoding="utf-8", errors="replace")
+                                   encoding="utf-8", errors="replace",
+                                   **quiet_kwargs())
         assert process.stdout is not None
         for line in process.stdout:
             if cancel_flag["cancel"]:
@@ -1013,6 +1098,20 @@ class Worker(QThread):
 
     def _do_compile(self) -> None:
         assert self.python is not None
+        self._progress(f"checking what {self.python} can import", -1, force=True)
+        # Probed here, on the job's own thread: asking an interpreter what it can
+        # import is starting that interpreter, and it is under no obligation to
+        # answer quickly. Done on the interface thread this was the setup card
+        # frozen solid for up to a minute, with a console window flashing beside
+        # it on Windows, the moment the compile door was opened.
+        ok, missing = python_has(self.python, TOOLCHAIN_MODULES)
+        if not ok:
+            self.finished.emit(False, f"{self.python} is missing "
+                                      f"{', '.join(missing)}")
+            return
+        if self._cancel["cancel"]:
+            self.finished.emit(False, "the build was cancelled")
+            return
         tag = resolve_tag(self.owner, self.repo)
         version = _readable(tag_version(tag) or tag)
         work = staging_dir(self.target, "berry_source_")
@@ -1045,6 +1144,31 @@ class Worker(QThread):
 
 # --- the card ---
 
+class ToolchainProbe(QThread):
+    """One ask of what a machine's Python can import, off the interface thread.
+
+    The answer only decorates the door's hint line, so it is worth neither a
+    frozen card nor a black console window; the card starts one of these and is
+    told the answer through ``answered`` when the interpreter gets round to it.
+    """
+
+    answered = pyqtSignal(str, bool, list)      # (interpreter, ok, missing)
+
+    def __init__(self, py: str, modules: tuple[str, ...]) -> None:
+        super().__init__()
+        self.py = py
+        self.modules = tuple(modules)
+
+    def run(self) -> None:                        # noqa: D401 - QThread contract
+        try:
+            ok, missing = python_has(self.py, self.modules)
+        except Exception as error:            # noqa: BLE001 - as in Worker.run:
+            # a stray error loose from a QThread's run() aborts the whole setup,
+            # and this one is only a hint nobody was waiting for.
+            ok, missing = False, [f"{type(error).__name__}: {error}"]
+        self.answered.emit(self.py, ok, list(missing))
+
+
 class InstallerCard(QWidget):
     """The window: the splash's look, the two doors, and a job view.
 
@@ -1063,6 +1187,12 @@ class InstallerCard(QWidget):
                          | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._worker: Worker | None = None
+        self._probe: ToolchainProbe | None = None
+        # The last toolchain answer for this card's interpreter, so opening and
+        # shutting the compile door does not start a fresh interpreter each time.
+        self._toolchain: tuple[str, bool, list[str]] | None = None
+        self._cancel_asked = False
+        self._leaving = False
         self._drag: tuple[int, int] | None = None
         self._ok = False
         self._program: Path | None = None
@@ -1078,8 +1208,8 @@ class InstallerCard(QWidget):
         body.setSpacing(9)
 
         # Two faces for one card: the setup form it opens with, and the job the
-        # doors run - a terminal behind a centred card, the way an in-app update
-        # wears its download. Only one is on screen at a time.
+        # doors run - a centred card, with its console folded behind it until
+        # somebody asks. Only one is on screen at a time.
         self.stack = QStackedWidget(card)
         self.stack.addWidget(self._build_setup_page())
         self.stack.addWidget(self._build_job_page())
@@ -1092,6 +1222,7 @@ class InstallerCard(QWidget):
         self.adjustSize()
         self._center_on_screen()
         self._door_changed()
+        self._toggle_advanced()     # the git source starts folded away
 
     # -- the setup form --
 
@@ -1144,6 +1275,24 @@ class InstallerCard(QWidget):
         self.step.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.step.setWordWrap(True)
 
+        # The git source is the one part of this form nobody on the normal
+        # path should ever see: the published build comes from this
+        # program's own repository, and only the compiler door can be
+        # pointed elsewhere - so the two fields wait behind a line that
+        # says what opening them is for.
+        self.adv_toggle = QPushButton("Advanced: build from another repository",
+                                      page)
+        self.adv_toggle.setObjectName("advToggle")
+        self.adv_toggle.setCheckable(True)
+        self.adv_toggle.setChecked(False)
+        self.adv_toggle.clicked.connect(self._toggle_advanced)
+        self.git_label = QLabel("Git source (owner / repo)", page)
+        self.git_hint = QLabel("Only change these when the build comes from "
+                               "somewhere other than this program's own "
+                               "repository.", page)
+        self.git_hint.setObjectName("splashStep")
+        self.git_hint.setWordWrap(True)
+
         self.start_button = QPushButton("Install", page)
         self.start_button.setObjectName("primaryAction")
         self.start_button.clicked.connect(self._start)
@@ -1159,16 +1308,26 @@ class InstallerCard(QWidget):
         grid.addLayout(doors)
         grid.addWidget(QLabel("Install folder", page))
         grid.addLayout(where)
-        grid.addWidget(QLabel("Git source (owner / repo)", page))
+        grid.addWidget(self.adv_toggle)
+        grid.addWidget(self.git_label)
         grid.addLayout(gitbox)
+        grid.addWidget(self.git_hint)
         grid.addWidget(self.step)
         grid.addLayout(buttons)
         return page
 
-    # -- the job view: a terminal, and the card floating over it --
+    def _toggle_advanced(self) -> None:
+        """Show the git source fields, or fold them back out of the way."""
+        show = bool(self.adv_toggle.isChecked())
+        for widget in (self.git_label, self.owner_edit, self.repo_edit,
+                       self.git_hint):
+            widget.setVisible(show)
+        self.adjustSize()
+
+    # -- the job view: a card, and the console only for whoever asks --
 
     def _build_job_page(self) -> QWidget:
-        """The face a door wears while it works: steps on a terminal, a card."""
+        """The face a door wears while it works: one card, console on demand."""
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1176,6 +1335,10 @@ class InstallerCard(QWidget):
         holder = QWidget(page)
         cell = QGridLayout(holder)
         cell.setContentsMargins(0, 0, 0, 0)
+        # The console used to be the page's height; with it folded away the
+        # card needs the same room to stand in, or the whole face shrinks
+        # to a paragraph the moment somebody presses Show details.
+        holder.setMinimumHeight(320)
 
         self.terminal = QPlainTextEdit(holder)
         self.terminal.setObjectName("jobTerm")
@@ -1186,13 +1349,16 @@ class InstallerCard(QWidget):
         # off the back instead of quietly eating the memory of a long build.
         self.terminal.setMaximumBlockCount(2000)
         cell.addWidget(self.terminal, 0, 0)
+        self._details_shown = False
+        self.terminal.setVisible(False)
 
         # The card shares the terminal's cell and is centred over it - the same
-        # overlay an update puts its job on - so the steps keep scrolling behind
-        # it and the card holds the one thing worth reading at a glance.
+        # overlay an update puts its job on - so opening the console slides it
+        # in behind a card that never moves, and the card keeps the one thing
+        # worth reading at a glance.
         self.job_card = QFrame(holder)
         self.job_card.setObjectName("jobCard")
-        self.job_card.setFixedWidth(300)
+        self.job_card.setFixedWidth(320)
         cell.addWidget(self.job_card, 0, 0, Qt.AlignmentFlag.AlignCenter)
 
         inner = QVBoxLayout(self.job_card)
@@ -1225,6 +1391,12 @@ class InstallerCard(QWidget):
         self.card_progress.setTextVisible(True)
         self.card_progress.setFormat("%p%")
 
+        # The card's one concession to the curious: the console opens under
+        # it, or folds back, on a press that says which it is about to do.
+        self.details_button = QPushButton("Show details", self.job_card)
+        self.details_button.setObjectName("jobDetails")
+        self.details_button.clicked.connect(self._toggle_job_details)
+
         # A bar and the buttons never share the card: what the bar counts up to
         # is the moment the two things worth doing next take its place.
         self.job_actions = QWidget(self.job_card)
@@ -1245,11 +1417,23 @@ class InstallerCard(QWidget):
         inner.addWidget(self.card_title)
         inner.addWidget(self.card_step)
         inner.addWidget(self.card_progress)
+        inner.addWidget(self.details_button, 0, Qt.AlignmentFlag.AlignCenter)
         inner.addWidget(self.job_actions)
 
         self.job_card.raise_()
         lay.addWidget(holder)
         return page
+
+    def _toggle_job_details(self) -> None:
+        """Open the job's console behind the card, or fold it back away.
+
+        The steps keep being printed to the screen the whole time it is
+        hidden, so opening it late loses nothing of the job.
+        """
+        self._details_shown = not self._details_shown
+        self.terminal.setVisible(self._details_shown)
+        self.details_button.setText("Hide details" if self._details_shown
+                                    else "Show details")
 
     def _place_job_icon(self) -> None:
         path = find_icon()
@@ -1296,6 +1480,16 @@ class InstallerCard(QWidget):
                        color: {colour('text')}; }}
         QPushButton:hover {{ background-color: {colour('hover')};
                              border-color: {colour('accent')}; }}
+        QPushButton#advToggle {{ background-color: transparent;
+                                 border: none; padding: 2px;
+                                 color: {colour('muted')}; }}
+        QPushButton#advToggle:checked {{ color: {colour('accent')}; }}
+        QPushButton#jobDetails {{ background-color: {colour('raise')};
+                                  border: 1px solid {colour('border')};
+                                  border-radius: 6px; padding: 3px 14px;
+                                  color: {colour('muted')}; }}
+        QPushButton#jobDetails:hover {{ border-color: {colour('accent')};
+                                         color: {colour('text')}; }}
         QPushButton#primaryAction {{ background-color: {colour('accent')};
                                      color: {colour('bright')};
                                      border: 1px solid {colour('accent_deep')};
@@ -1351,23 +1545,65 @@ class InstallerCard(QWidget):
         """The compile door needs a toolchain; say so before it is opened."""
         self.start_button.setText("Install" if self.install_choice.isChecked()
                                   else "Compile")
-        if not self.install_choice.isChecked():
-            py = which_python()
-            if py is None:
-                self._say("no Python was found on this machine", bad=True)
-                return
-            ok, missing = python_has(py, ("PyInstaller", "PyQt6", "paramiko",
-                                          "keyring"))
-            if not ok:
-                hint = (f"run '{py} -m pip install -y pyinstaller" if
-                        "PyInstaller" in missing else
-                        f"install the app's requirements first "
-                        f"('{py} -m pip install -r requirements.txt' from a "
-                        "source checkout)")
-                self._say(f"{py} is missing {', '.join(missing)} - {hint}",
-                          bad=True)
-            else:
-                self._say(f"found {py}; it can build here")
+        if self.install_choice.isChecked():
+            return
+        py = which_python()
+        if py is None:
+            self._say("no Python was found on this machine", bad=True)
+            return
+        if self._toolchain is not None and self._toolchain[0] == py:
+            self._tell(self._toolchain[1], self._toolchain[2])
+            return
+        if self._probe is not None and self._probe.isRunning():
+            if self._probe.py == py:
+                return                      # already asking about this one
+            self._stop_probe()
+        self._say(f"checking what {py} can import...")
+        self._probe = ToolchainProbe(py, TOOLCHAIN_MODULES)
+        self._probe.answered.connect(self._on_toolchain)
+        self._probe.start()
+
+    def _on_toolchain(self, py: str, ok: bool, missing: list) -> None:
+        """A probe's answer: kept for the next time the door is opened."""
+        self._toolchain = (py, bool(ok), list(missing))
+        if self.install_choice.isChecked() or self._worker is not None:
+            return            # the door moved on, or a job owns the card now
+        self._tell(ok, missing)
+
+    def _tell(self, ok: bool, missing: list) -> None:
+        """What the compile door says about the interpreter it found."""
+        py = str((self._toolchain or ("", False, []))[0])
+        if ok:
+            self._say(f"found {py}; it can build here")
+            return
+        names = [item for item in missing if item in TOOLCHAIN_MODULES]
+        if not names:
+            # Not a module short: that interpreter would not answer at all, and
+            # telling somebody to pip-install into it would only waste their time.
+            self._say(f"{py} is not usable here - {' '.join(missing)}", bad=True)
+            return
+        if names == ["PyInstaller"]:
+            hint = f"run '{py} -m pip install pyinstaller'"
+        else:
+            hint = ("install the app's requirements first "
+                    f"('{py} -m pip install -r requirements.txt' from a "
+                    "source checkout)")
+        self._say(f"{py} is missing {', '.join(names)} - {hint}", bad=True)
+
+    def _stop_probe(self) -> None:
+        """End a probe: a QThread deleted while it still runs is a crash."""
+        probe = self._probe
+        self._probe = None
+        if probe is None:
+            return
+        try:
+            probe.answered.disconnect()
+        except TypeError:
+            pass                                # nothing was ever connected
+        if not probe.wait(PROBE_WAIT_MS):
+            probe.terminate()
+            probe.wait(PROBE_WAIT_MS)
+        probe.deleteLater()
 
     def _browse(self) -> None:
         start = self.dir_edit.text().strip() or str(Path.home())
@@ -1382,10 +1618,16 @@ class InstallerCard(QWidget):
             f"color: {PALETTE['warn' if bad else 'muted']};")
 
     def _reset_job(self, name: str) -> None:
-        """Put the job's console up clean: the card named, the bar busy."""
+        """Put the job's card up clean: named, folded, the bar busy."""
         self._ok = False
+        self._cancel_asked = False
         self._program = None
         self.terminal.clear()
+        # Every job starts with the console folded away, whatever the last
+        # one left open behind the card.
+        self._details_shown = False
+        self.terminal.setVisible(False)
+        self.details_button.setText("Show details")
         self.card_title.setText(name)
         self.card_step.setText("")
         self.card_step.setStyleSheet("")
@@ -1429,10 +1671,12 @@ class InstallerCard(QWidget):
             if py is None:
                 self._door_changed()
                 return
-            ok, missing = python_has(py, ("PyInstaller", "PyQt6", "paramiko",
-                                          "keyring"))
-            if not ok:
-                self._say(f"{py} is missing {', '.join(missing)}", bad=True)
+            if (self._toolchain is not None and self._toolchain[0] == py
+                    and not self._toolchain[1]):
+                # Asked already, refused already: no reason to start a job whose
+                # first step would only say the same thing. The interpreter's own
+                # check belongs to the job anyway - see Worker._do_compile.
+                self._tell(False, self._toolchain[2])
                 return
         try:
             target.mkdir(parents=True, exist_ok=True)
@@ -1457,6 +1701,10 @@ class InstallerCard(QWidget):
         self._job_bar(frac)
 
     def _on_finished(self, ok: bool, text: str) -> None:
+        if self._leaving:
+            # The person asked to leave and the job was stopped to let them; an
+            # outcome drawn over the top of that would only reopen the card.
+            return
         # The bar's job is over, so the card wears the outcome and the two
         # things worth doing next in its place: launch, or get out of the way.
         self._write_line(("OK  " if ok else "ERR ") + text)
@@ -1504,23 +1752,51 @@ class InstallerCard(QWidget):
         self.adjustSize()
         self._door_changed()
 
-    def _close_or_cancel(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.cancel()
-            self._job_step("cancelling...")
-            return
-        self.close()
+    def _leave(self) -> None:
+        """Close the card, stopping the job that is in the way of closing it.
 
-    def closeEvent(self, event) -> None:           # noqa: N802 - Qt's name
-        if self._worker is not None and self._worker.isRunning():
-            event.ignore()
-            self._worker.cancel()
+        The first press only asks the job to stop, which is the polite half of
+        it. The words on screen promise that a second press gets the person out -
+        and that promise used to be a lie, because the second press did the same
+        cancelling over again and left the card standing there with nowhere to
+        go. So the second press waits a bounded moment for the cancel to land and
+        then stops the thread only if that wait ran out: leaving a QThread running
+        while its window goes is how the setup dies on the way out instead of
+        closing.
+        """
+        worker = self._worker
+        if worker is None or not worker.isRunning():
+            self._worker = None
+            self.close()
+            return
+        if not self._cancel_asked:
+            worker.cancel()
+            self._cancel_asked = True
             words = ("the build is still running; press Close again to "
                      "leave anyway")
             if self.stack.currentIndex() == 1:
                 self._job_step(words)
             else:
                 self._say(words, bad=True)
+            return
+        self._leaving = True
+        self._job_step("leaving now; the job is being stopped")
+        worker.cancel()
+        if not worker.wait(FORCE_WAIT_MS):
+            worker.terminate()
+            worker.wait(FORCE_WAIT_MS)
+        self._worker = None
+        self.close()
+
+    def _close_or_cancel(self) -> None:
+        self._leave()
+
+    def closeEvent(self, event) -> None:           # noqa: N802 - Qt's name
+        self._stop_probe()
+        if self._worker is not None and self._worker.isRunning() \
+                and not self._leaving:
+            event.ignore()
+            self._leave()
             return
         event.accept()
 

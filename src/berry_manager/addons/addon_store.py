@@ -537,13 +537,23 @@ _ABOUT_STYLE = ("QPlainTextEdit { color: #d6d6d6; background-color: #1c1c1c;"
 _FILTER_LABEL = "QLabel { color: #9a9a9a; font-weight: 600; padding: 0px 4px 0px 2px; }"
 
 #: The job's own view, which stands in for the browsing panes while a build is
-#: running: the compiler's console filling the tab, and a card floating in the
-#: middle of it naming the addon in hand. The card is kept to its own width so
-#: the screen behind it stays readable at the edges, and dark enough that the
-#: two do not fight for the same pixels.
+#: running: a card in the middle of the tab naming the addon in hand, and the
+#: compiler's console only behind it for anyone who asks. The card is kept to
+#: its own width so it reads as one thing - what is being installed and how far
+#: it has got - and the console starts folded out of sight, since its thousands
+#: of lines are the store's workshop, not the shop front.
 _JOB_CARD_STYLE = ("#jobcard { background-color: rgba(24, 24, 24, 236);"
                    " border: 1px solid #3c3c3c; border-radius: 10px;"
-                   " padding: 12px; max-width: 340px; }")
+                   " padding: 14px; max-width: 380px; }")
+
+#: The one button the card wears: it pulls the console up out of the fold, or
+#: puts it back. "Show details" is the whole of what it promises - a person who
+#: never presses it never has to read a compiler line.
+_JOB_DETAILS_STYLE = ("QPushButton { background-color: #2d2d2d;"
+                      " border: 1px solid #4a4a4a; border-radius: 6px;"
+                      " padding: 4px 14px; color: #c8c8c8; font-size: 9pt;}"
+                      " QPushButton:hover { border-color: #c51a4a;"
+                      " color: #f2f2f2; }")
 
 #: What the card is called: the same words the detail pane uses for a name, a
 #: size down, since it has to be read at a glance over a moving screen.
@@ -680,16 +690,21 @@ def tab_icon() -> str:
 
 
 def _job_view() -> dict:
-    """The pane a job puts over the browsing panes: its console, and the addon in hand.
+    """The pane a job puts over the browsing panes: the addon in hand, and its console.
 
-    The ``terminal`` is never connected to anything - it is used for what it is
-    as a screen as well as a shell, so the build's own output is printed on it as
-    it arrives. The card floats over it through an ``overlay``, which keeps it
-    centred when the tab is resized rather than leaving the addon to count pixels;
-    the pane starts hidden, since a job is only one press of a button away.
+    The card is the whole of the view until asked otherwise: the addon's mark,
+    its name, the step it is on and the bar counting it up. The ``terminal``
+    behind it is never connected to anything - it is used for what it is as a
+    screen as well as a shell, so the build's own output keeps being printed as
+    it arrives - but it starts hidden, and the card's own button pulls it up for
+    anyone who wants to read it. The card floats over the whole pane through an
+    ``overlay``, which keeps it centred when the tab is resized rather than
+    leaving the addon to count pixels; the pane itself starts hidden, since a
+    job is only one press of a button away.
     """
     return {"kind": "overlay", "id": "jobpane", "visible": False, "children": [
-        {"kind": "terminal", "id": "jobterm", "font_size": 10},
+        {"kind": "terminal", "id": "jobterm", "font_size": 10,
+         "visible": False},
         {"kind": "column", "id": "jobcard", "object_name": "jobcard",
          "align": "center", "style": _JOB_CARD_STYLE, "children": [
              {"kind": "image", "id": "jobicon", "size": 64},
@@ -698,30 +713,41 @@ def _job_view() -> dict:
              {"kind": "label", "id": "jobstep", "text": "", "style": _JOB_SUB,
               "word_wrap": True},
              {"kind": "progress", "id": "jobbar", "maximum": 100, "value": 0},
+             {"kind": "button", "id": "jobdetails", "text": "Show details",
+              "style": _JOB_DETAILS_STYLE,
+              "tooltip": "The build's own console, behind this card. It keeps "
+                         "taking every line as it arrives whether it is open "
+                         "or not",
+              "on": ["clicked"]},
          ]},
     ]}
 
 
 def addons_page() -> dict:
-    """The store's own page: a list of what is on offer and, beside it, the one
-    addon currently picked, with the job's log under both.
+    """The store's own page: a shelf of tiles for what is on offer and, beside
+    it, the one addon currently picked, with the job's log under both.
 
     The status line sits in the header between the title and the repository chip,
-    so nothing of its own steals height from the list; it takes the width the two
+    so nothing of its own steals height from the shelf; it takes the width the two
     leave over and wraps inside that, so a long report stays readable and the chip
-    stays put. Under the header a filter line narrows the list as it is typed.
+    stays put. The only switch the header keeps is the one that shows the log -
+    everything else that can be set here is set once, on the store's Settings
+    page, rather than being left where a browse can bump into it.
 
     Two splitters do the rest, and every part of the tab can therefore be given
     room by dragging: the outer one is the panes over the log, the inner one is
-    the list over its detail pane. The detail pane starts with the larger share,
-    since an addon's description is the thing a person came here to read, and it
-    is itself split, so the description and the catalog's facts can be given room
-    against each other too.
+    the shelf over its detail pane. The shelf lays each addon as a tile - its own
+    picture over its name, version and how it stands - the way a store app is
+    picked off a shelf; the detail pane starts with the larger share, since an
+    addon's description is the thing a person came here to read, and it is itself
+    split, so the description and the catalog's facts can be given room against
+    each other too.
 
     The log lies folded under the browsing panes until it is asked for: the tick
     box in the header, or a drag of the fold line, pulls it back up to its share.
     A job that ends badly opens it on its own, since the log is where the reason
-    for a failure is written out at length.
+    for a failure is written out at length; a job that runs says only what its
+    card wears until someone presses Show details.
     """
     return {"kind": "column", "label": PAGE_ADDONS, "children": [
         {"kind": "row", "id": "headrow", "children": [
@@ -731,13 +757,6 @@ def addons_page() -> dict:
             {"kind": "label", "id": "source", "text": "",
              "tooltip": "The repository, or the first of them, the catalog is "
                         "read from", "style": _STATUS_STYLE},
-            {"kind": "check", "id": "delcfg", "text": "delete settings",
-             "checked": True,
-             "tooltip": "Whether Delete takes an addon's own settings under "
-                        "addons/_data/<id>/ with its program. Unticked here it "
-                        "holds for this session only; the switch in the store's "
-                        "Settings page is the answer kept for every one",
-             "on": ["toggled"]},
             {"kind": "check", "id": "showlog", "text": "show log",
              "checked": False,
              "tooltip": "The job's log under the two panes. It starts folded "
@@ -759,13 +778,14 @@ def addons_page() -> dict:
          "sizes": LOG_SHARE, "children": [
             {"kind": "column", "children": [
                 {"kind": "splitter", "id": "browse", "sizes": [2, 3], "children": [
-                    {"kind": "table", "id": "list", "columns": list(LIST_COLUMNS),
-                     "stretch": [0], "col_widths": [0, 70, 130], "font_size": 11,
-                     "checkbox": 0, "multi": True,
+                    {"kind": "list", "id": "list", "grid": True,
+                     "icon_size": 64, "tile_width": 150, "spacing": 10,
+                     "font_size": 10, "multi": True, "checkbox": 0,
                      "on": ["selected", "context", "toggled"],
-                     "tooltip": "Every addon the configured sources list; click one "
-                                "to read about it, ctrl-click several to work on them "
-                                "as a batch, and tick an installed one to switch it on"},
+                     "tooltip": "Every addon the configured sources list; press a "
+                                "tile to read about it, ctrl-press several to work "
+                                "on them as a batch, and tick an installed one to "
+                                "switch it on"},
                     {"kind": "column", "children": [
                         {"kind": "row", "children": [
                             {"kind": "image", "id": "dicon", "size": 64},
@@ -1015,6 +1035,12 @@ def build_tab() -> None:
 # works exactly as it did before the batch.
 _LOCAL = threading.local()
 MAX_DOWNLOAD_WORKERS = 4
+
+# How many PyInstaller builds a batch may have running at once. Each build
+# stages in its own ``<work>/<id>`` folder, so two in flight never touch the
+# same spec, the same build folder or the same dist path; the limit is about
+# not pinching CPU and memory from the app while its own addon compiles.
+MAX_COMPILE_WORKERS = 3
 
 
 def say(text: str, bad: bool = False) -> None:
@@ -1505,6 +1531,20 @@ def staging() -> Path:
     return folder
 
 
+def staged_folder(id_value: str) -> Path:
+    """One addon's corner of the staging folder, made when asked for.
+
+    A batch downloads every addon's files before it builds any of them, so the
+    source, the assets and the test of one addon cannot share a flat folder with
+    the next - two stores can name the same picture, and one job's reset would
+    erase another's downloads. Everything an addon is built from lives under its
+    own id here until its tidy takes it away.
+    """
+    folder = staging() / clean_id(id_value)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 def work_dir() -> Path:
     """The addon's own folder under ``api.paths.data`` for the build's work.
 
@@ -1537,11 +1577,12 @@ def harness_folder(values: dict) -> Path | None:
     if ready is not None:
         return Path(ready)
     folder = staging() / "harness"
-    for name in HARNESS_FILES:
-        why = _fetch_file(values, name, folder / name, app_folder(values))
+    specs = [(name, folder / name) for name in HARNESS_FILES]
+    # Overlapped rather than in turn: each is one GitHub round-trip, and an
+    # install that fetches them one after the other pays the sum of both.
+    for why in _fetch_many(values, specs, app_folder(values)):
         if why:
-            note(f"the modules an addon imports could not be fetched "
-                 f"({name}): {why}")
+            note(f"the modules an addon imports could not be fetched: {why}")
             return None
     return folder
 
@@ -1573,21 +1614,37 @@ def _widen_harness(values: dict) -> bool:
     if job is None or job.get("harness") is None:
         return False
     folder = Path(str(job["harness"]))
-    got = False
+    specs: list[tuple[str, Path]] = []
     for name in _APP:
         relative = name.replace(".", "/") + ".py"
         target = folder / relative
-        if target.is_file():
-            continue
-        if _fetch_file(values, relative, target, app_folder(values)):
+        if not target.is_file():
+            specs.append((relative, target))
+    if not specs:
+        return False
+    # Every one of the app's modules is asked for at once: eight round-trips in
+    # turn is eight times the wait, and this is the retry path of a test that has
+    # already spent a run finding out it could not import them (see _fetch_many).
+    reasons = _fetch_many(values, specs, app_folder(values))
+    got = False
+    for (relative, _target), why in zip(specs, reasons):
+        if why:
             note(f"{relative} was not there to fetch")
         else:
             got = True
     return got
 
 
-def _reset_staging() -> None:
-    for child in staging().iterdir():
+def _reset_staging(id_value: str = "") -> None:
+    """Clear the staging folder: one addon's share of it, or the whole of it.
+
+    With an id, only that addon's staged files go; with none, everything does,
+    which is what a job does once at its start. The shared harness folder sits
+    under the same roof and is only cleared by the whole-fold wipe, so a batch
+    that fetched it for its first test still has it for the rest of them.
+    """
+    folder = staged_folder(id_value) if id_value else staging()
+    for child in folder.iterdir():
         try:
             if child.is_dir():
                 shutil.rmtree(child, ignore_errors=True)
@@ -1598,17 +1655,20 @@ def _reset_staging() -> None:
 
 
 def _tidy(id_value: str) -> None:
-    """Throw the downloads and the build away once the program is in ``addons``.
+    """Throw this addon's downloads and build away once its program landed.
 
     The source, its assets, its test and everything PyInstaller made on the way
-    were only a means to the program that got installed, so they are cleared;
-    what the addon itself keeps in its ``_data`` folder is left alone.
+    were only a means to the program that got installed, so they are cleared -
+    for this addon alone, since the batch may still be downloading or building
+    over its neighbours' files. What the addon itself keeps in its ``_data``
+    folder is left alone, and so is the shared harness, which the next addon's
+    test may still import; the job's start wipes the whole staging fold anyway.
     """
     try:
         shutil.rmtree(work_dir() / id_value, ignore_errors=True)
     except OSError as error:
         note(f"the build folder could not be cleared: {error}")
-    _reset_staging()
+    _reset_staging(id_value)
 
 
 # --- the pictures an addon is shown with ---
@@ -1618,9 +1678,21 @@ def _tidy(id_value: str) -> None:
 #: addons costs forty downloads the first time and nothing at all after it.
 _PICTURES = (".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico")
 
+#: How many pictures have landed since the table was last drawn with them. A
+#: one-item list because it is written from a function that has to keep it
+#: between ticks without a class for the sake of one counter.
+_land_icons = [0]
+
 #: How many ticks a picture waits between itself and the next one. Slow enough
 #: that a build starting in between gets the connection back in front of it.
 _ICON_GAP = 0.3
+
+#: How many pictures may land before the table is drawn with them. Repainting
+#: after every single one meant a store of forty addons rebuilt a forty-row
+#: listing forty times, all of it in the moment the tab is opened, for rows that
+#: nobody had finished looking at yet; the wait between two pictures is the
+#: network's, not the table's.
+_ICON_REFRESH = 8
 
 
 def icons_dir() -> Path:
@@ -1711,6 +1783,7 @@ def queue_icons() -> None:
     published without one costs nothing and is drawn with the default.
     """
     del icon_queue[:]
+    _land_icons[0] = 0
     for entry in entries:
         id_value = one_line(entry.get("id"))
         if not id_value or not one_line(entry.get("icon")):
@@ -1728,6 +1801,11 @@ def _pump_icons() -> None:
     One per tick, because these are the app's own downloads and a store with a
     slow connection would otherwise sit filling a row of empty squares while it
     caught up. A picture that will not come is left for the default.
+
+    The table is not redrawn per picture (see ``_ICON_REFRESH``): it is redrawn
+    every few arrivals and once more when the last of them has landed, so a
+    listing that is still filling in costs a handful of rebuilds instead of one
+    per row.
     """
     if api is None or not icon_queue:
         return
@@ -1736,6 +1814,7 @@ def _pump_icons() -> None:
         return
     id_value = str(icon_queue.pop(0))
     entry = entry_for(id_value)
+    landed = False
     if entry is not None:
         name = one_line(entry.get("icon"))
         source = entry.get("src")
@@ -1745,11 +1824,23 @@ def _pump_icons() -> None:
             values = source_values(source)
             if _fetch_quiet(values, f"assets/{id_value}/{name}", target):
                 icon_paths[id_value] = str(target)
-                show_entries()
-                if picked == id_value:
-                    show_detail(entry)
+                landed = True
+    _land_icons[0] += 1 if landed else 0
     if icon_queue:
+        if _land_icons[0] >= _ICON_REFRESH:
+            _land_icons[0] = 0
+            show_entries()
+            if picked in icon_paths:
+                picked_entry = entry_for(picked)
+                if picked_entry is not None:
+                    show_detail(picked_entry)
         api.schedule.after(_ICON_GAP, _pump_icons)
+        return
+    if landed or _land_icons[0]:
+        _land_icons[0] = 0
+        show_entries()
+        if picked == id_value and entry is not None:
+            show_detail(entry)
 
 
 # --- which commit a published addon came out of ---
@@ -2532,6 +2623,14 @@ def manager_toggle(ident: str, slug: str, payload: dict) -> None:
     note(words)
 
 
+#: The file browsers this store has opened and not yet looked after. ``xdg-open``
+#: is a child of this process, and a child that has finished and not been waited
+#: on stays on the machine's process list for the life of the app - which for a
+#: window left open for days is one leftover per folder opened. Each ask prunes
+#: the ones that have already gone.
+_openers: list[subprocess.Popen] = []
+
+
 def reveal(path: Path) -> None:
     """Show one folder in the machine's own file browser.
 
@@ -2539,6 +2638,10 @@ def reveal(path: Path) -> None:
     Windows ``startfile`` call where there is one, ``xdg-open`` everywhere else.
     Neither is waited on - a file browser is not the store's business once it has
     been opened - and one that will not start is said on the status line.
+
+    Nothing waited on is reaped either, so the list of them is gone through on
+    each ask: ``poll()`` takes a finished child back for the system and leaves
+    the ones still up alone.
     """
     where = str(path)
     opener = getattr(os, "startfile", None)
@@ -2546,8 +2649,10 @@ def reveal(path: Path) -> None:
         if callable(opener):
             opener(where)
             return
-        subprocess.Popen(["xdg-open", where], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+        _openers[:] = [held for held in _openers if held.poll() is None]
+        _openers.append(subprocess.Popen(["xdg-open", where],
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL))
     except (OSError, ValueError) as error:
         manager_say(f"{where} could not be shown: {error}", bad=True)
 
@@ -3385,15 +3490,16 @@ def _job_picture(entry: dict | None) -> str:
 
 
 def _job_show(show: bool) -> bool:
-    """Swap the browsing panes for the job's console, or hand them back.
+    """Swap the browsing panes for the job's card, or hand them back.
 
     ``set_widget`` answers ``False`` for an id the tab does not hold, which is how
     a job started on a tab built without the pane - an older layout, or a bare
     test harness - finds out it has nowhere to print and carries on regardless.
 
-    The console is meant to own the whole tab while a job runs, so the header,
+    The card is meant to own the whole tab while a job runs, so the header,
     the filter line, the button row and the folded log under the panes all step
-    aside with it and come back on the same call.
+    aside with it and come back on the same call. The console behind the card
+    keeps to the fold: it is pulled up only by the card's own button.
     """
     if api is None:
         return False
@@ -3405,6 +3511,22 @@ def _job_show(show: bool) -> bool:
     for quiet in ("headrow", "filterrow", "actionrow", "log"):
         _detail(quiet, "visible", not show)
     return bool(placed)
+
+
+def toggle_job_details() -> None:
+    """Pull the job's console up from behind the card, or fold it back away.
+
+    The build prints to the screen the whole time it is hidden, so opening it
+    late loses nothing of the job - the lines are already there, and the card
+    keeps its place floating over whatever share of the pane is showing.
+    """
+    if api is None or job is None or not job.get("pane"):
+        return
+    showing = not bool(job.get("console"))
+    job["console"] = showing
+    _detail("jobterm", "visible", showing)
+    _detail("jobdetails", "text",
+            "Hide details" if showing else "Show details")
 
 
 def _job_write(text: str) -> None:
@@ -3499,7 +3621,10 @@ def _begin(verb: str, entry: dict | None = None) -> dict:
     working = True
     job = {"verb": verb, "values": {}, "source": "", "stream": None,
            "on_ok": None, "fail": "", "lines": [], "harness": None,
-           "widened": False, "details": {}, "id": "", "queue": [],
+           "widened": False, "details": {}, "console": False, "id": "",
+           "queue": [], "phase": "", "staged": {}, "waiting": [],
+           "building": {}, "test_ids": [], "test_at": 0,
+           "from_versions": {},
            "total": 1, "done": 0, "restore": {}, "did": [], "pane": False}
     _point_job_at(entry)
     _buttons(False)
@@ -3514,6 +3639,11 @@ def _begin(verb: str, entry: dict | None = None) -> dict:
             api.tabs.set_widget(TAB, "jobterm", "clear", True)
         except AddonError:
             pass
+        # Every job starts with the console folded away, whatever the last
+        # one left open behind it: the card is the view, and the button
+        # says "Show details" because that is what it will do.
+        _detail("jobterm", "visible", False)
+        _detail("jobdetails", "text", "Show details")
         _job_card(_job_name(entry), step="", picture=_job_picture(entry))
     note(f"{job['source']}: this job reads the store from here")
     # The page hears the job twice: here and at its end. The steps go to the
@@ -3527,16 +3657,26 @@ def _begin(verb: str, entry: dict | None = None) -> dict:
 
 
 def _begin_job(verb: str, items: list[dict]) -> dict:
-    """Start a job over a batch: the first entry works at once, the rest queue.
+    """Start a job over a batch: everything downloads first, then it builds.
 
-    One job covers the whole of what was picked. Its queue is worked through
-    addon by addon, and the card's bar counts its percentage over all of
-    them, so ten installs read as one job at one pace.
+    One job covers the whole of what was picked. Its queue is the batch in
+    order: every file of every addon lands first, the published tests are run
+    over them one at a time, and the builds then run side by side, up to a
+    few at once. The card's bar counts over all of them, so ten installs
+    read as one job at one pace.
+
+    An update remembers each installed version before anything is touched,
+    since the installs that follow overwrite the manifest the number is read
+    from.
     """
     global job
     job = _begin(verb, items[0])
     job["queue"] = list(items)
     job["total"] = len(items)
+    if verb == "update":
+        job["from_versions"] = {
+            one_line(entry.get("id")): installed_version(
+                one_line(entry.get("id"))) for entry in items}
     return job
 
 
@@ -3550,6 +3690,7 @@ def _finish(text: str, bad: bool = False) -> None:
     """
     global working, job
     if job is not None:
+        _kill_builds()       # a job that ended has no use for builds in flight
         total = int(job.get("total") or 1)
         done = int(job.get("done") or 0)
         if bad and total > 1:
@@ -3598,6 +3739,57 @@ def _progress(text: str, frac: float) -> None:
     _job_card(step=line, percent=percent)
 
 
+def _phase(text: str, frac: float | None = None) -> None:
+    """One line on the card, for a phase the whole batch shares.
+
+    The batch works in phases - every download, then the tests, then the
+    builds side by side - so the bar reads over the whole job at once rather
+    than over one addon's share of it: ``frac`` is the absolute share wanted,
+    and leaving it out changes the line without moving the bar.
+    """
+    if api is None or job is None:
+        return
+    if frac is None:
+        _job_card(step=text)
+        return
+    part = max(0.0, min(1.0, float(frac)))
+    _job_card(step=text, percent=min(99, int(round(100.0 * part))))
+
+
+def _batch_frac() -> float:
+    """Where the bar stands while builds are in flight: 45% up to 95%.
+
+    Downloads own the job's first stretch and the tests the next, but the
+    builds overlap each other, so their share moves by finished addon rather
+    than by the one in hand.
+    """
+    total = max(1, int((job or {}).get("total") or 1))
+    done = int((job or {}).get("done") or 0)
+    return 0.45 + 0.50 * done / total
+
+
+def _kill_builds() -> None:
+    """Stop every build still running: nobody is left to read their lines.
+
+    A batch that ended - in failure or in the middle - must not leave two or
+    three PyInstaller processes burning CPU behind it; each slot's stream is
+    asked to take its whole process tree down, and a slot that refuses to
+    die is said and left, the job being over either way.
+    """
+    if job is None:
+        return
+    for ident, slot in list((job.get("building") or {}).items()):
+        stream = slot.get("stream")
+        if stream is None:
+            continue
+        try:
+            stream.kill()
+        except Exception as error:
+            note(f"{ident}'s build could not be stopped: {error}")
+    job["building"] = {}
+    job["waiting"] = []
+
+
 def _prep_one(id_value: str) -> None:
     """Stop the addon and switch it off before its file is replaced.
 
@@ -3624,7 +3816,7 @@ def _prep_one(id_value: str) -> None:
     except Exception as error:
         note(f"{id_value} could not be stopped and switched off first: {error}")
         return
-    _progress(f"stopped and switched off {id_value} to work on it", 0.03)
+    _phase(f"stopped and switched off {id_value} to work on it")
 
 
 def _restore_enabled(id_value: str) -> None:
@@ -3649,32 +3841,15 @@ def _restore_enabled(id_value: str) -> None:
          "before the update")
 
 
-def _start_next() -> None:
-    """Take the next addon off the batch queue and set it building.
+def _start_job() -> None:
+    """Set the batch off: the interpreter first, then the download phase.
 
-    Each entry is aimed at its own publishing source, stopped and switched
-    off as it comes, and the interpreter and PyInstaller are checked again
-    per addon rather than assumed from the last - the first of a batch may
-    have brought pip along since the job started.
+    One check of the Python and of PyInstaller covers the whole of the
+    batch: nothing about a build depends on which addon comes next, and a
+    pip that had to run answers for all of them.
     """
-    global job
-    if job is None or not job.get("queue"):
+    if job is None:
         return
-    entry = job["queue"].pop(0)
-    id_value = one_line(entry.get("id"))
-    job["id"] = id_value
-    job["widened"] = False
-    job["harness"] = None
-    job["lines"] = []
-    _point_job_at(entry)
-    # The card follows the work: a batch is one console and one name in the
-    # middle of it, changed as each addon comes off the queue.
-    _job_card(_job_name(entry), picture=_job_picture(entry))
-    if job.get("verb") == "update":
-        job["from_version"] = installed_version(id_value)
-    if int(job.get("total") or 1) > 1:
-        _progress(f"working on {one_line(entry.get('name')) or id_value}", 0.0)
-    _prep_one(id_value)
     where = _ensure_python()
     if not where:
         return
@@ -3682,7 +3857,185 @@ def _start_next() -> None:
     if not ready:
         _pip_install(where)
         return
-    _compile(id_value)
+    _download_all()
+
+
+def _download_all() -> None:
+    """The batch's first phase: every file of every addon lands, then tests.
+
+    Downloading is the slow part of a job when the network is, and
+    compiling the slow part when the machine is; paying the whole of the
+    first up front means a store being offline stops the job before any
+    build is spent, and the builds that follow never wait on a fetch.
+    """
+    if job is None:
+        return
+    _reset_staging()
+    job["phase"] = "download"
+    job["staged"] = {}
+    items = list(job.get("queue") or [])
+    total = max(1, len(items))
+    for index, entry in enumerate(items):
+        id_value = one_line(entry.get("id"))
+        job["id"] = id_value
+        _point_job_at(entry)
+        if total > 1:
+            # The card follows the work: one console and one name in the
+            # middle of it, changed as each addon's files come down.
+            _job_card(_job_name(entry), picture=_job_picture(entry))
+        _phase(f"downloading {id_value}'s files ({index + 1} of {total})...",
+               0.03 + 0.27 * index / total)
+        why = _stage_entry(entry)
+        if why:
+            _finish(why, bad=True)
+            return
+    # The harness is the app's own half, not any addon's: one fetched copy
+    # stands for the whole batch, wherever its addons were published.
+    if job.get("harness") is None:
+        job["harness"] = harness_folder(job["values"])
+    for record in job["staged"].values():
+        record["harness"] = job["harness"]
+    _phase("every file of every addon is down", 0.30)
+    _start_tests()
+
+
+def _start_tests() -> None:
+    """The batch's second phase: each addon's published gate, run in turn.
+
+    The gates share the machine's Python and the one console, and a test the
+    addon itself failed ends the job before any build is spent - so they
+    answer one after another, and nothing compiled is wasted on an addon
+    whose neighbour has already refused.
+    """
+    if job is None:
+        return
+    job["phase"] = "test"
+    job["test_ids"] = [one_line(entry.get("id"))
+                       for entry in (job.get("queue") or [])]
+    job["test_at"] = 0
+    _next_test()
+
+
+def _next_test() -> None:
+    """Run the next addon's test; when the last has answered, start the builds."""
+    if job is None:
+        return
+    ids = job.get("test_ids") or []
+    at = int(job.get("test_at") or 0)
+    if at >= len(ids):
+        _start_builds()
+        return
+    job["test_at"] = at + 1
+    id_value = ids[at]
+    record = (job.get("staged") or {}).get(id_value) or {}
+    job["id"] = id_value
+    _point_job_at(record.get("entry") or {})
+    job["widened"] = False
+    job["lines"] = []
+    job["harness"] = record.get("harness")
+    total = max(1, len(ids))
+    _phase(f"checking {id_value} ({at + 1} of {total})...",
+           0.30 + 0.15 * (at + 1) / total)
+    _maybe_test(id_value, record.get("source"), record.get("test"),
+                then=_next_test)
+
+
+def _start_builds() -> None:
+    """The batch's last phase: compile up to MAX_COMPILE_WORKERS at a time.
+
+    Every gate has spoken and every file is down, so what is left is the
+    machine's work alone. Each build stages in its own folder under the
+    work root and writes its dist paths there, so two PyInstaller processes
+    in flight never touch the same files; the limit is only about leaving
+    the computer usable while the batch runs.
+    """
+    if job is None:
+        return
+    job["phase"] = "build"
+    job["waiting"] = list(job.get("test_ids") or [])
+    job["building"] = {}
+    if not job["waiting"]:
+        _finish_all()
+        return
+    _fill_build_slots()
+    if job is not None and job.get("building"):
+        _poll_builds()
+
+
+def _fill_build_slots() -> None:
+    """Start waiting builds until every slot the batch may use is taken."""
+    if job is None:
+        return
+    while (job.get("waiting")
+           and len(job.get("building") or {}) < MAX_COMPILE_WORKERS):
+        _begin_build(job["waiting"].pop(0))
+        if job is None:              # that build ended the job on the way in
+            return
+
+
+def _begin_build(id_value: str) -> None:
+    """Stop one addon and hand its staged source to the compiler.
+
+    The addon is only stopped when its own build starts, so an addon that
+    waits its slot stays up - and running - until the job really needs its
+    file out of the way.
+    """
+    if job is None:
+        return
+    record = (job.get("staged") or {}).get(id_value) or {}
+    entry = record.get("entry") or {}
+    job["id"] = id_value
+    _point_job_at(entry)
+    job["harness"] = record.get("harness")
+    if int(job.get("total") or 1) > 1:
+        _job_card(_job_name(entry), picture=_job_picture(entry))
+    if job.get("verb") == "update":
+        job["from_version"] = str(
+            (job.get("from_versions") or {}).get(id_value, ""))
+    _prep_one(id_value)
+    _phase(f"compiling {id_value}...", _batch_frac())
+    _build(id_value, record.get("source"))
+
+
+def _poll_builds() -> None:
+    """Drain every build in flight; install what finished, top the slots up.
+
+    One tick walks the whole batch: each slot's lines come out under its
+    addon's name, a build that ended clean is installed at once and its
+    slot given to the next waiting addon, and a build that ended dirty ends
+    the job - taking the siblings down with it, since nobody is left to
+    read what they go on printing.
+    """
+    if job is None:
+        return
+    batched = int(job.get("total") or 1) > 1
+    for ident, slot in list((job.get("building") or {}).items()):
+        stream = slot.get("stream")
+        if stream is None:
+            continue
+        for line in stream.drain(300):
+            if line is not None:
+                note(f"[{ident}] {line}" if batched else line)
+        if not stream.finished:
+            continue
+        code = int(stream.code or 0)
+        job["building"].pop(ident, None)
+        if code != 0:
+            _finish(slot.get("fail")
+                    or f"{ident}'s build stopped with code {code}", bad=True)
+            return
+        _install_step(ident)
+        if job is None:
+            return
+        _fill_build_slots()
+        if job is None:
+            return
+    if job.get("building"):
+        if api is not None:
+            api.schedule.after(0.2, _poll_builds)
+        return
+    if not job.get("waiting"):
+        _finish_all()
 
 
 def _stream(command: list[str], cwd: Path | None, on_ok: Any,
@@ -3830,42 +4183,42 @@ def _fetch_many(values: dict, specs: list[tuple[str, Path]],
     return results
 
 
-def _compile(id_value: str) -> None:
-    """Fetch the addon's .py, its pictures and its test at once, then build it.
+def _stage_entry(entry: dict) -> str:
+    """Fetch one addon's program, pictures and test into its own staging folder.
 
-    The program, its assets and its test are unrelated files, so each is asked
-    for side by side rather than waiting on the last (see _fetch_many). A picture
-    that will not arrive is said and skipped rather than refused: the assets are
-    decoration, and every addon can draw its own tab mark, so losing one is worth
-    a line in the log and nothing more. The source is not - without it there is
-    no addon to build - and neither is a test that was named but could not land,
-    since the check that guards the build would then have nothing to run.
+    The program, its assets and its test are unrelated files, so each is
+    asked for side by side rather than waiting on the last (see
+    _fetch_many). A picture that will not arrive is said and skipped rather
+    than refused: the assets are decoration, and every addon can draw its
+    own tab mark, so losing one is worth a line in the log and nothing more.
+    The source is not - without it there is no addon to build - and neither
+    is a test that was named but could not land, since the check that guards
+    the build would then have nothing to run.
+
+    Everything staged is written down against the addon's id for the test
+    and build phases to pick up; the answer is the reason the batch must
+    stop, or nothing.
     """
     if job is None:
-        return
-    entry = entry_for(id_value)
+        return "the job ended before the download could start"
+    id_value = one_line(entry.get("id"))
     values = job["values"]
-    if entry is None:
-        _finish(f"the store no longer lists {id_value}", bad=True)
-        return
-    _reset_staging()
-    source = staging() / f"{id_value}.py"
+    folder = staged_folder(id_value)
+    source = folder / f"{id_value}.py"
     names = list(entry.get("assets") or [])
     if entry.get("icon") and entry["icon"] not in names:
         names.append(entry["icon"])
-    assets = staging() / "assets"
+    assets = folder / "assets"
     test_name = entry.get("test") or ""
     specs: list[tuple[str, Path]] = [(entry["filename"], source)]
     specs += [(f"assets/{id_value}/{name}", assets / name) for name in names]
     if test_name:
-        specs.append((f"_tests/{test_name}", staging() / test_name))
-    _progress(f"downloading {len(specs)} file(s)...", 0.15)
+        specs.append((f"_tests/{test_name}", folder / test_name))
     reasons = _fetch_many(values, specs)
     if reasons[0]:
-        _finish(reasons[0], bad=True)
-        return
+        return reasons[0]
     # Read before the build, since the source is gone by the time it is installed
-    job["details"] = _details(source)
+    details = _details(source)
     left = []
     for index, name in enumerate(names, 1):        # reasons[0] is the source
         if reasons[index]:
@@ -3878,14 +4231,16 @@ def _compile(id_value: str) -> None:
     if test_name:
         why = reasons[-1]                            # the test is the last spec
         if why:
-            _finish(f"the addon's test could not be fetched: {why}", bad=True)
-            return
-        test_path = staging() / test_name
-    job["harness"] = harness_folder(values)
-    _maybe_test(id_value, source, test_path)
+            return f"the addon's test could not be fetched: {why}"
+        test_path = folder / test_name
+    job["staged"][id_value] = {"entry": entry, "source": source,
+                               "test": test_path, "details": details,
+                               "values": dict(values), "harness": None}
+    return ""
 
 
-def _maybe_test(id_value: str, source: Path, test_path: Path | None) -> None:
+def _maybe_test(id_value: str, source: Path, test_path: Path | None,
+                then: Any = None) -> None:
     """Run the addon's own test before spending a build on it; skip it when none.
 
     The test is handed the downloaded ``.py`` through ``RASCONF_ADDON_SOURCE``
@@ -3894,17 +4249,29 @@ def _maybe_test(id_value: str, source: Path, test_path: Path | None) -> None:
     ends the job; a run that never got as far as the addon is only said out loud,
     because it proved nothing either way. The build goes ahead when there is no
     test published, no way to run one, or a test that passed.
+
+    ``then``, when given, is what the batch wants onward in place of the build:
+    the gates run one after another over the addons, and answering one only
+    moves that queue along - the builds themselves wait until every test has
+    spoken.
     """
     if job is None:
         return
+
+    def onward() -> None:
+        if callable(then):
+            then()
+        else:
+            _build(id_value, source)
+
     if test_path is None or not test_path.is_file():
         _progress("no test is published for this addon; compiling as it is", 0.45)
-        _build(id_value, source)
+        onward()
         return
     harness = job.get("harness")
     if harness is None:
         _progress("the addon's test cannot be run here; compiling as it is", 0.45)
-        _build(id_value, source)
+        onward()
         return
     dev = _dev()
     where, why = dev.build_interpreter()
@@ -3918,13 +4285,14 @@ def _maybe_test(id_value: str, source: Path, test_path: Path | None) -> None:
     env["QT_QPA_PLATFORM"] = "offscreen"           # a test may build real widgets
     _progress(f"running {test_path.name} before compiling...", 0.55)
     _stream([str(where), str(test_path)], Path(harness),
-            lambda: _build(id_value, source), env=env,
+            onward, env=env,
             fail="the addon's own test did not pass, so it was not compiled",
-            on_bad=lambda: _test_said_nothing(id_value, source, test_path))
+            on_bad=lambda: _test_said_nothing(id_value, source, test_path,
+                                              then=then))
 
 
 def _test_said_nothing(id_value: str, source: Path,
-                       test_path: Path | None) -> None:
+                       test_path: Path | None, then: Any = None) -> None:
     """Sort a test that stopped into the addon's fault and this machine's.
 
     A published test imports the app's protocol and, for its widget checks, Qt,
@@ -3935,7 +4303,9 @@ def _test_said_nothing(id_value: str, source: Path,
     Dying on one of the app's own modules is worth one retry, because it may be
     the harness that is short rather than the Python: when the modules were
     fetched rather than found, the rest of the app is asked for and the test is
-    run again against a harness that can hold the whole thing up.
+    run again against a harness that can hold the whole thing up. The batch's
+    own ``then`` rides the retry, so a widening answers the gate queue and not
+    a build.
     """
     missing = _machine_missing()
     if not missing:
@@ -3949,12 +4319,15 @@ def _test_said_nothing(id_value: str, source: Path,
         job["widened"] = True
         say(f"fetching the app's other modules to run {test_path.name} properly...")
         if _widen_harness(job.get("values") or {}):
-            _maybe_test(id_value, source, test_path)
+            _maybe_test(id_value, source, test_path, then=then)
             return
     note(f"the test could not start: this Python has no {missing}, so nothing "
          "was proved about the addon either way")
     _progress("the addon's test cannot be run here; compiling as it is", 0.45)
-    _build(id_value, source)
+    if callable(then):
+        then()
+    else:
+        _build(id_value, source)
 
 
 def _is_app(name: str) -> bool:
@@ -4006,15 +4379,21 @@ def _machine_missing() -> str:
 
 
 def _build(id_value: str, source: Path) -> None:
-    """Write a launcher and run PyInstaller over the staged source and its assets.
+    """Write a launcher and start PyInstaller over the addon's staged source.
 
     The launcher imports the app's two modules, so the build is only worth
-    starting when they can be read from disk: the folder that holds them is put
-    on the search path with the addon's own.
+    starting when they can be read from disk: the folder that holds them is
+    put on the search path with the addon's own. The process is not run
+    through the job's single stream: a batch has up to ``MAX_COMPILE_WORKERS``
+    builds in flight and :func:`_poll_builds` drains every slot each tick.
     """
     if job is None:
         return
     dev = _dev()
+    if source is None or not Path(source).is_file():
+        _finish(f"{id_value}'s downloaded source is not here to compile",
+                bad=True)
+        return
     harness = job.get("harness")
     if harness is None:
         _finish("the modules an addon imports could not be reached, so a program "
@@ -4032,7 +4411,7 @@ def _build(id_value: str, source: Path) -> None:
         _finish(f"the build folder could not be made: {error}", bad=True)
         return
     entry = entry_for(id_value) or {}
-    assets = staging() / "assets"
+    assets = staged_folder(id_value) / "assets"
     # A folder program, deliberately, not a one-file: a one-file carries its
     # whole runtime inside one archive and unpacks all of it to a temp folder
     # on every single start - twenty seconds and 200 MB on Windows - and the
@@ -4046,9 +4425,13 @@ def _build(id_value: str, source: Path) -> None:
         options["icon"] = str(icon) if (icon is not None and icon.is_file()) else True
     command = dev.build_command(launcher, id_value, options, source, root=root,
                                 paths=[Path(harness)])
-    _progress(f"compiling {id_value} with PyInstaller...", 0.70)
+    _phase(f"compiling {id_value} with PyInstaller...")
     note("$ " + " ".join(command))
-    _stream(command, work, lambda: _install_step(id_value))
+    stream = dev._Stream(command, cwd=work)
+    stream.start()
+    job.setdefault("building", {})[id_value] = {
+        "stream": stream, "lines": [],
+        "fail": f"{id_value} could not be compiled; the lines above say why"}
 
 
 def _stay_off(id_value: str) -> None:
@@ -4130,7 +4513,7 @@ def _keep_picture(id_value: str, entry: dict) -> None:
         return
     standard = icon_filename(name)
     source: Path | None = None
-    folder = staging() / "assets"
+    folder = staged_folder(id_value) / "assets"
     for wanted in (standard, one_line(entry.get("icon"))):
         if wanted:
             candidate = folder / wanted
@@ -4211,22 +4594,23 @@ def _clear_old_flat(id_value: str) -> None:
 
 
 def _install_step(id_value: str) -> None:
-    """Move the fresh program into ``addons/<id>/``, then on to the next or end.
+    """Move the fresh program into ``addons/<id>/``, then tidy after it.
 
     A fresh install is left switched off; an update puts the switch back where
-    it stood before the job stopped the addon. With more of a batch queued the
-    next addon starts straight off this one; only the last addon's finish ends
-    the job and asks for the rescan.
+    it stood before the job stopped the addon. Builds run side by side, so
+    this places one program and its records and leaves the batch's ending to
+    :func:`_finish_all`, once the last slot has emptied.
 
-    The rescan that lets the app see the new file re-loads this addon as well,
-    which takes the module this code runs in out of the app: the api is gone the
-    moment ``_reload()`` starts. So everything that still needs it - clearing the
-    build away, the switch, the table and the status line - is done first, and
-    the rescan is the last thing here.
+    The rescan that lets the app see the new files re-loads this addon as
+    well, which takes the module this code runs in out of the app: the api is
+    gone the moment ``_reload()`` starts. So everything that still needs it -
+    clearing the build away, the switch, the table and the status line - is
+    done first, in every addon's own step, and only the batch's last one
+    calls for the rescan.
     """
     if job is None:
         return
-    _progress(f"installing {id_value}...", 0.92)
+    _phase(f"installing {id_value}...", _batch_frac())
     dev = _dev()
     staged = dev.staged_name(id_value, False, root=work_dir())
     if not staged.is_file():
@@ -4240,7 +4624,9 @@ def _install_step(id_value: str) -> None:
         _tidy(id_value)
         _finish(f"it could not be put in the addons folder: {error}", bad=True)
         return
-    _describe(id_value, target, job.get("details") or {}, entry_for(id_value) or {})
+    record = (job.get("staged") or {}).get(id_value) or {}
+    _describe(id_value, target, record.get("details") or job.get("details")
+              or {}, entry_for(id_value) or {})
     _tidy(id_value)
     updating = job.get("verb") == "update"
     if updating:
@@ -4253,28 +4639,46 @@ def _install_step(id_value: str) -> None:
     job.setdefault("did", []).append(id_value)
     job["done"] = int(job.get("done") or 0) + 1
     show_entries()
-    if job.get("queue"):
-        _start_next()
+
+
+def _finish_all() -> None:
+    """End the batch in one line, then ask the app to look again.
+
+    Every addon that landed says so here rather than in its own install
+    step: the steps run in whatever order their builds finish, and one
+    summary keeps the switches, the table and the rescan in the order the
+    person left them in the list.
+    """
+    if job is None:
         return
-    did = job.get("did") or [id_value]
+    did = list(job.get("did") or [])
+    updating = job.get("verb") == "update"
     if len(did) > 1:
         if updating:
-            _finish(f"updated {len(did)} addons - " + ", ".join(did) +
+            text = (f"updated {len(did)} addons - " + ", ".join(did) +
                     "; each switch is back where it was")
         else:
-            _finish(f"installed {len(did)} addons - " + ", ".join(did) +
+            text = (f"installed {len(did)} addons - " + ", ".join(did) +
                     ", switched off until you turn them on in the Addon "
                     "manager")
-    elif updating:
-        had = one_line(job.get("from_version"))
-        now = one_line((job.get("details") or {}).get("manifest", {})
-                       .get("version")) \
-            or one_line((entry_for(id_value) or {}).get("version"))
-        _finish(f"updated addons/{id_value}"
-                + (f" from {had} to {now}" if had and now else ""))
+    elif len(did) == 1:
+        id_value = did[0]
+        record = (job.get("staged") or {}).get(id_value) or {}
+        if updating:
+            had = one_line((job.get("from_versions") or {}).get(id_value))
+            now = one_line((record.get("details") or {}).get("manifest", {})
+                           .get("version")) \
+                or one_line((entry_for(id_value) or {}).get("version"))
+            text = (f"updated addons/{id_value}"
+                    + (f" from {had} to {now}" if had and now else ""))
+        else:
+            text = (f"installed addons/{id_value}/, switched off until you "
+                    "turn it on in the Addon manager")
     else:
-        _finish(f"installed addons/{id_value}/, switched off until you turn it "
-                "on in the Addon manager")
+        # Nothing landed and nothing failed loudly either: the batch had
+        # no addon left to build, which is worth saying as a stopping.
+        text = "no addon reached the build"
+    _finish(text, bad=not did)
     _reload()
 
 
@@ -4315,17 +4719,19 @@ def _after_pip(where: str) -> None:
     if not ready:
         _finish(f"PyInstaller still cannot be found: {hint}", bad=True)
         return
-    id_value = job.get("id") if job is not None else ""
-    _compile(str(id_value))
+    _download_all()
 
 
 def install_selected(_checked: bool = False) -> None:
-    """Download and compile the chosen addons, installing PyInstaller first if needed.
+    """Download the chosen addons, then compile them a few at a time.
 
-    One row or several: ctrl-click takes the whole selection as a batch, the
-    job works through it addon by addon, and every install ends switched off.
-    Anything in the selection that is already installed is left out of it with
-    a line in the log, since installing over a live addon is Update's work.
+    One row or several: ctrl-click takes the whole selection as a batch.
+    Every file of every addon lands first, the published tests answer in
+    turn, and the builds then run side by side - up to three at a time - so
+    a long batch pays for the network once and for the machine once. Every
+    install ends switched off. Anything in the selection that is already
+    installed is left out of it with a line in the log, since installing
+    over a live addon is Update's work.
     """
     if api is None or working:
         return
@@ -4358,18 +4764,19 @@ def install_selected(_checked: bool = False) -> None:
         if entry not in fresh:
             note(f"{entry['id']} is already installed; it was left out of the "
                  "batch")
-    _start_next()
+    _start_job()
 
 
 def update_selected(_checked: bool = False) -> None:
     """Rebuild every chosen addon that is behind, keeping its settings.
 
     An update is an install over the top of what is already there: the same
-    download, test and compile as a fresh install, and the program already in
-    ``addons`` is replaced as the new one is copied in. What the addon saved for
-    itself under ``addons/_data/<id>`` is never part of what an install clears,
-    so its config keeps the answers already given to it. Each addon is stopped
-    and switched off while its program is rebuilt, and its switch in Settings >
+    downloads up front, the same tests in turn and the same builds a few at a
+    time as a fresh install, and the program already in ``addons`` is replaced
+    as the new one is copied in. What the addon saved for itself under
+    ``addons/_data/<id>`` is never part of what an install clears, so its
+    config keeps the answers already given to it. Each addon is stopped and
+    switched off only when its own build starts, and its switch in Settings >
     Addons is put back exactly where it was once the new one lands.
     """
     if api is None or working:
@@ -4422,7 +4829,7 @@ def update_selected(_checked: bool = False) -> None:
             say("the update was declined")
             return
     _begin_job("update", behind)
-    _start_next()
+    _start_job()
 
 
 def _stop_before_delete(id_value: str) -> None:
@@ -4639,6 +5046,9 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
             manager_config_save(slug)
         else:
             manager_config_cancel(slug)
+        return
+    if ident == "jobdetails" and name == "clicked":
+        toggle_job_details()
         return
     if name == "clicked":
         handler = HANDLERS.get(ident)

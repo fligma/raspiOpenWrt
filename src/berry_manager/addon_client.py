@@ -304,6 +304,17 @@ class ProcessAPI:
         self.name = name or self.id
         self.api_version = API_VERSION
         self.lock = threading.Lock()
+        # ``lock`` keeps the pipe's lines whole; this keeps the two maps whole.
+        # A request takes an id out of the counter and puts its queue under it,
+        # and the reader thread takes that queue back out when the answer comes -
+        # from another thread, because an addon's scheduled callback runs on a
+        # timer thread and its hooks on the dispatcher. Unguarded, two requests
+        # could be handed the same id and share one answer, and a reader that
+        # reached for a queue the asking thread had already timed out on raised
+        # inside the reader, which left the addon with no pipe reader at all and
+        # every later request waiting out REPLY_TIMEOUT on an answer nobody was
+        # coming. One claim, under this lock, settles both.
+        self.map_lock = threading.Lock()
         self.counter = 0
         self.pending: dict[int, queue.Queue] = {}
         self.tokens: dict[int, object] = {}
@@ -376,41 +387,44 @@ class ProcessAPI:
         for key, value in (named or {}).items():
             place(key, value)
 
-        self.counter += 1
-        identifier = self.counter
-        answers: queue.Queue = queue.Queue(maxsize=1)
-        self.pending[identifier] = answers
+        with self.map_lock:
+            self.counter += 1
+            identifier = self.counter
+            answers: queue.Queue = queue.Queue(maxsize=1)
+            self.pending[identifier] = answers
         message: dict = {"id": identifier, "api": method, "args": values}
         token = None
         if callback is not None:
             if not callback_argument:
                 raise AddonError(f"{method} has no callback a second process could use")
-            self.token_counter += 1
-            token = self.token_counter
-            self.tokens[token] = callback
+            with self.map_lock:
+                self.token_counter += 1
+                token = self.token_counter
+                self.tokens[token] = callback
             message["callback"] = callback_argument
             message["token"] = token
         if not self.send(message):
-            self.pending.pop(identifier, None)
-            if token is not None:
-                self.tokens.pop(token, None)
+            self._forget(identifier, token)
             raise AddonError("the app is not listening any more")
         try:
             kind, result = answers.get(timeout=REPLY_TIMEOUT)
         except queue.Empty:
-            self.pending.pop(identifier, None)
-            if token is not None:
-                self.tokens.pop(token, None)
+            self._forget(identifier, token)
             raise AddonError(f"the app did not answer '{method}' in time")
-        self.pending.pop(identifier, None)
+        self._forget(identifier, token)
         if kind == "error":
-            if token is not None:
-                self.tokens.pop(token, None)
             raise AddonError(str(result))
         if is_future_handle(result):
             # A job the app started for us: what comes back is only its handle.
             return RemoteFuture(self, result[FUTURE_KEY])
         return result
+
+    def _forget(self, identifier: int, token: Any = None) -> None:
+        """Take this request's two slots back once its answer is spent or refused."""
+        with self.map_lock:
+            self.pending.pop(identifier, None)
+            if token is not None:
+                self.tokens.pop(token, None)
 
     def read_loop(self) -> None:
         """Route the app's lines: answers to whoever asked, the rest to the dispatcher."""
@@ -431,11 +445,15 @@ class ProcessAPI:
             if not isinstance(message, dict):
                 continue
             identifier = message.get("id")
-            if identifier is not None and identifier in self.pending:
+            answers = None            # a line with no id must not wear the last one's
+            if identifier is not None:
+                with self.map_lock:
+                    answers = self.pending.pop(identifier, None)
+            if answers is not None:
                 kind = "error" if "error" in message else "ok"
                 value = message.get("error") if kind == "error" else message.get("result")
                 try:
-                    self.pending[identifier].put((kind, value))
+                    answers.put_nowait((kind, value))
                 except queue.Full:
                     pass
                 continue
@@ -448,8 +466,10 @@ class ProcessAPI:
 
     def _release_pending(self, reason: str) -> None:
         """Hand an error back to every thread still waiting on the app."""
-        while self.pending:
-            _identifier, answers = self.pending.popitem()
+        with self.map_lock:
+            stranded = list(self.pending.values())
+            self.pending.clear()
+        for answers in stranded:
             try:
                 answers.put_nowait(("error", reason))
             except queue.Full:
@@ -498,7 +518,8 @@ class ProcessAPI:
                            where="on_message")
             return
         if op == "invoke":
-            callback = self.tokens.get(message.get("token"))
+            with self.map_lock:
+                callback = self.tokens.get(message.get("token"))
             if callable(callback):
                 guard_call(self, callback, *(message.get("args") or []), where="callback")
             return
