@@ -499,8 +499,17 @@ jobs:
         # A single file beside the build folder, so its artifact name is not
         # picked up by the release's ``berry_manager-*`` download (a folder of
         # that name would hide the program build); it is published as itself.
+        # The onefile output is ``berry_manager-setup`` on Linux and
+        # ``berry_manager-setup.exe`` on Windows, so only the extension moves.
+        # Put the non-empty value in the ``&&`` branch: GitHub reads ``''`` as
+        # falsy, so writing ``Linux && '' || '.exe'`` short-circuits to ``.exe``
+        # on *both* systems and this step then looks for a ``.exe`` that Linux
+        # never built. ``if-no-files-found: error`` keeps that kind of mismatch
+        # failing here, at the step that made it, rather than surfacing as an
+        # empty artifact two jobs later in the release's ``find``.
         name: berry-setup-${{ runner.os }}
-        path: src/berry_manager/dist/berry_manager-setup${{ runner.os == 'Linux' && '' || '.exe' }}
+        path: src/berry_manager/dist/berry_manager-setup${{ runner.os == 'Windows' && '.exe' || '' }}
+        if-no-files-found: error
         retention-days: 7
 
   # A build that passed its tests and packaged its two programs *is* a release:
