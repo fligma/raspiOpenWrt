@@ -47,6 +47,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -56,12 +57,16 @@ from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -75,7 +80,7 @@ from PyQt6.QtWidgets import (
 #: the newest ``berry`` tag - see :func:`resolve_tag` - the same way the Manager
 #: update addon does. This value is only the tag used when that ask cannot be
 #: made: an offline machine, or a fork with no releases published yet.
-APP_VERSION = "0x3.0x2.0x3"
+APP_VERSION = "0x3.0x2.0x4"
 OWNER = "fligma"
 REPO = "raspiOpenWrt"
 TAG_PREFIX = "berry"
@@ -125,6 +130,48 @@ PALETTE = {
     "disabled_fill": "#292929",
     "disabled_edge": "#383838",
 }
+
+#: The longest step line the job card wears. The whole line goes onto the
+#: terminal behind the card, so the card only has to stay readable over it -
+#: the same bargain the in-app update's job card makes.
+_JOB_STEP_LEN = 52
+
+#: How many times a download that broke off is picked up from the byte it
+#: stopped at before it is called lost, and the pause before each pickup. A
+#: twenty-megabyte program over a home connection loses a packet now and then;
+#: that used to throw away every byte already in hand - the same patience the
+#: in-app updater gives a large download.
+MAX_RESUMES = 4
+RESUME_WAIT = 0.8
+
+#: How many redirect hops one download may follow before it is called lost.
+MAX_REDIRECTS = 8
+
+#: The size of a read: big enough to keep a large build moving, small enough
+#: that a broken body loses little and the counter still ticks.
+DOWNLOAD_CHUNK = 512 * 1024
+
+#: How far apart two progress reports may be, in seconds. The download's byte
+#: counter and PyInstaller's output can each say something new many times a
+#: second; the card and the terminal behind it only need to read as alive, and
+#: every report is a trip across to the interface thread.
+PROGRESS_MIN_INTERVAL = 0.1
+
+#: Suffixes granted the run bit without sniffing, because on the one system this
+#: walk runs (never Windows) they are always code to load: ``.so`` objects, whole
+#: or versioned (``libcrypto.so.1.1``). ``_internal`` is mostly made of them, so
+#: this is where the walk saves the most. Any file whose suffix does not say
+#: "executable" still has its first four bytes read, so no ELF is missed.
+KNOWN_EXEC_SUFFIXES = (".so",)
+
+
+class _Resumable(Exception):
+    """A download body that broke off, keeping how many bytes reached disk."""
+
+    def __init__(self, have: int, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.have = int(have)
+        self.error = error
 
 
 def system_name() -> str:
@@ -271,7 +318,91 @@ def pick_latest(tags) -> tuple | None:
 
 # --- what touches the network: the downloads and one catalog read ---
 
-def fetch_github(tail: str, dest: Path, report, owner: str, repo: str) -> None:
+def _fetch_once(base: str, dest: Path, have: int, report, token: str,
+                cancel: dict | None) -> None:
+    """One walk of the redirect and one read of the body, resuming at ``have``.
+
+    The ``Range`` that picks a broken body up from its stopping byte rides on the
+    request that finally answers with the file; the ``github.com`` hop only points
+    somewhere else, so asking it for a range is harmless. A ``206`` means the rest
+    is coming and is appended to what is already on disk; a ``200`` means the
+    range was ignored, so the file is started fresh - no worse than never asking.
+    """
+    host, path = "github.com", base
+    hops = 0
+    while True:
+        conn = http.client.HTTPSConnection(host, timeout=30)
+        headers = {"User-Agent": f"berry-setup/{APP_VERSION}",
+                   "Accept": "application/octet-stream"}
+        # The one-time signature GitHub redirects to carries its own access in
+        # the URL, so a token is sent to the github.com hop only.
+        if token and host.endswith("github.com"):
+            headers["Authorization"] = f"Bearer {token}"
+        if have > 0:
+            headers["Range"] = f"bytes={have}-"
+        conn.request("GET", path, headers=headers)
+        response = conn.getresponse()
+        status = int(response.status)
+        if status in (301, 302, 303, 307, 308):
+            location = response.getheader("Location") or ""
+            response.read()
+            conn.close()
+            hops += 1
+            if not location or hops > MAX_REDIRECTS:
+                raise OSError("the download kept being pointed elsewhere")
+            parts = urlsplit(location)
+            if parts.scheme != "https" or not parts.netloc:
+                raise OSError(f"{location} is not an https address")
+            host, path = parts.netloc, (parts.path or "/")
+            if parts.query:
+                path = f"{path}?{parts.query}"
+            continue
+        if status == 416 and have > 0:
+            # The range sits past the end: whatever was kept was wrong, so drop
+            # it and let the caller ask for the whole file again.
+            response.read()
+            conn.close()
+            raise _Resumable(0, OSError("the kept bytes were past the end"))
+        if status == 200:
+            mode, written = "wb", 0
+        elif status == 206:
+            mode, written = "ab", have
+        else:
+            body = response.read(400)
+            conn.close()
+            raise OSError(f"GitHub refused with {status}: "
+                          f"{body.decode('utf-8', 'replace')[:200]}")
+        length = response.getheader("Content-Length") or ""
+        part = int(length) if length.isdigit() else 0
+        total = written + part if part else 0
+        done = written
+        with dest.open(mode) as handle:
+            while True:
+                if cancel is not None and cancel.get("cancel"):
+                    conn.close()
+                    raise OSError("the download was cancelled")
+                try:
+                    chunk = response.read(DOWNLOAD_CHUNK)
+                except (http.client.HTTPException, OSError) as error:
+                    handle.flush()
+                    raise _Resumable(done, error)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                done += len(chunk)
+                report(done, total)
+        conn.close()
+        if done == 0:
+            raise OSError("the download answered with nothing at all")
+        if total and done < total:
+            # The body ended short of what it promised: keep what landed and
+            # pick the rest up on the next try rather than accept a cut file.
+            raise _Resumable(done, OSError("the download ended early"))
+        return
+
+
+def fetch_github(tail: str, dest: Path, report, owner: str, repo: str,
+                 cancel: dict | None = None) -> None:
     """GET one address from GitHub, following the redirect, into ``dest``.
 
     Both fetches - the release archive and the source snapshot - go through
@@ -282,66 +413,51 @@ def fetch_github(tail: str, dest: Path, report, owner: str, repo: str) -> None:
     sent to the ``github.com`` hop only and never on to the file server that
     finally hands the bytes over. ``report`` is called with
     ``(bytes_done, bytes_total)`` as they arrive.
+
+    A body that breaks off mid-way is not thrown away: the bytes on disk are kept
+    and the same address is asked for the rest, up to ``MAX_RESUMES`` times with a
+    short pause. A server that will not resume answers the whole file again, so a
+    lost partial costs only the retry. ``cancel``, when given, is a
+    ``{"cancel": bool}`` flag checked between chunks, so a download can be walked
+    away from too - not only a build - and a cancellation is honoured, not retried.
     """
     token = os.environ.get("GITHUB_TOKEN", "").strip()
-    host, path = "github.com", f"/{owner.strip('/')}/{repo.strip('/')}{tail}"
-    hops = 0
+    base = f"/{owner.strip('/')}/{repo.strip('/')}{tail}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    have = 0
+    attempt = 0
     while True:
-        conn = http.client.HTTPSConnection(host, timeout=30)
-        headers = {"User-Agent": f"berry-setup/{APP_VERSION}",
-                   "Accept": "application/octet-stream"}
-        # The one-time signature GitHub redirects to carries its own access in
-        # the URL, so a token is sent to the github.com hop only.
-        if token and host.endswith("github.com"):
-            headers["Authorization"] = f"Bearer {token}"
-        conn.request("GET", path, headers=headers)
-        response = conn.getresponse()
-        status = int(response.status)
-        if status in (301, 302, 303, 307, 308):
-            location = response.getheader("Location") or ""
-            response.read()
-            conn.close()
-            hops += 1
-            if not location or hops > 8:
-                raise OSError("the download kept being pointed elsewhere")
-            parts = urlsplit(location)
-            if parts.scheme != "https" or not parts.netloc:
-                raise OSError(f"{location} is not an https address")
-            host, path = parts.netloc, (parts.path or "/")
-            if parts.query:
-                path = f"{path}?{parts.query}"
-            continue
-        if status != 200:
-            body = response.read(400)
-            conn.close()
-            raise OSError(f"GitHub refused with {status}: "
-                          f"{body.decode('utf-8', 'replace')[:200]}")
-        length = response.getheader("Content-Length") or ""
-        total = int(length) if length.isdigit() else 0
-        done = 0
-        dest.write_bytes(b"")
-        with dest.open("ab") as handle:
-            while True:
-                chunk = response.read(256 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                done += len(chunk)
-                report(done, total)
-        conn.close()
-        if done == 0:
-            raise OSError("the download answered with nothing at all")
-        return
+        attempt += 1
+        try:
+            _fetch_once(base, dest, have, report, token, cancel)
+            return
+        except _Resumable as lost:
+            have = lost.have
+            if attempt >= MAX_RESUMES:
+                raise OSError(f"the download broke off {attempt} times: "
+                              f"{lost.error}") from lost.error
+            time.sleep(RESUME_WAIT)
+        except (OSError, http.client.HTTPException):
+            # A cancellation is a wish to stop, not a stumble to recover from.
+            if cancel is not None and cancel.get("cancel"):
+                raise
+            if attempt >= MAX_RESUMES:
+                raise
+            have = 0
+            dest.unlink(missing_ok=True)
+            time.sleep(RESUME_WAIT)
 
 
-def github_api_json(owner: str, repo: str, tail: str):
+def github_api_json(owner: str, repo: str, tail: str, timeout: int = 20):
     """GET one ``api.github.com`` answer for this repository and parse it.
 
     Both doors ask the catalog before they download, so this is the one small
     read that is not a file: the JSON back, or an OSError saying why not. A
     token in the environment is sent, which lifts the shared anonymous rate
     limit - the same bargain the update addon makes. ``api.github.com`` answers
-    in one hop, so unlike the downloads there is no redirect to walk.
+    in one hop, so unlike the downloads there is no redirect to walk. The
+    patience is the caller's to shorten: a tag lookup that a machine cannot
+    reach is better off giving up quickly and falling back than hanging.
     """
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     # The API hangs repositories off /repos/, unlike the download host where
@@ -351,7 +467,7 @@ def github_api_json(owner: str, repo: str, tail: str):
                "Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    conn = http.client.HTTPSConnection("api.github.com", timeout=20)
+    conn = http.client.HTTPSConnection("api.github.com", timeout=timeout)
     try:
         conn.request("GET", path, headers=headers)
         response = conn.getresponse()
@@ -364,6 +480,11 @@ def github_api_json(owner: str, repo: str, tail: str):
     return json.loads(body.decode("utf-8", "replace"))
 
 
+#: The newest tag each ``owner/repo`` resolved to this run, so a door that asks
+#: twice does not wait on the network twice.
+_tag_cache: dict[tuple[str, str], str] = {}
+
+
 def resolve_tag(owner: str, repo: str) -> str:
     """The tag to install: the newest published ``berry`` release if it can be
     asked for, else the tag this setup was built to match.
@@ -371,27 +492,37 @@ def resolve_tag(owner: str, repo: str) -> str:
     Asking the catalog is what lets a setup published weeks ago still install
     the current build, and lets a fork reach its own newest - the very thing the
     in-app update tab does. When the network cannot answer, :func:`release_tag`
-    keeps the offline path working rather than dead in the water.
+    keeps the offline path working rather than dead in the water - and the ask
+    wears a short patience so a known-offline machine falls back in a couple of
+    seconds, not twenty. A real answer is remembered for the rest of the run; a
+    fallback is not, so a link that comes back later is still taken.
     """
+    key = (owner, repo)
+    cached = _tag_cache.get(key)
+    if cached:
+        return cached
     try:
-        rows = github_api_json(owner, repo, "tags?per_page=100")
+        rows = github_api_json(owner, repo, "tags?per_page=100", timeout=8)
     except (OSError, ValueError, http.client.HTTPException):
         return release_tag()
     names = ([row.get("name") for row in rows if isinstance(row, dict)]
              if isinstance(rows, list) else [])
     best = pick_latest(names)
-    return best[0] if best else release_tag()
+    if not best:
+        return release_tag()
+    _tag_cache[key] = best[0]
+    return best[0]
 
 
 def download_release(dest: Path, report, owner: str, repo: str,
-                     tag: str) -> None:
+                     tag: str, cancel: dict | None = None) -> None:
     """Fetch ``tag``'s archive for the running system into ``dest``."""
     fetch_github(f"/releases/download/{tag}/{asset_name()}",
-                 dest, report, owner, repo)
+                 dest, report, owner, repo, cancel)
 
 
 def download_source(dest: Path, report, owner: str, repo: str,
-                    tag: str) -> None:
+                    tag: str, cancel: dict | None = None) -> None:
     """Fetch the source snapshot ``tag`` names into ``dest``.
 
     A compile reads the program's own ``src/berry_manager`` off GitHub rather
@@ -399,7 +530,7 @@ def download_source(dest: Path, report, owner: str, repo: str,
     exactly the one the release names - and the setup stays a small file.
     """
     fetch_github(f"/archive/refs/tags/{tag}.tar.gz",
-                 dest, report, owner, repo)
+                 dest, report, owner, repo, cancel)
 
 
 # --- how the build is recognised and laid down ---
@@ -453,10 +584,16 @@ def _restore_exec_bits(root: Path) -> None:
     no unix mode at all, and Python's own unzip never sets the run bit. A
     helper like ``QtWebEngineProcess`` then lands unrunnable, and Chromium's
     zygote dies on the failed exec with a fatal CHECK - which reads to a
-    person as the program vanishing the moment it opens. Four bytes per file
-    decide it: anything that starts with the ELF magic means code to run or
-    load, and granting ``+x`` to a library costs nothing it did not already
-    have. The running program is chmodded by the caller whatever its header.
+    person as the program vanishing the moment it opens.
+
+    A suffix that gives the file away settles it without an open: ``.so``
+    objects (see ``KNOWN_EXEC_SUFFIXES``) are code to load on this system and
+    are granted ``+x`` straight away, which spares the walk through the hundreds
+    of libraries that make up most of ``_internal``. Everything whose suffix
+    does not say "executable" still has its first four bytes read - the ELF
+    magic is the authority - so a real binary is never missed for the sake of a
+    name, and a data file with a misleading one costs only a short read. The
+    running program is chmodded by the caller whatever its header.
     """
     for here, _dirs, files in os.walk(root):
         for name in files:
@@ -464,12 +601,39 @@ def _restore_exec_bits(root: Path) -> None:
             try:
                 if not path.is_file() or path.is_symlink():
                     continue
-                with path.open("rb") as handle:
-                    if handle.read(4) != b"\x7fELF":
-                        continue
+                if not any(suffix in KNOWN_EXEC_SUFFIXES
+                           for suffix in path.suffixes):
+                    with path.open("rb") as handle:
+                        if handle.read(4) != b"\x7fELF":
+                            continue
                 path.chmod(path.stat().st_mode | 0o111)
             except OSError:
                 continue
+
+
+def staging_dir(target: Path, prefix: str = "berry_stage_") -> Path:
+    """A fresh throwaway folder on the same filesystem as ``target``.
+
+    Laying a build down is a move, and a move is only free when it stays on one
+    device. The default temp folder so often lives on another (a ramdisk at
+    ``/tmp`` while the app goes under the home folder), which would force a
+    byte-for-byte copy of a hundred megabytes of libraries. So the staging area
+    is made beside the target - under it, then by it, then above it, and only in
+    the ordinary temp folder as a last resort - whichever first lets a folder be
+    created there, so ``place_build`` can rename where it can and copy where it
+    must.
+    """
+    seen: set[Path] = set()
+    parent = target
+    while parent is not None and parent not in seen:
+        seen.add(parent)
+        try:
+            if parent.is_dir():
+                return Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
+        except OSError:
+            pass
+        parent = parent.parent if parent.parent != parent else None
+    return Path(tempfile.mkdtemp(prefix=prefix))
 
 
 def place_build(build_root: Path, target: Path) -> None:
@@ -490,8 +654,11 @@ def place_build(build_root: Path, target: Path) -> None:
                 shutil.rmtree(landing, ignore_errors=True)
             else:
                 landing.unlink(missing_ok=True)
-        shutil.copytree(source, landing) if source.is_dir() \
-            else shutil.copy2(source, landing)
+        # A rename is one syscall whatever the size; a copy moves every byte.
+        # The build is staged on the target's own filesystem (see
+        # ``staging_dir``), so this is normally the rename - and ``shutil.move``
+        # still falls back to copying across devices when it is not.
+        shutil.move(str(source), str(landing))
     if os.name != "nt":
         _restore_exec_bits(target)
         try:
@@ -503,6 +670,35 @@ def place_build(build_root: Path, target: Path) -> None:
     readme = addons / "README.txt"
     if not readme.exists():
         readme.write_text(ADDONS_README, encoding="utf-8")
+
+
+def launch_program(program: Path) -> None:
+    """Start the freshly installed program, detached from this setup.
+
+    The setup opened a door onto the app; launching walks through it. The new
+    copy is started detached - its own session on unix, a detached process on
+    Windows - with the install folder as its home, so it outlives this setup and
+    finds the ``_internal`` and ``addons`` beside it. Nothing here waits on it:
+    the app is on its own the moment it is up.
+    """
+    if not program.is_file():
+        raise OSError(f"{program.name} is not there to start")
+    if os.name == "nt":
+        flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        subprocess.Popen([str(program)], cwd=str(program.parent),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True,
+                         creationflags=flags)
+        return
+    try:
+        program.chmod(program.stat().st_mode | 0o111)
+    except OSError:
+        pass
+    subprocess.Popen([str(program)], cwd=str(program.parent),
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, close_fds=True,
+                     start_new_session=True)
 
 
 # --- the source a compile reads, and the staging a faithful build needs ---
@@ -660,16 +856,17 @@ def python_has(py: str, modules: tuple[str, ...]) -> tuple[bool, list[str]]:
 
 
 def run_compile(source: Path, target: Path, py: str, report,
-                cancel_flag) -> None:
+                cancel_flag, base: str | None = None) -> None:
     """Build the program from ``source`` with PyInstaller into ``target``.
 
     Everything happens in a throwaway copy, so the source tree is never touched
     and the leftovers a compile makes (``build/``, ``dist/``, the ``.spec``, the
     staging folders) go with that copy when the finished build has been moved.
     The flags mirror the workflow exactly, so a local build and a published one
-    are the same program.
+    are the same program. ``base`` is where that throwaway is made; passing a
+    folder on the target's own filesystem makes the final move a rename.
     """
-    work = Path(tempfile.mkdtemp(prefix="berry_build_"))
+    work = Path(tempfile.mkdtemp(prefix="berry_build_", dir=base))
     try:
         stage = work / "src"
         report("copying the source to a build folder")
@@ -750,9 +947,26 @@ class Worker(QThread):
         self.repo = repo
         self.python = python
         self._cancel = {"cancel": False}
+        self._last_emit = 0.0
 
     def cancel(self) -> None:
         self._cancel["cancel"] = True
+
+    def _progress(self, text: str, frac: float = -1,
+                  force: bool = False) -> None:
+        """Report a step, no more than about ten times a second.
+
+        The download's byte counter and PyInstaller's log can each say something
+        new many times a second, and every report is a trip across to the
+        interface thread that redraws a terminal line. The card only has to read
+        as alive, so reports inside the interval are dropped - unless a step is
+        changing (``force``), which is worth showing whole and on time.
+        """
+        now = time.monotonic()
+        if not force and now - self._last_emit < PROGRESS_MIN_INTERVAL:
+            return
+        self._last_emit = now
+        self.progress.emit(text, frac)
 
     def run(self) -> None:                        # noqa: D401 - QThread contract
         try:
@@ -760,29 +974,33 @@ class Worker(QThread):
                 self._do_install()
             else:
                 self._do_compile()
-        except (OSError, ValueError, zipfile.BadZipFile) as error:
+        except Exception as error:            # noqa: BLE001 - a stray error let
+            # loose from a QThread's run() calls qFatal and aborts the whole
+            # process; caught here it is only a job the card can wear as failed,
+            # not a crash the moment the work is done.
             self.finished.emit(False, str(error) or error.__class__.__name__)
 
     def _do_install(self) -> None:
         tag = resolve_tag(self.owner, self.repo)
         version = _readable(tag_version(tag) or tag)
         archive = Path(tempfile.gettempdir()) / asset_name()
-        staging = Path(tempfile.mkdtemp(prefix="berry_install_"))
+        staging = staging_dir(self.target, "berry_install_")
         try:
-            self.progress.emit(f"fetching {asset_name()} ({version}) from the "
-                               f"release", -1)
+            self._progress(f"fetching {asset_name()} ({version}) from the "
+                           f"release", -1, force=True)
 
             def on_bytes(done: int, total: int) -> None:
                 frac = (done / total) if total else -1
                 size = f"{done / 1_048_576:.1f} MB"
                 if total:
                     size += f" of {total / 1_048_576:.1f} MB"
-                self.progress.emit(f"downloading {size}", frac)
+                self._progress(f"downloading {size}", frac)
 
-            download_release(archive, on_bytes, self.owner, self.repo, tag)
+            download_release(archive, on_bytes, self.owner, self.repo, tag,
+                             self._cancel)
             build_root = extract_release(archive, staging,
-                                         lambda t: self.progress.emit(t, -1))
-            self.progress.emit("putting the build in place", -1)
+                                         lambda t: self._progress(t, -1))
+            self._progress("putting the build in place", -1, force=True)
             place_build(build_root, self.target)
             self.finished.emit(True, f"Berry Manager {version} is "
                                      f"installed at {self.target}")
@@ -797,26 +1015,27 @@ class Worker(QThread):
         assert self.python is not None
         tag = resolve_tag(self.owner, self.repo)
         version = _readable(tag_version(tag) or tag)
-        work = Path(tempfile.mkdtemp(prefix="berry_source_"))
+        work = staging_dir(self.target, "berry_source_")
         try:
             tarball = work / "source.tar.gz"
-            self.progress.emit(f"fetching the source of {version} from "
-                               f"{self.owner}/{self.repo}", -1)
+            self._progress(f"fetching the source of {version} from "
+                           f"{self.owner}/{self.repo}", -1, force=True)
 
             def on_bytes(done: int, total: int) -> None:
                 frac = (done / total) if total else -1
                 size = f"{done / 1024} KB"
                 if total:
                     size += f" of {total / 1024} KB"
-                self.progress.emit(f"downloading source {size}", frac)
+                self._progress(f"downloading source {size}", frac)
 
-            download_source(tarball, on_bytes, self.owner, self.repo, tag)
+            download_source(tarball, on_bytes, self.owner, self.repo, tag,
+                            self._cancel)
             source = extract_source(tarball, work,
-                                    lambda t: self.progress.emit(t, -1))
+                                    lambda t: self._progress(t, -1))
             tarball.unlink(missing_ok=True)
             run_compile(source, self.target, self.python,
-                        lambda text: self.progress.emit(text, -1),
-                        self._cancel)
+                        lambda text: self._progress(text, -1),
+                        self._cancel, base=str(work))
             self.finished.emit(True, f"a local build of Berry Manager "
                                      f"{version} is installed at "
                                      f"{self.target}")
@@ -827,11 +1046,16 @@ class Worker(QThread):
 # --- the card ---
 
 class InstallerCard(QWidget):
-    """The window: the splash's look, and the two doors under it.
+    """The window: the splash's look, the two doors, and a job view.
 
-    It opens as the boot card does - logo, name, and a bar under a line of what
-    is happening - and adds only what an installer needs: a choice of door, the
-    folder it will write to, and the buttons to start and to close.
+    It opens as the boot card does - logo, name, and what an installer needs:
+    a choice of door, the folder it will write to, and the buttons to start and
+    to close. Once a door opens the form gives way to the view an in-app update
+    wears for a long job: a terminal for a background printing every step as it
+    arrives, with a card floating in the middle naming the version and counting
+    its share. When the job lands, the card's bar is replaced by a line that
+    says it is done and the two things worth doing next - launch the program, or
+    close the setup.
     """
 
     def __init__(self) -> None:
@@ -840,6 +1064,8 @@ class InstallerCard(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._worker: Worker | None = None
         self._drag: tuple[int, int] | None = None
+        self._ok = False
+        self._program: Path | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -851,80 +1077,188 @@ class InstallerCard(QWidget):
         body.setContentsMargins(30, 24, 30, 20)
         body.setSpacing(9)
 
-        self.logo = QLabel(card)
+        # Two faces for one card: the setup form it opens with, and the job the
+        # doors run - a terminal behind a centred card, the way an in-app update
+        # wears its download. Only one is on screen at a time.
+        self.stack = QStackedWidget(card)
+        self.stack.addWidget(self._build_setup_page())
+        self.stack.addWidget(self._build_job_page())
+        body.addWidget(self.stack)
+
+        self.install_choice.toggled.connect(self._door_changed)
+        self.setFixedWidth(520)
+        self.setStyleSheet(self._card_sheet())
+        self.stack.setCurrentIndex(0)
+        self.adjustSize()
+        self._center_on_screen()
+        self._door_changed()
+
+    # -- the setup form --
+
+    def _build_setup_page(self) -> QWidget:
+        """The face the installer opens with: the splash, and the two doors."""
+        page = QWidget()
+        grid = QVBoxLayout(page)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(9)
+
+        self.logo = QLabel(page)
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._place_logo()
 
-        title = QLabel(f"Berry Manager V{_readable(APP_VERSION)} - setup", card)
+        title = QLabel(f"Berry Manager V{_readable(APP_VERSION)} - setup", page)
         title.setObjectName("splashTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         subtitle = QLabel("Install the published build, or compile one here.",
-                          card)
+                          page)
         subtitle.setObjectName("splashStep")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
 
         doors = QHBoxLayout()
-        self.install_choice = QRadioButton("Install release", card)
-        self.compile_choice = QRadioButton("Compile on this PC", card)
+        self.install_choice = QRadioButton("Install release", page)
+        self.compile_choice = QRadioButton("Compile on this PC", page)
         self.install_choice.setChecked(True)
         doors.addWidget(self.install_choice)
         doors.addStretch(1)
         doors.addWidget(self.compile_choice)
 
-        self.dir_edit = QLineEdit(str(default_install_dir()), card)
-        browse = QPushButton("Browse...", card)
+        self.dir_edit = QLineEdit(str(default_install_dir()), page)
+        browse = QPushButton("Browse...", page)
         browse.clicked.connect(self._browse)
         where = QHBoxLayout()
         where.addWidget(self.dir_edit, 1)
         where.addWidget(browse)
 
-        self.owner_edit = QLineEdit(OWNER, card)
+        self.owner_edit = QLineEdit(OWNER, page)
         self.owner_edit.setPlaceholderText("owner")
-        self.repo_edit = QLineEdit(REPO, card)
+        self.repo_edit = QLineEdit(REPO, page)
         self.repo_edit.setPlaceholderText("repo")
         gitbox = QHBoxLayout()
         gitbox.addWidget(self.owner_edit, 1)
         gitbox.addWidget(self.repo_edit, 2)
 
-        self.step = QLabel("", card)
+        self.step = QLabel("", page)
         self.step.setObjectName("splashStep")
         self.step.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.step.setWordWrap(True)
 
-        self.bar = QProgressBar(card)
-        self.bar.setRange(0, 100)
-        self.bar.setValue(0)
-        self.bar.setTextVisible(True)
-        self.bar.setFormat("%p%")
-
-        buttons = QHBoxLayout()
-        self.start_button = QPushButton("Install", card)
+        self.start_button = QPushButton("Install", page)
         self.start_button.setObjectName("primaryAction")
         self.start_button.clicked.connect(self._start)
-        self.cancel_button = QPushButton("Close", card)
+        self.cancel_button = QPushButton("Close", page)
         self.cancel_button.clicked.connect(self._close_or_cancel)
+        buttons = QHBoxLayout()
         buttons.addWidget(self.start_button, 1)
         buttons.addWidget(self.cancel_button)
 
-        body.addWidget(self.logo)
-        body.addWidget(title)
-        body.addWidget(subtitle)
-        body.addLayout(doors)
-        body.addWidget(QLabel("Install folder", card))
-        body.addLayout(where)
-        body.addWidget(QLabel("Git source (owner / repo)", card))
-        body.addLayout(gitbox)
-        body.addWidget(self.step)
-        body.addWidget(self.bar)
-        body.addLayout(buttons)
+        grid.addWidget(self.logo)
+        grid.addWidget(title)
+        grid.addWidget(subtitle)
+        grid.addLayout(doors)
+        grid.addWidget(QLabel("Install folder", page))
+        grid.addLayout(where)
+        grid.addWidget(QLabel("Git source (owner / repo)", page))
+        grid.addLayout(gitbox)
+        grid.addWidget(self.step)
+        grid.addLayout(buttons)
+        return page
 
-        self.install_choice.toggled.connect(self._door_changed)
-        self.setFixedWidth(440)
-        self.setStyleSheet(self._card_sheet())
-        self.adjustSize()
-        self._center_on_screen()
-        self._door_changed()
+    # -- the job view: a terminal, and the card floating over it --
+
+    def _build_job_page(self) -> QWidget:
+        """The face a door wears while it works: steps on a terminal, a card."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        holder = QWidget(page)
+        cell = QGridLayout(holder)
+        cell.setContentsMargins(0, 0, 0, 0)
+
+        self.terminal = QPlainTextEdit(holder)
+        self.terminal.setObjectName("jobTerm")
+        self.terminal.setReadOnly(True)
+        self.terminal.setMinimumHeight(300)
+        # A whole PyInstaller run can print many thousands of lines; the console
+        # only needs the recent tail, so the buffer is capped and old lines fall
+        # off the back instead of quietly eating the memory of a long build.
+        self.terminal.setMaximumBlockCount(2000)
+        cell.addWidget(self.terminal, 0, 0)
+
+        # The card shares the terminal's cell and is centred over it - the same
+        # overlay an update puts its job on - so the steps keep scrolling behind
+        # it and the card holds the one thing worth reading at a glance.
+        self.job_card = QFrame(holder)
+        self.job_card.setObjectName("jobCard")
+        self.job_card.setFixedWidth(300)
+        cell.addWidget(self.job_card, 0, 0, Qt.AlignmentFlag.AlignCenter)
+
+        inner = QVBoxLayout(self.job_card)
+        inner.setContentsMargins(18, 14, 18, 16)
+        inner.setSpacing(7)
+
+        self.card_done = QLabel("DONE", self.job_card)
+        self.card_done.setObjectName("jobDone")
+        self.card_done.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.card_done.hide()
+
+        self.card_icon = QLabel(self.job_card)
+        self.card_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._place_job_icon()
+
+        self.card_title = QLabel("", self.job_card)
+        self.card_title.setObjectName("jobName")
+        self.card_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.card_title.setWordWrap(True)
+
+        self.card_step = QLabel("", self.job_card)
+        self.card_step.setObjectName("jobStep")
+        self.card_step.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.card_step.setWordWrap(True)
+
+        self.card_progress = QProgressBar(self.job_card)
+        self.card_progress.setObjectName("jobBar")
+        self.card_progress.setRange(0, 100)
+        self.card_progress.setValue(0)
+        self.card_progress.setTextVisible(True)
+        self.card_progress.setFormat("%p%")
+
+        # A bar and the buttons never share the card: what the bar counts up to
+        # is the moment the two things worth doing next take its place.
+        self.job_actions = QWidget(self.job_card)
+        row = QHBoxLayout(self.job_actions)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        self.launch_button = QPushButton("Launch app", self.job_actions)
+        self.launch_button.setObjectName("primaryAction")
+        self.launch_button.clicked.connect(self._launch_app)
+        self.job_close_button = QPushButton("Close installer", self.job_actions)
+        self.job_close_button.clicked.connect(self._on_job_close)
+        row.addWidget(self.launch_button, 1)
+        row.addWidget(self.job_close_button)
+        self.job_actions.hide()
+
+        inner.addWidget(self.card_done)
+        inner.addWidget(self.card_icon)
+        inner.addWidget(self.card_title)
+        inner.addWidget(self.card_step)
+        inner.addWidget(self.card_progress)
+        inner.addWidget(self.job_actions)
+
+        self.job_card.raise_()
+        lay.addWidget(holder)
+        return page
+
+    def _place_job_icon(self) -> None:
+        path = find_icon()
+        if path is None:
+            self.card_icon.hide()
+            return
+        self.card_icon.setPixmap(QPixmap(str(path)).scaled(
+            64, 64, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
 
     # -- the splash's face --
 
@@ -975,6 +1309,19 @@ class InstallerCard(QWidget):
                         color: {colour('text')}; font-size: 10px; }}
         QProgressBar::chunk {{ background-color: {colour('accent')};
                                border-radius: 3px; margin: 1px; }}
+        QPlainTextEdit#jobTerm {{ background-color: {colour('base')};
+                        border: 1px solid {colour('border')};
+                        border-radius: 6px; color: {colour('text')};
+                        font-family: Consolas, monospace; font-size: 10pt; }}
+        QFrame#jobCard {{ background-color: rgba(24, 24, 24, 236);
+                        border: 1px solid {colour('accent')};
+                        border-radius: 10px; }}
+        QLabel#jobName {{ color: {colour('bright')}; font-size: 13px;
+                        font-weight: 700; }}
+        QLabel#jobStep {{ color: {colour('muted')}; font-size: 10px;
+                        font-family: Consolas, monospace; }}
+        QLabel#jobDone {{ color: {colour('ok')}; font-size: 15px;
+                        font-weight: 700; letter-spacing: 3px; }}
         """
 
     def _center_on_screen(self) -> None:
@@ -1034,14 +1381,40 @@ class InstallerCard(QWidget):
         self.step.setStyleSheet(
             f"color: {PALETTE['warn' if bad else 'muted']};")
 
-    def _set_bar(self, frac: float) -> None:
+    def _reset_job(self, name: str) -> None:
+        """Put the job's console up clean: the card named, the bar busy."""
+        self._ok = False
+        self._program = None
+        self.terminal.clear()
+        self.card_title.setText(name)
+        self.card_step.setText("")
+        self.card_step.setStyleSheet("")
+        self.card_progress.show()
+        self.card_progress.setRange(0, 0)          # busy until a share is known
+        self.card_progress.setFormat("")
+        self.card_done.hide()
+        self.job_actions.hide()
+        self._write_line(f"-> {name}")
+
+    def _write_line(self, text: str) -> None:
+        self.terminal.appendPlainText(str(text))
+
+    def _job_step(self, text: str) -> None:
+        """One step: printed whole on the console, trimmed onto the card."""
+        line = str(text)
+        self._write_line(line)
+        if len(line) > _JOB_STEP_LEN:
+            line = line[:_JOB_STEP_LEN - 1].rstrip() + "\u2026"
+        self.card_step.setText(line)
+
+    def _job_bar(self, frac: float) -> None:
         if frac is None or frac < 0:
-            self.bar.setRange(0, 0)               # busy: the bar slides
-            self.bar.setFormat("")
+            self.card_progress.setRange(0, 0)      # busy: the bar slides
+            self.card_progress.setFormat("")
         else:
-            self.bar.setRange(0, 100)
-            self.bar.setFormat("%p%")
-            self.bar.setValue(max(0, min(100, round(frac * 100))))
+            self.card_progress.setRange(0, 100)
+            self.card_progress.setFormat("%p%")
+            self.card_progress.setValue(max(0, min(100, round(frac * 100))))
 
     def _start(self) -> None:
         if self._worker is not None:
@@ -1067,9 +1440,12 @@ class InstallerCard(QWidget):
             self._say(f"cannot use that folder: {error}", bad=True)
             return
 
+        self._program = target / program_file_name()
         self.start_button.setEnabled(False)
-        self._set_bar(-1)
-        self._say("working...")
+        self._reset_job("Compiling Berry Manager" if compiling
+                        else "Installing Berry Manager")
+        self.stack.setCurrentIndex(1)
+        self.adjustSize()
         self._worker = Worker("compile" if compiling else "install", target,
                               owner, repo, py)
         self._worker.progress.connect(self._on_progress)
@@ -1077,15 +1453,27 @@ class InstallerCard(QWidget):
         self._worker.start()
 
     def _on_progress(self, text: str, frac: float) -> None:
-        self._say(text)
-        self._set_bar(frac)
+        self._job_step(text)
+        self._job_bar(frac)
 
     def _on_finished(self, ok: bool, text: str) -> None:
-        self._set_bar(1.0 if ok else -1)
-        if ok:
-            self.bar.setRange(0, 100)
-            self.bar.setFormat("done")
-        self._say(text, bad=not ok)
+        # The bar's job is over, so the card wears the outcome and the two
+        # things worth doing next in its place: launch, or get out of the way.
+        self._write_line(("OK  " if ok else "ERR ") + text)
+        self.card_progress.hide()
+        self.card_done.setText("DONE" if ok else "NOT DONE")
+        self.card_done.setStyleSheet(
+            f"color: {PALETTE['ok' if ok else 'warn']};")
+        self.card_done.show()
+        self.card_step.setText(text)
+        self.card_step.setStyleSheet(
+            f"color: {PALETTE['ok' if ok else 'warn']};")
+        self._ok = ok
+        self.launch_button.setVisible(ok)
+        self.launch_button.setEnabled(ok)
+        self.launch_button.setText("Launch app")
+        self.job_close_button.setText("Close installer" if ok else "Back")
+        self.job_actions.show()
         self.start_button.setEnabled(True)
         self.start_button.setText("Install again" if ok else
                                   self.start_button.text())
@@ -1093,10 +1481,33 @@ class InstallerCard(QWidget):
             self._worker.deleteLater()
             self._worker = None
 
+    def _launch_app(self) -> None:
+        if self._program is None:
+            return
+        try:
+            launch_program(self._program)
+        except OSError as error:
+            self.card_step.setText(f"could not start it: {error}")
+            self.card_step.setStyleSheet(f"color: {PALETTE['warn']};")
+            return
+        self.launch_button.setEnabled(False)
+        self.launch_button.setText("Launched")
+        self.card_step.setText(f"started {self._program.name}")
+        self.card_step.setStyleSheet(f"color: {PALETTE['ok']};")
+
+    def _on_job_close(self) -> None:
+        """A landed install closes the setup; a failed one hands the form back."""
+        if self._ok:
+            self.close()
+            return
+        self.stack.setCurrentIndex(0)
+        self.adjustSize()
+        self._door_changed()
+
     def _close_or_cancel(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             self._worker.cancel()
-            self._say("cancelling...")
+            self._job_step("cancelling...")
             return
         self.close()
 
@@ -1104,8 +1515,12 @@ class InstallerCard(QWidget):
         if self._worker is not None and self._worker.isRunning():
             event.ignore()
             self._worker.cancel()
-            self._say("the build is still running; press Close again to "
-                      "leave anyway")
+            words = ("the build is still running; press Close again to "
+                     "leave anyway")
+            if self.stack.currentIndex() == 1:
+                self._job_step(words)
+            else:
+                self._say(words, bad=True)
             return
         event.accept()
 
