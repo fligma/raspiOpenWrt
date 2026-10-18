@@ -2005,6 +2005,21 @@ def _fill_children(layout: QLayout, children: list, kind: str, spec: dict,
         widget = _build_one(child, registry, events)
         if widget is None:
             continue
+        if str(child.get("kind") or "").lower() == "spacer" \
+                and kind in ("column", "vbox", "row", "hbox"):
+            # A spring keeps to the line it lies on. Qt hands a container's
+            # claim up from what it holds: a column that carries a both-ways
+            # spacer says it expands sideways too, and the row it stands in
+            # then splits the slack with it - which is how a side bar that
+            # should hug its own icons once took half the page from the pane
+            # beside it. Across its own line the spring stays merely growable:
+            # free to stretch when nothing else is claiming, never claiming.
+            policy = widget.sizePolicy()
+            if kind in ("column", "vbox"):
+                policy.setHorizontalPolicy(QSizePolicy.Policy.Preferred)
+            else:
+                policy.setVerticalPolicy(QSizePolicy.Policy.Preferred)
+            widget.setSizePolicy(policy)
         if kind == "grid":
             layout.addWidget(widget, int(child.get("row", index)), int(child.get("col", 0)))
         elif kind == "form" and label is not None:

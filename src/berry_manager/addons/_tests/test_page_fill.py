@@ -1,16 +1,20 @@
 """Checks that a page gives its room to the widgets that asked for it.
 
-Two layout promises the tabs rest on, and neither is visible in a data-only
-test. Both were broken in the same way: a control was left growable when it
-should have kept to its own contents, so it ate half the page and the table
-under it was pushed to a strip at the bottom.
+Three layout promises the tabs rest on, and none is visible in a data-only
+test. The first two were broken in the same way: a control was left growable
+when it should have kept to its own contents, so it ate half the page and the
+table under it was pushed to a strip at the bottom.
 
 * a word-wrapped status line takes exactly the height its text needs at the
   width it is given - and takes another line when the pane narrows rather than
   clipping or hoarding the room a splitter below it was asking for;
 * a ``scroll`` pane leaves the room its own column asks for *under* its
   contents, which is what pins a form to the top of its pane instead of
-  stretching it over the whole height.
+  stretching it over the whole height;
+* a ``spacer`` claims slack along the line it lies on and never across it:
+  a column that ends in a spring hugs its own width inside a row, so the pane
+  beside it - a web view filling a tab, say - gets the slack it was promised
+  instead of splitting the page fifty-fifty with a rail.
 
 Run it on the command line::
 
@@ -166,6 +170,47 @@ def test_scroll_stretch(api: Any) -> None:
     body2.deleteLater()
 
 
+# --- three: a spring keeps to the line it lies on ---
+
+def test_spring_line(api: Any) -> None:
+    print("\n3. a spacer claims slack along its own line only")
+    spec = {"kind": "row", "expand": "both", "children": [
+        {"kind": "column", "id": "rail", "children": [
+            {"kind": "button", "text": ""},
+            {"kind": "button", "text": ""},
+            {"kind": "spacer"},
+        ]},
+        {"kind": "label", "id": "page", "text": "the page", "expand": "both"},
+    ]}
+    body, registry = laid_out(api, spec, 1200, 700)
+    rail, pane = registry["rail"], registry["page"]
+    look(f"rail {rail.width()} wide (it wants {rail.sizeHint().width()}), "
+         f"pane {pane.width()} of {body.width()}")
+    check(pane.width() >= body.width() * 0.8,
+          f"a rail ending in a spring took {rail.width()} beside a page of "
+          f"{pane.width()} - the spring claimed across its own line")
+    check(rail.width() <= rail.sizeHint().width() + 24,
+          f"the rail grew to {rail.width()} over its own "
+          f"{rail.sizeHint().width()}")
+
+    # The same claim across a column: a strip of buttons ending in a spring
+    # must not reach up for the height the body under it was promised.
+    stack = {"kind": "column", "expand": "both", "children": [
+        {"kind": "row", "id": "bar", "children": [
+            {"kind": "button", "text": "go"}, {"kind": "spacer"}]},
+        {"kind": "label", "id": "below", "text": "body", "expand": "both"},
+    ]}
+    body2, registry2 = laid_out(api, stack, 700, 500)
+    bar = registry2["bar"]
+    below = registry2["below"]
+    look(f"bar {bar.height()} tall, below {below.height()} of {body2.height()}")
+    check(below.height() >= body2.height() * 0.6,
+          f"a row ending in a spring claimed the height: the body under it "
+          f"was left {below.height()} of {body2.height()}")
+    body.deleteLater()
+    body2.deleteLater()
+
+
 api_app: Any = None
 
 
@@ -185,9 +230,11 @@ def main() -> int:
     except Exception as error:                       # noqa: BLE001
         print(f"addon_api could not be imported: {error}")
         return 2
-    print("addon_api: wrapped lines hug, scrolled columns leave room")
+    print("addon_api: wrapped lines hug, scrolled columns leave room, "
+          "springs keep to their line")
     test_hug(api)
     test_scroll_stretch(api)
+    test_spring_line(api)
     api_app.processEvents()
 
     if FAILURES:
