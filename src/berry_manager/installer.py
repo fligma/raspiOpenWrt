@@ -75,7 +75,7 @@ from PyQt6.QtWidgets import (
 #: the newest ``berry`` tag - see :func:`resolve_tag` - the same way the Manager
 #: update addon does. This value is only the tag used when that ask cannot be
 #: made: an offline machine, or a fork with no releases published yet.
-APP_VERSION = "0x3.0x2.0x2"
+APP_VERSION = "0x3.0x2.0x3"
 OWNER = "fligma"
 REPO = "raspiOpenWrt"
 TAG_PREFIX = "berry"
@@ -445,6 +445,33 @@ def extract_release(archive: Path, staging: Path, report) -> Path:
                   "for and not found")
 
 
+def _restore_exec_bits(root: Path) -> None:
+    """Put the run bit back on every ELF a copied or unpacked tree holds.
+
+    The release archive is the one place permissions cannot be trusted: the
+    artifact upload hands files back at 0644, a zip written on Windows carries
+    no unix mode at all, and Python's own unzip never sets the run bit. A
+    helper like ``QtWebEngineProcess`` then lands unrunnable, and Chromium's
+    zygote dies on the failed exec with a fatal CHECK - which reads to a
+    person as the program vanishing the moment it opens. Four bytes per file
+    decide it: anything that starts with the ELF magic means code to run or
+    load, and granting ``+x`` to a library costs nothing it did not already
+    have. The running program is chmodded by the caller whatever its header.
+    """
+    for here, _dirs, files in os.walk(root):
+        for name in files:
+            path = Path(here) / name
+            try:
+                if not path.is_file() or path.is_symlink():
+                    continue
+                with path.open("rb") as handle:
+                    if handle.read(4) != b"\x7fELF":
+                        continue
+                path.chmod(path.stat().st_mode | 0o111)
+            except OSError:
+                continue
+
+
 def place_build(build_root: Path, target: Path) -> None:
     """Move an unpacked build to where the user asked for it, and make it run.
 
@@ -466,6 +493,7 @@ def place_build(build_root: Path, target: Path) -> None:
         shutil.copytree(source, landing) if source.is_dir() \
             else shutil.copy2(source, landing)
     if os.name != "nt":
+        _restore_exec_bits(target)
         try:
             (target / program).chmod(0o755)
         except OSError:

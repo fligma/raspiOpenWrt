@@ -120,7 +120,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Berry Manager update",
-    "version": "1.6",
+    "version": "1.7",
     "author": "fligma",
     "description": "Groups the berry tags published on GitHub into their major "
                    "lines, newest first, each line opening to its own builds, and "
@@ -2673,6 +2673,33 @@ def looks_like_program_tree(root: Path, system: str) -> bool:
             and (root / INTERNAL_DIR).is_dir())
 
 
+def _restore_exec_bits(root: Path) -> None:
+    """Put the run bit back on every ELF an unpacked tree holds.
+
+    The release zip is untrustworthy about permissions by construction: the
+    artifact upload hands the build back at 0644 and Python's own unzip never
+    sets the run bit, so a helper like ``QtWebEngineProcess`` lands
+    unrunnable - and Chromium's zygote dies on the failed exec with a fatal
+    CHECK, which to the user is the updated program vanishing the moment it
+    opens. Four bytes decide it: the ELF magic means code to run or load, and
+    ``+x`` on a library costs nothing it did not already have. The swap that
+    moves this tree in place is a rename, so what is repaired here is what
+    the new copy launches with.
+    """
+    for here, _dirs, files in os.walk(root):
+        for name in files:
+            path = Path(here) / name
+            try:
+                if not path.is_file() or path.is_symlink():
+                    continue
+                with path.open("rb") as handle:
+                    if handle.read(4) != b"\x7fELF":
+                        continue
+                path.chmod(path.stat().st_mode | 0o111)
+            except OSError:
+                continue
+
+
 def extract_program_tree(data: bytes, dest: Path, system: str) -> Path:
     """Unpack a one-dir build and hand back the folder that holds it.
 
@@ -2690,6 +2717,8 @@ def extract_program_tree(data: bytes, dest: Path, system: str) -> Path:
             archive.extractall(dest)
     except (OSError, ValueError, zipfile.BadZipFile, NotImplementedError) as error:
         raise AddonError(f"the build folder could not be unpacked: {error}")
+    if os.name != "nt":
+        _restore_exec_bits(dest)
     if looks_like_program_tree(dest, system):
         return dest
     for child in sorted(dest.iterdir()):
