@@ -40,6 +40,7 @@ into a throwaway folder that goes when the result has been moved, so no
 from __future__ import annotations
 
 import http.client
+import json
 import os
 import shutil
 import subprocess
@@ -67,13 +68,14 @@ from PyQt6.QtWidgets import (
 
 # --- what this setup is, and where the release it belongs to lives ---
 
-#: The one place the version is written is ``core/const.py``; the release packer
-#: reads that same line, so this is kept equal to it and names the tag this setup
-#: was published under. A build made from source reads the live value instead.
-#: It is the program's byte-packed hex form (the release decimal would call
-#: ``3.1.0``), so ``release_tag`` below lands on the same ``berry0x3.0x1.0x0``
-#: tag the workflow publishes.
-APP_VERSION = "0x3.0x1.0x0"
+#: The version THIS setup carries, kept equal to ``core/const.py``'s
+#: ``APP_VERSION`` so its own title reads the same as the program it installs.
+#: It is the byte-packed hex form (the release decimal would call ``3.2.1``).
+#: It is NOT the release the doors reach for: both default to asking GitHub for
+#: the newest ``berry`` tag - see :func:`resolve_tag` - the same way the Manager
+#: update addon does. This value is only the tag used when that ask cannot be
+#: made: an offline machine, or a fork with no releases published yet.
+APP_VERSION = "0x3.0x2.0x1"
 OWNER = "fligma"
 REPO = "raspiOpenWrt"
 TAG_PREFIX = "berry"
@@ -176,7 +178,11 @@ def default_install_dir() -> Path:
 
 
 def release_tag() -> str:
-    """The GitHub tag this setup was published under: ``berry`` + the version."""
+    """The tag this setup falls back to: ``berry`` + its own version.
+
+    Used only when the newest published release cannot be asked for; the doors
+    reach the live catalog through :func:`resolve_tag` and come here on failure.
+    """
     return f"{TAG_PREFIX}{APP_VERSION}"
 
 
@@ -185,13 +191,92 @@ def asset_name() -> str:
     return f"berry_manager-{system_name()}.zip"
 
 
-# --- the one thing that touches the network ---
+# --- reading a byte-packed version, and choosing the newest release ---
+
+def _version_parts(value) -> tuple:
+    """The bytes out of a byte-packed hex version, as a comparable tuple.
+
+    Each dotted part is its own ``0x`` hex byte (``0x3.0x2.0x1`` is what the
+    release decimal would call ``3.2.1``), so each is read in base 16 and the
+    run compared as numbers - which is why a ``0x10`` patch beats ``0x9``,
+    where a text compare would lose it. A part that is not hex is skipped, and
+    a version with no readable byte is only compared as text below.
+    """
+    parts: list[int] = []
+    for raw in str(value or "").split("."):
+        part = raw.strip()
+        if part[:2].lower() == "0x":
+            part = part[2:]
+        if part and all(c in "0123456789abcdefABCDEF" for c in part):
+            parts.append(int(part, 16))
+    return tuple(parts)
+
+
+def _readable(value) -> str:
+    """A byte-packed hex version as the decimal a person reads (``3.2.1``).
+
+    The tag and the comparison stay in hex; the words this setup prints go
+    through here, the same way the running program's title bar and splash do,
+    so the installer never shows ``0x3.0x2.0x1`` where the app would show
+    ``3.2.1``. A version nothing can be made of is returned as it came.
+    """
+    parts = _version_parts(value)
+    if not parts:
+        return str(value or "")
+    return ".".join(str(byte) for byte in parts)
+
+
+def _version_newer(remote, local) -> bool:
+    """Whether one byte-packed version reads as ahead of another."""
+    wanted, have = _version_parts(remote), _version_parts(local)
+    if wanted and have:
+        length = max(len(wanted), len(have))
+        return (wanted + (0,) * (length - len(wanted))
+                > have + (0,) * (length - len(have)))
+    clean_remote, clean_local = str(remote or ""), str(local or "")
+    return bool(clean_remote) and clean_remote != clean_local
+
+
+def tag_version(name, prefix=TAG_PREFIX) -> str:
+    """The version a ``berry<version>`` tag names, or nothing when it is not one.
+
+    ``berry0x3.0x2.0x1`` reads as ``0x3.0x2.0x1``; a tag that does not start with
+    the prefix, or carries nothing comparable after it, is not this program's
+    release and is passed over.
+    """
+    text = str(name or "").strip()
+    if not text or not text.lower().startswith(str(prefix).lower()):
+        return ""
+    rest = text[len(prefix):].strip()
+    return rest if _version_parts(rest) else ""
+
+
+def pick_latest(tags) -> tuple | None:
+    """The newest ``(tag, version)`` in a list of tag names, or nothing.
+
+    GitHub gives tags back in an order of its own, so this does not trust it:
+    each one that reads as a version is compared and the best kept. This is the
+    same rule the Manager update addon applies, so the setup reaches for the
+    build that tab would offer.
+    """
+    best: tuple | None = None
+    for name in tags or []:
+        version = tag_version(name)
+        if not version:
+            continue
+        if best is None or _version_newer(version, best[1]):
+            best = (str(name).strip(), version)
+    return best
+
+
+# --- what touches the network: the downloads and one catalog read ---
 
 def fetch_github(tail: str, dest: Path, report, owner: str, repo: str) -> None:
     """GET one address from GitHub, following the redirect, into ``dest``.
 
     Both fetches - the release archive and the source snapshot - go through
-    here, which is the single place anything leaves the machine. GitHub answers
+    here, which is where the two archive downloads leave the machine (the
+    catalog read is its own small door, ``github_api_json``). GitHub answers
     these links by pointing somewhere else, so the redirect is followed by hand,
     one hop at a time, and a private token (when the environment carries one) is
     sent to the ``github.com`` hop only and never on to the file server that
@@ -249,21 +334,72 @@ def fetch_github(tail: str, dest: Path, report, owner: str, repo: str) -> None:
         return
 
 
-def download_release(dest: Path, report, owner: str, repo: str) -> None:
-    """Fetch this release's archive for the running system into ``dest``."""
-    tail = (f"/releases/download/{release_tag()}/{asset_name()}")
-    fetch_github(tail, dest, report, owner, repo)
+def github_api_json(owner: str, repo: str, tail: str):
+    """GET one ``api.github.com`` answer for this repository and parse it.
+
+    Both doors ask the catalog before they download, so this is the one small
+    read that is not a file: the JSON back, or an OSError saying why not. A
+    token in the environment is sent, which lifts the shared anonymous rate
+    limit - the same bargain the update addon makes. ``api.github.com`` answers
+    in one hop, so unlike the downloads there is no redirect to walk.
+    """
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    # The API hangs repositories off /repos/, unlike the download host where
+    # owner/repo sits at the top; asking without it answers a quiet 404.
+    path = f"/repos/{owner.strip('/')}/{repo.strip('/')}/{tail.lstrip('/')}"
+    headers = {"User-Agent": f"berry-setup/{APP_VERSION}",
+               "Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    conn = http.client.HTTPSConnection("api.github.com", timeout=20)
+    try:
+        conn.request("GET", path, headers=headers)
+        response = conn.getresponse()
+        status = int(response.status)
+        body = response.read()
+    finally:
+        conn.close()
+    if status != 200:
+        raise OSError(f"the GitHub API refused with {status}")
+    return json.loads(body.decode("utf-8", "replace"))
 
 
-def download_source(dest: Path, report, owner: str, repo: str) -> None:
-    """Fetch the source snapshot this release was tagged from into ``dest``.
+def resolve_tag(owner: str, repo: str) -> str:
+    """The tag to install: the newest published ``berry`` release if it can be
+    asked for, else the tag this setup was built to match.
+
+    Asking the catalog is what lets a setup published weeks ago still install
+    the current build, and lets a fork reach its own newest - the very thing the
+    in-app update tab does. When the network cannot answer, :func:`release_tag`
+    keeps the offline path working rather than dead in the water.
+    """
+    try:
+        rows = github_api_json(owner, repo, "tags?per_page=100")
+    except (OSError, ValueError, http.client.HTTPException):
+        return release_tag()
+    names = ([row.get("name") for row in rows if isinstance(row, dict)]
+             if isinstance(rows, list) else [])
+    best = pick_latest(names)
+    return best[0] if best else release_tag()
+
+
+def download_release(dest: Path, report, owner: str, repo: str,
+                     tag: str) -> None:
+    """Fetch ``tag``'s archive for the running system into ``dest``."""
+    fetch_github(f"/releases/download/{tag}/{asset_name()}",
+                 dest, report, owner, repo)
+
+
+def download_source(dest: Path, report, owner: str, repo: str,
+                    tag: str) -> None:
+    """Fetch the source snapshot ``tag`` names into ``dest``.
 
     A compile reads the program's own ``src/berry_manager`` off GitHub rather
     than carrying a private copy inside the setup, so the source it builds is
     exactly the one the release names - and the setup stays a small file.
     """
-    tail = f"/archive/refs/tags/{release_tag()}.tar.gz"
-    fetch_github(tail, dest, report, owner, repo)
+    fetch_github(f"/archive/refs/tags/{tag}.tar.gz",
+                 dest, report, owner, repo)
 
 
 # --- how the build is recognised and laid down ---
@@ -600,10 +736,13 @@ class Worker(QThread):
             self.finished.emit(False, str(error) or error.__class__.__name__)
 
     def _do_install(self) -> None:
+        tag = resolve_tag(self.owner, self.repo)
+        version = _readable(tag_version(tag) or tag)
         archive = Path(tempfile.gettempdir()) / asset_name()
         staging = Path(tempfile.mkdtemp(prefix="berry_install_"))
         try:
-            self.progress.emit(f"fetching {asset_name()} from the release", -1)
+            self.progress.emit(f"fetching {asset_name()} ({version}) from the "
+                               f"release", -1)
 
             def on_bytes(done: int, total: int) -> None:
                 frac = (done / total) if total else -1
@@ -612,12 +751,12 @@ class Worker(QThread):
                     size += f" of {total / 1_048_576:.1f} MB"
                 self.progress.emit(f"downloading {size}", frac)
 
-            download_release(archive, on_bytes, self.owner, self.repo)
+            download_release(archive, on_bytes, self.owner, self.repo, tag)
             build_root = extract_release(archive, staging,
                                          lambda t: self.progress.emit(t, -1))
             self.progress.emit("putting the build in place", -1)
             place_build(build_root, self.target)
-            self.finished.emit(True, f"Berry Manager {APP_VERSION} is "
+            self.finished.emit(True, f"Berry Manager {version} is "
                                      f"installed at {self.target}")
         finally:
             shutil.rmtree(staging, ignore_errors=True)
@@ -628,10 +767,12 @@ class Worker(QThread):
 
     def _do_compile(self) -> None:
         assert self.python is not None
+        tag = resolve_tag(self.owner, self.repo)
+        version = _readable(tag_version(tag) or tag)
         work = Path(tempfile.mkdtemp(prefix="berry_source_"))
         try:
             tarball = work / "source.tar.gz"
-            self.progress.emit(f"fetching the source from "
+            self.progress.emit(f"fetching the source of {version} from "
                                f"{self.owner}/{self.repo}", -1)
 
             def on_bytes(done: int, total: int) -> None:
@@ -641,7 +782,7 @@ class Worker(QThread):
                     size += f" of {total / 1024} KB"
                 self.progress.emit(f"downloading source {size}", frac)
 
-            download_source(tarball, on_bytes, self.owner, self.repo)
+            download_source(tarball, on_bytes, self.owner, self.repo, tag)
             source = extract_source(tarball, work,
                                     lambda t: self.progress.emit(t, -1))
             tarball.unlink(missing_ok=True)
@@ -649,7 +790,7 @@ class Worker(QThread):
                         lambda text: self.progress.emit(text, -1),
                         self._cancel)
             self.finished.emit(True, f"a local build of Berry Manager "
-                                     f"{APP_VERSION} is installed at "
+                                     f"{version} is installed at "
                                      f"{self.target}")
         finally:
             shutil.rmtree(work, ignore_errors=True)
@@ -686,7 +827,7 @@ class InstallerCard(QWidget):
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._place_logo()
 
-        title = QLabel(f"Berry Manager V{APP_VERSION} - setup", card)
+        title = QLabel(f"Berry Manager V{_readable(APP_VERSION)} - setup", card)
         title.setObjectName("splashTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -816,13 +957,15 @@ class InstallerCard(QWidget):
 
     def mousePressEvent(self, event) -> None:      # noqa: N802 - Qt's name
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag = (event.globalPosition().x() - self.x(),
-                          event.globalPosition().y() - self.y())
+            # Keep the grab as a QPoint offset (global minus this card's top-left):
+            # ``globalPosition()`` is a QPointF, and a float reaching ``move`` is
+            # a TypeError, not a nudge - which is how a frameless window dies the
+            # moment someone drags it.
+            self._drag = event.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, event) -> None:       # noqa: N802 - Qt's name
         if self._drag is not None:
-            self.move(event.globalPosition().x() - self._drag[0],
-                      event.globalPosition().y() - self._drag[1])
+            self.move(event.globalPosition().toPoint() - self._drag)
 
     def mouseReleaseEvent(self, event) -> None:    # noqa: N802 - Qt's name
         self._drag = None
