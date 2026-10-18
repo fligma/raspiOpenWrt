@@ -107,6 +107,7 @@ import os
 import re
 import shutil
 import ssl
+import subprocess
 import sys
 import time
 import zipfile
@@ -119,7 +120,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Berry Manager update",
-    "version": "1.4",
+    "version": "1.6",
     "author": "fligma",
     "description": "Groups the berry tags published on GitHub into their major "
                    "lines, newest first, each line opening to its own builds, and "
@@ -136,7 +137,10 @@ ADDON = {
                    "found by a check that ran on its own is announced as a notice, "
                    "and a download is shown as a job the tab holds onto: a "
                    "terminal behind a card that names the version and counts its "
-                   "bytes.",
+                   "bytes. A whole folder build (one-dir) is detected by its "
+                   "``_internal`` folder and swapped by a helper that runs once "
+                   "this copy closes, so a folder install updates itself without "
+                   "a single-file move ever touching its locked libraries.",
     "requires": [],
     # This talks to GitHub and to the disk it runs on, never to a device.
     "connection": "none",
@@ -181,10 +185,11 @@ RESUME_WAIT = 0.8
 DOWNLOAD_READ_TIMEOUT = 90
 
 #: The oldest version the swap will go back to when the config says nothing.
-#: Below it the program predates how this addon stages and swaps a file, so a
-#: move that far back is more likely to leave a broken install than a working
-#: older copy, and is refused rather than attempted.
-OLDEST_ALLOWED = "2.0.0"
+#: It sits at the onefile-to-onedir line: a build below it predates how this
+#: addon stages and swaps a program, so a move that far back is more likely to
+#: leave a broken install than a working older copy, and is refused outright.
+#: It is written in the program's own byte-packed hex, as every version here is.
+OLDEST_ALLOWED = "0x3.0x0.0x0"
 
 #: The oldest version that may be installed with this copy's own setup left
 #: where it is. A way back below this line is only offered after everything
@@ -193,7 +198,7 @@ OLDEST_ALLOWED = "2.0.0"
 #: disagree with those files rather than merely to be behind them. It is not the
 #: same line as ``OLDEST_ALLOWED``: that one refuses the move outright, this one
 #: refuses to make the move carelessly.
-KEEP_ALLOWED = "2.0.0"
+KEEP_ALLOWED = "0x3.0x0.0x0"
 
 # --- what can be configured, and what it starts out as ---
 
@@ -214,8 +219,9 @@ FIELDS = [
      "hint": "The account or organisation the repository belongs to"},
     {"key": "repo", "label": "Repository", "kind": "text"},
     {"key": "tag_prefix", "label": "Version tag prefix", "kind": "text",
-     "hint": "Tags read as versions start with this: berry1.5.9 is version "
-             "1.5.9. Anything else the tags name is ignored."},
+     "hint": "Tags read as versions start with this: "
+             "berry0x1.0x5.0x9 is version 0x1.0x5.0x9. Anything else the tags "
+             "name is ignored."},
     {"key": "check_startup", "label": "Check when the app starts", "kind": "bool",
      "hint": "One read of the published tags a moment after the window is up. "
              "It costs a few requests, and says nothing when nothing is ahead."},
@@ -296,16 +302,31 @@ def profile_token() -> str:
 # --- versions and tags ---
 
 def _version_parts(value: Any) -> tuple:
-    """The digits out of a dotted version, as a tuple that can be compared."""
-    return tuple(int(part) for part in re.findall(r"\d+", str(value or "")))
+    """The bytes out of a dotted version, as a tuple that can be compared.
+
+    The version is byte-packed hex: each dotted part is its own ``0x`` hex byte
+    (``0x3.0x1.0x0`` for the release decimal would call ``3.1.0``), so each part
+    is read in base 16 and the run of them compared as numbers. A ``0x`` lead is
+    trimmed when it is there and a part may be left bare; a part that is not hex
+    at all is passed over, and a version with no readable byte is only compared
+    as text (see ``version_newer``).
+    """
+    parts: list[int] = []
+    for raw in str(value or "").split("."):
+        part = raw.strip()
+        if part[:2].lower() == "0x":
+            part = part[2:]
+        if part and all(c in "0123456789abcdefABCDEF" for c in part):
+            parts.append(int(part, 16))
+    return tuple(parts)
 
 
 def version_newer(remote: Any, local: Any) -> bool:
     """Whether the published version is ahead of the one running here.
 
-    A dotted number is read as digits, so 1.10 beats 1.9 rather than losing
-    to it as text would; a version with no digits at all is only compared
-    as text.
+    Each dotted byte is read in hex and the run of them compared as numbers, so
+    ``0x3.0x1.0x10`` beats ``0x3.0x1.0x9`` rather than losing to it as text
+    would; a version with no readable byte at all is only compared as text.
     """
     wanted, have = _version_parts(remote), _version_parts(local)
     if wanted and have:
@@ -1359,17 +1380,20 @@ def picked_entry() -> dict | None:
 # --- the major lines the left pane is built from ---
 
 def major_of(version: Any) -> str:
-    """The line one published version belongs to, named by its first two numbers.
+    """The line one published version belongs to, named by its first two bytes.
 
-    ``1.6.1`` and ``1.6.9`` are both on the ``1.6`` line: what separates them is a
-    hotfix, and a pane that lists them one under the other reads as noise once a
-    program has a few years of tags behind it. A version with a single number is
-    its own line, and a tag nothing here reads as a version belongs to none.
+    ``0x3.0x1.0x0`` and ``0x3.0x1.0x5`` are both on the ``0x3.0x1`` line: what
+    separates them is a hotfix, and a pane that lists them one under the other
+    reads as noise once a program has a few years of tags behind it. The label is
+    the version's own leading dotted bytes kept as they are written - hex, like
+    every version here - rather than rebuilt from parsed numbers. A version with
+    a single byte is its own line, and a tag nothing reads as a version belongs
+    to none.
     """
-    parts = _version_parts(version)
-    if not parts:
+    parts = [part for part in str(one_line(version)).split(".") if part]
+    if not _version_parts(version) or not parts:
         return ""
-    return ".".join(str(part) for part in parts[:2])
+    return ".".join(parts[:2])
 
 
 def majors(entries: list) -> list[dict]:
@@ -2104,6 +2128,10 @@ def check_now(_checked: bool = False) -> None:
         if entry["release"] is not None:
             entry["download"] = download_source(entry["release"], system)
         entries.append(entry)
+    # A version below the floor stays in the list - greyed as "older than the
+    # floor" and refused when it is picked (installable turns it away before any
+    # download). It is left visible rather than dropped so the row still says
+    # where it stands and why going back that far is turned down.
     entries.sort(key=lambda item: _sort_key(item["version"]), reverse=True)
     for index, entry in enumerate(entries):
         entry["previous"] = (entries[index + 1]["tag"]
@@ -2598,6 +2626,231 @@ def swap_program(target: Path, staged: Path) -> str:
     return "the old copy was replaced in one step"
 
 
+# --- the one-dir (folder) build: what a whole-program-tree update lands as ---
+
+#: The folder a one-dir build keeps its libraries and data in. Its name showing
+#: up anywhere in a download's archive is what says the payload is a whole build
+#: rather than the single file a one-file build swaps.
+INTERNAL_DIR = "_internal"
+
+
+def _program_file_name(system: str) -> str:
+    """The program file a one-dir build is named for, per system."""
+    return "berry_manager.exe" if system == "windows" else "berry_manager"
+
+
+def zip_has_internal_tree(data: bytes) -> bool:
+    """Whether this archive is a one-dir build: it names ``_internal`` somewhere.
+
+    A one-file release carries the program and the drop-in addons and nothing
+    else, so no path in it has an ``_internal`` part; a one-dir build puts every
+    library and data file under one. That one difference tells the two payloads
+    apart before anything is written, read straight off the index rather than by
+    unpacking.
+    """
+    try:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            for row in archive.infolist():
+                parts = str(row.filename).replace("\\", "/").split("/")
+                if INTERNAL_DIR in parts:
+                    return True
+    except (OSError, ValueError, zipfile.BadZipFile, NotImplementedError):
+        return False
+    return False
+
+
+def looks_like_program_tree(root: Path, system: str) -> bool:
+    """Whether this folder is a one-dir build for this system: its program file
+    and an ``_internal`` beside it.
+
+    Only structure is checked. A stub exe on its own would pass the single-file
+    header test yet be nothing without its libraries - which is exactly the trap
+    that makes a folder verified as a pair rather than by its biggest file.
+    """
+    if not root.is_dir():
+        return False
+    return ((root / _program_file_name(system)).is_file()
+            and (root / INTERNAL_DIR).is_dir())
+
+
+def extract_program_tree(data: bytes, dest: Path, system: str) -> Path:
+    """Unpack a one-dir build and hand back the folder that holds it.
+
+    The release zips the whole ``berry_manager`` folder, so the build usually
+    sits one level under ``dest``; an archive that kept no top folder has it in
+    ``dest`` itself. Which one it is is found by looking for the pair of a program
+    file and ``_internal`` rather than guessed from the archive's names, so a
+    differently-packed folder still lands where it should.
+    """
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            archive.extractall(dest)
+    except (OSError, ValueError, zipfile.BadZipFile, NotImplementedError) as error:
+        raise AddonError(f"the build folder could not be unpacked: {error}")
+    if looks_like_program_tree(dest, system):
+        return dest
+    for child in sorted(dest.iterdir()):
+        if child.is_dir() and looks_like_program_tree(child, system):
+            return child
+    raise AddonError("that archive holds no Berry Manager build for this system "
+                     f"- a program file and an {INTERNAL_DIR}/ folder were looked "
+                     "for and not found")
+
+
+def _unix_updater() -> str:
+    """The shell the folder swap runs on, once this copy has closed.
+
+    Every move is a rename on one volume, so the swap cannot half-write the
+    program: the running file and the live ``_internal`` are moved aside under a
+    name nothing is holding, the staged ones take their place, and the leftovers
+    go. The new copy is started by this script rather than the app, because the
+    app's own relaunch would exec the file before this ever got to move it. The
+    staged folder is only named here so an earlier attempt's leftovers are gone;
+    the script deletes itself (``$6``) last.
+    """
+    return """#!/bin/sh
+PID="$1"; APP="$2"; DEST="$3"; SRC="$4"; STAGED="$5"; SELF="$6"
+while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
+cd "$APP" || exit 1
+rm -rf "$APP/_internal.old"
+if [ -d "$APP/_internal" ]; then mv "$APP/_internal" "$APP/_internal.old" || exit 1; fi
+if [ -e "$APP/$DEST" ]; then mv -f "$APP/$DEST" "$APP/$DEST.old" || true; fi
+if ! mv -f "$STAGED/_internal" "$APP/_internal"; then
+    [ -d "$APP/_internal" ] && rm -rf "$APP/_internal"
+    mv -f "$APP/_internal.old" "$APP/_internal" 2>/dev/null
+    mv -f "$APP/$DEST.old" "$APP/$DEST" 2>/dev/null
+    "$APP/$DEST" >/dev/null 2>&1 &
+    rm -f "$SELF"; exit 1
+fi
+if ! mv -f "$STAGED/$SRC" "$APP/$DEST"; then
+    rm -rf "$APP/_internal"
+    mv -f "$APP/_internal.old" "$APP/_internal" 2>/dev/null
+    mv -f "$APP/$DEST.old" "$APP/$DEST" 2>/dev/null
+    "$APP/$DEST" >/dev/null 2>&1 &
+    rm -f "$SELF"; exit 1
+fi
+chmod 755 "$APP/$DEST" 2>/dev/null
+rm -rf "$APP/_internal.old" "$APP/$DEST.old" "$STAGED"
+"$APP/$DEST" >/dev/null 2>&1 &
+rm -f "$SELF"
+"""
+
+
+def _windows_updater() -> str:
+    """The batch the folder swap runs on, once this copy has closed.
+
+    Windows frees a running exe to be renamed but not the libraries loaded inside
+    ``_internal`` to be touched, so the whole swap waits for this process to end
+    (the ``tasklist`` loop), then does the same rename-aside, move-in, delete-the-
+    old dance as the shell version, and starts the new copy itself. ``%6`` removes
+    the script last. A move that fails rolls the old file and folder back before
+    restarting the previous copy, so a half-applied update never strands the user.
+    """
+    return ("@echo off\r\n"
+            "setlocal\r\n"
+            "set PID=%1\r\n"
+            "set APP=%2\r\n"
+            "set DEST=%3\r\n"
+            "set SRC=%4\r\n"
+            "set STAGED=%5\r\n"
+            "set SELF=%6\r\n"
+            ":wait\r\n"
+            "tasklist /fi \"PID eq %PID%\" 2>nul | find \"%PID%\" >nul\r\n"
+            "if not errorlevel 1 (\r\n"
+            "    timeout /t 1 /nobreak >nul\r\n"
+            "    goto wait\r\n"
+            ")\r\n"
+            "cd /d \"%APP%\" || exit /b 1\r\n"
+            "if exist \"%APP%\\_internal.old\" rmdir /s /q \"%APP%\\_internal.old\"\r\n"
+            "if exist \"%APP%\\_internal\" move \"%APP%\\_internal\" \"%APP%\\_internal.old\"\r\n"
+            "if exist \"%APP%\\%DEST%.old\" del /q \"%APP%\\%DEST%.old\"\r\n"
+            "if exist \"%APP%\\%DEST%\" move \"%APP%\\%DEST%\" \"%APP%\\%DEST%.old\"\r\n"
+            "move \"%STAGED%\\_internal\" \"%APP%\\_internal\"\r\n"
+            "if errorlevel 1 goto :rollback\r\n"
+            "move \"%STAGED%\\%SRC%\" \"%APP%\\%DEST%\"\r\n"
+            "if errorlevel 1 goto :rollback\r\n"
+            "if exist \"%APP%\\_internal.old\" rmdir /s /q \"%APP%\\_internal.old\"\r\n"
+            "if exist \"%APP%\\%DEST%.old\" del /q \"%APP%\\%DEST%.old\"\r\n"
+            "if exist \"%STAGED%\" rmdir /s /q \"%STAGED%\"\r\n"
+            "start \"\" \"%APP%\\%DEST%\"\r\n"
+            "del \"%SELF%\"\r\n"
+            "goto :eof\r\n"
+            ":rollback\r\n"
+            "if exist \"%APP%\\_internal\" rmdir /s /q \"%APP%\\_internal\"\r\n"
+            "if exist \"%APP%\\_internal.old\" move \"%APP%\\_internal.old\" \"%APP%\\_internal\"\r\n"
+            "if exist \"%APP%\\%DEST%\" del /q \"%APP%\\%DEST%\"\r\n"
+            "if exist \"%APP%\\%DEST%.old\" move \"%APP%\\%DEST%.old\" \"%APP%\\%DEST%\"\r\n"
+            "start \"\" \"%APP%\\%DEST%\"\r\n"
+            "del \"%SELF%\"\r\n")
+
+
+def arm_folder_update(staged_root: Path, system: str) -> str:
+    """Write the post-exit updater, start it detached, and leave this copy to be
+    closed.
+
+    The updater does the swap only once this process is gone, which is what frees
+    the program file and every library in ``_internal`` for the move. Nothing here
+    asks for a restart: the app's own relaunch execs the current file the instant
+    the process ends, ahead of the swap, so the relaunched copy comes from the
+    updater instead. The user is told to close the window, which is the moment the
+    swap runs. The destination keeps the name the user launched (``DEST``), while
+    the staged file carries the build's own name (``SRC``); a folder that came
+    from a renamed one-file copy is thus updated without moving anything else.
+    """
+    target = program_path()
+    app_dir = target.parent
+    dest_name = target.name
+    src_name = _program_file_name(system)
+    helper = staging_target("berry_update.bat" if os.name == "nt"
+                            else "berry_update.sh")
+    fields = (str(os.getpid()), str(app_dir), dest_name, src_name,
+              str(staged_root), str(helper))
+    if os.name == "nt":
+        helper.write_text(_windows_updater(), encoding="mbcs")
+        arguments = ["cmd", "/c", str(helper), *fields]
+        kwargs: dict = {"close_fds": True, "stdin": subprocess.DEVNULL,
+                        "stdout": subprocess.DEVNULL,
+                        "stderr": subprocess.DEVNULL,
+                        "creationflags": (subprocess.DETACHED_PROCESS
+                                          | subprocess.CREATE_NEW_PROCESS_GROUP)}
+    else:
+        helper.write_text(_unix_updater(), encoding="utf-8")
+        try:
+            helper.chmod(0o755)
+        except OSError:
+            pass
+        arguments = ["/bin/sh", str(helper), *fields]
+        kwargs = {"close_fds": True, "stdin": subprocess.DEVNULL,
+                  "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+                  "start_new_session": True}
+    try:
+        subprocess.Popen(arguments, **kwargs)
+    except OSError as error:
+        try:
+            helper.unlink()
+        except OSError:
+            pass
+        raise AddonError(f"the updater could not be started: {error}")
+    return ("the folder update is armed; it finishes the swap and starts the new "
+            "copy the moment this window is closed")
+
+
+def install_folder_update(data: bytes, system: str) -> str:
+    """Check, unpack and arm a one-dir build. The staged folder is taken back on
+    any failure before the updater has run, so a bad archive leaves nothing
+    half-built behind."""
+    staged_root = staging_target("update_tree")
+    try:
+        root = extract_program_tree(data, staged_root, system)
+        return arm_folder_update(root, system)
+    except (AddonError, OSError):
+        shutil.rmtree(staged_root, ignore_errors=True)
+        raise
+
+
 def restart_app() -> None:
     """Close this copy and start the new program through the app's own
     relaunch, which waits until this process has ended.
@@ -3044,16 +3297,27 @@ def finish_download() -> None:
         pass
     job["response"] = None
     staged: Path | None = None
+    # A zip that names ``_internal`` is a whole one-dir build, not the single
+    # file this swap was born to move; it goes to the folder updater, which
+    # arms a helper to finish after this copy closes. Anything else - a raw
+    # program, or a one-file build's zip - keeps the single-file swap.
+    folder = data[:2] == b"PK" and zip_has_internal_tree(data)
     try:
         system = system_name()
-        program, how = check_bytes(data, system)
-        # The bytes are down, so the job's own part of the work is done and what
-        # is left is the swap: one line, said once, on the card and the console.
-        _progress(f"{_size(len(program))} {how}; putting it in place", 1.0)
-        target = program_path()
-        staged = staging_target(target.name + ".new")
-        staged.write_bytes(program)
-        words = swap_program(target, staged)
+        if folder:
+            _progress("a build folder is in hand; arming the swap to finish "
+                      "when this window closes", 1.0)
+            words = install_folder_update(data, system)
+        else:
+            program, how = check_bytes(data, system)
+            # The bytes are down, so the job's own part of the work is done and
+            # what is left is the swap: one line, said once, on the card and the
+            # console.
+            _progress(f"{_size(len(program))} {how}; putting it in place", 1.0)
+            target = program_path()
+            staged = staging_target(target.name + ".new")
+            staged.write_bytes(program)
+            words = swap_program(target, staged)
     except (AddonError, OSError, ValueError) as error:
         if staged is not None:
             try:
@@ -3063,6 +3327,21 @@ def finish_download() -> None:
         _finish(f"the update stopped: {error}", bad=True)
         return
     found = None
+    if folder:
+        # Nothing has been moved yet: the armed helper swaps the folder and
+        # starts the new copy the moment this process is gone, so the running
+        # version list must not be re-counted as if this copy were already the
+        # new one. The restart is deliberately not offered - the app's own
+        # relaunch would exec the current file ahead of the swap - the user
+        # closing the window is what runs it.
+        _finish(f"berry{wanted or ''} is staged from "
+                f"{tag or 'a published tag'}; {words}. "
+                + ("Its written data was backed up and erased before this "
+                   "landed." if erased else "The config folder and the addons "
+                                          "were not touched."))
+        note("close this window whenever you are ready: the update finishes "
+             "the swap and starts the new copy for you")
+        return
     _finish(f"berry{wanted or ''} is in place from {tag or 'a published tag'}; "
             f"{words}. "
             + ("Its written data was backed up and erased before this landed."

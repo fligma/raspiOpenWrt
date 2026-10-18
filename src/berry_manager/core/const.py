@@ -46,11 +46,45 @@ def find_asset(filename: str) -> Path | None:
             return candidate
     return None
 
-#: The program's own version, the one the About dialog shows and the update
-#: addon compares against the tags published on GitHub (``berry`` + this).
-#: One line to change per release, everything else reads it from here.
-APP_VERSION = "2.5.7"
+#: The program's own version, the one the update addon compares against the
+#: tags published on GitHub (``berry`` + this) and the About dialog shows. One
+#: line to change per release, everything else reads it from here.
+#:
+#: The version is byte-packed hex: three numbers (major, minor, patch), each
+#: written as its own ``0x`` hex byte and joined with dots - so the release that
+#: was ``3.1.0`` in decimal is ``0x3.0x1.0x0`` here. Bumping a release means
+#: editing these three bytes (a patch of sixteen reads ``0x10``). Every place
+#: that compares or publishes takes this form as it stands: the parser, the
+#: floors, the GitHub tag and the setup. Only the surfaces a person reads off
+#: the running window - the title bar, the splash and the tray tooltip - show
+#: the decimal below.
+APP_VERSION = "0x3.0x1.0x0"
 UPDATE_TAG_PREFIX = "berry"
+
+
+def readable_version(value: str = APP_VERSION) -> str:
+    """The byte-packed hex version shown back in decimal, for the eye.
+
+    The version is stored as hex (``0x3.0x1.0x0``) because that is what the
+    update addon compares and what the GitHub tag is built from; the three
+    surfaces a person reads while the program runs take this instead: each
+    dotted segment is parsed as a hex byte and re-emitted in decimal, joined
+    with dots, so ``0x3.0x1.0x0`` reads ``3.1.0`` and a future ``0x10`` reads
+    ``16``. A segment that is not a hex byte is skipped, so an unreadable
+    version comes back empty rather than raising.
+    """
+    parts: list[str] = []
+    for raw in str(value or "").split("."):
+        part = raw.strip()
+        if part[:2].lower() == "0x":
+            part = part[2:]
+        if part and all(c in "0123456789abcdefABCDEF" for c in part):
+            parts.append(str(int(part, 16)))
+    return ".".join(parts)
+
+
+#: The version as the title bar, the splash and the tray tooltip show it.
+APP_VERSION_DISPLAY = readable_version()
 
 # --- file names and fixed identifiers ---
 
@@ -140,7 +174,7 @@ PROJECT_GITHUB_URL = "https://github.com/fligma/raspiOpenWrt"
 PROJECT_LICENSE_URL = PROJECT_GITHUB_URL + "/blob/main/LICENSE"
 
 #: Where one release of this program is published: the tag is the version with
-#: ``UPDATE_TAG_PREFIX`` in front of it, so ``PROJECT_RELEASE_URL + "berry1.6.4"``
+#: ``UPDATE_TAG_PREFIX`` in front of it, so ``PROJECT_RELEASE_URL + "berry0x1.0x6.0x4"``
 #: is the page carrying that build's notes. The About box links it.
 PROJECT_RELEASE_URL = PROJECT_GITHUB_URL + "/releases/tag/"
 

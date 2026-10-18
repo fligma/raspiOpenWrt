@@ -3394,7 +3394,7 @@ class ColorWheelDialog(QDialog):
 ###############################################################################
 
 
-from core.const import APP_VERSION, ICON_FILES, find_asset, zoom_size
+from core.const import APP_VERSION_DISPLAY, ICON_FILES, find_asset, zoom_size
 
 #: The card's own size at 100% zoom; the interface zoom multiplies it, like
 #: every other hand-written number in the program.
@@ -3435,7 +3435,7 @@ class _SplashCard(QWidget):
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._place_logo(config)
 
-        title = QLabel(f"Berry Manager V{APP_VERSION}", card)
+        title = QLabel(f"Berry Manager V{APP_VERSION_DISPLAY}", card)
         title.setObjectName("splashTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 

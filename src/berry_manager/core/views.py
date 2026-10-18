@@ -566,6 +566,7 @@ class MainConnectionMixin:
 
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -577,11 +578,10 @@ from PyQt6.QtCore import (
     QEvent,
     QObject,
     QPoint,
-    QSize,
     QUrl,
     Qt,
 )
-from PyQt6.QtGui import QDesktopServices, QIcon, QShowEvent
+from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -599,15 +599,13 @@ from addon_common import clean_child_env
 from core.ui import web_tab_url
 from core.ui import TabCloseButton, TabEditDialog
 
-try:
-    from PyQt6.QtWebEngineWidgets import QWebEngineView
-except ImportError:
-    QWebEngineView = None
-
-try:
-    from PyQt6.QtWebEngineCore import QWebEnginePage
-except ImportError:
-    QWebEnginePage = None
+# The Chromium-backed widgets (QWebEngineView/QWebEnginePage and the two
+# subclasses built on them) are deliberately NOT imported here. This module is
+# read before the splash is up, so a module-level PyQt6.QtWebEngine* import
+# would load the whole Chromium stack on every start whether or not a browser
+# tab is ever opened. They live in core.webview and are pulled in on the first
+# web tab (see BrowserMixin._build_web_like_tab); the name below is only for
+# the type checker, so the annotations that mention it still resolve.
 
 
 CERT_BYPASS_FLAG = "--ignore-certificate-errors"
@@ -684,6 +682,13 @@ def relaunch_process() -> bool:
     return True
 
 
+#: The folder a one-dir (folder) build keeps its libraries and data in, and the
+#: name its previous copy is parked under (``_internal.old``) by a folder swap.
+#: The update addon owns the real switch on this name; it is repeated here only
+#: so the boot sweep below can find the leftover without importing the addon.
+INTERNAL_DIR_NAME = "_internal"
+
+
 def replaced_program_path() -> Path:
     """Where the update addon parks the old copy of this program when it
     swaps in a new one: beside the running file, under the same name plus
@@ -702,6 +707,11 @@ def clear_replaced_program() -> None:
     started from the new file - finishes the deletion here. A leftover that
     still refuses is worth a shrug, not a dialog: it is one dead file beside
     a program that has already started.
+
+    A one-dir (folder) build leaves a second thing beside that file: the
+    libraries the swap parked as ``_internal.old``. The post-exit updater
+    normally takes it itself, but an interrupted move or a copy that came up
+    before the helper finished still owes the sweep, so it is cleared here too.
     """
     try:
         leftover = replaced_program_path()
@@ -712,75 +722,22 @@ def clear_replaced_program() -> None:
             leftover.unlink()
     except OSError:
         pass
+    internal = leftover.with_name(INTERNAL_DIR_NAME + ".old")
+    try:
+        if internal.is_dir():
+            shutil.rmtree(internal, ignore_errors=True)
+    except OSError:
+        pass
 
 
 if TYPE_CHECKING:
     from core.window import BerryManager
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
 
-
-if QWebEnginePage is not None:
-    class WebTabPage(QWebEnginePage):
-        """A page that lets a click wanting its own tab or window - a
-        ``target=_blank`` link, a script's ``window.open`` - get a real,
-        closable tab; the plain view would swallow the request in silence."""
-
-        def __init__(self, browser: "BrowserMixin") -> None:
-            super().__init__()
-            self._browser = browser
-
-        def createWindow(self, feature):        # noqa: ARG002 - one home for every kind
-            try:
-                return self._browser.open_requested_tab()
-            except Exception:
-                return None
-else:
-    WebTabPage = None
-
-
-if QWebEngineView is not None:
-    class QuietWebView(QWebEngineView):
-        """A web view that never asks the window for more room than it has.
-
-        Booting the browser process moves a plain view's size hints: the
-        page announces a preferred size and the layout minimums the window
-        obeys rise with it, so opening a browser tab resizes the whole
-        window on its own. The view fills whatever room it is given, and
-        that is the only size it should ever have asked for - both hints
-        are pinned at nothing here, and the layout's own stretch keeps
-        the page as big as the tab it sits in.
-
-        The hints are only the layout's half of the boot. The other half is
-        native: the moment this view's Chromium window is embedded the top
-        level is re-placed around it, and a window that is re-placed loses
-        its snap to a screen edge and springs back to the size it kept
-        before. A fresh view therefore arms that guard as it comes up, and
-        every address put to it arms one too (see :class:`_SnapKeeper`)."""
-
-        #: Whether this view has ever been seen: the embed disturbs a window
-        #: once in its life, so only the first showing is worth guarding.
-        _snap_armed = False
-
-        def minimumSizeHint(self) -> QSize:
-            return QSize(0, 0)
-
-        def sizeHint(self) -> QSize:
-            return QSize(0, 0)
-
-        def showEvent(self, event: QShowEvent) -> None:
-            super().showEvent(event)
-            if not self._snap_armed:
-                self._snap_armed = True
-                steady_snap(self)
-
-        def setUrl(self, url: QUrl) -> None:
-            steady_snap(self)
-            super().setUrl(url)
-
-        def setHtml(self, *args, **kwargs) -> None:
-            steady_snap(self)
-            super().setHtml(*args, **kwargs)
-else:
-    QuietWebView = None
+# WebTabPage and QuietWebView - the two subclasses that used to sit here on the
+# QtWebEngine imports - now live in core.webview, imported only when a web tab
+# is first built, so Chromium stays off the boot path. _build_web_like_tab
+# reaches them there.
 
 
 if sys.platform == "win32":
@@ -1016,7 +973,11 @@ class BrowserMixin:
                 return self.tabs.addTab(page, title)
             return self.tabs.insertTab(position, page, title)
 
-        if QuietWebView is None:
+        # Chromium is loaded here, on the first web tab, rather than when this
+        # module is read: a session that never opens a browser tab never pays
+        # for the engine. core.webview holds the two widgets.
+        from core import webview
+        if webview.QuietWebView is None:
             notice = QLabel(
                 "Embedded browser is unavailable.\n"
                 "Install PyQt6-WebEngine to view this page inside the app, "
@@ -1033,9 +994,9 @@ class BrowserMixin:
             add_tab()
             return url_input, None, page
 
-        view = QuietWebView()
-        if WebTabPage is not None:
-            view.setPage(WebTabPage(self))
+        view = webview.QuietWebView()
+        if webview.WebTabPage is not None:
+            view.setPage(webview.WebTabPage(self))
         add_tab()
 
         # A tab held back from loading still answers to Go, to Enter in the

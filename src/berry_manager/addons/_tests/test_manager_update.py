@@ -118,9 +118,9 @@ def offer(where: str) -> list[dict]:
 #: Every tag the repository is pretending to publish, oldest last, one of them
 #: not a version at all. The order is GitHub's, not the list's: the check has to
 #: sort it.
-TAG_ROWS = [{"name": "berry1.6.1", "commit": {"sha": "aaa1111aaa"}},
-            {"name": "berry1.6.0", "commit": {"sha": "bbb2222bbb"}},
-            {"name": "berry1.5.9", "commit": {"sha": "ccc3333ccc"}},
+TAG_ROWS = [{"name": "berry0x1.0x6.0x1", "commit": {"sha": "aaa1111aaa"}},
+            {"name": "berry0x1.0x6.0x0", "commit": {"sha": "bbb2222bbb"}},
+            {"name": "berry0x1.0x5.0x9", "commit": {"sha": "ccc3333ccc"}},
             {"name": "v-older-thing", "commit": {"sha": ""}}]
 
 #: The releases made for those tags. 1.6.1 has a file and a written account,
@@ -129,15 +129,15 @@ TAG_ROWS = [{"name": "berry1.6.1", "commit": {"sha": "aaa1111aaa"}},
 #: file carry it for both systems, because that is what a release holds and a
 #: one-sided record would leave the other runner with nothing to find.
 RELEASES: dict[str, dict] = {
-    "berry1.6.1": {
-        "tag_name": "berry1.6.1", "name": "Berry 1.6.1",
+    "berry0x1.0x6.0x1": {
+        "tag_name": "berry0x1.0x6.0x1", "name": "Berry 0x1.0x6.0x1",
         "published_at": "2026-10-12T10:00:00Z",
         "body": "The store got a pane to read a listing in.",
         "author": {"login": "fligma"},
-        "assets": offer("https://x/1.6.1"),
+        "assets": offer("https://x/0x1.0x6.0x1"),
     },
-    "berry1.6.0": {
-        "tag_name": "berry1.6.0", "name": "berry1.6.0",
+    "berry0x1.0x6.0x0": {
+        "tag_name": "berry0x1.0x6.0x0", "name": "berry0x1.0x6.0x0",
         "published_at": "2026-10-01T09:00:00Z", "body": "",
         "assets": offer("https://x/older"),
     },
@@ -147,7 +147,7 @@ RELEASES: dict[str, dict] = {
 #: one before it.
 COMMIT = {
     "sha": "aaa1111aaa1111",
-    "commit": {"message": "Berry Manager v1.6.1 - the store pane\n\n"
+    "commit": {"message": "Berry Manager v0x1.0x6.0x1 - the store pane\n\n"
                           "second line of the commit",
                "author": {"name": "fligma", "date": "2026-10-12T09:55:00Z"}},
     "author": {"login": "fligma"},
@@ -284,76 +284,76 @@ def wire(upd: Any) -> list[str]:
 
 def test_the_helpers(upd: Any) -> None:
     print("\n1. versions, tags, the floor and addresses")
-    check(upd.tag_version("berry1.5.9", "berry") == "1.5.9",
-          "berry1.5.9 did not read as version 1.5.9")
-    check(upd.tag_version("BERRY1.6", "berry") == "1.6",
+    check(upd.tag_version("berry0x1.0x5.0x9", "berry") == "0x1.0x5.0x9",
+          "berry0x1.0x5.0x9 did not read as version 0x1.0x5.0x9")
+    check(upd.tag_version("BERRY0x1.0x6", "berry") == "0x1.0x6",
           "the prefix compare was case-sensitive")
     check(upd.tag_version("berry", "berry") == "",
           "a prefix with no version after it read as a release anyway")
-    check(upd.tag_version("v1.5.9", "berry") == "",
+    check(upd.tag_version("v0x1.0x5.0x9", "berry") == "",
           "a tag outside the prefix counted as an update")
     check(upd.tag_version("berry-rc", "berry") == "",
           "a prefix plus letters with no digits counted as a version")
 
-    check(upd.version_newer("1.10", "1.9"),
-          "1.10 lost to 1.9 as text instead of winning as digits")
-    check(not upd.version_newer("1.5.9", "1.5.9"), "an equal version counted as newer")
-    check(not upd.version_newer("1.5.8", "1.5.9"), "an older version counted as newer")
-    check(upd.version_newer("1.6", ""), "a remote version lost the empty compare")
-    check(not upd.version_newer("", "1.6"), "nothing remote still counted as newer")
+    check(upd.version_newer("0x1.0xa", "0x1.0x9"),
+          "0x1.0xa lost to 0x1.0x9 as text instead of winning as digits")
+    check(not upd.version_newer("0x1.0x5.0x9", "0x1.0x5.0x9"), "an equal version counted as newer")
+    check(not upd.version_newer("0x1.0x5.0x8", "0x1.0x5.0x9"), "an older version counted as newer")
+    check(upd.version_newer("0x1.0x6", ""), "a remote version lost the empty compare")
+    check(not upd.version_newer("", "0x1.0x6"), "nothing remote still counted as newer")
 
-    check(upd.versions_equal("1.6", "1.6.0"),
-          "1.6 and 1.6.0 were called different programs")
-    check(not upd.versions_equal("1.6.1", "1.6.0"), "two versions one apart matched")
-    check(not upd.versions_equal("", "1.6"), "nothing at all matched a version")
+    check(upd.versions_equal("0x1.0x6", "0x1.0x6.0x0"),
+          "0x1.0x6 and 0x1.0x6.0x0 were called different programs")
+    check(not upd.versions_equal("0x1.0x6.0x1", "0x1.0x6.0x0"), "two versions one apart matched")
+    check(not upd.versions_equal("", "0x1.0x6"), "nothing at all matched a version")
 
-    ordered = sorted(["1.6.0", "1.10", "1.5.9", "1.6"], key=upd._sort_key)
-    check(ordered[0] == "1.5.9" and ordered[-1] == "1.10"
+    ordered = sorted(["0x1.0x6.0x0", "0x1.0xa", "0x1.0x5.0x9", "0x1.0x6"], key=upd._sort_key)
+    check(ordered[0] == "0x1.0x5.0x9" and ordered[-1] == "0x1.0xa"
           and upd.versions_equal(ordered[1], ordered[2])
           and upd.version_newer(ordered[1], ordered[0]),
           f"a list of versions did not sort: {ordered}")
 
-    best = upd.pick_latest(["v2.0", "berry1.5.9", "berry1.6.0", "berry1.5.10"], "berry")
-    check(best == ("berry1.6.0", "1.6.0"),
+    best = upd.pick_latest(["v0x2.0x0", "berry0x1.0x5.0x9", "berry0x1.0x6.0x0", "berry0x1.0x5.0xa"], "berry")
+    check(best == ("berry0x1.0x6.0x0", "0x1.0x6.0x0"),
           f"the newest tag out of an unordered list is wrong: {best!r}")
-    check(upd.pick_latest(["v2.0"], "berry") is None,
+    check(upd.pick_latest(["v0x2.0x0"], "berry") is None,
           "a list with no update tags produced one anyway")
     check(upd.pick_latest([], "berry") is None, "an empty tag list produced a winner")
 
     # Where one version stands, and how far back the swap is willing to go.
-    check(upd.stance_of("1.6.1", "1.6.0", "1.6.0") == "newer",
+    check(upd.stance_of("0x1.0x6.0x1", "0x1.0x6.0x0", "0x1.0x6.0x0") == "newer",
           "a version ahead of this copy was not called an update")
-    check(upd.stance_of("1.6.0", "1.6", "1.6.0") == "this",
+    check(upd.stance_of("0x1.0x6.0x0", "0x1.0x6", "0x1.0x6.0x0") == "this",
           "this copy's own version, spelled shorter, was not recognised")
-    check(upd.stance_of("1.6.0", "1.6.1", "1.6.0") == "older",
+    check(upd.stance_of("0x1.0x6.0x0", "0x1.0x6.0x1", "0x1.0x6.0x0") == "older",
           "a version at the floor and behind was not a way back")
-    check(upd.stance_of("1.5.9", "1.6.1", "1.6.0") == "too old",
+    check(upd.stance_of("0x1.0x5.0x9", "0x1.0x6.0x1", "0x1.0x6.0x0") == "too old",
           "a version below the floor was offered anyway")
-    check(upd.stance_of("", "1.6.1", "1.6.0") == "unknown",
+    check(upd.stance_of("", "0x1.0x6.0x1", "0x1.0x6.0x0") == "unknown",
           "a version nothing reads was given a stance")
-    check(upd.stance_of("1.5.9", "1.6.1", "1.5.0") == "older",
+    check(upd.stance_of("0x1.0x5.0x9", "0x1.0x6.0x1", "0x1.0x5.0x0") == "older",
           "a moved floor did not move the line")
     check(upd._floor({}) == upd.OLDEST_ALLOWED,
           "the default floor is not the one named in the module")
     check(upd._floor({"min_version": "  "}) == upd.OLDEST_ALLOWED,
           "a blank floor left the default behind")
-    check(upd._floor({"min_version": "1.4.2"}) == "1.4.2",
+    check(upd._floor({"min_version": "0x1.0x4.0x2"}) == "0x1.0x4.0x2",
           "a named floor was not the one used")
     check(upd._prefix({}) == "berry" and upd._prefix({"tag_prefix": "fork"}) == "fork",
           "the tag prefix was not read, or not defaulted")
 
     # The major lines the left pane is built from: one row per line, newest line
     # first, each holding the place its versions have in the list it was made from.
-    check(upd.major_of("1.6.1") == "1.6" and upd.major_of("1.6") == "1.6"
+    check(upd.major_of("0x1.0x6.0x1") == "0x1.0x6" and upd.major_of("0x1.0x6") == "0x1.0x6"
           and upd.major_of("2") == "2",
           f"a version's line is not its first two numbers: "
-          f"{[upd.major_of(v) for v in ('1.6.1', '1.6', '2')]}")
+          f"{[upd.major_of(v) for v in ('0x1.0x6.0x1', '0x1.0x6', '2')]}")
     check(upd.major_of("nightly") == "" and upd.major_of("") == "",
           "a tag nothing reads as a version was given a line anyway")
-    grouped = upd.majors([{"version": "2.0.1"}, {"version": "2.0.0"},
-                          {"version": "1.9.4"}, {"version": "nightly"},
-                          {"version": "1.6.1"}])
-    check([line["major"] for line in grouped] == ["2.0", "1.9", "1.6"],
+    grouped = upd.majors([{"version": "0x2.0x0.0x1"}, {"version": "0x2.0x0.0x0"},
+                          {"version": "0x1.0x9.0x4"}, {"version": "nightly"},
+                          {"version": "0x1.0x6.0x1"}])
+    check([line["major"] for line in grouped] == ["0x2.0x0", "0x1.0x9", "0x1.0x6"],
           f"the lines are not newest first, or a non-version joined them: "
           f"{[(line['major'], line['entries']) for line in grouped]}")
     check(grouped[0]["head"] == 0 and grouped[0]["entries"] == [0, 1]
@@ -460,7 +460,7 @@ def test_the_release(upd: Any) -> None:
 
 # --- three: the tab, the check and the two panes, on a stub api ---
 
-def fresh(upd: Any, config: dict | None = None, version: str = "1.6.0",
+def fresh(upd: Any, config: dict | None = None, version: str = "0x1.0x6.0x0",
           ask: bool = True, keep_timers: bool = False) -> Any:
     """The addon on a stub api: no start-up check, no network, a known version."""
     upd.api = None
@@ -554,14 +554,14 @@ def test_the_tab(upd: Any) -> None:
           f"the check read the story of more versions than the one it opened "
           f"on: {asked}")
     versions = [str(entry["version"]) for entry in upd.published]
-    check(versions == ["1.6.1", "1.6.0", "1.5.9"],
+    check(versions == ["0x1.0x6.0x1", "0x1.0x6.0x0", "0x1.0x5.0x9"],
           f"the list is not the published versions newest first: {versions}")
-    check([entry["tag"] for entry in upd.published][-1] == "berry1.5.9"
-          and upd.published[0]["previous"] == "berry1.6.0"
+    check([entry["tag"] for entry in upd.published][-1] == "berry0x1.0x5.0x9"
+          and upd.published[0]["previous"] == "berry0x1.0x6.0x0"
           and upd.published[-1]["previous"] == "",
           f"a version is not chained to the one before it: "
           f"{[(e['tag'], e['previous']) for e in upd.published]}")
-    check("berry1.6.1 is out" in last_status(api) and "1 update ahead" in last_status(api),
+    check("berry0x1.0x6.0x1 is out" in last_status(api) and "1 update ahead" in last_status(api),
           f"an update out did not lead the status line: {last_status(api)!r}")
     check(f"floor for going back is {upd.OLDEST_ALLOWED}" in " ".join(api.logs),
           f"the log does not account for the floor: {api.logs[-2:]}")
@@ -601,35 +601,35 @@ def test_the_list_and_the_pane(upd: Any) -> None:
     print("\n5. the lines, and the pane beside them, say the same thing")
     # The floor is pinned under the fixtures so 1.5.9 stands as the version
     # below the line this record refuses, whatever the shipped clamp says now.
-    api = fresh(upd, config={"min_version": "1.6.0"})
+    api = fresh(upd, config={"min_version": "0x1.0x6.0x0"})
     del TAILS[:]
     upd.check_now()
     # three published versions on two lines: 1.6 with two builds, 1.5 with one.
-    check([line["major"] for line in upd.lines] == ["1.6", "1.5"],
+    check([line["major"] for line in upd.lines] == ["0x1.0x6", "0x1.0x5"],
           f"the versions are not grouped into their lines: "
           f"{[(line['major'], line['entries']) for line in upd.lines]}")
-    check(upd.opened == ["1.6"],
+    check(upd.opened == ["0x1.0x6"],
           f"the pane did not open on the line the pick sits on: {upd.opened}")
-    check(upd.slot_of("1.6") == 0 and upd.slot_of("1.5") == 1
-          and upd.slot_of("9.9") == -1,
+    check(upd.slot_of("0x1.0x6") == 0 and upd.slot_of("0x1.0x5") == 1
+          and upd.slot_of("0x9.0x9") == -1,
           "a line is not placed in the row of the pane it is drawn in")
     head = str(last_set(api, "mhead0", "text"))
-    check("berry1.6.x" in head and "2 published build(s)" in head
+    check("berry0x1.0x6.x" in head and "2 published build(s)" in head
           and "this copy is on it" in head,
           f"an open line does not say what it holds and where this copy is: "
           f"{head!r}")
     check(last_set(api, "mhead0", "visible") is True
           and last_set(api, "mpick0", "visible") is True
-          and str(last_set(api, "mopen0", "text")) == "1.6  less",
+          and str(last_set(api, "mopen0", "text")) == "0x1.0x6  less",
           f"an open line is not drawn as its heading and its dropdown: "
           f"{last_set(api, 'mhead0', 'visible')!r}")
     check(last_set(api, "mpick1", "visible") is False
-          and str(last_set(api, "mopen1", "text")) == "1.5  more"
+          and str(last_set(api, "mopen1", "text")) == "0x1.0x5  more"
           and last_set(api, "mpick1", "items") is None,
           "a line below this copy was opened before anybody asked for it")
 
     picks = items_for(api, "mpick0")
-    check([str(text).split(" ")[0] for text in picks] == ["1.6.1", "1.6.0"],
+    check([str(text).split(" ")[0] for text in picks] == ["0x1.0x6.0x1", "0x1.0x6.0x0"],
           f"a line's dropdown is not its own versions, newest first: {picks}")
     check("an update - file attached" in str(picks[0])
           and "this copy" in str(picks[1]),
@@ -643,7 +643,7 @@ def test_the_list_and_the_pane(upd: Any) -> None:
 
     # The pane opens on the update, since that is what a person came for.
     check(upd.picked == 0, f"the check did not open on the update: {upd.picked}")
-    check(str(last_set(api, "vtitle", "text")) == "berry1.6.1  \u2014  Berry 1.6.1",
+    check(str(last_set(api, "vtitle", "text")) == "berry0x1.0x6.0x1  \u2014  Berry 0x1.0x6.0x1",
           f"the pane's title is not the tag and the release's own name: "
           f"{last_set(api, 'vtitle', 'text')!r}")
     check(str(last_set(api, "vchip", "text")) == "an update - file attached"
@@ -660,8 +660,8 @@ def test_the_list_and_the_pane(upd: Any) -> None:
           and "3 file(s) moved" in meta and "aaa1111" not in meta,
           f"the line of facts is not the facts: {meta!r}")
     state = str(last_set(api, "vstate", "text"))
-    check("An update is ready" in state and "berry1.6.1" in state
-          and "berry1.6.0" in state and "stay exactly where they are" in state,
+    check("An update is ready" in state and "berry0x1.0x6.0x1" in state
+          and "berry0x1.0x6.0x0" in state and "stay exactly where they are" in state,
           f"the state line does not say what installing would do: {state!r}")
     detail = str(last_set(api, "vdetail", "value"))
     check("The store got a pane" in detail,
@@ -679,45 +679,45 @@ def test_the_list_and_the_pane(upd: Any) -> None:
 
     print("\n6. a release with no words of its own, and one with no file")
     upd.pick_row(1)
-    check(str(last_set(api, "vtitle", "text")) == "berry1.6.0",
+    check(str(last_set(api, "vtitle", "text")) == "berry0x1.0x6.0x0",
           f"a release named for its own tag gained a title anyway: "
           f"{last_set(api, 'vtitle', 'text')!r}")
-    check("Berry Manager v1.6.1 - the store pane" in str(last_set(api, "vdetail", "value")),
+    check("Berry Manager v0x1.0x6.0x1 - the store pane" in str(last_set(api, "vdetail", "value")),
           "the commit's title did not stand in for a release that wrote nothing")
     upd.pick_row(2)
     check("no file attached" in str(last_set(api, "vmeta", "text")),
           f"a bare tag did not say it has nothing: {last_set(api, 'vmeta', 'text')!r}")
-    check("is older than 1.6.0" in str(last_set(api, "vstate", "text")),
+    check("is older than 0x1.0x6.0x0" in str(last_set(api, "vstate", "text")),
           f"the refusal did not reach the state line: {last_set(api, 'vstate', 'text')!r}")
     check("publish the tag as a release" not in str(last_set(api, "vdetail", "value")),
           "a version below the floor was told how to attach a file instead")
-    check(upd.opened == ["1.6", "1.5"],
+    check(upd.opened == ["0x1.0x6", "0x1.0x5"],
           f"picking a version did not pull its own line open: {upd.opened}")
 
     print("\n7. picking a version out of a line's dropdown")
     upd.pick_row(0)
     upd.on_widget(upd.TAB, "mpick1", "changed",
-                  {"text": "1.5.9  \u2014  older than the floor"})
+                  {"text": "0x1.0x5.0x9  \u2014  older than the floor"})
     check(upd.picked == 2, f"a line's dropdown did not move the pane: {upd.picked}")
-    upd.on_widget(upd.TAB, "mpick0", "changed", {"text": "1.6.0  \u2014  this copy"})
+    upd.on_widget(upd.TAB, "mpick0", "changed", {"text": "0x1.0x6.0x0  \u2014  this copy"})
     check(upd.picked == 1, f"a picked label did not move the pane: {upd.picked}")
     upd.on_widget(upd.TAB, "mpick0", "changed", {"text": "not-a-version"})
     check(upd.picked == 1, "an unknown label moved the pane off what it was showing")
     upd.on_widget("Other tab", "mpick0", "changed",
-                  {"text": "1.6.1  \u2014  an update - file attached"})
+                  {"text": "0x1.0x6.0x1  \u2014  an update - file attached"})
     check(upd.picked == 1, "another tab's dropdown was read as this one's")
     upd.on_widget(upd.TAB, "mpick0", "clicked",
-                  {"text": "1.6.1  \u2014  an update - file attached"})
+                  {"text": "0x1.0x6.0x1  \u2014  an update - file attached"})
     check(upd.picked == 1, f"a dropdown's click was taken as a pick: {upd.picked}")
     upd.pick_row(99)
     check(upd.picked == 1, "a row that does not exist moved the pane")
-    check(upd.index_of("1.5", "1.6.1") == -1,
+    check(upd.index_of("0x1.0x5", "0x1.0x6.0x1") == -1,
           "a version was read out of another line's dropdown")
-    check(upd.index_of("1.6", "1.6.1") == 0,
+    check(upd.index_of("0x1.0x6", "0x1.0x6.0x1") == 0,
           "a dropdown entry was not matched by the version it starts with")
     upd.filling = True
     upd.on_widget(upd.TAB, "mpick0", "changed",
-                  {"text": "1.6.1  \u2014  an update - file attached"})
+                  {"text": "0x1.0x6.0x1  \u2014  an update - file attached"})
     upd.filling = False
     check(upd.picked == 1, "laying a line's versions down was taken as a pick")
 
@@ -726,25 +726,25 @@ def test_the_list_and_the_pane(upd: Any) -> None:
     del TAILS[:]
     del api.calls[:]
     upd.toggle_major(1)                      # 1.5 is open from the pick: shut it
-    check("1.5" not in upd.opened
+    check("0x1.0x5" not in upd.opened
           and last_set(api, "mpick1", "visible") is False
-          and str(last_set(api, "mopen1", "text")) == "1.5  more",
+          and str(last_set(api, "mopen1", "text")) == "0x1.0x5  more",
           f"shutting a line left its dropdown on the page: {upd.opened}")
     upd.toggle_major(1)                      # and open it again
-    check("1.5" in upd.opened
+    check("0x1.0x5" in upd.opened
           and last_set(api, "mpick1", "visible") is True
           and not sets_for(api, "mpick1", "items"),
           "opening a line a second time laid its versions down again")
     check(not TAILS, f"opening a line cost a request: {TAILS}")
     upd.on_widget(upd.TAB, "mopen1", "clicked", {})
-    check("1.5" not in upd.opened,
+    check("0x1.0x5" not in upd.opened,
           "the line's button did not shut its own line")
     upd.on_widget("Other tab", "mopen1", "clicked", {})
     upd.on_widget(upd.TAB, "mopen1", "changed", {})
-    check("1.5" not in upd.opened,
+    check("0x1.0x5" not in upd.opened,
           "another tab's button, or a report that is not a click, moved the pane")
     upd.on_widget(upd.TAB, "mopen9", "clicked", {})
-    check(upd.opened == ["1.6"],
+    check(upd.opened == ["0x1.0x6"],
           "a button in a row the pane never filled opened something anyway")
     check(upd.slot_number("mpick3") == 3 and upd.slot_number("check") == -1
           and upd.slot_number("mopen99") == -1,
@@ -756,7 +756,7 @@ def test_the_list_and_the_pane(upd: Any) -> None:
     upd.check_now()
     at_check = list(TAILS)
     values = upd.merge_config(upd.DEFAULTS, api.config.stored())
-    upd.show_detail(values, upd.published[1], "1.6.0", "1.6.0", fetch=False)
+    upd.show_detail(values, upd.published[1], "0x1.0x6.0x0", "0x1.0x6.0x0", fetch=False)
     check("has not been read beyond the tag list" in
           str(last_set(api, "vdetail", "value")),
           f"a version nobody picked was given a story anyway: "
@@ -772,14 +772,14 @@ def test_the_list_and_the_pane(upd: Any) -> None:
           f"{TAILS}")
     del TAILS[:]
     upd.pick_row(2)
-    check("releases/tags/berry1.5.9" in TAILS,
+    check("releases/tags/berry0x1.0x5.0x9" in TAILS,
           f"a tag outside the batch was not read for itself: {TAILS}")
     del TAILS[:]
     upd.pick_row(0)
     check(not TAILS, f"a version already read was fetched a second time: {TAILS}")
     upd.pick_row(1)
     check(not TAILS, "coming back to a read version cost a request")
-    check(upd.read_already("berry1.6.1") and upd.read_already("berry1.6.0"),
+    check(upd.read_already("berry0x1.0x6.0x1") and upd.read_already("berry0x1.0x6.0x0"),
           "a read version's story was not kept where the next pick can find it")
 
     print("\n7d. what the pane has no room for goes under Older, and is pickable")
@@ -801,28 +801,28 @@ def test_the_list_and_the_pane(upd: Any) -> None:
     del TAILS[:]
     with patched(upd, MAJOR_SLOTS=1):
         upd.check_now()
-        check(upd.slot_of("1.6") == 0 and upd.slot_of("1.5") == -1
+        check(upd.slot_of("0x1.0x6") == 0 and upd.slot_of("0x1.0x5") == -1
               and upd.older_indices() == [2],
               f"a line with no row is not the overflow's: "
-              f"{[upd.slot_of(m) for m in ('1.6', '1.5')]} "
+              f"{[upd.slot_of(m) for m in ('0x1.0x6', '0x1.0x5')]} "
               f"{upd.older_indices()}")
         check(last_set(api, upd.OLDER_HEAD, "visible") is True
               and last_set(api, upd.OLDER_PICK, "visible") is True,
               "the overflow was painted with its dropdown still folded away")
         names = items_for(api, upd.OLDER_PICK)
         check(names == [upd.item_text(upd.published[2])]
-              and str(names[0]).startswith("1.5.9"),
+              and str(names[0]).startswith("0x1.0x5.0x9"),
               f"the overflow's dropdown is not the versions with no row, in "
               f"the words every line uses: {names}")
         check(last_set(api, "major1", "visible") is None
               and (spec_leaf(spec, "major1") or {}).get("visible") is False,
               "a line the pane has no room for was put on the page anyway")
         check(upd.older_index(str(names[0])) == 2
-              and upd.older_index("1.6.1  \u2014  this copy") == -1
+              and upd.older_index("0x1.0x6.0x1  \u2014  this copy") == -1
               and upd.older_index("") == -1,
               "the overflow answers for a version that has a row of its own")
         upd.pick_row(2)
-        check(str(last_set(api, upd.OLDER_PICK, "value")).startswith("1.5.9"),
+        check(str(last_set(api, upd.OLDER_PICK, "value")).startswith("0x1.0x5.0x9"),
               f"picking an overflow version did not point its dropdown at it: "
               f"{last_set(api, upd.OLDER_PICK, 'value')!r}")
         upd.pick_row(0)                        # come back off the overflow
@@ -863,11 +863,11 @@ def test_the_list_and_the_pane(upd: Any) -> None:
 
 def test_the_way_back(upd: Any) -> None:
     print("\n8. going back, and the floor that says how far")
-    api = fresh(upd, version="1.6.1", config={"min_version": "1.6.0"})
+    api = fresh(upd, version="0x1.0x6.0x1", config={"min_version": "0x1.0x6.0x0"})
     upd.check_now()
     check([entry["stance"] for entry in upd.published]
           == ["this", "older", "too old"],
-          f"against 1.6.1 the versions do not stand right: "
+          f"against 0x1.0x6.0x1 the versions do not stand right: "
           f"{[(e['version'], e['stance']) for e in upd.published]}")
     check("newest published version" in last_status(api)
           and "1 older one(s) can still be gone back to" in last_status(api),
@@ -876,17 +876,17 @@ def test_the_way_back(upd: Any) -> None:
     check(upd.picked == 0, f"with nothing ahead the pane did not open on this copy: "
                            f"{upd.picked}")
     values = upd.merge_config(upd.DEFAULTS, {})
-    ok, why = upd.installable(upd.published[1], values, "1.6.1", "1.6.0")
+    ok, why = upd.installable(upd.published[1], values, "0x1.0x6.0x1", "0x1.0x6.0x0")
     check(ok and why == "", f"a version at the floor was refused: {why!r}")
-    ok, why = upd.installable(upd.published[2], values, "1.6.1", "1.6.0")
-    check(not ok and "berry1.5.9 is older than 1.6.0" in why and "setting" in why,
+    ok, why = upd.installable(upd.published[2], values, "0x1.0x6.0x1", "0x1.0x6.0x0")
+    check(not ok and "berry0x1.0x5.0x9 is older than 0x1.0x6.0x0" in why and "setting" in why,
           f"the floor refusal did not name itself: {why!r}")
-    ok, why = upd.installable(upd.published[0], values, "1.6.1", "1.6.0")
+    ok, why = upd.installable(upd.published[0], values, "0x1.0x6.0x1", "0x1.0x6.0x0")
     check(not ok and "already running here" in why,
           f"this copy's own version offered to replace itself: {why!r}")
     entry = dict(upd.published[1])
     entry["download"] = None
-    ok, why = upd.installable(entry, values, "1.6.1", "1.6.0")
+    ok, why = upd.installable(entry, values, "0x1.0x6.0x1", "0x1.0x6.0x0")
     check(not ok and "carries no download" in why,
           f"a way back with nothing attached was installable: {why!r}")
     upd.pick_row(1)
@@ -895,10 +895,10 @@ def test_the_way_back(upd: Any) -> None:
           f"{last_set(api, 'vstate', 'text')!r}")
 
     print("\n9. a moved floor moves the line, not the code")
-    api = fresh(upd, version="1.6.1", config={"min_version": "1.5.0"})
+    api = fresh(upd, version="0x1.0x6.0x1", config={"min_version": "0x1.0x5.0x0"})
     upd.check_now()
     check([entry["stance"] for entry in upd.published] == ["this", "older", "older"],
-          f"a lowered floor did not let 1.5.9 back in: "
+          f"a lowered floor did not let 0x1.0x5.0x9 back in: "
           f"{[(e['version'], e['stance']) for e in upd.published]}")
     check("2 older one(s)" in last_status(api),
           f"the count of ways back did not follow the floor: {last_status(api)!r}")
@@ -906,19 +906,19 @@ def test_the_way_back(upd: Any) -> None:
 
 def test_the_notice(upd: Any) -> None:
     print("\n10. the notice a check sends up on its own")
-    api = fresh(upd, version="1.6.0")
+    api = fresh(upd, version="0x1.0x6.0x0")
     upd.check_now()
     notices = [arguments for where, arguments, _n in api.calls
                if where == "ui.popup"]
     check(len(notices) == 1 and notices[0][0] == "Berry Manager update"
-          and "berry1.6.1 is out" in str(notices[0][1])
-          and "this copy is berry1.6.0" in str(notices[0][1])
+          and "berry0x1.0x6.0x1 is out" in str(notices[0][1])
+          and "this copy is berry0x1.0x6.0x0" in str(notices[0][1])
           and "file is attached" in str(notices[0][1]),
           f"the version out was not announced once, in full: {notices}")
     upd.check_now()
     check(api.times("ui.popup") == 1,
           f"the same version was announced twice: {api.times('ui.popup')}")
-    upd.announced.discard("1.6.1")
+    upd.announced.discard("0x1.0x6.0x1")
     upd.check_now()
     check(api.times("ui.popup") == 2,
           "a version the addon had stopped holding was not announced again")
@@ -928,7 +928,7 @@ def test_the_notice(upd: Any) -> None:
     check(not api.called("ui.popup"),
           "the notice came through with the switch off")
 
-    api = fresh(upd, version="1.6.1")
+    api = fresh(upd, version="0x1.0x6.0x1")
     upd.check_now()
     check(not api.called("ui.popup"),
           "a copy already newest was announced anyway")
@@ -1106,7 +1106,7 @@ def test_the_job(upd: Any) -> None:
     # The floor is pinned at the fixtures' own line: this record is about what
     # the floor refuses and what the swap does, so it reads the same however far
     # the shipped clamp has been drawn.
-    api = fresh(upd, version="1.6.0", config={"min_version": "1.6.0"})
+    api = fresh(upd, version="0x1.0x6.0x0", config={"min_version": "0x1.0x6.0x0"})
     upd.update_selected()
     check("no version picked yet" in last_status(api),
           f"Install with nothing picked did not say so: {last_status(api)!r}")
@@ -1115,7 +1115,7 @@ def test_the_job(upd: Any) -> None:
     upd.published[2]["stance"] = "too old"
     upd.pick_row(2)
     upd.update_selected()
-    check("older than 1.6.0" in last_status(api),
+    check("older than 0x1.0x6.0x0" in last_status(api),
           f"a version below the floor was not refused before the download: "
           f"{last_status(api)!r}")
 
@@ -1268,9 +1268,9 @@ def test_the_job(upd: Any) -> None:
         # The keep line is where this copy's setup may be left in place: the
         # published fixtures sit at 1.6.x, so it is moved down to them rather
         # than the versions being moved up to it. Its default is the clamp.
-        api2 = fresh(upd, version="1.6.1",
-                     config={"min_version": "1.6.0",
-                             "keep_min_version": "1.5.0"})
+        api2 = fresh(upd, version="0x1.0x6.0x1",
+                     config={"min_version": "0x1.0x6.0x0",
+                             "keep_min_version": "0x1.0x5.0x0"})
         api2.answer("ui.dialog", {"answer": upd.KEEP_ANSWER})
         api2.answer("ui.question", True)
         upd.check_now()
@@ -1289,8 +1289,8 @@ def test_the_job(upd: Any) -> None:
                  if where == "ui.dialog"]
         check(len(boxes) == 1, f"a downgrade did not ask its own question once: {boxes}")
         words = spec_words(boxes[0][0]) if boxes else ""
-        check(boxes and str(boxes[0][0][1]) == "Go back to berry1.6.0?"
-              and "This copy is berry1.6.1" in words
+        check(boxes and str(boxes[0][0][1]) == "Go back to berry0x1.0x6.0x0?"
+              and "This copy is berry0x1.0x6.0x1" in words
               and "older program" in words
               and "hotfix on the same line" in words,
               f"the way back was not said as a way back: "
@@ -1310,7 +1310,7 @@ def test_the_job(upd: Any) -> None:
               and "Go back to it now?" in str(asked[-1][1]),
               f"the finished downgrade did not ask to start the older copy: "
               f"{asked[-1] if asked else None}")
-        check("berry1.6.0 is in place" in last_status(api2)
+        check("berry0x1.0x6.0x0 is in place" in last_status(api2)
               and "were not touched" in last_status(api2),
               f"a downgrade did not say which older copy had landed: "
               f"{last_status(api2)!r}")
@@ -1326,7 +1326,7 @@ def test_the_job(upd: Any) -> None:
         # The keep line is left at the shipped 2.0.0 clamp, which is what puts
         # these fixtures under it; the floor is pinned at their own line so the
         # way back reaches the question instead of the floor's refusal first.
-        api5 = fresh(upd, version="1.6.1", config={"min_version": "1.6.0"})
+        api5 = fresh(upd, version="0x1.0x6.0x1", config={"min_version": "0x1.0x6.0x0"})
         api5.answer("ui.dialog", {"answer": upd.KEEP_ANSWER})
         api5.answer("ui.question", True)
         upd.check_now()
@@ -1350,7 +1350,7 @@ def test_the_job(upd: Any) -> None:
         check(f"further back than {upd.KEEP_ALLOWED}" in words5,
               f"the two answers did not say why the third is missing: {words5!r}")
         check("erase it and start clean" in last_status(api5)
-              and f"berry1.6.0 is further back than {upd.KEEP_ALLOWED}"
+              and f"berry0x1.0x6.0x0 is further back than {upd.KEEP_ALLOWED}"
               in last_status(api5),
               f"an answer that keeps the setup below the line was obeyed rather "
               f"than refused: {last_status(api5)!r}")
@@ -1362,8 +1362,8 @@ def test_the_job(upd: Any) -> None:
         # is a setting like the floor: two dots and three read the same.
         moved = upd.merge_config(upd.DEFAULTS, {"keep_min_version": "2"})
         check(upd.keep_floor(moved) == "2"
-              and upd.keep_allowed(moved, "2.0.0") is True
-              and upd.keep_allowed(moved, "1.9.9") is False
+              and upd.keep_allowed(moved, "0x2.0x0.0x0") is True
+              and upd.keep_allowed(moved, "0x1.0x9.0x9") is False
               and upd.keep_allowed(moved, "") is False,
               f"the keep line does not read versions the way the list does: "
               f"{upd.keep_floor(moved)!r}")
@@ -1379,8 +1379,8 @@ def test_the_job(upd: Any) -> None:
 
         print("\n18b. the third answer leaves everything where it is")
         target.write_bytes(b"the old program")
-        api3 = fresh(upd, version="1.6.1",
-                     config={"min_version": "1.6.0"})
+        api3 = fresh(upd, version="0x1.0x6.0x1",
+                     config={"min_version": "0x1.0x6.0x0"})
         api3.answer("ui.dialog", {"answer": upd.CANCEL_ANSWER})
         upd.check_now()
         upd.pick_row(1)
@@ -1443,7 +1443,7 @@ def test_the_job(upd: Any) -> None:
         # The keep line stays at the shipped 2.0.0 clamp, which is what puts
         # these fixtures under it; the floor is pinned at their own line so the
         # way back is refused by the clamp alone, not by the floor as well.
-        api4 = fresh(upd, version="1.6.1", config={"min_version": "1.6.0"})
+        api4 = fresh(upd, version="0x1.0x6.0x1", config={"min_version": "0x1.0x6.0x0"})
         api4.answer("ui.dialog", {"answer": upd.ERASE_ANSWER})
         api4.answer("ui.question", False)      # no restart at the end of this one
         api4.answer("session.addons", rows)
@@ -1476,7 +1476,7 @@ def test_the_job(upd: Any) -> None:
         check(("some_addon", False) in stops
               and not any(str(row[0]) == "berry_web" for row in stops),
               f"an erase did not take the installed addons down first: {stops}")
-        backup = base / "backup-before-1.6.0.zip"
+        backup = base / "backup-before-0x1.0x6.0x0.zip"
         check(backup.is_file(),
               f"no backup landed beside the program: {sorted(p.name for p in base.iterdir())}")
         kept: list[str] = []
@@ -1487,7 +1487,7 @@ def test_the_job(upd: Any) -> None:
               and any(name.startswith("addons/_data/some_addon/") for name in kept)
               and any(name.startswith("addons/_data/berry_web/") for name in kept),
               f"the backup is not everything that was about to go: {kept}")
-        check(any("backup-before-1.6.0.zip" in line for line in api4.logs),
+        check(any("backup-before-0x1.0x6.0x0.zip" in line for line in api4.logs),
               f"the backup was not said out loud where it was written: {api4.logs[-4:]}")
         check(any("some_addon" in line and "stopped and deleted" in line
                   for line in api4.logs),
@@ -1511,7 +1511,7 @@ def test_the_job(upd: Any) -> None:
 
         print("\n19. a page on the wire stops the update without touching anything")
         target.write_bytes(b"the old program")
-        api3 = fresh(upd, version="1.6.0")
+        api3 = fresh(upd, version="0x1.0x6.0x0")
         upd.check_now()
         upd.pick_row(0)
         page = b"<!doctype html>\n<html>" + b" " * 200_000
@@ -1532,7 +1532,7 @@ def test_the_job(upd: Any) -> None:
               "the stopped job left the addon in a state the user cannot retry from")
 
         print("\n20. a short body is an early stop, not a program")
-        api4 = fresh(upd, version="1.6.0")
+        api4 = fresh(upd, version="0x1.0x6.0x0")
         upd.check_now()
         upd.pick_row(0)
         short = SYSTEM_HEAD[THE_SYSTEM] + b"\x00" * 500
@@ -1549,7 +1549,7 @@ def test_the_job(upd: Any) -> None:
               f"{last_status(api4)!r}")
 
         print("\n21. a redirect that never ends is given up on")
-        api5 = fresh(upd, version="1.6.0")
+        api5 = fresh(upd, version="0x1.0x6.0x0")
         upd.check_now()
         upd.pick_row(0)
         hops = [FakeResp(302, b"", {"Location": f"https://x/{n}"})
@@ -1595,7 +1595,7 @@ def test_the_job_view(upd: Any) -> None:
         body = program_bytes(THE_SYSTEM, b"\xAA")
         total = len(body)
 
-        api = fresh(upd, version="1.6.0")
+        api = fresh(upd, version="0x1.0x6.0x0")
         api.answer("ui.question", True)
         api.answer("tabs.set_widget", True)
         upd.check_now()
@@ -1625,7 +1625,7 @@ def test_the_job_view(upd: Any) -> None:
             check(api.asked("tabs.lock", "locked") is True,
                   "a running download did not hold the window's tab bar: "
                   f"{api.last('tabs.lock')}")
-            check(str(last_set(api, "jobname", "text")) == "berry1.6.1",
+            check(str(last_set(api, "jobname", "text")) == "berry0x1.0x6.0x1",
                   f"the card does not name the version being fetched: "
                   f"{last_set(api, 'jobname', 'text')!r}")
             check(bool(last_set(api, "jobicon", "image")),
@@ -1645,7 +1645,7 @@ def test_the_job_view(upd: Any) -> None:
             written = [arguments[3] for where, arguments, _n in api.calls
                        if where == "tabs.set_widget" and len(arguments) >= 4
                        and arguments[1] == "jobterm" and arguments[2] == "write"]
-            check(any(str(one).startswith("updating to berry1.6.1") for one in written),
+            check(any(str(one).startswith("updating to berry0x1.0x6.0x1") for one in written),
                   f"the console never heard which version was being fetched: "
                   f"{written}")
             check(any(line in str(one) for one in written),
@@ -1676,7 +1676,7 @@ def test_the_job_view(upd: Any) -> None:
         # a job on a tab with no pane: nothing is written to a console that is
         # not on screen, and no tab bar is held for a job nobody can see
         target.write_bytes(b"the old program")
-        api2 = fresh(upd, version="1.6.0")
+        api2 = fresh(upd, version="0x1.0x6.0x0")
         api2.answer("ui.question", True)
         upd.check_now()
         upd.pick_row(0)

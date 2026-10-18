@@ -420,7 +420,7 @@ jobs:
       working-directory: "src/berry_manager"
       shell: cmd
       run: >
-        pyinstaller --noconfirm --onefile --windowed --icon="assets\icon.png"
+        pyinstaller --noconfirm --onedir --windowed --icon="assets\icon.png"
         --add-data="assets;assets" --add-data="config.example.json;."
         --add-data="_addon_bundle;addons" --add-data="_addon_harness;harness"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
@@ -430,7 +430,7 @@ jobs:
       if: runner.os == 'Linux'
       working-directory: "src/berry_manager"
       run: >
-        pyinstaller --noconfirm --onefile --windowed --icon="assets/icon.png"
+        pyinstaller --noconfirm --onedir --windowed --icon="assets/icon.png"
         --add-data="assets:assets" --add-data="config.example.json:."
         --add-data="_addon_bundle:addons" --add-data="_addon_harness:harness"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
@@ -443,9 +443,12 @@ jobs:
       run: |
         # The addons that came with the program are inside the executable, so the
         # folder beside it starts empty and is the user's own: what they drop
-        # there is what they can read, change and delete. The app creates the
-        # folder anyway, so a note is all that is shipped with it.
-        New-Item -ItemType Directory -Force -Path dist/addons | Out-Null
+        # there is what they can read, change and delete. A --onedir build is a
+        # folder (the program file and its _internal), so this note is written
+        # inside that folder, beside the program - the shape the release packs
+        # and the setup unpacks. The app creates the folder anyway, so a note is
+        # all that is shipped with it.
+        New-Item -ItemType Directory -Force -Path dist/berry_manager/addons | Out-Null
         $note = @(
           "Drop an addon in this folder: a .py file, a folder holding addon.py,",
           "or a program (.exe) with a .json manifest of the same name. The app",
@@ -460,16 +463,44 @@ jobs:
           "picture in addons/assets/<name>/<name>icon.png - or in assets/ beside",
           "the program, under that same name."
         ) -join [Environment]::NewLine
-        Set-Content -Path dist/addons/README.txt -Value $note -Encoding utf8
+        Set-Content -Path dist/berry_manager/addons/README.txt -Value $note -Encoding utf8
 
-    - name: Upload Artifacts
+    - name: Build the setup program (Windows)
+      if: runner.os == 'Windows'
+      working-directory: "src/berry_manager"
+      shell: cmd
+      run: >
+        pyinstaller --noconfirm --onefile --windowed --name="berry_manager-setup"
+        --icon="assets\icon.png" --add-data="assets;assets"
+        installer.py
+
+    - name: Build the setup program (Linux)
+      if: runner.os == 'Linux'
+      working-directory: "src/berry_manager"
+      run: >
+        pyinstaller --noconfirm --onefile --windowed --name="berry_manager-setup"
+        --icon="assets/icon.png" --add-data="assets:assets"
+        installer.py
+
+    - name: Upload the program build
       uses: actions/upload-artifact@v4
       with:
         name: berry_manager-${{ runner.os }}
-        path: |
-          src/berry_manager/dist/berry_manager.exe
-          src/berry_manager/dist/berry_manager
-          src/berry_manager/dist/addons/
+        # A --onedir build is the whole dist/berry_manager folder: the program
+        # file, its _internal, and the drop-in addons the step above wrote. The
+        # release packs this folder so those three land at the top of the zip,
+        # which is what the setup reads back.
+        path: src/berry_manager/dist/berry_manager/
+        retention-days: 7
+
+    - name: Upload the setup program
+      uses: actions/upload-artifact@v4
+      with:
+        # A single file beside the build folder, so its artifact name is not
+        # picked up by the release's ``berry_manager-*`` download (a folder of
+        # that name would hide the program build); it is published as itself.
+        name: berry-setup-${{ runner.os }}
+        path: src/berry_manager/dist/berry_manager-setup${{ runner.os == 'Linux' && '' || '.exe' }}
         retention-days: 7
 
   # A build that passed its tests and packaged its two programs *is* a release:
@@ -492,14 +523,25 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Collect the two builds
+    - name: Collect the program builds
       uses: actions/download-artifact@v4
       with:
         # One folder per artifact: built/berry_manager-Windows and
-        # built/berry_manager-Linux, each holding the program with the drop-in
-        # addons folder beside it - the shape the workflow staged.
+        # built/berry_manager-Linux, each holding the whole --onedir build (the
+        # program, its _internal, and the drop-in addons) - the shape the
+        # workflow staged. berry-setup-* is deliberately not matched here: the
+        # setup is a loose file, gathered by the step after this one.
         pattern: berry_manager-*
         path: built
+        merge-multiple: false
+
+    - name: Collect the setup programs
+      uses: actions/download-artifact@v4
+      with:
+        # built/../setup-Windows and setup-Linux, each holding the single
+        # berry_manager-setup program this run built for that system.
+        pattern: berry-setup-*
+        path: setup
         merge-multiple: false
 
     - name: Pack one archive per system
@@ -507,8 +549,11 @@ jobs:
       run: |
         # The version is read from the one place it lives, so a release is made
         # by editing core.const.APP_VERSION and pushing: no tag to type,
-        # no button to press. Each archive is named for the system it holds -
-        # the update addon tells the two apart by exactly that word.
+        # no button to press. It is the program's byte-packed hex (three 0x bytes
+        # joined with dots, e.g. 0x3.0x1.0x0), read here as it stands - the sed
+        # takes the quoted text, not digits - so the tag is ``berry`` + that hex.
+        # Each archive is named for the system it holds - the update addon tells
+        # the two apart by exactly that word.
         version=$(sed -n 's/^APP_VERSION *= *"\([^"]*\)".*/\1/p' \
                   'src/berry_manager/core/const.py')
         if [ -z "$version" ]; then
@@ -535,6 +580,26 @@ jobs:
           fi
           ( cd "$folder" && zip -q -r -X "$GITHUB_WORKSPACE/release/berry_manager-${pair##*:}.zip" . )
         done
+        # The setup is a real program of its own, built for each system, so it
+        # rides on the release as that system's file: berry_manager-setup-windows
+        # (an .exe) and berry_manager-setup-linux. It is what installs the folders
+        # above, and it looks nothing like them - a lone file, not a tree.
+        for pair in Windows:windows Linux:linux; do
+          sdir="setup/berry-setup-${pair%%:*}"
+          found=$(find "$sdir" -maxdepth 1 -type f -name 'berry_manager-setup*' | head -n1)
+          if [ -z "$found" ]; then
+            echo "there is no setup program in $sdir to publish"; exit 1
+          fi
+          dest="release/berry_manager-setup-${pair##*:}"
+          case "$found" in
+            *.exe) dest="$dest.exe" ;;
+          esac
+          cp "$found" "$dest"
+          case "$found" in
+            *.exe) : ;;
+            *) chmod 755 "$dest" ;;
+          esac
+        done
         echo "archives to publish:"; ls -l release
 
     - name: Publish the release
@@ -553,18 +618,23 @@ jobs:
         cat > note.md <<EOF
         Built by the Actions workflow from commit \`$COMMIT\`.
 
-        - **berry_manager-windows.zip** - the program and the empty drop-in
-          \`addons\` folder, for Windows.
+        - **berry_manager-setup-windows** / **berry_manager-setup-linux** - the
+          setup program. Run it and it installs the app for you: it either
+          brings down the build below and unpacks it where you choose, or
+          compiles one on the machine with PyInstaller. It wears the app's own
+          boot card, and both doors take their data from this GitHub repository
+          (the source can be set, but it defaults to the one it shipped with).
+        - **berry_manager-windows.zip** - the program folder (the program file,
+          its \`_internal\`, and the empty drop-in \`addons\`), for Windows.
         - **berry_manager-linux.zip** - the same for Linux.
 
-        Unpack it anywhere and run the program; keep \`addons\` beside it. An
-        addon dropped in that folder is read when the app starts, and each
-        addon keeps its own settings under \`addons/_data\`. Nothing in a
-        release changes what an installed copy already holds: the in-app update
-        swaps the program file alone.
-
-        The **Manager update** tab reads this tag as version \`$VERSION\` and
-        takes the archive whose name says its own system.
+        The two archives are what the setup installs and what an update swaps;
+        keep \`addons\` beside the program. An addon dropped in that folder is
+        read when the app starts, and each addon keeps its own settings under
+        \`addons/_data\`. The in-app **Manager update** tab reads this tag as
+        version \`$VERSION\` (the program's byte-packed hex), takes the archive
+        whose name says its own system, and lays the whole folder down in place
+        of the one you are running.
         EOF
         title="Berry Manager $VERSION"
         if gh release view "$TAG" >/dev/null 2>&1; then
@@ -591,6 +661,6 @@ jobs:
         fi
         # --clobber: an asset of this name from an earlier run is replaced, so
         # a re-run at the same version cannot leave two files to choose from.
-        gh release upload "$TAG" release/*.zip --clobber
+        gh release upload "$TAG" release/* --clobber
         gh release view "$TAG" --json tagName,assets \
           --jq '"published \(.tagName) with: \([.assets[].name] | join(", "))"'

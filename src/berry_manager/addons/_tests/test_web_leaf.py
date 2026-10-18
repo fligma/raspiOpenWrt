@@ -213,7 +213,7 @@ def test_reads_and_moves() -> None:
 
 def test_the_build() -> None:
     print("\n3. what the spec's ``web`` kind builds")
-    if api.QWebEngineView is not None:
+    if api.webengine_view() is not None:
         look("QtWebEngine is here, so the kind builds a real view and this test "
              "does not build one - a view means a render process, which an "
              "offscreen runner has no business starting. The notice below is "
@@ -255,7 +255,7 @@ def main() -> int:
         return 2
     api = addon_api
     print(f"addon_api: a web leaf, QtWebEngine "
-          f"{'missing' if api.QWebEngineView is None else 'here'}")
+          f"{'missing' if api.webengine_view() is None else 'here'}")
     test_hold()
     test_reads_and_moves()
     test_the_build()

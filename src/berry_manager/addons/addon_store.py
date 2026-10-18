@@ -166,7 +166,7 @@ from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_manifest_p
 
 ADDON = {
     "name": "Berry addon store",
-    "version": "3.0",
+    "version": "4.0",
     "author": "fligma",
     "description": "Lists the addons published in the repository's addon.store "
                    "folder, downloads a chosen one into a staging folder and "
@@ -1418,16 +1418,42 @@ def addons_dir() -> Path:
     return Path(api.paths.addons)
 
 
+#: Folder listings remembered between rows, keyed ``folder -> [mtime_ns, names]``.
+#: A store repaint asks "is this installed" and "what is its picture" once per
+#: row; without this that is a directory scan (or three stat() calls) per row,
+#: so a few dozen addons cost a hundred-plus disk trips on every filter
+#: keystroke. One scan serves the whole pass, and the folder's own stamp moves
+#: the moment a file is added or taken away - an install that just landed is
+#: never answered from the last listing.
+_LISTINGS: dict[str, list] = {}
+
+
+def _folder_names(folder: Path) -> set[str]:
+    """The names sitting directly in ``folder``, scanned once and kept current."""
+    key = str(folder)
+    try:
+        stamp = folder.stat().st_mtime_ns
+    except OSError:
+        _LISTINGS.pop(key, None)
+        return set()
+    held = _LISTINGS.get(key)
+    if held is not None and held[0] == stamp:
+        return held[1]
+    try:
+        names = {child.name for child in folder.iterdir()}
+    except OSError:
+        names = set()
+    _LISTINGS[key] = [stamp, names]
+    return names
+
+
 def installed(id_value: str) -> bool:
     """Whether an addon id already sits in the addons folder in any shape."""
-    folder = addons_dir()
     name = clean_id(id_value)
     if not name:
         return False
-    for candidate in (folder / f"{name}.exe", folder / f"{name}.bin", folder / name):
-        if candidate.exists():
-            return True
-    return False
+    names = _folder_names(addons_dir())
+    return f"{name}.exe" in names or f"{name}.bin" in names or name in names
 
 
 def installed_version(id_value: str) -> str:
@@ -1607,12 +1633,11 @@ def cached_icon(id_value: str) -> str:
     if not name:
         return ""
     folder = icons_dir()
-    target = None
-    for candidate in sorted(folder.glob(f"{name}.*")):
-        if candidate.suffix.lower() in _PICTURES and candidate.is_file():
-            target = candidate
-            break
-    return str(target) if target is not None else ""
+    prefix = f"{name}."
+    wanted = sorted(item for item in _folder_names(folder)
+                    if item.startswith(prefix)
+                    and Path(item).suffix.lower() in _PICTURES)
+    return str(folder / wanted[0]) if wanted else ""
 
 
 def fallback_icon() -> str:

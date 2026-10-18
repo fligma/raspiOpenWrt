@@ -339,6 +339,7 @@ from contextlib import contextmanager
 import inspect
 import json
 import posixpath
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 import stat as stat_module
@@ -435,28 +436,49 @@ from core.net import (create_ssh_client, exec_remote, remote_join,
 import core.ui
 from core.ui import tab_caption
 
-try:  # the web kinds are inert when QtWebEngine is not installed
-    from PyQt6.QtWebEngineWidgets import QWebEngineView
-except ImportError:
-    QWebEngineView = None
+def webengine_view() -> Any:
+    """The QtWebEngine view class, imported on first use rather than when this
+    module is read.
+
+    ``core.addon`` pulls ``addon_api`` in before the window is up, so a
+    module-level ``PyQt6.QtWebEngine*`` import here would load the whole
+    Chromium stack on every start whether or not the session ever shows a web
+    page. Reached only where a page is actually built or shown, ``None`` when
+    PyQt6-WebEngine is not installed."""
+    try:
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+    except ImportError:
+        return None
+    return QWebEngineView
+
+
+def webengine_loaded() -> Any:
+    """The view class if Chromium has already been imported, else ``None``.
+
+    Unlike :func:`webengine_view` this never starts the import, so a check that
+    only wants to know whether some widget is a web view cannot drag Chromium
+    onto the path by itself: with nothing imported there is no web view to find
+    anyway."""
+    module = sys.modules.get("PyQt6.QtWebEngineWidgets")
+    return getattr(module, "QWebEngineView", None) if module else None
 
 
 def quiet_web_view() -> Any:
     """A web view that never asks the window for more room than it has.
 
-    The same ``core.views.QuietWebView`` the app's own browser tabs are
-    built from: when the render process boots, a plain view's size hints
-    jump with the page's preferred size and the layout minimums drag the
-    window after them. Read late rather than imported at the top: a bare
-    addon harness builds specs without ``core.views`` in sight, and an
-    addon that never asks for a page should not be the reason it fails.
-    With no app beside the leaf, the plain view is all there is.
+    The same ``core.webview.QuietWebView`` the app's own browser tabs are built
+    from: when the render process boots, a plain view's size hints jump with
+    the page's preferred size and the layout minimums drag the window after
+    them. Read late rather than imported at the top: a bare addon harness builds
+    specs without ``core.webview`` in sight, and an addon that never asks for a
+    page should not be the reason it fails. With no app beside the leaf, the
+    plain view is all there is.
     """
     try:
-        from core.views import QuietWebView
+        from core.webview import QuietWebView
     except Exception:
         QuietWebView = None
-    return (QuietWebView or QWebEngineView)()
+    return (QuietWebView or webengine_view())()
 
 
 #: One shared pool, so twenty addons cannot open twenty SSH connections.
@@ -1959,7 +1981,7 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
                              spacer.sizePolicy().Policy.Expanding)
         return spacer
     if kind in ("web", "webview"):
-        if QWebEngineView is None:
+        if webengine_view() is None:
             return QLabel("QtWebEngine is not available in this installation.")
         view = quiet_web_view()
         # The leaf starts empty and only is given an address by the ``url``
@@ -4258,8 +4280,11 @@ class UIAPI:
 
 
 def _is_web_view(widget: Any) -> bool:
-    """True for an embedded page; QtWebEngine is optional."""
-    return QWebEngineView is not None and isinstance(widget, QWebEngineView)
+    """True for an embedded page; QtWebEngine is optional. Reads the class only
+    if Chromium is already in hand, so recognising a widget never imports the
+    engine on its own."""
+    view = webengine_loaded()
+    return view is not None and isinstance(widget, view)
 
 
 def app_icon_path(win: Any) -> str:

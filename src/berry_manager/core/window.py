@@ -67,6 +67,7 @@ from core.ui import (
 )
 from core.const import (
     APP_VERSION,
+    APP_VERSION_DISPLAY,
     BASE_DIR,
     DEFAULT_PROFILE,
     ICON_FILES,
@@ -326,9 +327,10 @@ class BerryManager(
         self.terminal_history_pos = len(self.terminal_history)
         self.connected_once = False
         self.main_connected = False
-        # The version the window is running, where a user looks first: the
-        # About box says the same thing, from the same constant.
-        self.setWindowTitle(f"Berry Manager V{APP_VERSION}")
+        # The version the window is running, where a user looks first. The title
+        # reads the decimal the person expects (``3.1.0``); the stored hex is what
+        # the update addon and the About box work from.
+        self.setWindowTitle(f"Berry Manager V{APP_VERSION_DISPLAY}")
         self.resize(1180, 780)
 
         # The look is decided before anything is drawn: the themes folder is
@@ -1206,7 +1208,7 @@ class BerryManager(
             icon = QApplication.style().standardIcon(
                 QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray.setIcon(icon)
-        self.tray.setToolTip(f"Berry Manager V{APP_VERSION}")
+        self.tray.setToolTip(f"Berry Manager V{APP_VERSION_DISPLAY}")
 
     def raise_from_tray(self) -> None:
         """Come back from whatever it was minimised to, under the pointer."""

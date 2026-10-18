@@ -21,6 +21,7 @@ import codecs
 from pathlib import PurePosixPath
 import posixpath
 import queue
+import socket
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -279,29 +280,52 @@ class SSHShellWorker(QThread):
             except Exception:
                 pass
 
+    def _flush_outgoing(self) -> None:
+        """Send everything queued for the shell - resizes and text - in one go."""
+        while True:
+            try:
+                item = self.outgoing.get_nowait()
+            except queue.Empty:
+                return
+            if isinstance(item, tuple):           # a queued resize
+                self.cols, self.rows = item[1], item[2]
+                self.channel.resize_pty(width=self.cols, height=self.rows)
+            else:
+                self.channel.sendall(item.encode("utf-8"))
+
     def run(self) -> None:
         """Attach to the main session, then alternate reading output and flushing queued input; the short timeout keeps it responsive to stop and typing."""
         try:
             if self.stop_requested.is_set():
                 return
             self.channel = self.shared.open_shell(self.cols, self.rows)
-            self.channel.settimeout(0.1)
+            self.channel.settimeout(0.05)
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             self.connected.emit()
             while not self.stop_requested.is_set() and not self.channel.closed:
-                if self.channel.recv_ready():
-                    data = decoder.decode(self.channel.recv(65536))
-                    if data:
-                        self.received.emit(data)
+                # Push everything queued first, then let the socket block for the
+                # next byte. The old shape read one 64 KB chunk and then waited a
+                # full poll interval in ``outgoing.get`` before reading again,
+                # which capped fast output (a ``cat``, an unroll) at a couple of
+                # chunks a second no matter how quick the link; blocking in
+                # ``recv`` keeps typing latency at the interval while a burst
+                # streams through as it arrives.
+                self._flush_outgoing()
                 try:
-                    outgoing = self.outgoing.get(timeout=0.05)
-                except queue.Empty:
+                    chunk = self.channel.recv(65536)
+                except socket.timeout:
                     continue
-                if isinstance(outgoing, tuple):       # a queued resize
-                    self.cols, self.rows = outgoing[1], outgoing[2]
-                    self.channel.resize_pty(width=self.cols, height=self.rows)
-                    continue
-                self.channel.sendall(outgoing.encode("utf-8"))
+                except Exception:
+                    # A stop or a closed far side is a clean exit, not an error;
+                    # anything else is real and is left to surface below.
+                    if self.stop_requested.is_set() or self.channel.closed:
+                        break
+                    raise
+                if not chunk:                     # the far side closed
+                    break
+                text = decoder.decode(chunk)
+                if text:
+                    self.received.emit(text)
         except Exception as error:
             if not self.stop_requested.is_set():
                 self.failed.emit(str(error))
@@ -381,6 +405,19 @@ class OwnShellWorker(QThread):
             except Exception:
                 pass
 
+    def _flush_outgoing(self) -> None:
+        """Send everything queued for the shell - resizes and text - in one go."""
+        while True:
+            try:
+                item = self.outgoing.get_nowait()
+            except queue.Empty:
+                return
+            if isinstance(item, tuple):           # a queued resize
+                self.cols, self.rows = item[1], item[2]
+                self.channel.resize_pty(width=self.cols, height=self.rows)
+            else:
+                self.channel.sendall(item.encode("utf-8"))
+
     def run(self) -> None:
         """Open the connection, then alternate reading output and flushing queued input; the short timeout keeps it responsive to typing and to stop."""
         try:
@@ -390,24 +427,34 @@ class OwnShellWorker(QThread):
             self.channel = self.client.invoke_shell(term="xterm-256color",
                                                     width=self.cols,
                                                     height=self.rows)
-            self.channel.settimeout(0.1)
+            self.channel.settimeout(0.05)
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             self.state["connected"] = True
             self.connected.emit()
             while not self.stop_requested.is_set() and not self.channel.closed:
-                if self.channel.recv_ready():
-                    data = decoder.decode(self.channel.recv(65536))
-                    if data:
-                        self.received.emit(data)
+                # Push everything queued first, then let the socket block for the
+                # next byte. The old shape read one 64 KB chunk and then waited a
+                # full poll interval in ``outgoing.get`` before reading again,
+                # which capped fast output (a ``cat``, an unroll) at a couple of
+                # chunks a second no matter how quick the link; blocking in
+                # ``recv`` keeps typing latency at the interval while a burst
+                # streams through as it arrives.
+                self._flush_outgoing()
                 try:
-                    outgoing = self.outgoing.get(timeout=0.05)
-                except queue.Empty:
+                    chunk = self.channel.recv(65536)
+                except socket.timeout:
                     continue
-                if isinstance(outgoing, tuple):       # a queued resize
-                    self.cols, self.rows = outgoing[1], outgoing[2]
-                    self.channel.resize_pty(width=self.cols, height=self.rows)
-                    continue
-                self.channel.sendall(outgoing.encode("utf-8"))
+                except Exception:
+                    # A stop or a closed far side is a clean exit, not an error;
+                    # anything else is real and is left to surface below.
+                    if self.stop_requested.is_set() or self.channel.closed:
+                        break
+                    raise
+                if not chunk:                     # the far side closed
+                    break
+                text = decoder.decode(chunk)
+                if text:
+                    self.received.emit(text)
         except Exception as error:
             if not self.stop_requested.is_set():
                 self.failed.emit(str(error) or type(error).__name__)
@@ -617,14 +664,30 @@ def _palette() -> list[QColor]:
 
 PALETTE = _palette()
 
+#: The two ground colours, built once. Every run of every paint asks for them,
+#: and a ``QColor`` is not free to make.
+DEFAULT_BG_COLOR = QColor(DEFAULT_BG)
+DEFAULT_FG_COLOR = QColor(DEFAULT_FG)
+
+
+#: Truecolor cells decoded to a ``QColor`` once: a full-screen program that
+#: repaints the same coloured run on every frame is answered from here rather
+#: than rebuilding a ``QColor`` per paint.
+_TRUECOLOR: dict[int, QColor] = {}
+
 
 def _cell_color(value: int, default: QColor) -> QColor:
     if value < 0:
         return default
     if value < 256:
         return PALETTE[value]
+    held = _TRUECOLOR.get(value)
+    if held is not None:
+        return held
     packed = value - 256
-    return QColor((packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF)
+    color = QColor((packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF)
+    _TRUECOLOR[value] = color
+    return color
 
 
 def _blend(color: QColor, toward: QColor, weight: float) -> QColor:
@@ -692,6 +755,15 @@ class TerminalScreen(QWidget):
         self._private = ""
         self._osc_after_escape = False
 
+        # Damage tracking: which grid rows a chunk actually changed, so a paint
+        # repaints those rows alone rather than the whole window. ``_damage_all``
+        # says a scroll, a clear or a screen swap moved everything and there is
+        # nothing to clip. ``_style_cache`` keeps the font and its metrics for
+        # each attribute combination, so a paint builds no ``QFont``/``QFontMetrics``.
+        self._damage_all = False
+        self._damage_rows: set[int] = set()
+        self._style_cache: dict[int, tuple] = {}
+
         self._back = 0                    # rows of history currently showing
         self._bar = QScrollBar(Qt.Orientation.Vertical, self)
         self._bar.setVisible(False)
@@ -722,6 +794,7 @@ class TerminalScreen(QWidget):
         self._cw = max(1, self._metrics.horizontalAdvance("W"))
         self._ch = max(1, self._metrics.height())
         self._ascent = self._metrics.ascent()
+        self._style_cache.clear()
         self._refit()
 
     def font_size(self) -> int:
@@ -763,23 +836,81 @@ class TerminalScreen(QWidget):
         self.cr = min(self.cr, rows - 1)
         self.cc = min(self.cc, cols - 1)
         self._back = min(self._back, len(self.history))
+        self._mark_all()
         self._update_bar()
         self.update()
 
     # --- feeding output ---
 
     def feed(self, text: str) -> None:
-        """One chunk of device output. The view follows it if it was at bottom."""
-        for ch in text:
-            self._step(ch)
+        """One chunk of device output. The view follows it if it was at bottom.
+
+        Ordinary output - the printable bytes that make up almost everything a
+        shell sends - is consumed as a run straight into ``_put`` rather than
+        walked one character through the state machine; the machine is entered
+        only for a control byte or the start of an escape. The rows the chunk
+        touched are painted at the end and nothing else is, so a full-screen
+        program that redraws two lines costs two rows, not the whole grid.
+        """
+        old_row = self.cr
+        self._damage_all = False
+        self._damage_rows = set()
+        length = len(text)
+        i = 0
+        while i < length:
+            if self._state == "ground":
+                start = i
+                while i < length:
+                    ch = text[i]
+                    if ch == "\x1b" or ord(ch) < 32:
+                        break
+                    i += 1
+                if i > start:
+                    self._put_run(text, start, i)
+                    continue
+            # Control byte, escape, or mid-sequence: one character of the machine.
+            self._step(text[i])
+            i += 1
+
         # Any output brings the cursor back for a full beat, the way a real
         # terminal does: a program that keeps the screen busy - nano redrawing
         # on every keystroke - is never left with a cursor caught mid-blink.
         self._blink_on = True
         if self._back:
+            # Coming down out of the history jumps the whole screen: no clipping.
             self._back = 0
             self._bar.setValue(0)
-        self.update()
+            self._damage_all = True
+        # The cursor moved somewhere in the grid, and the cell it left must be
+        # redrawn plain as the block is painted onto its new row.
+        self._damage_rows.add(old_row)
+        self._damage_rows.add(self.cr)
+        self._repaint_damage()
+
+    def _mark_dirty(self, row: int) -> None:
+        """Note that one grid row changed; ignored once the whole screen did."""
+        if not self._damage_all:
+            self._damage_rows.add(row)
+
+    def _mark_all(self) -> None:
+        """Note that the whole grid changed (a scroll, a clear, a screen swap)."""
+        self._damage_all = True
+
+    def _repaint_damage(self) -> None:
+        """Ask for just the damaged rows, or the whole window when there is no less."""
+        if self._damage_all:
+            self.update()
+            return
+        if not self._damage_rows:
+            return
+        top = max(0, min(self._damage_rows))
+        bottom = min(self.rows - 1, max(self._damage_rows))
+        self.update(QRect(0, top * self._ch, self.width(),
+                          (bottom - top + 1) * self._ch))
+
+    def _update_cursor_row(self) -> None:
+        """Redraw the cursor's own row - all a blink or a focus change costs."""
+        self.update(QRect(0, self.cr * self._ch, self.width(), self._ch))
 
     def write_local(self, text: str) -> None:
         """A message from the app itself, drawn exactly like device output."""
@@ -791,6 +922,7 @@ class TerminalScreen(QWidget):
         self.history.clear()
         self.cr = self.cc = 0
         self._back = 0
+        self._mark_all()
         self._update_bar()
         self.update()
 
@@ -1034,6 +1166,7 @@ class TerminalScreen(QWidget):
             (self.app_cursor, self.autowrap, self.bracketed_paste) = keep_modes
             self._main_state = None
             self.alternate = False
+        self._mark_all()
         self._update_bar()
         self.update()
 
@@ -1070,12 +1203,40 @@ class TerminalScreen(QWidget):
         elif self.origin_mode and self.cr < self.top_margin:
             self.cr = self.top_margin
         self.lines[self.cr][self.cc] = (ch, *self.pen)
+        self._mark_dirty(self.cr)
         if self.cc + 1 >= self.cols:
             if self.autowrap:
                 self.cc = self.cols - 1
                 self.wrap_next = True
         else:
             self.cc += 1
+
+    def _put_run(self, text: str, start: int, end: int) -> None:
+        """Lay a printable run onto the grid in one write when it fits the row.
+
+        Almost everything a shell sends is ordinary text on a full-width screen
+        with no pending wrap: that case drops straight into the row and moves the
+        cursor once, instead of walking every character through :meth:`_put`. A
+        run that reaches the last column, or that arrives with a wrap, a scroll
+        region, or origin mode pending, is still walked one character so autowrap
+        and the margins turn exactly as they always did.
+        """
+        if self.wrap_next or self.origin_mode or self.bottom_margin < self.rows - 1:
+            for index in range(start, end):
+                self._put(text[index])
+            return
+        cc = self.cc
+        run = end - start
+        if run >= self.cols - cc:
+            # Touches or passes the last column: leave the edge bookkeeping to
+            # the per-character path rather than second-guessing where wrap sets.
+            for index in range(start, end):
+                self._put(text[index])
+            return
+        pen = self.pen
+        self.lines[self.cr][cc:cc + run] = [(ch, *pen) for ch in text[start:end]]
+        self.cc = cc + run
+        self._mark_dirty(self.cr)
 
     def _line_feed(self) -> None:
         if self.cr == self.bottom_margin:
@@ -1091,9 +1252,10 @@ class TerminalScreen(QWidget):
 
     def _scroll_up(self, count: int, force: bool = False) -> None:
         """Roll the region up: lines leave at the top, blanks arrive at the bottom."""
+        self._mark_all()
         top, bottom = self.top_margin, self.bottom_margin
         count = min(count, bottom - top + 1)
-        gone = [row[:] for row in self.lines[top:top + count]]
+        gone = self.lines[top:top + count]
         for _ in range(count):
             del self.lines[top]
             self.lines.insert(bottom, _blank_row(self.cols))
@@ -1104,6 +1266,7 @@ class TerminalScreen(QWidget):
             self._update_bar()
 
     def _scroll_down(self, count: int, force: bool = False) -> None:
+        self._mark_all()
         top, bottom = self.top_margin, self.bottom_margin
         count = min(count, bottom - top + 1)
         for _ in range(count):
@@ -1120,6 +1283,7 @@ class TerminalScreen(QWidget):
     def _insert_lines(self, count: int) -> None:
         if not (self.top_margin <= self.cr <= self.bottom_margin):
             return
+        self._mark_all()
         for _ in range(min(count, self.bottom_margin - self.cr + 1)):
             del self.lines[self.bottom_margin]
             self.lines.insert(self.cr, _blank_row(self.cols))
@@ -1127,6 +1291,7 @@ class TerminalScreen(QWidget):
     def _delete_lines(self, count: int) -> None:
         if not (self.top_margin <= self.cr <= self.bottom_margin):
             return
+        self._mark_all()
         for _ in range(min(count, self.bottom_margin - self.cr + 1)):
             del self.lines[self.cr]
             self.lines.insert(self.bottom_margin, _blank_row(self.cols))
@@ -1137,18 +1302,21 @@ class TerminalScreen(QWidget):
         for _ in range(min(count, self.cols - self.cc)):
             row.insert(self.cc, blank)
             row.pop()
+        self._mark_dirty(self.cr)
 
     def _delete_chars(self, count: int) -> None:
         row = self.lines[self.cr]
         for _ in range(min(count, self.cols - self.cc)):
             del row[self.cc]
             row.append(_blank_cell())
+        self._mark_dirty(self.cr)
 
     def _erase_chars(self, count: int) -> None:
         row = self.lines[self.cr]
         blank = _blank_cell()
         for col in range(self.cc, min(self.cc + max(1, count), self.cols)):
             row[col] = blank
+        self._mark_dirty(self.cr)
 
     def _erase_line(self, mode: int) -> None:
         # Erased cells take the pen's bg, so a reverse line clears to the margin.
@@ -1162,8 +1330,10 @@ class TerminalScreen(QWidget):
                 row[col] = blank
         else:
             self.lines[self.cr] = [_blank_cell(bg=self.pen[1]) for _ in range(self.cols)]
+        self._mark_dirty(self.cr)
 
     def _erase_display(self, mode: int) -> None:
+        self._mark_all()
         blank = _blank_cell(bg=self.pen[1])
         if mode == 0:
             self._erase_line(0)
@@ -1291,108 +1461,124 @@ class TerminalScreen(QWidget):
 
     def _visible_rows(self) -> list:
         """The lines under the window, history first when scrolled back."""
-        history = [] if self.alternate else self.history
-        total = history + self.lines
-        end = len(total) - self._back
+        # At rest - or on the alternate screen, which has no history - the window
+        # shows the live grid exactly, so hand that list back without splicing a
+        # copy of the (up to 2000-row) history onto the front of it. That splice
+        # was the whole cost of every paint for the common, unscrolled case.
+        if self.alternate or self._back == 0:
+            if len(self.lines) >= self.rows:
+                return self.lines
+            return self.lines + [_blank_row(self.cols)
+                                 for _ in range(self.rows - len(self.lines))]
+        # The window may straddle history and the live grid, but it is at most
+        # ``rows`` tall: gather just the slice spanning the two by index rather
+        # than concatenating the whole (up to 2000-row) history on every paint.
+        hist = len(self.history)
+        end = hist + len(self.lines) - self._back
         start = max(0, end - self.rows)
-        shown = total[start:end]
+        if end <= hist:
+            shown = self.history[start:end]
+        elif start >= hist:
+            shown = self.lines[start - hist:end - hist]
+        else:
+            shown = self.history[start:] + self.lines[:end - hist]
         return [_blank_row(self.cols) for _ in range(self.rows - len(shown))] + shown
 
     def _view_top_index(self) -> int:
-        history = [] if self.alternate else self.history
-        total = history + self.lines
-        return max(0, len(total) - self._back - self.rows)
+        history = 0 if self.alternate else len(self.history)
+        return max(0, history + len(self.lines) - self._back - self.rows)
 
     # --- drawing ---
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.fillRect(self.rect(), QColor(DEFAULT_BG))
+        # Only the rows inside the damaged region are walked. A partial ``update``
+        # (one row of typed output, one line a full-screen program redraws) then
+        # paints one row rather than the whole grid; a full update covers every
+        # row, so the old whole-screen repaint still happens exactly when it must.
+        clip = event.rect()
+        painter.fillRect(clip, DEFAULT_BG_COLOR)
         rows = self._visible_rows()
         view_top = self._view_top_index()
-        fonts: dict[int, QFont] = {}
-        for row_index, row in enumerate(rows):
+        first = max(0, clip.top() // self._ch)
+        last = min(len(rows) - 1, (clip.bottom() - 1) // self._ch)
+        for row_index in range(first, last + 1):
+            row = rows[row_index]
             y = row_index * self._ch
             col = 0
             while col < len(row):
                 cell = row[col]
                 fg, bg, flags = cell[1], cell[2], cell[3]
                 run = col
-                while run + 1 < len(row) and (row[run + 1][1], row[run + 1][2], row[run + 1][3]) == (fg, bg, flags):
+                while (run + 1 < len(row)
+                       and row[run + 1][1] == fg and row[run + 1][2] == bg
+                       and row[run + 1][3] == flags):
                     run += 1
                 # background first, then the glyphs of the run in its font;
                 # reverse video swaps the two, defaults crossing over
                 if flags & REVERSE:
-                    bg_color = _cell_color(fg, QColor(DEFAULT_FG))
-                    text_color = _cell_color(bg, QColor(DEFAULT_BG))
+                    bg_color = _cell_color(fg, DEFAULT_FG_COLOR)
+                    text_color = _cell_color(bg, DEFAULT_BG_COLOR)
                 else:
-                    bg_color = _cell_color(bg, QColor(DEFAULT_BG))
-                    text_color = _cell_color(fg, QColor(DEFAULT_FG))
+                    bg_color = _cell_color(bg, DEFAULT_BG_COLOR)
+                    text_color = _cell_color(fg, DEFAULT_FG_COLOR)
                     if flags & BOLD and 0 <= fg < 8:
                         text_color = PALETTE[fg + 8]      # bold 0..7 picks the bright colour
                     if flags & DIM:
                         text_color = _blend(text_color, bg_color, 0.4)
-                if bg_color != QColor(DEFAULT_BG):
+                if bg_color != DEFAULT_BG_COLOR:
                     painter.fillRect(QRect(col * self._cw, y, (run - col + 1) * self._cw, self._ch), bg_color)
-                text = "".join(row[c][0] for c in range(col, run + 1)).rstrip()
-                if flags & HIDDEN:
-                    text = ""
-                if text:
-                    font = fonts.get(flags)
-                    if font is None:
-                        font = self._font_for(flags, fonts)
-                    painter.setFont(font)
-                    painter.setPen(text_color)
-                    place = (Qt.AlignmentFlag.AlignLeft
-                             | Qt.AlignmentFlag.AlignBottom)
-                    if self._runs_straight(font, text):
-                        painter.drawText(
-                            QRect(col * self._cw + 1, y,
-                                  (run - col + 1) * self._cw, self._ch),
-                            place, text)
-                    else:
-                        # One glyph per cell, each at its own grid position.
-                        # A run drawn in one go is laid out by the font's own
-                        # advances, and a character the monospace face does not
-                        # carry - a box-drawing line, a check mark, an
-                        # ideograph - comes from a fallback with a width of its
-                        # own, which slides every glyph after it sideways. The
-                        # cursor is placed by counting cells, so the two
-                        # disagree and the block lands behind the words that
-                        # were actually typed, further back with every odd
-                        # glyph on the line.
-                        for offset, glyph in enumerate(text):
-                            if glyph == " ":
-                                continue
+                if not (flags & HIDDEN):
+                    text = "".join(cell[0] for cell in row[col:run + 1]).rstrip()
+                    if text:
+                        font, metrics = self._font_for(flags)
+                        painter.setFont(font)
+                        painter.setPen(text_color)
+                        place = (Qt.AlignmentFlag.AlignLeft
+                                 | Qt.AlignmentFlag.AlignBottom)
+                        # Whether this run would sit on the grid drawn in one go,
+                        # measured with the font actually about to draw it: an
+                        # ordinary line of characters costs a single ``drawText``,
+                        # and only a run carrying a glyph the face does not own -
+                        # a box-drawing line, a check mark, an ideograph - pays for
+                        # being placed cell by cell, so the cursor counting cells
+                        # and the glyphs laid out by advances cannot disagree.
+                        if metrics.horizontalAdvance(text) == len(text) * self._cw:
                             painter.drawText(
-                                QRect((col + offset) * self._cw + 1, y,
-                                      self._cw, self._ch), place, glyph)
+                                QRect(col * self._cw + 1, y,
+                                      (run - col + 1) * self._cw, self._ch),
+                                place, text)
+                        else:
+                            for offset, glyph in enumerate(text):
+                                if glyph == " ":
+                                    continue
+                                painter.drawText(
+                                    QRect((col + offset) * self._cw + 1, y,
+                                          self._cw, self._ch), place, glyph)
                 col = run + 1
         self._paint_selection(painter, view_top, rows)
         self._paint_cursor(painter)
         painter.end()
 
-    def _font_for(self, flags: int, cache: dict) -> QFont:
-        font = QFont(self._font)
-        font.setBold(bool(flags & BOLD))
-        font.setItalic(bool(flags & ITALIC))
-        font.setUnderline(bool(flags & UNDERLINE))
-        font.setStrikeOut(bool(flags & STRIKE))
-        cache[flags] = font
-        return font
+    def _font_for(self, flags: int) -> tuple:
+        """The ``(QFont, QFontMetrics)`` for an attribute set, built once and kept.
 
-    def _runs_straight(self, font: QFont, text: str) -> bool:
-        """Whether this run would sit on the grid if it were drawn in one go.
-
-        Measured with the font actually about to draw it: an ordinary line of
-        characters costs a single ``drawText``, which is how the whole screen is
-        painted, and only the lines carrying a glyph the face does not own pay
-        for being placed cell by cell.
+        The cache is dropped in :meth:`set_font`, where the base face changes;
+        between two such calls the same ``flags`` never rebuild a font or measure
+        it again, which is what a screen full of bold and coloured runs used to
+        cost on every paint.
         """
-        if not text:
-            return True
-        return QFontMetrics(font).horizontalAdvance(text) == len(text) * self._cw
+        entry = self._style_cache.get(flags)
+        if entry is None:
+            font = QFont(self._font)
+            font.setBold(bool(flags & BOLD))
+            font.setItalic(bool(flags & ITALIC))
+            font.setUnderline(bool(flags & UNDERLINE))
+            font.setStrikeOut(bool(flags & STRIKE))
+            entry = (font, QFontMetrics(font))
+            self._style_cache[flags] = entry
+        return entry
 
     def _paint_selection(self, painter: QPainter, view_top: int, rows: list) -> None:
         if self._select_from is None or self._select_to is None:
@@ -1424,9 +1610,9 @@ class TerminalScreen(QWidget):
             # a solid block in the cell's own colours, so it reads on any background
             cell = self.lines[self.cr][self.cc]
             if cell[3] & REVERSE:
-                fill, glyph = _cell_color(cell[2], QColor(DEFAULT_BG)), _cell_color(cell[1], QColor(DEFAULT_FG))
+                fill, glyph = _cell_color(cell[2], DEFAULT_BG_COLOR), _cell_color(cell[1], DEFAULT_FG_COLOR)
             else:
-                fill, glyph = _cell_color(cell[1], QColor(DEFAULT_FG)), _cell_color(cell[2], QColor(DEFAULT_BG))
+                fill, glyph = _cell_color(cell[1], DEFAULT_FG_COLOR), _cell_color(cell[2], DEFAULT_BG_COLOR)
             painter.fillRect(rect, fill)
             painter.setPen(glyph)
             painter.drawText(rect.adjusted(1, 0, 0, 0),
@@ -1435,8 +1621,8 @@ class TerminalScreen(QWidget):
             # unfocused: a hollow box, drawn against the cell's own colour so it
             # stays visible on any background, light or dark
             cell = self.lines[self.cr][self.cc]
-            base = _cell_color(cell[2], QColor(DEFAULT_BG))
-            edge = QColor(DEFAULT_FG) if base.lightnessF() < 0.5 \
+            base = _cell_color(cell[2], DEFAULT_BG_COLOR)
+            edge = DEFAULT_FG_COLOR if base.lightnessF() < 0.5 \
                 else QColor(30, 30, 30)
             painter.setPen(edge)
             painter.drawRect(rect.adjusted(0, 0, -1, -1))
@@ -1515,13 +1701,13 @@ class TerminalScreen(QWidget):
     def focusOutEvent(self, event: QFocusEvent) -> None:
         self._blink.stop()
         self._blink_on = True
-        self.update()
+        self._update_cursor_row()
         super().focusOutEvent(event)
 
     def _toggle_blink(self) -> None:
         if self.cursor_visible:
             self._blink_on = not self._blink_on
-            self.update()
+            self._update_cursor_row()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
