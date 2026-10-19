@@ -34,8 +34,7 @@
         "berryvmicon.png"
       ],
       "icon": "berryvmicon.png",
-      "test": "test_berryvm.py",
-      "status": "updated"
+      "test": "test_berryvm.py"
     },
     {
       "id": "cert_manager",
