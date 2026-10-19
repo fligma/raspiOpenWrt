@@ -30,6 +30,7 @@ from the command line::
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import sys
@@ -50,6 +51,12 @@ FAILURES: list[str] = []
 #: a QThread that has not finished - and dropped without a bye-bye by the
 #: ``os._exit`` at the bottom of the file.
 STRAYS: list[object] = []
+
+#: The application object the Qt sections run under, held for the whole life of
+#: the process: an unheld ``QApplication([])`` is a temporary that garbage
+#: collection takes away again, and every signal emitted after that goes
+#: nowhere - a probe that lands but never answers.
+APP: list[object] = []
 
 PROGRAM = "berry_manager.exe" if os.name == "nt" else "berry_manager"
 INTERNAL = "_internal"
@@ -218,8 +225,13 @@ def test_the_waits_are_milliseconds(inst: object) -> None:
     # finishes in half a second is waited out by a patience counted in
     # milliseconds, and is given up on by the same number read as seconds.
     from PyQt6.QtCore import QThread, QCoreApplication
+    from PyQt6.QtWidgets import QApplication
 
-    QCoreApplication.instance() or QCoreApplication([])
+    # a QApplication, not merely a core one: section four draws the crash
+    # dialog, and a QMessageBox is a widget - which is a Qt abort on its own.
+    # Held in APP, because an application that nothing references is an
+    # application that garbage collection ends, signals and all.
+    QCoreApplication.instance() or APP.append(QApplication([]))
 
     class Quick(QThread):
         def run(self) -> None:
@@ -253,6 +265,138 @@ def test_the_waits_are_milliseconds(inst: object) -> None:
          "are drawn to catch")
 
 
+# --- four: the newest release on the form, and the error on the screen ---
+
+def test_the_newest_and_the_notice(inst: object) -> None:
+    print("\n4. the setup names the newest release it can find, and names "
+          "the error it dies of")
+    text = SOURCE.read_text(encoding="utf-8")
+
+    # the form promises the newest before anything is pressed: a probe off
+    # the interface thread, a label for its answer, and both wired into the
+    # card that opens the door
+    check("class GitHubProbe" in text and "answered = pyqtSignal(str)" in text,
+          "there is no off-thread probe for the newest release")
+    check("self._start_gprobe()" in text and "Newest release I can find" in text,
+          "the setup form never shows the newest release it found")
+    check("self._stop_gprobe()" in text,
+          "a release probe is left running when the card closes - which is a "
+          "QThread destroyed mid-run, the crash this file's whole third section "
+          "is drawn to catch")
+    value = getattr(inst, "NEWEST_WAIT_MS", None)
+    check(isinstance(value, int) and value >= 1000,
+          f"NEWEST_WAIT_MS = {value!r} is not a millisecond patience of at "
+          "least a second")
+
+    # the probe itself: an answer when the catalog answers, the version the
+    # setup carries when the network does not, and silence - never a raise -
+    # when something no guard expected comes loose, because an error loose
+    # in a QThread's run is a dead process
+    from PyQt6.QtCore import QCoreApplication
+    from PyQt6.QtWidgets import QApplication
+
+    QCoreApplication.instance() or APP.append(QApplication([]))
+    real_api = inst.github_api_json
+    real_cache = dict(inst._tag_cache)
+    try:
+        inst._tag_cache.clear()
+
+        def offline(owner: str, repo: str, tail: str, timeout: int = 20):
+            raise OSError("no network here")
+
+        inst.github_api_json = offline
+        got: list = []
+        probe = inst.GitHubProbe("fligma", "raspiOpenWrt")
+        probe.answered.connect(got.append)
+        probe.start()
+        landed = probe.wait(int(inst.NEWEST_WAIT_MS))
+        # the wait bounds the thread, not the posted answer: let the main
+        # thread run what it was sent before reading what came back
+        for _ in range(20):
+            QCoreApplication.processEvents()
+            if got:
+                break
+            time.sleep(0.05)
+        check(landed and got == [inst._readable(inst.APP_VERSION)],
+              f"a probe with no network did not fall back to the setup's own "
+              f"version: landed={landed}, got={got}")
+
+        inst._tag_cache.clear()
+
+        def impossible(owner: str, repo: str, tail: str, timeout: int = 20):
+            raise RuntimeError("an error no guard in the read expects")
+
+        inst.github_api_json = impossible
+        got2: list = []
+        probe2 = inst.GitHubProbe("fligma", "raspiOpenWrt")
+        probe2.answered.connect(got2.append)
+        probe2.start()
+        landed2 = probe2.wait(int(inst.NEWEST_WAIT_MS))
+        for _ in range(20):
+            QCoreApplication.processEvents()
+            if got2:
+                break
+            time.sleep(0.05)
+        check(landed2 and got2 == [""],
+              f"a probe whose read raised did not answer quietly: landed="
+              f"{landed2}, got={got2}")
+    finally:
+        inst.github_api_json = real_api
+        inst._tag_cache.clear()
+        inst._tag_cache.update(real_cache)
+
+    # the silent death: an error loose in a slot arrives at the hook main()
+    # installs, and the hook says what it is - on stderr for a terminal, and
+    # in a dialog for the windowed build that has none
+    check("sys.excepthook = _crash_report" in text,
+          "the setup's main does not install a crash reporter, so an error "
+          "in a slot closes the window with no line ever read")
+    shown: dict = {}
+
+    class _Box:
+        class Icon:                                  # noqa: D106 - Qt's shape
+            Critical = "critical"
+
+        def setIcon(self, colour: object) -> None:
+            shown["icon"] = colour
+
+        def setWindowTitle(self, title: str) -> None:
+            shown["title"] = title
+
+        def setText(self, line: str) -> None:
+            shown["text"] = line
+
+        def setInformativeText(self, line: str) -> None:
+            shown["info"] = line
+
+        def setDetailedText(self, body: str) -> None:
+            shown["detail"] = body
+
+        def exec(self) -> int:
+            shown["exec"] = True
+            return 0
+
+    real_box = inst.QMessageBox
+    real_stderr, sys.stderr = sys.stderr, io.StringIO()
+    inst.QMessageBox = _Box
+    try:
+        try:
+            raise ValueError("the slot said so")
+        except ValueError:
+            inst._crash_report(*sys.exc_info())
+        printed = sys.stderr.getvalue()
+    finally:
+        sys.stderr = real_stderr
+        inst.QMessageBox = real_box
+    check(shown.get("exec") and "error" in str(shown.get("text"))
+          and "the slot said so" in str(shown.get("info"))
+          and "ValueError" in str(shown.get("detail")),
+          f"the crash report did not put the error on a dialog: {shown}")
+    check("ValueError: the slot said so" in printed,
+          "the crash report did not write the traceback where a terminal "
+          "could read it")
+
+
 def main() -> int:
     try:
         import installer as inst
@@ -263,6 +407,7 @@ def main() -> int:
     test_the_landing(inst)
     test_a_refused_move(inst)
     test_the_waits_are_milliseconds(inst)
+    test_the_newest_and_the_notice(inst)
 
     if FAILURES:
         print()

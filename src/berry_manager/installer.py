@@ -48,6 +48,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import traceback
 import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -62,6 +63,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -192,6 +194,13 @@ FORCE_WAIT_MS = 3000
 #: The same bargain for a toolchain probe, which holds an interpreter for as long
 #: as that interpreter cares to take.
 PROBE_WAIT_MS = 1500
+
+#: The same bargain for the newest-release probe, whose wait covers the ask it
+#: can still be inside: :func:`resolve_tag` gives the catalog read eight seconds
+#: and falls back when they run out, so a probe waited out past this bound is a
+#: probe that would have answered - and terminating one mid-socket is the quiet
+#: crash this wait exists to avoid.
+NEWEST_WAIT_MS = 9000
 
 
 class _Resumable(Exception):
@@ -1169,6 +1178,42 @@ class ToolchainProbe(QThread):
         self.answered.emit(self.py, ok, list(missing))
 
 
+#: Probes this card overtook while they were still asking: kept referenced
+#: until they land, because a QThread destroyed mid-run takes the setup down
+#: with it, and a UI-thread wait on a network call would be its own small freeze.
+_ABOARD: list = []
+
+
+class GitHubProbe(QThread):
+    """The newest published release, asked off the interface thread.
+
+    The setup form names the version it is about to offer before anybody
+    presses a button, and the only honest way to know it is to read the
+    catalog - which is a network call wearing whatever patience the network
+    has (up to the eight seconds :func:`resolve_tag` gives it). So the ask
+    lives here, started when the card opens and retargeted when the git
+    fields move; the answer only decorates a label.
+    """
+
+    answered = pyqtSignal(str)      # the readable newest version, or ""
+
+    def __init__(self, owner: str, repo: str) -> None:
+        super().__init__()
+        self.owner = owner
+        self.repo = repo
+
+    def run(self) -> None:                        # noqa: D401 - QThread contract
+        try:
+            tag = resolve_tag(self.owner, self.repo)
+            text = _readable(tag_version(tag) or tag)
+        except Exception:                      # noqa: BLE001 - as in Worker.run:
+            # a stray error loose from a QThread's run() aborts the whole setup,
+            # and this one was only ever going to fill in a label; the card
+            # falls back to the version the setup carries itself.
+            text = ""
+        self.answered.emit(text)
+
+
 class InstallerCard(QWidget):
     """The window: the splash's look, the two doors, and a job view.
 
@@ -1188,6 +1233,7 @@ class InstallerCard(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._worker: Worker | None = None
         self._probe: ToolchainProbe | None = None
+        self._gprobe: GitHubProbe | None = None
         # The last toolchain answer for this card's interpreter, so opening and
         # shutting the compile door does not start a fresh interpreter each time.
         self._toolchain: tuple[str, bool, list[str]] | None = None
@@ -1216,6 +1262,11 @@ class InstallerCard(QWidget):
         body.addWidget(self.stack)
 
         self.install_choice.toggled.connect(self._door_changed)
+        # The release either door reaches for is newest-whatever-GitHub-has;
+        # re-ask when the git fields move, so the label always names the
+        # repository the next press would actually use.
+        self.owner_edit.editingFinished.connect(self._start_gprobe)
+        self.repo_edit.editingFinished.connect(self._start_gprobe)
         self.setFixedWidth(520)
         self.setStyleSheet(self._card_sheet())
         self.stack.setCurrentIndex(0)
@@ -1223,6 +1274,7 @@ class InstallerCard(QWidget):
         self._center_on_screen()
         self._door_changed()
         self._toggle_advanced()     # the git source starts folded away
+        self._start_gprobe()
 
     # -- the setup form --
 
@@ -1246,6 +1298,13 @@ class InstallerCard(QWidget):
         subtitle.setObjectName("splashStep")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
+
+        # The newest release this setup can find, named on the form before
+        # anything is pressed - what "Install" would actually bring down.
+        self.newest = QLabel("checking for the newest release...", page)
+        self.newest.setObjectName("splashStep")
+        self.newest.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.newest.setWordWrap(True)
 
         doors = QHBoxLayout()
         self.install_choice = QRadioButton("Install release", page)
@@ -1305,6 +1364,7 @@ class InstallerCard(QWidget):
         grid.addWidget(self.logo)
         grid.addWidget(title)
         grid.addWidget(subtitle)
+        grid.addWidget(self.newest)
         grid.addLayout(doors)
         grid.addWidget(QLabel("Install folder", page))
         grid.addLayout(where)
@@ -1605,6 +1665,67 @@ class InstallerCard(QWidget):
             probe.wait(PROBE_WAIT_MS)
         probe.deleteLater()
 
+    def _start_gprobe(self) -> None:
+        """Ask, off the card's thread, what the newest release this machine can
+        find is; the answer lands on the form through ``_on_newest``."""
+        old = self._gprobe
+        self._gprobe = None
+        if old is not None:
+            try:
+                old.answered.disconnect()
+            except TypeError:
+                pass                            # nothing was ever connected
+            if old.isRunning():
+                # Still on the network: this thread is not waited on with the
+                # interface frozen, and it is not thrown away mid-run either -
+                # it keeps itself alive until the answer lands unheard.
+                _ABOARD.append(old)
+
+                def _landed(probe: QThread = old) -> None:
+                    try:
+                        _ABOARD.remove(probe)
+                    except ValueError:
+                        pass
+                    probe.deleteLater()
+
+                old.finished.connect(_landed)
+            else:
+                old.deleteLater()
+        owner = self.owner_edit.text().strip() or OWNER
+        repo = self.repo_edit.text().strip() or REPO
+        self.newest.setText("checking for the newest release...")
+        self._gprobe = GitHubProbe(owner, repo)
+        self._gprobe.answered.connect(self._on_newest)
+        self._gprobe.start()
+
+    def _on_newest(self, text: str) -> None:
+        """A release probe's answer: the newest the setup can find, by name."""
+        if self._worker is not None:
+            return            # a job owns the card now; the label waits for none
+        if not text:
+            # Not even the fallback landed (resolve_tag cannot raise, so this is
+            # a probe that died trying): the version this setup itself carries
+            # is the newest one the machine has any word on.
+            text = _readable(APP_VERSION)
+        self.newest.setText(f"Newest release I can find: V{text}")
+
+    def _stop_gprobe(self) -> None:
+        """End a release probe: a QThread deleted while it still runs is a crash."""
+        probe = self._gprobe
+        self._gprobe = None
+        if probe is None:
+            return
+        try:
+            probe.answered.disconnect()
+        except TypeError:
+            pass                                # nothing was ever connected
+        # The wait covers the longest ask the probe can be inside, so it lands
+        # by itself; terminate here would be the quiet crash on the way out.
+        if not probe.wait(NEWEST_WAIT_MS):
+            probe.terminate()
+            probe.wait(NEWEST_WAIT_MS)
+        probe.deleteLater()
+
     def _browse(self) -> None:
         start = self.dir_edit.text().strip() or str(Path.home())
         chosen = QFileDialog.getExistingDirectory(self, "Choose the install "
@@ -1793,6 +1914,7 @@ class InstallerCard(QWidget):
 
     def closeEvent(self, event) -> None:           # noqa: N802 - Qt's name
         self._stop_probe()
+        self._stop_gprobe()
         if self._worker is not None and self._worker.isRunning() \
                 and not self._leaving:
             event.ignore()
@@ -1801,16 +1923,57 @@ class InstallerCard(QWidget):
         event.accept()
 
 
+def _crash_report(kind, value, trace) -> None:
+    """Say what went wrong instead of dying silent.
+
+    A setup window has no console, and PyQt hands an error loose in a slot -
+    or a thread's ``run()`` that nothing caught - straight to this hook on
+    its way out of the process: without a hook the machine simply loses the
+    window and no line is ever read. With one, the traceback goes to stderr
+    where a terminal can show it and a dialog says so where there is no
+    terminal at all. The dialog is the last courtesy; an error even in
+    drawing it must not become an error about the error.
+    """
+    text = "".join(traceback.format_exception(kind, value, trace))
+    try:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+    except (OSError, AttributeError, ValueError):
+        pass                        # a frozen windowed build may have no stderr
+    if QApplication.instance() is None:
+        return            # no app to draw a dialog on, and trying is its own abort
+    try:
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Berry Manager Setup")
+        box.setText("The setup ran into an error it did not expect.")
+        box.setInformativeText(str(value) or (kind or type(None)).__name__)
+        box.setDetailedText(text)
+        box.exec()
+    except Exception:                       # noqa: BLE001 - the report must not
+        pass                            # raise: the traceback above is the point
+
+
 def main() -> int:
+    # Every silent death this file has ended in - an error in a slot, a thread
+    # nothing caught - is reported through here instead of just closing the
+    # window, so what to do about it can actually be read.
+    sys.excepthook = _crash_report
     app = QApplication(sys.argv)
     app.setApplicationName("Berry Manager Setup")
     app.setOrganizationName("fligma")
     icon = find_icon()
     if icon is not None:
         app.setWindowIcon(QIcon(str(icon)))
-    card = InstallerCard()
-    card.show()
-    return app.exec()
+    try:
+        card = InstallerCard()
+        card.show()
+        return app.exec()
+    except Exception:                       # noqa: BLE001 - die saying so
+        _crash_report(*sys.exc_info())
+        return 1
+    finally:
+        sys.excepthook = sys.__excepthook__
 
 
 if __name__ == "__main__":

@@ -1956,8 +1956,17 @@ filter_text = ""
 
 
 def state_of(entry: dict) -> tuple[str, str, str]:
-    """How one addon stands here: the short words for its row, the long words for
-    the pane beside it, and the colour both are drawn in.
+    """How one addon stands on this machine: the short words for its row, the long
+    words for the pane beside it, and the colour both are drawn in.
+
+    There are only ever three answers, so a row is never left guessing what it is
+    being told. An addon that is not here at all is put forward as a download; one
+    that is here but behind the catalog is marked for update; one that is here and
+    current reads plainly as installed. What the store itself counts as new or
+    freshly built is a separate note, worn beside the name, and never stands in
+    place of which of these three a person is actually looking at - which is why
+    the same uninstalled addon says the same thing whether or not the catalog has
+    just changed under it.
 
     The version counted as behind is the one written down beside the program when
     it was installed, so a row can say what an update would replace rather than
@@ -1968,19 +1977,16 @@ def state_of(entry: dict) -> tuple[str, str, str]:
     done = installed(id_value)
     have = (one_line(pending.get("installed"))
             or (installed_version(id_value) if done else ""))
-    if pending:
+    if done and pending:
         return ("update available",
                 f"Update available - version {have or 'unknown'} here, "
                 f"{one_line(pending.get('available')) or '?'} in the store",
                 "#ffb020")
     if done:
         return ("installed", f"Installed, version {have or 'unknown'}", "#23d18b")
-    status = one_line(entry.get("status"))
-    if status == "new":
-        return ("new", "New in the store, never installed here", "#ffb020")
-    if status == "updated":
-        return ("updated", "Updated in the store since it was last built", "#ffb020")
-    return ("not installed", "Not installed on this machine", "#9a9a9a")
+    return ("needs download",
+            "Not installed yet - it can be downloaded and built from the store",
+            "#4aa3ff")
 
 
 def matches(entry: dict, needle: str) -> bool:
@@ -4083,14 +4089,25 @@ def _poll_stream() -> None:
     if code != 0:
         on_bad = job.pop("on_bad", None)
         if callable(on_bad):
-            on_bad()
+            try:
+                on_bad()
+            except Exception as error:       # noqa: BLE001 - never wedge 'working'
+                _finish(f"the job could not try again: "
+                        f"{type(error).__name__}: {error}", bad=True)
             return
         _finish(job.get("fail") or f"the job stopped with code {code}", bad=True)
         return
     job.pop("on_bad", None)
     on_ok = job.pop("on_ok", None)
     if callable(on_ok):
-        on_ok()
+        # The step after a finished process runs on the app's own tick, where a
+        # raise would kill the program as silently as it wedges this tab; the
+        # job ends saying what broke instead.
+        try:
+            on_ok()
+        except Exception as error:           # noqa: BLE001 - never wedge 'working'
+            _finish(f"the job could not go on: "
+                    f"{type(error).__name__}: {error}", bad=True)
 
 
 def _clear_ready() -> None:
@@ -4759,12 +4776,22 @@ def install_selected(_checked: bool = False) -> None:
                 "it on in the Addon manager."):
             say("the install was declined")
             return
-    _begin_job("install", fresh)
-    for entry in pool:
-        if entry not in fresh:
-            note(f"{entry['id']} is already installed; it was left out of the "
-                 "batch")
-    _start_job()
+    # Everything from here on is a job the tab has promised to finish: the
+    # buttons grey out, and every later press answers the guard at the top.
+    # A raise between that promise and the first scheduled step would there-
+    # fore leave every button dead for the rest of the session - a store whose
+    # Install "does nothing" - so the whole synchronous start is caught and
+    # ended as the failed job it is, with the reason left on the screen.
+    try:
+        _begin_job("install", fresh)
+        for entry in pool:
+            if entry not in fresh:
+                note(f"{entry['id']} is already installed; it was left out of "
+                     "the batch")
+        _start_job()
+    except Exception as error:               # noqa: BLE001 - never wedge 'working'
+        _finish(f"the install could not start: "
+                f"{type(error).__name__}: {error}", bad=True)
 
 
 def update_selected(_checked: bool = False) -> None:
@@ -4828,8 +4855,14 @@ def update_selected(_checked: bool = False) -> None:
                 "is switched back the way it was after."):
             say("the update was declined")
             return
-    _begin_job("update", behind)
-    _start_job()
+    # The same promise as the install: a start that cannot be begun is ended
+    # as a visible failure, never a greyed-out tab waiting on a job that died.
+    try:
+        _begin_job("update", behind)
+        _start_job()
+    except Exception as error:               # noqa: BLE001 - never wedge 'working'
+        _finish(f"the update could not start: "
+                f"{type(error).__name__}: {error}", bad=True)
 
 
 def _stop_before_delete(id_value: str) -> None:

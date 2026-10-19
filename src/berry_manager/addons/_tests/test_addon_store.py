@@ -269,8 +269,8 @@ def test_the_tab(store: Any) -> None:
           == ["hello_store", "odd_id"],
           f"a row's own caption does not lead back to its addon: {names}")
     check(all("cells" in row for row in rows), "a table row holds no cells")
-    check(rows[1]["cells"][2] == "not installed",
-          f"a row nobody has taken yet was not described plainly: {rows[1]}")
+    check(rows[1]["cells"][2] == "needs download",
+          f"a row nobody has taken yet was not offered plainly: {rows[1]}")
     check(store.installed("hello_store") in (False, True),
           "installed() answered something unusable")
 
@@ -516,7 +516,9 @@ def test_the_pane(store: Any) -> None:
                   f"the files an addon carries were not listed: {facts}")
             check("Says hello" in shown("dabout", "value"),
                   f"the description did not reach the pane: {shown('dabout', 'value')!r}")
-            check("new in the store" in last_text_for(api, "dstate").lower(),
+            # an addon not here at all is put forward as a download, whatever the
+            # catalog's own new/updated note says beside its name
+            check("download" in last_text_for(api, "dstate").lower(),
                   f"how the addon stands was not said: {last_text_for(api, 'dstate')!r}")
 
             # and once it is installed behind, the pane says what an update replaces
@@ -718,7 +720,7 @@ def test_the_updates(store: Any) -> None:
                   f"the behind addon was not marked for update: {byid['hello_store']}")
             check(byid["hello_store"].get("color") == "#ffb020",
                   "the update row did not wear the amber mark")
-            check(byid["odd_id"]["cells"][2] == "not installed",
+            check(byid["odd_id"]["cells"][2] == "needs download",
                   f"a thing not installed was described as an update: "
                   f"{byid['odd_id']}")
 
@@ -1088,6 +1090,93 @@ def test_the_switches(store: Any) -> None:
         store._dev, store._download_all = real_dev, real_download
         store._tidy, store._reload = real_tidy, real_reload
         store._start_job, store.show_entries = real_start, real_show
+        store.job = None
+        store.working = False
+        store.shutdown()
+
+
+def test_a_start_that_dies(store: Any) -> None:
+    """A job that dies before its first scheduled step has to die visibly.
+
+    A wedged ``working`` flag is indistinguishable from a button that does
+    nothing: once a job is promised, every later press answers the guard at
+    the top of the handler, so an exception loose in the synchronous part of
+    the start - an ``import core.addon`` that a compiled store cannot reach,
+    say - keeps every button dead for the rest of the session. Both buttons,
+    and the step a finished process hands the job on to, must end the promised
+    job with the reason on the screen instead.
+    """
+    print("\n5i. a start that cannot start ends as a failure it says")
+    api = fresh(store)
+    real_dir = store.addons_dir
+    real_entries, real_updates = store.entries, store.updates
+    real_start, real_dev = store._start_job, store._dev
+    try:
+        with tempfile.TemporaryDirectory() as where:
+            folder = Path(where)
+            store.addons_dir = lambda: folder
+            store.entries = store.parse_catalog(CATALOG)
+            store.updates = {}
+            api.answer("session.addon_state", {"installed": False,
+                                               "enabled": False,
+                                               "running": False})
+            api.answer("tabs.widget_value", ["Hello from the store  \u25cf new"])
+            api.answer("ui.question", True)
+
+            def explode() -> None:
+                raise ModuleNotFoundError("No module named 'core'")
+
+            store._start_job = explode
+            api.calls.clear()
+            store.install_selected()
+            check(not store.working and store.job is None,
+                  f"a start that raised wedged the tab: working={store.working}, "
+                  f"job={store.job is not None}")
+            check("install could not start" in last_status(api)
+                  and "core" in last_status(api),
+                  f"a failed install did not say why: {last_status(api)!r}")
+
+            # the same promise on the update button
+            (folder / "hello_store.exe").write_text("x", encoding="utf-8")
+            (folder / "hello_store.json").write_text('{"version": "1.0"}',
+                                                     encoding="utf-8")
+            store.entries = store.parse_catalog({"addons": [
+                {"id": "hello_store", "name": "Hello", "version": "1.1",
+                 "filename": "hello_store.py"}]})
+            api.answer("session.addon_state", {"installed": True,
+                                               "enabled": False,
+                                               "running": False})
+            api.answer("tabs.widget_value", ["Hello"])
+            api.calls.clear()
+            store.update_selected()
+            check(not store.working and store.job is None,
+                  "a start of an update that raised wedged the tab")
+            check("update could not start" in last_status(api),
+                  f"a failed update did not say why: {last_status(api)!r}")
+
+            # and a step that raises on the tick after a finished process is
+            # a failed job too - not a dead program, and not a held button
+            class _DoneStream:
+                finished = True
+                code = 0
+
+                def drain(self, _n: int) -> list:
+                    return []
+            store.job = {"verb": "install", "total": 1, "done": 0,
+                         "pane": False, "stream": _DoneStream(),
+                         "on_ok": explode, "on_bad": None, "fail": "",
+                         "building": {}, "waiting": [], "restore": {}}
+            store.working = True
+            api.calls.clear()
+            store._poll_stream()
+            check(not store.working and store.job is None,
+                  "an on_ok that raised left the job holding the buttons")
+            check("could not go on" in last_status(api),
+                  f"a failed continuation did not say why: {last_status(api)!r}")
+    finally:
+        store.addons_dir = real_dir
+        store.entries, store.updates = real_entries, real_updates
+        store._start_job, store._dev = real_start, real_dev
         store.job = None
         store.working = False
         store.shutdown()
@@ -3109,6 +3198,7 @@ def main() -> int:
     test_installed(store)
     test_the_updates(store)
     test_the_switches(store)
+    test_a_start_that_dies(store)
     test_the_batch_order(store)
     test_the_job_view(store)
     test_the_sources(store)
