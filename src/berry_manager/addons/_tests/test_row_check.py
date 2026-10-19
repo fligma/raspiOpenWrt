@@ -244,6 +244,119 @@ def test_grid_flip(api: Any) -> None:
               f"the flip lost the tile's line: {payload.get('cells')}")
 
 
+# --- six: the taskbar primitives a desktop addon leans on ---
+
+def test_taskbar_primitives(api: Any) -> None:
+    """Horizontal flow, a pinned height and small icons on a plain list.
+
+    BerryVM's taskbar is a ``kind: list`` strip, and a Qt list without help
+    is a 192px column with no room for marks: the bar swallowed half the
+    desktop and every button came up blank. The spec now carries
+    ``flow: horizontal`` and ``icon_size``, and ``height`` / ``icon_size``
+    can be re-set later; this drives the real primitives offscreen.
+    """
+    print("\n6. a taskbar list flows sideways, pins its height and wears icons")
+    from PyQt6.QtWidgets import QListView
+    from PyQt6.QtCore import QSize
+
+    events: list = []
+
+    def emit(identifier: str, event: str, payload: dict) -> None:
+        events.append((identifier, event, payload))
+
+    spec = {"kind": "list", "id": "tasks", "flow": "horizontal",
+            "icon_size": 16, "on": ["selected"]}
+    bar, _registry = api.build_spec(spec, events=emit)
+    check(bar is not None, "the taskbar spec built")
+    check(bar.flow() == QListView.Flow.LeftToRight,
+          "flow: horizontal did not lay the list sideways")
+    check(bar.isWrapping() is False,
+          "a horizontal list still wraps, so the strip would grow a second row")
+    check(bar.iconSize().width() == api.zoom_size(16),
+          f"icon_size 16 was not put on the plain list: {bar.iconSize()}")
+    # The two late properties a scale change re-lays: a pinned height (a
+    # list's own sizeHint insists on 192px however it is nudged) and a
+    # fresh icon edge.
+    api.apply_widget_property(bar, "height", 30)
+    want_h = api.zoom_size(30)
+    check(bar.minimumHeight() == want_h and bar.maximumHeight() == want_h,
+          f"height 30 did not pin the bar: {bar.minimumHeight()}/"
+          f"{bar.maximumHeight()}, wanted {want_h}")
+    api.apply_widget_property(bar, "icon_size", 20)
+    check(bar.iconSize() == QSize(api.zoom_size(20), api.zoom_size(20)),
+          f"icon_size 20 did not reach the bar: {bar.iconSize()}")
+    # Items that name an icon become buttons that show it: a bare svg text
+    # is what the addon hands, and the item must come back with a picture.
+    mark = ('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">'
+            '<rect width="16" height="16" fill="#3fbf5f"/></svg>')
+    api.apply_widget_property(bar, "items", [
+        {"text": "Notepad", "icon": mark}, "plain text"])
+    check(bar.count() == 2, f"only {bar.count()} taskbar buttons landed")
+    check(bar.item(0).icon().isNull() is False,
+          "a taskbar item named an icon but came up blank")
+    check(bar.item(1).icon().isNull(),
+          "a plain string item grew an icon it was never given")
+
+
+# --- seven: a chromeless window's body can be made see-through ---
+
+def test_window_body_name(api: Any) -> None:
+    """The frame's inner body widget is named, so a sheet can reach it.
+
+    A desktop layer paints its wallpaper on the frame, but the frame keeps
+    an ordinary QWidget body inside, and the app-wide ``QWidget { background }
+    "#121212" }`` pours dark paint through it over the whole desktop - which
+    is how BerryVM's Bliss gradient came out black. The body now answers to
+    ``#addonWindowBody`` so the addon's own sheet can make it transparent.
+    """
+    print("\n7. a window frame's body answers to addonWindowBody")
+    from PyQt6.QtWidgets import QWidget
+
+    spec = {"kind": "windows", "id": "desk", "children": [
+        {"id": "icons", "title": "icons", "chrome": False,
+         "x": 0, "y": 0, "width": 200, "height": 200,
+         "spec": {"kind": "label", "text": "layer"}},
+    ]}
+    canvas, _registry = api.build_spec(spec)
+    check(canvas is not None, "the desktop canvas built with its layer")
+    frame = canvas._addon_windows["frames"].get("icons")
+    check(frame is not None, "the chromeless window did not open")
+    if frame is None:
+        return
+    body = frame.findChild(QWidget, "addonWindowBody")
+    check(body is not None,
+          "the frame holds no body named addonWindowBody for a sheet to reach")
+
+
+# --- eight: the zoom ladder walks by fives, fifty to a hundred and twenty ---
+
+def test_zoom_ladder() -> None:
+    """One press, one small predictable move.
+
+    The old ladder jumped by tens, then fifteens and twenties, and ran to
+    200% where nothing fits; zooming felt random and hard to undo. The rungs
+    are now even fives from 50 to 120, and ``step_zoom`` walks them.
+    """
+    print("\n8. the zoom ladder is even fives from 50 to 120")
+    from core import const
+
+    check(const.UI_ZOOM_STEPS == tuple(range(50, 121, 5)),
+          f"ladder is not 50..120 by fives: {const.UI_ZOOM_STEPS}")
+    check(const.UI_ZOOM_DEFAULT in const.UI_ZOOM_STEPS,
+          "the default zoom fell off the ladder")
+    check(const.UI_ZOOM_MIN == 50 and const.UI_ZOOM_MAX == 120,
+          f"the ends read {const.UI_ZOOM_MIN}..{const.UI_ZOOM_MAX}")
+    check(const.step_zoom(100, +1) == 105,
+          f"a step up from 100 gave {const.step_zoom(100, +1)}")
+    check(const.step_zoom(100, -1) == 95,
+          f"a step down from 100 gave {const.step_zoom(100, -1)}")
+    check(const.step_zoom(50, -1) == 50, "zooming out did not clamp at 50")
+    check(const.step_zoom(120, +1) == 120, "zooming in did not clamp at 120")
+    # An off-ladder stored value (an old profile) snaps to the nearest rung.
+    check(const.step_zoom(150, 0) == 120,
+          f"an old 150 zoom did not clamp down: {const.step_zoom(150, 0)}")
+
+
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
@@ -265,6 +378,9 @@ def main() -> int:
     test_silent_repaint(api)
     test_grid_repaint(app, api)
     test_grid_flip(api)
+    test_taskbar_primitives(api)
+    test_window_body_name(api)
+    test_zoom_ladder()
     app.processEvents()
 
     if FAILURES:

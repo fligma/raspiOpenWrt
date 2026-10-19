@@ -518,6 +518,36 @@ def test_desktop_and_taskbar(addon: Any, api: Api) -> None:
     check(addon.caption_for(addon.P_EXPLORER)
           not in [row.get("text") for row in drawn],
           "and its button is gone")
+    # The wallpaper shows through: the icon layer's own sheet makes the
+    # frame's client body transparent, so the window-wide dark ``QWidget``
+    # cannot paint a black floor over the desktop (the old bug: an always
+    # black wall, because the full-size icon layer hid it).
+    check("#addonWindowBody { background: transparent" in icon_sheet,
+          "the icon layer's body is transparent so the wallpaper is not black")
+    # The taskbar is a slim horizontal strip, not a tall column: the buttons
+    # run sideways, and the list is pinned to one button's height rather than
+    # Qt's 192px default that used to swallow the desktop.
+    task_list = find_kind(addon.TAB_SPEC, "list")
+    check(str(task_list.get("id")) == addon.TASK_LIST
+          and str(task_list.get("flow") or "").lower() == "horizontal",
+          "the task buttons run sideways along the bar")
+    addon.start_program(addon.P_EXPLORER)
+    addon.start_program(addon.P_CALC)
+    check(api.last_set(addon.TASK_LIST, "height")
+          == addon.scaled(addon.TASKBAR_H),
+          "the bar is pinned to one button's height, not Qt's tall default")
+    check(api.last_set(addon.TASK_LIST, "icon_size")
+          == addon.scaled(addon.TASKBAR_ICON),
+          "and its buttons wear small marks that fit a slim bar")
+    drawn = api.last_set(addon.TASK_LIST, "items") or []
+    check(len(drawn) >= 2
+          and all(str(row.get("icon") or "").startswith("<svg")
+                  for row in drawn),
+          "every taskbar button wears its window's icon")
+    check(addon.icon_for(addon.P_EXPLORER) == addon.ICON_COMPUTER,
+          "My Computer's button wears the computer mark")
+    check(addon.icon_for(addon.P_CALC) == addon.ICON_CALC,
+          "and the calculator's wears its own")
 
 
 def test_menus(addon: Any, api: Api) -> None:

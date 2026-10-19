@@ -183,7 +183,11 @@ PROJECT_RELEASE_URL = PROJECT_GITHUB_URL + "/releases/tag/"
 # Interface zoom: the density the window is drawn at. View >
 # Zoom in/out walks the ladder; every px/pt size is multiplied
 # by it (terminal font and hand-sized widgets too).
-UI_ZOOM_STEPS = (60, 70, 80, 90, 100, 110, 125, 140, 160, 180, 200)
+# Even rungs of five, from half size to a fifth over: one press
+# is one small, predictable move, so landing on a size takes no
+# thought - the old ladder jumped 10s then 15s and 20s and ran
+# to 200%, which read as lag and overshot what was asked for.
+UI_ZOOM_STEPS = tuple(range(50, 121, 5))
 UI_ZOOM_DEFAULT = 100
 UI_ZOOM_MIN = UI_ZOOM_STEPS[0]
 UI_ZOOM_MAX = UI_ZOOM_STEPS[-1]

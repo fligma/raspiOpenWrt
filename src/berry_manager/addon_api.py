@@ -2072,6 +2072,18 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
                 listing.setGridSize(QSize(zoom_size(wide),
                                           side + zoom_size(56)))
             listing._addon_grid = {"icon": side, "tile": wide}
+        if str(spec.get("flow") or "").lower() in ("horizontal", "left", "row"):
+            # A taskbar lays its buttons out sideways along one line rather
+            # than down a column: Qt's own LeftToRight flow with no wrapping,
+            # so the strip stays a single row and grows along the bar.
+            listing.setFlow(QListView.Flow.LeftToRight)
+            listing.setWrapping(False)
+        if spec.get("icon_size") and not spec.get("grid"):
+            # A plain (non-tile) list that names an icon size - a taskbar's
+            # buttons - has its marks drawn at that edge rather than the
+            # style's default, which is far too big for a slim bar.
+            small = zoom_size(int(spec.get("icon_size") or 16))
+            listing.setIconSize(QSize(small, small))
         if spec.get("checkbox") is not None:
             # The column a tile's tick lives in; a grid has one column of
             # its own, and rows laid down with "check" become user-tickable
@@ -2310,6 +2322,23 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
             widget.setFormat(text)
         elif hasattr(widget, "setText"):
             widget.setText(text)
+    elif prop == "height":
+        # Pin a widget to one height. A taskbar holds its strip to a single
+        # row of buttons this way; Qt's own list height (192px) would else
+        # swallow most of the desktop the bar sits on.
+        try:
+            widget.setFixedHeight(zoom_size(int(value)))
+        except (TypeError, ValueError):
+            pass
+    elif prop == "icon_size":
+        # The edge a list's marks are drawn at, for a strip that needs small
+        # ones (a taskbar's buttons) rather than the style's default.
+        try:
+            small = zoom_size(int(value))
+        except (TypeError, ValueError):
+            small = 0
+        if small and hasattr(widget, "setIconSize"):
+            widget.setIconSize(QSize(small, small))
     elif prop == "items":
         raw = list(value or [])
         names = [str(entry.get("text", "") if isinstance(entry, dict) else entry)
@@ -3163,6 +3192,11 @@ class _WindowFrame(QFrame):
         self._bar.setVisible(bool(chrome))
         lay.addWidget(self._bar, 0)
         body = QWidget(self)
+        # Named so a sheet can reach it: the frame's own background is one
+        # thing, but the client area under it is this bare widget, and the
+        # window-wide ``QWidget { background }`` would otherwise paint it
+        # opaque - which is how a chromeless desktop layer hides its wallpaper.
+        body.setObjectName("addonWindowBody")
         blay = QVBoxLayout(body)
         edge = 0 if not chrome else zoom_size(6)
         blay.setContentsMargins(edge, edge, edge, edge)

@@ -270,6 +270,27 @@ TILE_ICONS = {
     P_CALC: ICON_CALC,
 }
 
+#: The mark a taskbar button wears, from the ``kind`` its opened record
+#: carries. A program's window and the tile that started it wear the same
+#: picture; a machine's terminal wears the SSH mark like the Terminal does.
+KIND_ICONS = {
+    "explorer": ICON_COMPUTER,
+    "berrypad": ICON_TEXTFILE,
+    "viewer": ICON_PICTURE,
+    "console": ICON_CONSOLE,
+    "main_ssh": ICON_SSH,
+    "machines": ICON_SSH,
+    "machine": ICON_SSH,
+    "settings": ICON_GEAR,
+    "calc": ICON_CALC,
+}
+
+#: The taskbar's own shape, in unscaled pixels: one row of buttons tall, and
+#: the mark beside each caption drawn at this edge. Both go through the
+#: desktop scale, so a bigger desktop grows a bigger bar.
+TASKBAR_H = 30
+TASKBAR_ICON = 16
+
 # --- the look: wallpapers, and the two sheets that paint the desktop ---
 
 #: The backgrounds the desktop knows by name. A gradient is Qt's own
@@ -405,6 +426,11 @@ def taskbar_sheet() -> str:
 #: wallpaper is the desktop, and the tiles lose their box.
 ICON_FRAME_SHEET = (
     "#addonWindow { background: transparent; border: none; }"
+    # The client area under the (absent) bar is a bare widget of its own; the
+    # window-wide ``QWidget { background }`` paints it the theme's dark, and
+    # since this layer spans the whole desktop, that dark is what a person
+    # would see instead of the wallpaper. Made transparent, the wall shows.
+    "#addonWindowBody { background: transparent; border: none; }"
     "#berryDeskGrid { background: transparent; border: none;"
     " color: #ffffff; font-weight: bold; outline: none; }"
     "#berryDeskGrid::item { background: transparent; color: #ffffff;"
@@ -485,7 +511,7 @@ TAB_SPEC = {
               "tooltip": "Open one of BerryVM's programs; a program already "
                          "open is raised rather than started again"},
              {"kind": "list", "id": TASK_LIST, "object_name": "berryTasks",
-              "on": ["selected"], "expand": True,
+              "on": ["selected"], "expand": True, "flow": "horizontal",
               "tooltip": "One button per window on the desktop. Select one "
                          "and it comes forward."},
              {"kind": "row", "id": TRAY, "object_name": "berryTray",
@@ -1025,12 +1051,34 @@ def caption_for(win_id: str) -> str:
     return win_id
 
 
+def icon_for(win_id: str) -> str:
+    """The mark a window's taskbar button wears: the picture its kind is known
+    by, or the program's own tile mark when the id is one that ships. A window
+    the addon has no record for falls back to the plain file mark."""
+    record = opened.get(win_id) or {}
+    kind = str(record.get("kind") or "")
+    if kind in KIND_ICONS:
+        return KIND_ICONS[kind]
+    if win_id in TILE_ICONS:
+        return TILE_ICONS[win_id]
+    return ICON_FILE
+
+
 def refresh_taskbar() -> None:
-    """Redraw the row of window buttons from what the desktop reports."""
+    """Redraw the row of window buttons from what the desktop reports.
+
+    The bar is a slim horizontal strip: each button is its window's mark
+    beside its caption, and the list is pinned to one button's height so it
+    does not fall back on Qt's tall default (192px) and swallow the desktop
+    it sits on. The height and mark size ride the desktop scale, so a bigger
+    desktop grows a bigger bar - and a scale change, which re-runs this
+    through :func:`relayout_desktop`, moves them with it."""
     if api is None:
         return
+    api.tabs.set_widget(TAB, TASK_LIST, "height", scaled(TASKBAR_H))
+    api.tabs.set_widget(TAB, TASK_LIST, "icon_size", scaled(TASKBAR_ICON))
     api.tabs.set_widget(TAB, TASK_LIST, "items",
-                        [{"text": caption_for(win_id)}
+                        [{"text": caption_for(win_id), "icon": icon_for(win_id)}
                          for win_id in program_window_ids()])
 
 
