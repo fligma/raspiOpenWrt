@@ -646,6 +646,344 @@ def test_list_attention_prop(api: Any) -> None:
           "attention: [] did not clear the tint")
 
 
+# --- fifteen: a window can be resized from any edge, not just its corner ---
+
+def test_resize_all_edges(api: Any) -> None:
+    """Eight resize handles let the hand drag a frame from any side.
+
+    A frame used to be sized only from its bottom-right corner; now four sides
+    and four corners each carry a :class:`_WindowEdge`. The check reads the
+    handles off a freshly built frame and drives ``resize_from`` directly, the
+    way a drag would, to prove the opposite edge stays pinned and the minimum
+    size is honoured."""
+    print("\n15. a window is resizable from all eight edges")
+    spec = {"kind": "windows", "id": "desk",
+            "on": ["resized", "restored", "maximized"],
+            "children": [
+                {"id": "w1", "title": "Window one",
+                 "x": 40, "y": 40, "width": 300, "height": 200,
+                 "spec": {"kind": "label", "text": "hi"}},
+            ]}
+    canvas, _registry = api.build_spec(spec)
+    frame = canvas._addon_windows["frames"].get("w1")
+    check(frame is not None, "the window opened")
+    if frame is None:
+        return
+    check(len(frame._grips) == 8,
+          f"a resizable framed window has {len(frame._grips)} resize "
+          f"handles, not 8")
+    check(set(frame._edge_map or {}) >= {"l", "r", "t", "b", "lt", "rt",
+                                         "lb", "rb"},
+          "the eight handles do not cover all four sides and corners")
+    floor = api.zoom_size(api.WINDOW_MIN)
+    # Drag the left edge 50px right: narrower by 50, origin moved right by 50,
+    # the right edge pinned where it was.
+    geom = (40, 40, 300, 200)
+    frame.resize_from("l", geom, 50, 0)
+    check(frame.width() == 300 - 50,
+          f"a left drag of 50 gave width {frame.width()}")
+    check(frame.x() == 40 + 50,
+          f"a left drag did not move the origin with it: x={frame.x()}")
+    # Drag the bottom edge down: taller, top stays put.
+    frame.resize_from("b", geom, 0, 30)
+    check(frame.height() == 200 + 30,
+          f"a bottom drag of 30 gave height {frame.height()}")
+    check(frame.y() == 40,
+          f"a bottom drag moved the top: y={frame.y()}")
+    # A right drag past nothing shrinks the window, but never under the floor.
+    frame.resize_from("r", geom, -400, 0)
+    check(frame.width() == floor,
+          f"crushing the right edge did not stop at the minimum "
+          f"({frame.width()} vs floor {floor})")
+
+
+# --- sixteen: dragging a maximized window's bar restores it under the hand ---
+
+def test_drag_restore(api: Any) -> None:
+    """An un-maximize by a drag keeps the grab point under the cursor.
+
+    Grabbing a full-screen window's title bar and pulling it back down should
+    return the frame to the size it had before, with the spot of the bar the
+    hand closed on carried across to the same fraction of the now-shorter bar
+    - so the window follows the cursor instead of snapping its corner to it.
+    """
+    print("\n16. dragging a maximized bar un-maximizes to the grab point")
+    from PyQt6.QtCore import QPoint
+
+    # The pure math first: grab the dead centre of a 800-wide maximized bar at
+    # global x 400, restore to 300 wide -> the window's left goes to 250 so the
+    # centre of the new bar sits under the cursor at 400.
+    x, y = api._drag_restore_point(400, 10, 0.5, 10, 300, 200, 0, 0)
+    check(x == 250 and y == 0,
+          f"the centre grab did not translate to the shorter bar: "
+          f"({x}, {y})")
+    # A grab 3/4 along the wide bar lands 3/4 along the narrow one.
+    x3, _ = api._drag_restore_point(600, 10, 0.75, 10, 300, 200, 0, 0)
+    check(x3 == 600 - 0.75 * 300,
+          f"a right-of-centre grab misplaced the window: x={x3}")
+
+    events: list = []
+
+    def emit(identifier: str, event: str, payload: dict) -> None:
+        events.append((identifier, event, payload))
+
+    spec = {"kind": "windows", "id": "desk",
+            "on": ["maximized", "restored"],
+            "children": [
+                {"id": "w1", "title": "Window one",
+                 "x": 30, "y": 30, "width": 220, "height": 140,
+                 "spec": {"kind": "label", "text": "hi"}},
+            ]}
+    canvas, _registry = api.build_spec(spec, events=emit)
+    frame = canvas._addon_windows["frames"].get("w1")
+    if frame is None:
+        check(False, "the window did not open for the drag test")
+        return
+    api._window_command(canvas, "toggle_maximize", {"id": "w1"})
+    check(frame._maximized is True, "the frame did not maximize")
+    check(frame._prev_geom is not None, "maximize lost the previous size")
+    prev_w, prev_h = frame._prev_geom[2], frame._prev_geom[3]
+    events.clear()
+    # Un-maximize the way the bar's drag does: grab the centre, pull.
+    press = frame.mapToGlobal(QPoint(0, 0))
+    grab = (0.5, 8)
+    frame.restore_for_drag(press, grab)
+    check(frame._maximized is False, "restore_for_drag left it maximized")
+    check(frame._prev_geom is None, "restore_for_drag kept the old geometry")
+    check(frame.width() == max(api.zoom_size(api.WINDOW_MIN), prev_w)
+          and frame.height() == max(api.zoom_size(api.WINDOW_MIN), prev_h),
+          f"the frame did not return to its pre-max size: "
+          f"{frame.width()}x{frame.height()} vs {prev_w}x{prev_h}")
+    check(any(e[1] == "restored" for e in events),
+          "the drag un-maximize did not report a restore")
+
+
+# --- seventeen: pushing a bar to a desktop edge names a snap zone ---
+
+def test_snap_zone(api: Any) -> None:
+    """The pure snap rule an Aero-style drag leans on.
+
+    :func:`snap_zone` takes the cursor's place inside the canvas, the canvas'
+    own room and how near a side counts as against it, and answers with the
+    rectangle a window would land in - or ``None`` for an ordinary drop. It
+    touches no Qt, so the whole half/quarter/maximise rule is checked here
+    offscreen."""
+    print("\n17. a bar pushed to an edge names the zone it lands in")
+    room_w, room_h, edge = 1000, 800, 24
+    left = api.snap_zone(0, 400, room_w, room_h, edge)
+    check(left == {"x": 0, "y": 0, "w": 500, "h": 800, "max": False},
+          f"a left-edge drop takes the left half: {left}")
+    right = api.snap_zone(999, 400, room_w, room_h, edge)
+    check(right == {"x": 500, "y": 0, "w": 500, "h": 800, "max": False},
+          f"a right-edge drop takes the right half: {right}")
+    top = api.snap_zone(500, 0, room_w, room_h, edge)
+    check(top == {"x": 0, "y": 0, "w": 1000, "h": 800, "max": True},
+          f"a top-edge drop maximises: {top}")
+    corner = api.snap_zone(0, 0, room_w, room_h, edge)
+    check(corner == {"x": 0, "y": 0, "w": 500, "h": 400, "max": False},
+          f"a top-left corner takes that quarter: {corner}")
+    corner_r = api.snap_zone(999, 0, room_w, room_h, edge)
+    check(corner_r == {"x": 500, "y": 0, "w": 500, "h": 400, "max": False},
+          f"a top-right corner takes its quarter: {corner_r}")
+    check(api.snap_zone(500, 400, room_w, room_h, edge) is None,
+          "a drop in the middle of the desktop is not a snap")
+    check(api.snap_zone(0, 400, 0, 0, edge) is None,
+          "a room of nothing snaps to nothing")
+    check(api.snap_zone(0, 400, room_w, room_h, 0) is None,
+          "a zero edge width never reaches an edge")
+
+
+# --- eighteen: a canvas leaf is driven through commands and saved ---
+
+def test_canvas(app: Any, api: Any) -> None:
+    """The paint surface an addon drives with ``set_widget`` commands.
+
+    The leaf paints from the mouse on its own, but tools, colour, width,
+    clear, undo and file IO all arrive as commands, and its working size is
+    read back. This builds one, drives every command the Paint addon uses,
+    saves a real PNG to disk and reads it back with QImage to prove the file
+    is a picture - then undoes."""
+    print("\n18. a canvas leaf takes its commands and saves a PNG")
+    import tempfile
+    from PyQt6.QtGui import QImage
+
+    widget, _registry = api.build_spec({"kind": "canvas", "id": "c1",
+                                        "tool": "pen", "color": "#00ff00",
+                                        "width": 5})
+    check(isinstance(widget, api._PaintCanvas),
+          "a canvas spec built a paint surface")
+    widget.show()
+    app.processEvents()
+    widget.resize(160, 120)
+    app.processEvents()
+    api.apply_widget_property(widget, "tool", "rect")
+    check(widget._tool == "rect", "the tool command reached the surface")
+    api.apply_widget_property(widget, "tool", "sparkle")
+    check(widget._tool == "rect", "an unknown tool is refused, not taken")
+    api.apply_widget_property(widget, "color", "#ff0000")
+    check(widget._color.name() == "#ff0000",
+          "the colour command reached the surface")
+    api.apply_widget_property(widget, "width", 9)
+    check(widget._width == 9, "the width command reached the surface")
+    size = api.read_widget_value(widget, "size")
+    check(isinstance(size, dict) and size.get("w") == 160
+          and size.get("h") == 120,
+          f"the surface reads its working size back: {size}")
+    fd, png = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    if os.path.exists(png):
+        os.unlink(png)
+    api.apply_widget_property(widget, "clear", "#0000ff")
+    api.apply_widget_property(widget, "save", png)
+    wrote = os.path.isfile(png) and os.path.getsize(png) > 0
+    check(wrote, "Save wrote a PNG to the named path")
+    if wrote:
+        reloaded = QImage(png)
+        check(not reloaded.isNull() and reloaded.width() == 160
+              and reloaded.height() == 120,
+              f"the file is a readable PNG at the surface's size: "
+              f"{reloaded.width()}x{reloaded.height()}")
+        os.unlink(png)
+    api.apply_widget_property(widget, "undo", True)
+    check(True, "Undo ran without raising")
+    widget.close()
+
+
+# --- nineteen: a player leaf builds, or falls back gracefully ---
+
+def test_player(api: Any) -> None:
+    """The audio leaf a Media Player drives - or its polite absence.
+
+    A ``player`` leaf is built on QtMultimedia; where that module is missing
+    the leaf is a plain notice, the same bargain a ``web`` leaf strikes
+    without QtWebEngine. Either way the commands it is handed and the reads
+    taken from it must never raise, so playback is not exercised here - only
+    that the leaf exists in one of its two shapes and answers its reads."""
+    print("\n19. a player leaf builds, and answers its reads")
+    widget, _registry = api.build_spec({"kind": "player", "id": "p1",
+                                        "volume": 60})
+    check(widget is not None, "the player spec built a widget")
+    leaf = getattr(widget, "_addon_player", None)
+    if isinstance(leaf, dict):
+        check(isinstance(widget, api._MediaLeaf),
+              "with QtMultimedia the leaf is a real media player")
+        for prop, value in (("open", "/no/such/track.mp3"), ("volume", 40),
+                            ("mute", True), ("stop", True), ("seek", 1000)):
+            api.apply_widget_property(widget, prop, value)
+        state = api.read_widget_value(widget, "state")
+        check(state in ("stopped", "playing", "paused", "loading"),
+              f"the leaf answers a state word: {state!r}")
+        position = api.read_widget_value(widget, "position")
+        check(isinstance(position, int),
+              f"and its position in milliseconds: {position!r}")
+        check(isinstance(api.read_widget_value(widget, "duration"), int),
+              "and its duration in milliseconds")
+    else:
+        notice = str(api.read_widget_value(widget, "text") or "")
+        check("QtMultimedia" in notice or "not available" in notice,
+              f"without QtMultimedia the leaf is a plain notice: {notice!r}")
+    raised = ""
+    try:
+        api.read_widget_value(widget, "state")
+        api.read_widget_value(widget, "position")
+        api.apply_widget_property(widget, "play", True)
+    except Exception as error:                       # noqa: BLE001 - the crash itself
+        raised = f"{type(error).__name__}: {error}"
+    check(not raised,
+          f"a player's reads and commands must never raise: {raised!r}")
+
+
+# --- twenty: a windows canvas reports its own room ---
+
+def test_desktop_area(app: Any, api: Any) -> None:
+    """The canvas' ``area`` read: the box a cascade or a tile fits into.
+
+    An addon that lays its windows out needs the desktop's own room, not
+    just the frames inside it, so a ``windows`` canvas answers ``area`` with
+    its current size in real pixels. This builds a desktop, sizes it, and
+    reads the room back beside the window list."""
+    print("\n20. a windows desktop reads its area, not only its frames")
+    events: list = []
+
+    def emit(identifier: str, event: str, payload: dict) -> None:
+        events.append((identifier, event, payload))
+
+    spec = {"kind": "windows", "id": "desk", "on": ["activated"],
+            "children": [
+                {"id": "w1", "title": "one",
+                 "spec": {"kind": "label", "text": "hi"}},
+            ]}
+    canvas, _registry = api.build_spec(spec, events=emit)
+    canvas.show()
+    app.processEvents()
+    canvas.resize(800, 600)
+    app.processEvents()
+    area = api.read_widget_value(canvas, "area")
+    check(isinstance(area, dict) and area.get("width") == 800
+          and area.get("height") == 600,
+          f"the desktop reports its own room: {area}")
+    check(api.read_widget_value(canvas, "windows") == ["w1"],
+          "and still lists the windows it holds")
+    canvas.close()
+
+
+# --- twenty-one: a restart asks on the loop, not inside the caller's trip ---
+
+def test_app_restart_deferred(app: Any, api: Any) -> None:
+    """An addon asks for a restart through ``api.session``, which runs on the
+    interface thread while the addon's own worker waits for the answer. Closing
+    the window there tears the addons down around that request - the caller
+    among them - so the shutdown waits on a thread that is only let go once the
+    call returns: the window freezes half-shut, never relaunches, and the next
+    hand-opened copy stands beside it as a second window. ``request_app_restart``
+    now sets the restart and hands the close to the next turn of the loop."""
+    print("\n21. a restart asks on the loop, not inside the caller's round trip")
+    from core.views import take_restart_request
+
+    def holder(win):
+        return type("_Api", (), {"win": win})()
+
+    class _Win:
+        def __init__(self, answer: bool) -> None:
+            self.calls = 0
+            self._answer = answer
+
+        def close(self) -> bool:
+            self.calls += 1
+            return self._answer
+
+    take_restart_request()                    # clear any flag another section left
+
+    # No window to close: refused outright, nothing queued.
+    check(api.SessionAPI(holder(None)).request_app_restart() is False,
+          "a restart with no window to close is refused")
+    check(take_restart_request() is False,
+          "a refused restart owes nothing to the entry point")
+
+    # A window that closes: the ask is accepted, the close is deferred to the
+    # loop rather than run here, and a restart stays owed.
+    win = _Win(True)
+    check(api.SessionAPI(holder(win)).request_app_restart() is True,
+          "a restart with a window is accepted")
+    check(win.calls == 0,
+          f"the close ran inside the call ({win.calls}), not on the loop")
+    app.processEvents()
+    check(win.calls == 1,
+          f"the deferred close ran {win.calls} times on the loop, want once")
+    check(take_restart_request() is True,
+          "a good close leaves a restart owed to the entry point")
+
+    # A close turned down on the tick (an abort question answered "cancel")
+    # withdraws the restart, so nothing relaunches later by accident.
+    win2 = _Win(False)
+    check(api.SessionAPI(holder(win2)).request_app_restart() is True,
+          "the ask is accepted before the loop finds the close refused")
+    app.processEvents()
+    check(win2.calls == 1, "the refused close still happened once")
+    check(take_restart_request() is False,
+          "a close turned down withdraws the restart")
+
+
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
@@ -676,6 +1014,13 @@ def main() -> int:
     test_window_min_max_attention(api)
     test_shortcut_prop(api)
     test_list_attention_prop(api)
+    test_resize_all_edges(api)
+    test_drag_restore(api)
+    test_snap_zone(api)
+    test_canvas(app, api)
+    test_player(api)
+    test_desktop_area(app, api)
+    test_app_restart_deferred(app, api)
     app.processEvents()
 
     if FAILURES:

@@ -424,6 +424,7 @@ jobs:
         --add-data="assets;assets" --add-data="config.example.json;."
         --add-data="_addon_bundle;addons" --add-data="_addon_harness;harness"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
+        --hidden-import=PyQt6.QtMultimedia
         berry_manager.py
 
     - name: Build with PyInstaller (Linux)
@@ -434,6 +435,7 @@ jobs:
         --add-data="assets:assets" --add-data="config.example.json:."
         --add-data="_addon_bundle:addons" --add-data="_addon_harness:harness"
         --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore
+        --hidden-import=PyQt6.QtMultimedia
         --hidden-import=secretstorage --hidden-import=jeepney
         berry_manager.py
 

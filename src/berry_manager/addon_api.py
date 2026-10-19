@@ -253,13 +253,16 @@ False`` to draw it with no title bar at all - the plain floor an icon layer
 wants - and with ``"min_size": [w, h]`` or ``"min_width"``/``"min_height"`` -
 in unscaled pixels, like the window's own ``width`` - to give it a floor a
 hand cannot drag it under, which is what lets an icon layer fill a desktop
-without losing itself. A
+without losing itself. ``widget_value(tab, canvas, "area")`` reads the
+desktop's own room as ``{"width": ..., "height": ...}`` - the area an addon
+cascades or tiles its windows into. A
 ``windows`` canvas answers to ``activated``, ``moved``, ``resized`` and ``closed``
 through ``on``, each carrying the window's id and its new place or size.
 ``label``, ``button``, ``line``, ``multi`` (plain text edit), ``check``,
 ``combo``, ``list``, ``tree``, ``table``, ``progress``, ``spin``, ``slider``,
 ``spacer``, ``image``, ``web``, ``color`` (a hex line with the colour wheel
-behind its swatch), ``terminal`` - all take ``id``, ``text``, ``tooltip``,
+behind its swatch), ``terminal``, ``canvas`` (a free-drawing paint surface),
+``player`` (an audio leaf) - all take ``id``, ``text``, ``tooltip``,
 ``style`` (a stylesheet, so an addon can style its own tab), ``enabled``,
 ``visible``, ``font_size`` (drawn at the interface zoom), ``items``, ``value``,
 ``placeholder``, ``checked``, ``minimum``,
@@ -304,6 +307,22 @@ as many as it likes and each is a separate machine. ``set_widget(tab, id,
 is attached to (never the password) and ``"grid"`` its shape. It needs
 ``"requires": ["ssh"]`` and ``"connection": "own"`` in the manifest, like any
 other work done over a connection of its own.
+A ``canvas`` is a free-drawing surface for a paint program: it holds one
+picture the size of the widget and the hand draws straight onto it, so a stroke
+lands with no round trip to the addon. ``tool`` (one of ``pen``, ``line``,
+``rect``, ``ellipse``, ``eraser``, ``fill``), ``color`` (a hex), and ``width``
+(in pixels) steer the hand; ``clear`` (optionally to a colour), ``undo`` (a
+bounded stack), ``save`` (a PNG path) and ``open``/``load`` (an image path)
+are asked the same way, and ``widget_value(tab, id, "size")`` reads back
+``{"w": ..., "h": ...}``, the working area. It raises no events of its own - a
+program drives it through its buttons and its ``save``/``open``.
+A ``player`` is audio playback on QtMultimedia in a pane of the addon's own
+tab. ``open``/``source`` (a local path or an address) loads a track and
+``play``, ``pause``, ``stop``, ``toggle``, ``seek`` (milliseconds), ``volume``
+(0-100) and ``mute`` drive the transport; ``widget_value`` reads ``"state"``
+(``playing``/``paused``/``stopped``), ``"position"`` and ``"duration"`` (in
+milliseconds) and ``"title"`` back. Without QtMultimedia the leaf is a one-line
+notice, the same bargain a ``web`` leaf strikes without QtWebEngine.
 ``on`` lists the events sent back to the addon: ``clicked``, ``toggled``,
 ``changed``, ``returned``, ``selected``, ``activated`` (a double-click on a
 ``list``/``table``/``tree`` row, carrying that row's ``text`` and ``cells``)
@@ -314,7 +333,10 @@ down, asked for or lost) and ``failed`` (carrying the reason), and to ``bell``
 and ``title`` (the screen's own news) when it is asked for them. A ``web`` leaf
 answers to ``loaded``, carrying ``{"ok": ..., "url": ...}``, and to ``icon``,
 carrying ``{"icon": <PNG data URI>}`` when the page it holds reports a favicon of
-its own - the way an addon puts a served page's mark on one of its buttons.
+its own - the way an addon puts a served page's mark on one of its buttons. A
+``player`` leaf answers to ``state`` (the transport started, paused or stopped,
+carrying the new word), ``done`` (the track reached its end) and ``error``
+(carrying the reason).
 A ``web`` leaf is the same page view an embedded tab gets, in a pane of the
 addon's own tab: its ``url``, or ``set_widget(tab, id, "url", ...)``, is the
 address, and an address given to a leaf that is not on show is held until the
@@ -395,6 +417,7 @@ from PyQt6.QtGui import (
     QFont,
     QFontMetrics,
     QIcon,
+    QImage,
     QKeySequence,
     QPainter,
     QPen,
@@ -1374,6 +1397,40 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
         if "title" in asked:
             widget.title_changed.connect(
                 lambda text: report("title", {"text": str(text)}))
+    player = getattr(widget, "_addon_player", None)
+    if isinstance(player, dict) and set(names) & {"state", "done", "error"}:
+        # A player's news comes straight from QtMultimedia's signals. The
+        # addon lists in ``on`` which it wants to hear: ``state`` (the
+        # transport started, paused or stopped), ``done`` (the track reached
+        # its end) and ``error`` (it could not play at all). One ``report``
+        # sink serves all three, the same shape the terminal block strikes.
+        asked = set(names)
+
+        def report_player(event: str, payload: Any = None) -> None:
+            if event in asked:
+                events(identifier, event, dict(payload or {}))
+
+        player["report"] = report_player
+        media = player.get("player")
+        if media is not None:
+            if "state" in asked:
+                media.playbackStateChanged.connect(
+                    lambda value: report_player(
+                        "state", {"state": _player_state_name(value)}))
+            if "done" in asked:
+                try:
+                    from PyQt6.QtMultimedia import QMediaPlayer
+                    end_of_media = QMediaPlayer.MediaStatus.EndOfMedia
+                except Exception:                    # no enum, no done signal
+                    end_of_media = None
+                if end_of_media is not None:
+                    media.mediaStatusChanged.connect(
+                        lambda status, _end=end_of_media: report_player(
+                            "done") if status == _end else None)
+            if "error" in asked:
+                media.errorOccurred.connect(
+                    lambda _err, text: report_player(
+                        "error", {"text": str(text or "")}))
     if "moved" in names and isinstance(widget, QListWidget) \
             and getattr(widget, "_addon_grid", None) is not None \
             and (widget._addon_grid or {}).get("movement") == "free":
@@ -2114,6 +2171,25 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         view._addon_picture_side = max(8, zoom_size(side))
         view.setText("")
         return view
+    if kind == "canvas":
+        # A free-drawing surface for an addon's paint program. The leaf owns
+        # one QImage and paints onto it straight from the mouse, so a stroke
+        # lands with no round trip to the addon; the addon names the tool,
+        # colour and width and asks for clear/undo/save/open through
+        # ``set_widget``. See :class:`_PaintCanvas`.
+        return _PaintCanvas(spec)
+    if kind == "player":
+        # Audio playback on QtMultimedia. The module is read here rather than
+        # imported at the top so a bare harness and a QtMultimedia-less
+        # install both stand up: without it the leaf is a one-line notice, the
+        # same bargain a ``web`` leaf strikes without QtWebEngine. See
+        # :class:`_MediaLeaf`.
+        try:
+            from PyQt6.QtMultimedia import (  # noqa: F401
+                QMediaPlayer, QAudioOutput)
+        except ImportError:
+            return QLabel("QtMultimedia is not available in this installation.")
+        return _MediaLeaf(spec)
     if kind == "line":
         return QLineEdit()
     if kind == "color":
@@ -2402,6 +2478,15 @@ def style_sheet(widget: QWidget, text: Any) -> QWidget:
 
 def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
     """One ``set_widget`` operation, shared by the Python and the process API."""
+    if isinstance(widget, _PaintCanvas) and prop in PAINT_PROPS:
+        # A paint surface drives its own tools and file IO; anything outside
+        # the handful it owns (visible, enabled, style) still falls through.
+        widget.command(prop, value)
+        return
+    player = getattr(widget, "_addon_player", None)
+    if isinstance(player, dict) and prop in PLAYER_PROPS:
+        _player_command(player, prop, value)
+        return
     text = "" if value is None else str(value)
     if prop in ("text", "html"):
         if hasattr(widget, "setText"):
@@ -3497,6 +3582,11 @@ class _WindowTitleBar(QFrame):
         self._press: Any = None
         self._origin: Any = None
         self._click_guard: Any = None
+        # Where along the bar the hand is holding, so an un-maximize by a drag
+        # can keep that spot under the cursor once the window shrinks, and the
+        # flag saying this drag has already done its un-maximize.
+        self._grab: tuple[float, int] = (0.0, 0)
+        self._restored = False
         self.setObjectName("addonWindowBar")
         self.setFixedHeight(zoom_size(WINDOW_TITLE))
         bar = QHBoxLayout(self)
@@ -3537,8 +3627,18 @@ class _WindowTitleBar(QFrame):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            from PyQt6.QtCore import QPoint
             self._press = event.globalPosition().toPoint()
             self._origin = self._frame.pos()
+            self._restored = False
+            # Remember where along the bar the hand closed. As a fraction of
+            # the frame's width it survives an un-maximize: the window that
+            # shrinks from full-screen to its old size is caught at the same
+            # point of its shorter bar, not at its corner.
+            frame_global = self._frame.mapToGlobal(QPoint(0, 0))
+            wide = max(1, self._frame.width())
+            self._grab = ((self._press.x() - frame_global.x()) / wide,
+                          self._press.y() - frame_global.y())
             self._frame.activate()
             event.accept()
 
@@ -3546,15 +3646,54 @@ class _WindowTitleBar(QFrame):
         if self._press is None:
             return
         delta = event.globalPosition().toPoint() - self._press
+        # A drag that starts on a maximized window and is meant to move it
+        # first takes it back down: past a small threshold the frame steps out
+        # of maximize to its old size, centred under the cursor, and the same
+        # gesture carries on as an ordinary move.
+        if self._frame._maximized and not self._restored:
+            if delta.manhattanLength() > zoom_size(6):
+                self._frame.restore_for_drag(self._press, self._grab)
+                self._origin = self._frame.pos()
+                self._restored = True
         self._frame.move_to(self._origin.x() + delta.x(),
                             self._origin.y() + delta.y(), dragged=True)
+        # With the window following the hand, ask whether the cursor is now
+        # pressed against a desktop edge; if so, offer the zone it would land
+        # in with a ghost and remember it for the release. Clear both when it
+        # is nowhere near one, so an ordinary drop stays ordinary.
+        from PyQt6.QtCore import QPoint
+        canvas = self._frame._canvas
+        local = canvas.mapFromGlobal(event.globalPosition().toPoint())
+        room = canvas.size()
+        zone = snap_zone(local.x(), local.y(), room.width(), room.height(),
+                         zoom_size(SNAP_EDGE))
+        preview = _snap_preview(canvas)
+        if zone is not None:
+            if preview is not None:
+                from PyQt6.QtCore import QRect
+                preview.show_zone(
+                    QRect(zone["x"], zone["y"], zone["w"], zone["h"]))
+            self._frame._snap = zone
+        else:
+            if preview is not None:
+                preview.hide_zone()
+            self._frame._snap = None
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
         if self._press is None:
             return
+        zone = self._frame._snap
+        self._frame._snap = None
         self._press = None
-        self._frame.finish_move()
+        self._restored = False
+        preview = _snap_preview(self._frame._canvas)
+        if preview is not None:
+            preview.hide_zone()
+        if zone is not None:
+            self._frame.apply_snap(zone)
+        else:
+            self._frame.finish_move()
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -3564,30 +3703,54 @@ class _WindowTitleBar(QFrame):
             event.accept()
 
 
-class _WindowGrip(QWidget):
-    """The bottom-right corner a window is sized from; it rides the frame's edge
-    and drags it wider or taller, the way the bar drags it along."""
+#: Which edges a drag of a resize handle moves, and the cursor that handle
+#: wears to say so. The order is the one :meth:`_WindowFrame._place_grips`
+#: seats them in: the four sides first, then the four corners on top, so a
+#: corner keeps its own tip rather than losing it to the side it meets.
+RESIZE_EDGES = (
+    ("l", Qt.CursorShape.SizeHorCursor),
+    ("r", Qt.CursorShape.SizeHorCursor),
+    ("t", Qt.CursorShape.SizeVerCursor),
+    ("b", Qt.CursorShape.SizeVerCursor),
+    ("lt", Qt.CursorShape.SizeFDiagCursor),
+    ("rt", Qt.CursorShape.SizeBDiagCursor),
+    ("lb", Qt.CursorShape.SizeBDiagCursor),
+    ("rb", Qt.CursorShape.SizeFDiagCursor),
+)
 
-    def __init__(self, frame: "_WindowFrame") -> None:
+
+class _WindowEdge(QWidget):
+    """One resize border or corner of a window frame.
+
+    A frame used to be sized only from its bottom-right corner; eight of these
+    - four sides and four corners - let the hand grab any edge instead. Each
+    one knows which edges it owns (``"l"``, ``"rt"``, and so on) and drags the
+    frame through :meth:`_WindowFrame.resize_from`, which keeps the opposite
+    edge pinned and honours the frame's minimum size."""
+
+    def __init__(self, frame: "_WindowFrame", edges: str,
+                 cursor: Qt.CursorShape) -> None:
         super().__init__(frame)
         self._frame = frame
+        self._edges = str(edges)
         self._press: Any = None
-        self._size: Any = None
-        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        self.setFixedSize(zoom_size(WINDOW_GRIP), zoom_size(WINDOW_GRIP))
+        self._geom: Any = None
+        self.setCursor(cursor)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self._press = event.globalPosition().toPoint()
-            self._size = (self._frame.width(), self._frame.height())
+            frame = self._frame
+            self._geom = (frame.x(), frame.y(), frame.width(), frame.height())
+            frame.activate()
             event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._press is None:
             return
         delta = event.globalPosition().toPoint() - self._press
-        self._frame.size_to(self._size[0] + delta.x(),
-                            self._size[1] + delta.y(), dragged=True)
+        self._frame.resize_from(self._edges, self._geom,
+                                delta.x(), delta.y())
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
@@ -3596,6 +3759,97 @@ class _WindowGrip(QWidget):
         self._press = None
         self._frame.finish_resize()
         event.accept()
+
+
+def _drag_restore_point(press_x: int, press_y: int, ratio_x: float,
+                        offset_y: int, new_w: int, new_h: int,
+                        canvas_x: int, canvas_y: int) -> tuple[int, int]:
+    """Where a frame's top-left goes when a maximized window is un-maximized
+    by dragging its bar, in the canvas's own coordinates.
+
+    ``ratio_x`` is how far across the wide, maximized bar the hand grabbed
+    (0 at the left, 1 at the right); ``offset_y`` is how far down from the
+    frame's top. The restored bar is shorter, so the same fraction of its new
+    width sits under the cursor - which is what keeps the grab point exactly
+    where the hand left it rather than snapping the window's corner there.
+    ``press`` is the global point under the cursor and ``canvas`` the global
+    top-left of the desktop, so the answer is relative to the desktop."""
+    return (int(round(press_x - ratio_x * new_w - canvas_x)),
+            int(round(press_y - offset_y - canvas_y)))
+
+
+#: How close to a desktop edge, in pixels at 100% zoom, a dragged title bar
+#: has to come before the window is offered a snap zone beside it.
+SNAP_EDGE = 24
+
+
+def snap_zone(cx: int, cy: int, room_w: int, room_h: int,
+              edge: int) -> dict | None:
+    """The region a window lands in when its bar is pushed to a desktop edge.
+
+    ``cx``/``cy`` are the cursor's place inside the canvas and ``room`` the
+    canvas' own size, both already in real pixels; ``edge`` is how near a
+    side counts as against it. A bar against the top (and clear of both
+    corners) maximises; against a top corner takes that quarter; against a
+    bare side takes the half. ``None`` when the cursor is nowhere near an
+    edge, which is an ordinary drop. Pure - no Qt, no widget - so the whole
+    rule is checked offscreen."""
+    if room_w <= 0 or room_h <= 0 or edge <= 0:
+        return None
+    half_w = room_w // 2
+    half_h = room_h // 2
+    near_left = cx <= edge
+    near_right = cx >= room_w - edge
+    near_top = cy <= edge
+    if near_top and near_left:
+        return {"x": 0, "y": 0, "w": half_w, "h": half_h, "max": False}
+    if near_top and near_right:
+        return {"x": half_w, "y": 0, "w": room_w - half_w, "h": half_h,
+                "max": False}
+    if near_top:
+        return {"x": 0, "y": 0, "w": room_w, "h": room_h, "max": True}
+    if near_left:
+        return {"x": 0, "y": 0, "w": half_w, "h": room_h, "max": False}
+    if near_right:
+        return {"x": half_w, "y": 0, "w": room_w - half_w, "h": room_h,
+                "max": False}
+    return None
+
+
+class _SnapPreview(QWidget):
+    """The translucent ghost that shows where a dragged window will land.
+
+    A plain child of the desktop canvas, raised above the frames and see-
+    through to the mouse, that is moved to a snap zone while the bar is held
+    near an edge and hidden again the moment it is not."""
+
+    def __init__(self, canvas: "_WindowCanvas") -> None:
+        super().__init__(canvas)
+        self.setObjectName("addonSnapPreview")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setVisible(False)
+
+    def show_zone(self, rect) -> None:
+        self.setGeometry(rect)
+        self.setVisible(True)
+        self.raise_()
+
+    def hide_zone(self) -> None:
+        self.setVisible(False)
+
+
+def _snap_preview(canvas: "_WindowCanvas") -> "_SnapPreview | None":
+    """The canvas' one snap ghost, made on the first drag that nears an edge."""
+    store = _windows_store(canvas)
+    if store is None:
+        return None
+    preview = store.get("preview")
+    if preview is None:
+        preview = _SnapPreview(canvas)
+        store["preview"] = preview
+    return preview
 
 
 class _WindowFrame(QFrame):
@@ -3622,6 +3876,10 @@ class _WindowFrame(QFrame):
         self._prev_geom: tuple[int, int, int, int] | None = None
         self._minimized = False
         self._maximized = False
+        # The snap zone a title-bar drag is currently offering, if any: read
+        # on the release to decide whether the drop maximises, tiles or is a
+        # plain move. ``None`` whenever the cursor is clear of every edge.
+        self._snap: dict | None = None
         self._minimizable = bool(minimizable)
         self._maximizable = bool(maximizable)
         self.setObjectName("addonWindow")
@@ -3653,18 +3911,61 @@ class _WindowFrame(QFrame):
         blay.setContentsMargins(edge, edge, edge, edge)
         blay.addWidget(content if content is not None else QLabel("", body), 1)
         lay.addWidget(body, 1)
-        self._grip = _WindowGrip(self)
-        self._grip.setVisible(bool(resizable))
-        self._place_grip()
+        # Eight resize handles - four sides and four corners - so the window
+        # can be dragged to a new size from any edge, not just its bottom-
+        # right. A chromeless layer (the desktop's own icon floor) and a window
+        # opened non-resizable get none, and their list stays empty so the
+        # maximize show/hide has nothing to touch.
+        self._grips: list[_WindowEdge] = []
+        self._edge_map: dict[str, _WindowEdge] = {}
+        if resizable and chrome:
+            for edges, cursor in RESIZE_EDGES:
+                handle = _WindowEdge(self, edges, cursor)
+                self._grips.append(handle)
+                self._edge_map[edges] = handle
+        # ``_grip`` stays the bottom-right corner, the one handle a maximized
+        # frame still names when it hides and shows the sizing affordance.
+        self._grip = self._edge_map.get("rb")
+        self._place_grips()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._place_grip()
+        self._place_grips()
 
-    def _place_grip(self) -> None:
-        side = self._grip.width()
-        self._grip.move(self.width() - side, self.height() - side)
-        self._grip.raise_()
+    def _set_grips_visible(self, on: bool) -> None:
+        """Show or hide every resize handle at once - a maximized frame has
+        no edges left to grab, so they all go until it is restored."""
+        for handle in self._grips:
+            handle.setVisible(bool(on))
+
+    def _place_grips(self) -> None:
+        """Seat each handle along the edge it owns. Sides span their whole
+        side and corners take a square where two sides meet; the top strip is
+        kept shallower than the rest so most of the title bar under it stays
+        free to drag the window. Corners are raised last so they keep their
+        own tips rather than losing them to the side they cross."""
+        if not self._grips:
+            return
+        wide, tall = self.width(), self.height()
+        band = zoom_size(WINDOW_GRIP)
+        top = max(zoom_size(6), band // 2)
+        rects = {
+            "l": (0, 0, band, tall),
+            "r": (wide - band, 0, band, tall),
+            "t": (0, 0, wide, top),
+            "b": (0, tall - band, wide, band),
+            "lt": (0, 0, band, top),
+            "rt": (wide - band, 0, band, top),
+            "lb": (0, tall - band, band, band),
+            "rb": (wide - band, 0, band, band),
+        }
+        for edges, _cursor in RESIZE_EDGES:
+            handle = self._edge_map.get(edges)
+            if handle is None:
+                continue
+            x, y, w, h = rects[edges]
+            handle.setGeometry(x, y, w, h)
+            handle.raise_()
 
     def set_title(self, title: Any) -> None:
         self._bar.set_title(title)
@@ -3694,6 +3995,33 @@ class _WindowFrame(QFrame):
                     max(zoom_size(WINDOW_MIN), int(height)))
         if dragged:
             self._resized_flag = True
+
+    def resize_from(self, edges: str, geom: tuple, dx: int, dy: int) -> None:
+        """Drag one or two edges the handle named, holding the opposite edge
+        still and never going under the frame's minimum size.
+
+        ``geom`` is the ``(x, y, width, height)`` the frame had when the press
+        landed and ``dx``/``dy`` the run since; the new size is worked out from
+        those rather than from where the frame sits now, so a quick drag cannot
+        drift. When a left or top edge moves, the frame's origin moves with it
+        by just as much as the window actually shrank - so a clamp at the
+        minimum keeps the far edge pinned instead of pushing the window off the
+        desktop."""
+        x0, y0, w0, h0 = geom
+        floor = self.minimumSize()
+        minw = max(zoom_size(WINDOW_MIN), floor.width())
+        minh = max(zoom_size(WINDOW_MIN), floor.height())
+        edges = str(edges)
+        width = w0 + (dx if "r" in edges else 0) - (dx if "l" in edges else 0)
+        height = h0 + (dy if "b" in edges else 0) - (dy if "t" in edges else 0)
+        width = max(minw, width)
+        height = max(minh, height)
+        x = x0 + (w0 - width) if "l" in edges else x0
+        y = y0 + (h0 - height) if "t" in edges else y0
+        x, y = _clamp_position(self._canvas, width, height, x, y)
+        self.resize(width, height)
+        self.move(x, y)
+        self._resized_flag = True
 
     def finish_resize(self) -> None:
         if self._resized_flag:
@@ -3734,17 +4062,83 @@ class _WindowFrame(QFrame):
                 self.move(px, py)
             self._prev_geom = None
             self._maximized = False
-            self._grip.setVisible(True)
+            self._set_grips_visible(True)
             self._canvas._report(self._win_id, "restored", {})
             return
         self._prev_geom = (self.x(), self.y(), self.width(), self.height())
         self._maximized = True
-        self._grip.setVisible(False)
+        self._set_grips_visible(False)
         edge = zoom_size(2)
         self.move(0, 0)
         self.resize(max(zoom_size(WINDOW_MIN), room.width() - edge),
                     max(zoom_size(WINDOW_MIN), room.height() - edge))
         self._canvas._report(self._win_id, "maximized", {})
+
+    def restore_for_drag(self, press: Any, grab: tuple) -> None:
+        """Un-maximize by dragging the bar, the way a real desktop does.
+
+        ``press`` is the global point the hand is holding and ``grab`` the
+        ``(ratio_x, offset_y)`` spot the bar was caught at, read when the press
+        landed while the frame was maximized. The window goes back to the size
+        it had before it was maximized, and is placed so that same spot on its
+        (now shorter) bar stays under the cursor - the horizontal grab point is
+        carried across as a fraction of the width, so grabbing near the right
+        of a full-screen bar puts the hand near the right of the small one
+        rather than leaving the window's top-left corner stranded under it.
+        The bar's drag then continues from here as an ordinary move."""
+        if not self._maximized or self._prev_geom is None:
+            return
+        from PyQt6.QtCore import QPoint
+        _px, _py, pw, ph = self._prev_geom
+        floor = self.minimumSize()
+        width = max(zoom_size(WINDOW_MIN), pw, floor.width())
+        height = max(zoom_size(WINDOW_MIN), ph, floor.height())
+        ratio_x, offset_y = grab
+        canvas_global = self._canvas.mapToGlobal(QPoint(0, 0))
+        x, y = _drag_restore_point(press.x(), press.y(), ratio_x, offset_y,
+                                   width, height,
+                                   canvas_global.x(), canvas_global.y())
+        self._maximized = False
+        self._prev_geom = None
+        self._set_grips_visible(True)
+        self.resize(width, height)
+        self.move(*_clamp_position(self._canvas, width, height, x, y))
+        self._canvas._report(self._win_id, "restored", {})
+
+    def apply_snap(self, zone: dict) -> None:
+        """Drop the frame into the half, quarter or full region its bar was
+        held against.
+
+        A top-edge snap is the same as the maximise button, so it goes through
+        :meth:`request_toggle_maximize` and keeps the one ``_prev_geom`` the
+        restore path reads. A side or corner snap lays the window into that
+        fraction of the canvas instead, coming out of any maximize first so a
+        grip is left grabbable. Either way the frame says ``moved`` and
+        ``resized`` so a taskbar keeps up."""
+        if not zone:
+            return
+        if zone.get("max"):
+            if not self._maximized:
+                self.request_toggle_maximize()
+            self._canvas._report(self._win_id, "moved",
+                                 {"x": int(self.x()), "y": int(self.y())})
+            return
+        if self._maximized:
+            self._maximized = False
+            self._prev_geom = None
+            self._set_grips_visible(True)
+        floor = self.minimumSize()
+        width = max(zoom_size(WINDOW_MIN), int(zone["w"]), floor.width())
+        height = max(zoom_size(WINDOW_MIN), int(zone["h"]), floor.height())
+        x, y = _clamp_position(self._canvas, width, height,
+                               int(zone["x"]), int(zone["y"]))
+        self.resize(width, height)
+        self.move(x, y)
+        self._canvas._report(self._win_id, "moved",
+                             {"x": int(self.x()), "y": int(self.y())})
+        self._canvas._report(self._win_id, "resized",
+                             {"width": int(self.width()),
+                              "height": int(self.height())})
 
     def request_restore(self) -> None:
         """Undo whichever of minimize or maximize is set. The taskbar's own
@@ -3772,6 +4166,317 @@ class _WindowFrame(QFrame):
         self.setProperty("attention", value)
         self.style().unpolish(self)
         self.style().polish(self)
+
+
+#: The tools a ``canvas`` leaf answers to. Kept flat so the addon names one
+#: word rather than reaching into the widget.
+PAINT_TOOLS = ("pen", "line", "rect", "ellipse", "eraser", "fill")
+
+#: The ``set_widget`` properties a ``canvas`` leaf owns; anything else a
+#: paint surface is sent falls through to the ordinary widget handling.
+PAINT_PROPS = frozenset(("tool", "color", "width", "clear", "undo",
+                         "save", "open", "load", "image"))
+
+
+class _PaintCanvas(QWidget):
+    """A free-drawing surface for an addon's paint program.
+
+    Holds one ``QImage`` the size of the widget and draws straight onto it
+    from the mouse, so a stroke lands with no round trip to the addon. The
+    addon names the tool, colour and width through ``set_widget`` and asks
+    for ``clear``/``undo``/``save``/``open`` the same way; the picture is the
+    widget's own business in between. Pen and eraser paint as the hand moves;
+    line, rectangle and ellipse rubber-band from where the press landed."""
+
+    def __init__(self, spec: dict) -> None:
+        super().__init__()
+        self._tool = str(spec.get("tool") or "pen")
+        if self._tool not in PAINT_TOOLS:
+            self._tool = "pen"
+        self._color = QColor(str(spec.get("color") or "#000000"))
+        try:
+            self._width = max(1, int(spec.get("width") or 3))
+        except (TypeError, ValueError):
+            self._width = 3
+        try:
+            self._paper = QColor(str(spec.get("background") or "#ffffff"))
+        except (TypeError, ValueError):
+            self._paper = QColor("#ffffff")
+        self._image = QImage()
+        self._press = None
+        self._history: list[QImage] = []
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setMinimumSize(zoom_size(80), zoom_size(80))
+        self._ensure_image()
+
+    # --- the surface, kept the size of the widget ---
+    def _ensure_image(self) -> None:
+        wide = max(1, self.width())
+        tall = max(1, self.height())
+        if not self._image.isNull() and self._image.width() == wide \
+                and self._image.height() == tall:
+            return
+        fresh = QImage(wide, tall, QImage.Format.Format_ARGB32_Premultiplied)
+        fresh.fill(self._paper)
+        if not self._image.isNull():
+            painter = QPainter(fresh)
+            painter.drawImage(0, 0, self._image)
+            painter.end()
+        self._image = fresh
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._ensure_image()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.drawImage(0, 0, self._image)
+        painter.end()
+
+    # --- the hand ---
+    def _pen(self) -> QPen:
+        if self._tool == "eraser":
+            pen = QPen(self._paper, max(1, self._width * 3))
+        else:
+            pen = QPen(self._color, self._width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        return pen
+
+    def _push_history(self) -> None:
+        self._history.append(QImage(self._image))
+        if len(self._history) > 20:
+            self._history.pop(0)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        from PyQt6.QtCore import QPointF
+        pos = event.position().toPoint()
+        self._press = pos
+        self._push_history()
+        if self._tool in ("pen", "eraser"):
+            painter = QPainter(self._image)
+            painter.setPen(self._pen())
+            painter.drawPoint(pos)
+            painter.end()
+        elif self._tool == "fill":
+            self._image.fill(self._color)
+        self.update()
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press is None:
+            return
+        pos = event.position().toPoint()
+        if self._tool in ("pen", "eraser"):
+            painter = QPainter(self._image)
+            painter.setPen(self._pen())
+            painter.drawLine(self._press, pos)
+            painter.end()
+            self._press = pos
+        elif self._tool in ("line", "rect", "ellipse") and self._history:
+            # Redraw the shape afresh from the pre-press snapshot each step,
+            # so it rubber-bands instead of smearing trails down the canvas.
+            from PyQt6.QtCore import QRect
+            base = self._history[-1]
+            self._image = QImage(base)
+            painter = QPainter(self._image)
+            painter.setPen(self._pen())
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            box = QRect(self._press, pos).normalized()
+            if self._tool == "line":
+                painter.drawLine(self._press, pos)
+            elif self._tool == "rect":
+                painter.drawRect(box)
+            else:
+                painter.drawEllipse(box)
+            painter.end()
+        self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._press is None:
+            return
+        from PyQt6.QtCore import QRect
+        pos = event.position().toPoint()
+        if self._tool in ("line", "rect", "ellipse"):
+            painter = QPainter(self._image)
+            painter.setPen(self._pen())
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            box = QRect(self._press, pos).normalized()
+            if self._tool == "line":
+                painter.drawLine(self._press, pos)
+            elif self._tool == "rect":
+                painter.drawRect(box)
+            else:
+                painter.drawEllipse(box)
+            painter.end()
+        self._press = None
+        self.update()
+        event.accept()
+
+    # --- the addon's side of the bargain ---
+    def command(self, prop: str, value: Any) -> None:
+        if prop == "tool":
+            if str(value or "") in PAINT_TOOLS:
+                self._tool = str(value)
+        elif prop == "color":
+            colour = QColor(str(value or ""))
+            if colour.isValid():
+                self._color = colour
+        elif prop == "width":
+            try:
+                self._width = max(1, int(value))
+            except (TypeError, ValueError):
+                pass
+        elif prop == "clear":
+            self._push_history()
+            colour = self._paper
+            if isinstance(value, str) and value:
+                asked = QColor(str(value))
+                if asked.isValid():
+                    colour = asked
+            self._image.fill(colour)
+            self.update()
+        elif prop == "undo":
+            if self._history:
+                self._image = self._history.pop()
+                self.update()
+        elif prop == "save":
+            path = str(value or "")
+            if path:
+                self._image.save(path, "PNG")
+        elif prop in ("open", "load", "image"):
+            self._load(str(value or ""))
+
+    def _load(self, path: str) -> None:
+        if not path:
+            return
+        loaded = QImage(path)
+        if loaded.isNull():
+            return
+        self._push_history()
+        surface = QImage(max(1, self.width()), max(1, self.height()),
+                         QImage.Format.Format_ARGB32_Premultiplied)
+        surface.fill(self._paper)
+        painter = QPainter(surface)
+        painter.drawImage(0, 0, loaded)
+        painter.end()
+        self._image = surface
+        self.update()
+
+
+#: The ``set_widget`` properties a ``player`` leaf owns.
+PLAYER_PROPS = frozenset(("open", "source", "load", "play", "pause",
+                          "stop", "toggle", "seek", "volume", "mute"))
+
+
+def _media_source(value: Any) -> "QUrl":
+    """A media file as a ``QUrl``: a plain path becomes a local-file url,
+    something that already says ``http``/``https``/``file`` is taken as is."""
+    text = str(value or "")
+    low = text.lower()
+    if low.startswith(("http://", "https://", "file://", "qrc:")):
+        return QUrl(text)
+    return QUrl.fromLocalFile(text)
+
+
+def _player_state_name(state: Any) -> str:
+    """Qt's playback state as the one word an addon reads: the enum values are
+    fixed (stopped 0, playing 1, paused 2), so this needs no QtMultimedia
+    import of its own and still answers for a leaf built anywhere."""
+    try:
+        value = int(state)
+    except (TypeError, ValueError):
+        return "stopped"
+    return {0: "stopped", 1: "playing", 2: "paused"}.get(value, "stopped")
+
+
+def _player_command(state: dict, prop: str, value: Any) -> None:
+    """One transport move on a ``player`` leaf's media player."""
+    media = state.get("player")
+    output = state.get("output")
+    if media is None:
+        return
+    if prop in ("open", "source", "load"):
+        media.setSource(_media_source(value))
+    elif prop == "play":
+        media.play()
+    elif prop == "pause":
+        media.pause()
+    elif prop == "stop":
+        media.stop()
+    elif prop == "toggle":
+        if _player_state_name(media.playbackState()) == "playing":
+            media.pause()
+        else:
+            media.play()
+    elif prop == "seek":
+        try:
+            media.setPosition(int(value or 0))
+        except (TypeError, ValueError):
+            pass
+    elif prop == "volume":
+        if output is not None:
+            try:
+                output.setVolume(max(0.0, min(1.0, int(value or 0) / 100.0)))
+            except (TypeError, ValueError):
+                pass
+    elif prop == "mute":
+        if output is not None:
+            output.setMuted(bool(value))
+
+
+def _player_read(state: dict, what: str) -> Any:
+    """What a ``player`` leaf reads back: its state word, position and
+    duration in milliseconds, or the title it is holding."""
+    media = state.get("player")
+    if media is None:
+        return None
+    if what in ("value", "state"):
+        return _player_state_name(media.playbackState())
+    if what == "position":
+        return int(media.position())
+    if what == "duration":
+        return int(media.duration())
+    if what == "title":
+        source = media.source()
+        if source is None:
+            return ""
+        return str(source.fileName() or source.toString() or "")
+    return None
+
+
+class _MediaLeaf(QWidget):
+    """An audio leaf backed by QtMultimedia, for an addon that plays files.
+
+    A thin wrapper over one ``QMediaPlayer`` and its ``QAudioOutput``: the
+    addon loads a path or address with ``open``, drives it with ``play``,
+    ``pause``, ``stop``, ``seek`` and ``volume``, and reads ``state``,
+    ``position`` and ``duration`` back. It is only ever built where
+    QtMultimedia imported cleanly; without it the leaf is a plain notice,
+    the same bargain a ``web`` leaf strikes without QtWebEngine."""
+
+    def __init__(self, spec: dict) -> None:
+        super().__init__()
+        from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+        self._output = QAudioOutput(self)
+        self._media = QMediaPlayer(self)
+        self._media.setAudioOutput(self._output)
+        try:
+            self._output.setVolume(max(0.0, min(1.0, int(spec.get("volume", 80))
+                                                / 100.0)))
+        except (TypeError, ValueError):
+            self._output.setVolume(0.8)
+        # Everything ``_player_command``, ``_player_read`` and
+        # ``_connect_events`` share: the two Qt objects, the event sink (set
+        # when the spec asks for the player's news) and the last known state.
+        self._addon_player = {
+            "player": self._media,
+            "output": self._output,
+            "report": None,
+        }
 
 
 def _make_windows(spec: dict, registry: dict,
@@ -3812,7 +4517,9 @@ def _make_windows(spec: dict, registry: dict,
         "#addonWindowBar QPushButton#btnMin:hover { background: #3d7a3d;"
         " color: #ffffff; }"
         "#addonWindowBar QPushButton#btnMax:hover { background: #2a5ea8;"
-        " color: #ffffff; }"))
+        " color: #ffffff; }"
+        "#addonSnapPreview { background: rgba(90, 140, 220, 70);"
+        " border: 2px solid rgba(150, 190, 250, 200); border-radius: 4px; }"))
     for child in (spec.get("children") or []):
         if isinstance(child, dict):
             _windows_open(canvas, child)
@@ -3972,6 +4679,17 @@ def read_widget_value(widget: QWidget, what: str = "value") -> Any:
     if _is_web_leaf(widget):
         # Nor does a web leaf hold text of its own; its state is the address.
         return _read_web_leaf(widget, what)
+    player = getattr(widget, "_addon_player", None)
+    if isinstance(player, dict) and what in ("value", "state", "position",
+                                             "duration", "title"):
+        # A player leaf holds no text widget either; its reads are the
+        # transport's own state word, position and duration in milliseconds.
+        return _player_read(player, what)
+    if isinstance(widget, _PaintCanvas) and what == "size":
+        # The paint surface's working area, so an addon can size a save or
+        # line up a toolbar; the picture itself stays the widget's business.
+        size = widget.size()
+        return {"w": int(size.width()), "h": int(size.height())}
     if what == "text":
         return widget.text() if hasattr(widget, "text") else widget.toPlainText()
     if what == "html":
@@ -4026,6 +4744,11 @@ def read_widget_value(widget: QWidget, what: str = "value") -> Any:
         return {"x": int(frame.x()), "y": int(frame.y()),
                 "width": int(frame.width()), "height": int(frame.height()),
                 "visible": bool(frame.isVisible())}
+    if what == "area" and _windows_store(widget) is not None:
+        # The desktop's own room, so an addon that cascades or tiles its
+        # windows has something to fit them into beyond the frames themselves.
+        size = widget.size()
+        return {"width": int(size.width()), "height": int(size.height())}
     if what == "sizes" and isinstance(widget, QSplitter):
         return _splitter_sizes(widget)
     if what == "panes" and isinstance(widget, QSplitter):
@@ -4185,29 +4908,43 @@ class SessionAPI:
         time. This is the thread-safe way for an addon to ask for it: the call
         lands on the interface thread - the only one allowed to close the
         window - so nobody has to reach for ``api.win`` from their own thread.
-        ``False`` when there was no window to close or the close was turned
-        down; a pending restart is withdrawn in that case, so nothing
-        relaunches later by accident.
+
+        The close is left to the next turn of the event loop rather than run
+        here. An addon asks for this through ``api.session``, which delivers the
+        call to the interface thread and keeps the addon's own worker waiting on
+        the answer. Closing in place would tear the addons down around that
+        request - the caller among them - and the shutdown waits on a thread
+        that is only let go once this call returns, so the window freezes half
+        shut and never relaunches (and a hand-opened copy then stands beside it
+        as a second window). Handing the close a fresh tick lets the addon's
+        request come back first, so the shutdown runs over an idle addon - the
+        same reason :meth:`rescan_addons` queues.
+
+        ``False`` when there was no window to close, and a pending restart is
+        withdrawn then so nothing relaunches by accident. A close refused on
+        the tick - an abort question answered "cancel" - withdraws it there too.
         """
         from core.views import cancel_restart_request, restart_process
 
         win = getattr(self._api, "win", None)
         if win is None or not hasattr(win, "close"):
             return False
-        restart_process()
-        closed = False
-        try:
-            closed = bool(win.close())
-        finally:
-            if not closed:
-                # An abort question answered "cancel", or a close that died
-                # trying: the window stays up, so no relaunch may be owed.
-                cancel_restart_request()
-        if not closed:
-            return False
         app = QApplication.instance()
-        if app is not None:
-            app.quit()
+        restart_process()
+
+        def _close_and_quit() -> None:
+            closed = False
+            try:
+                closed = bool(win.close())
+            finally:
+                if not closed:
+                    # An abort question answered "cancel", or a close that died
+                    # trying: the window stays up, so no relaunch may be owed.
+                    cancel_restart_request()
+            if closed and app is not None:
+                app.quit()
+
+        QTimer.singleShot(0, _close_and_quit)
         return True
 
     def set_addon_enabled(self, addon_id: str, enabled: bool) -> dict:

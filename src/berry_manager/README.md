@@ -9,7 +9,7 @@ addon - a full file manager.
 ## Build the executable
 
 ```
-pyinstaller --noconfirm --onefile --windowed --icon="assets/icon.png" --add-data="assets:assets" --add-data="config.example.json:." --add-data="_addon_bundle:addons" --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore --hidden-import=secretstorage --hidden-import=jeepney berry_manager.py
+pyinstaller --noconfirm --onefile --windowed --icon="assets/icon.png" --add-data="assets:assets" --add-data="config.example.json:." --add-data="_addon_bundle:addons" --hidden-import=PyQt6.QtWebEngineWidgets --hidden-import=PyQt6.QtWebEngineCore --hidden-import=PyQt6.QtMultimedia --hidden-import=secretstorage --hidden-import=jeepney berry_manager.py
 ```
 
 On Windows use `;` between the parts of every `--add-data` pair
@@ -36,6 +36,13 @@ helper process and resource files come from the hooks PyInstaller ships for
 `PyQt6.QtWebEngine*`, so there is nothing to `--collect-all` - and those names
 are extension modules rather than packages, so collecting them as packages only
 produces a "not a package" warning.
+
+`PyQt6.QtMultimedia` sits behind the same kind of guard: the `player` leaf
+reads it inside the one function that builds an audio widget, so a build that
+never opens one pays nothing for it and the scanner cannot see the import - the
+`--hidden-import=PyQt6.QtMultimedia` option is what carries it. Without the
+module a `player` leaf is a one-line notice, exactly as a `web` leaf is without
+QtWebEngine, so the addon still stands up.
 
 The GitHub workflow in `.github/workflows/build.yml` runs exactly this command
 per operating system, for the pushes that can change its result: a first job
@@ -133,8 +140,8 @@ appears, and paid anyway the moment a connection is asked for (auto-connect
 reads paramiko on a worker thread, so it lands off the GUI's path either way).
 PyInstaller still collects both, because its scanner follows plain imports
 inside functions as readily as ones at the top; only imports that sit behind a
-condition - the QtWebEngine pair, tried and fallen back on - need the
-`--hidden-import` list.
+condition - the QtWebEngine pair and QtMultimedia, each tried and fallen back
+on - need the `--hidden-import` list.
 The addon files a build packs are the other weight on the way up, and they are
 handled the same way once rather than on every launch: see [Bytecode beside the
 source](#bytecode-beside-the-source).

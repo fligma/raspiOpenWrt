@@ -29,10 +29,20 @@ The programs that ship with it:
   colour or a picture file), the desktop's own scale, terminal text size,
   the clock, and the defaults the programs start with.
 * **Calculator** - four keys' worth of arithmetic with a keyboard of buttons.
+* **Paint** - a free-drawing surface (pen, line, rectangle, ellipse, eraser,
+  fill) with a colour, a width, undo, and Open/Save As to a PNG off this
+  machine; a saved picture can be handed straight to the Picture Viewer.
+* **Minesweeper** - the classic grid, beginner through expert, first click
+  always safe, flood reveal, and a Flag-mode toggle to plant the markers.
+* **Media Player** - QtMultimedia audio with a playlist: open a local file or
+  pull one off the device, then play, pause, stop, seek and set volume.
 
 Extras round it out: right-click the desktop for its menu, right-click any
-file row for Open/Edit/View/Transfer/Rename/Delete, and Start offers Change
-Background, About and Log Off, which shuts every window on the desktop.
+file row for Open/Edit/View/Transfer/Rename/Delete, drag a window's title bar
+against a desktop edge to snap it to a half, quarter or full with a ghost
+preview, right-click the taskbar to cascade, tile or Show desktop, and Start
+offers Change Background, About and Log Off, which shuts every window on the
+desktop.
 
 The manifest says ``"connection": "both"`` because the desktop really runs on
 two kinds of link: every file pane and the picture viewer ride the app's main
@@ -58,7 +68,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "BerryVM",
-    "version": "2.2",
+    "version": "2.3",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh", "sftp"],
@@ -69,7 +79,10 @@ ADDON = {
                    "menu, taskbar and desktop icons, with a two-paned local + "
                    "device file manager, Notepad for local and remote files, "
                    "a picture viewer, a local command prompt, SSH terminals, "
-                   "a calculator and Display Properties for the look.",
+                   "a calculator, Paint, Minesweeper, a Media Player and "
+                   "Display Properties for the look. Windows snap to half, "
+                   "quarter or full by their title bar, and the taskbar "
+                   "right-clicks into cascade, tile and Show desktop.",
 }
 
 #: The tab's mark when the assets folder carries no picture: a monitor wearing
@@ -116,6 +129,9 @@ P_SETTINGS = "settings"       # Display Properties
 P_CALC = "calc"               # Calculator
 P_RECYCLE = "recycle"         # the desktop's Recycle Bin window
 P_BROWSER = "browser"         # the Web Browser window (single instance)
+P_PAINT = "paint"             # Paint: the canvas drawing program
+P_MINE = "mine"               # Minesweeper
+P_MEDIA = "media"             # Media Player: QtMultimedia audio
 
 #: What Start and the desktop know as the program list: an id, a caption, and
 #: the mark the tile wears. The caption is the one name the icon layer, the
@@ -130,6 +146,9 @@ PROGRAMS: list[tuple[str, str]] = [
     (P_MACHINES, "Machines"),
     (P_SETTINGS, "Display Properties"),
     (P_CALC, "Calculator"),
+    (P_PAINT, "Paint"),
+    (P_MINE, "Minesweeper"),
+    (P_MEDIA, "Media Player"),
     (P_RECYCLE, "Recycle Bin"),
 ]
 
@@ -290,6 +309,48 @@ ICON_GLOBE = (
     '</svg>'
 )
 
+#: Paint's mark: a palette with a brush laid over it.
+ICON_PAINT = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<path d="M16 4c7 0 12 4 12 10 0 4-3 5-5 5h-3c-2 0-3 1-3 3 0 1 .5 2 .5 '
+    '3 0 2-1.5 3-3.5 3C9 28 4 23 4 16 4 9 9 4 16 4z" fill="#e8d8b0"'
+    ' stroke="#7a5a2a" stroke-width="1.2"/>'
+    '<circle cx="11" cy="12" r="1.7" fill="#c51a4a"/>'
+    '<circle cx="16" cy="9.5" r="1.7" fill="#2f7fdc"/>'
+    '<circle cx="21" cy="12" r="1.7" fill="#3e8522"/>'
+    '<circle cx="10.5" cy="18" r="1.7" fill="#e8b34b"/>'
+    '<path d="M20 20l7-9 2 1.5-7 9z" fill="#b98a4a" stroke="#5a3f1a"'
+    ' stroke-width="0.8"/>'
+    '<path d="M25 13.5l2 1.5-1.5 2.5-2.5-1.5z" fill="#c51a4a"/>'
+    '</svg>'
+)
+
+#: Minesweeper's mark: a grey mine with a lit fuse.
+ICON_MINE = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<circle cx="15" cy="18" r="8" fill="#3a3a3a" stroke="#111111"'
+    ' stroke-width="1"/>'
+    '<path d="M15 6v4M15 26v3M6 18H3M27 18h-3M8.5 11.5L6 9M21.5 11.5L24 9'
+    'M8.5 24.5L6 27M21.5 24.5L24 27" stroke="#111111" stroke-width="1.4"'
+    ' stroke-linecap="round"/>'
+    '<circle cx="12.5" cy="15.5" r="2" fill="#8a8a8a"/>'
+    '<path d="M18 12c2-3 4-4 6-5" stroke="#a06020" stroke-width="1.6"'
+    ' stroke-linecap="round" fill="none"/>'
+    '<circle cx="25" cy="6.5" r="1.8" fill="#ffb020"/>'
+    '</svg>'
+)
+
+#: Media Player's mark: a blue disc with a play triangle, the WMP echo.
+ICON_MEDIA = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<circle cx="16" cy="16" r="12" fill="#2a5ea8" stroke="#123060"'
+    ' stroke-width="1.2"/>'
+    '<circle cx="16" cy="16" r="4" fill="#bfe0ff"/>'
+    '<path d="M14 12l8 4-8 4z" fill="#ffb020" stroke="#a06020"'
+    ' stroke-width="0.6"/>'
+    '</svg>'
+)
+
 #: Program id to the mark its desktop tile wears.
 TILE_ICONS = {
     P_EXPLORER: ICON_COMPUTER,
@@ -300,6 +361,9 @@ TILE_ICONS = {
     P_MACHINES: ICON_SSH,
     P_SETTINGS: ICON_GEAR,
     P_CALC: ICON_CALC,
+    P_PAINT: ICON_PAINT,
+    P_MINE: ICON_MINE,
+    P_MEDIA: ICON_MEDIA,
     P_RECYCLE: ICON_RECYCLE,
     P_BROWSER: ICON_GLOBE,
 }
@@ -317,6 +381,9 @@ KIND_ICONS = {
     "machine": ICON_SSH,
     "settings": ICON_GEAR,
     "calc": ICON_CALC,
+    "paint": ICON_PAINT,
+    "mine": ICON_MINE,
+    "media": ICON_MEDIA,
     "recycle": ICON_RECYCLE,
     "browser": ICON_GLOBE,
 }
@@ -476,7 +543,14 @@ ICON_FRAME_SHEET = (
     # window-wide ``QWidget { background }`` paints it the theme's dark, and
     # since this layer spans the whole desktop, that dark is what a person
     # would see instead of the wallpaper. Made transparent, the wall shows.
+    # The frame's content is not one widget but a small tree - the body, the
+    # column the spec wraps the grid in, and the grid's own scroll viewport -
+    # and every one of them is an unnamed ``QWidget`` that the window-wide
+    # dark rule pours straight through. So the rule reaches them all: the
+    # whole subtree goes transparent and only the tiles, painted by their own
+    # ``::item`` rule below, stay visible over the wallpaper.
     "#addonWindowBody { background: transparent; border: none; }"
+    "#addonWindow QWidget { background: transparent; border: none; }"
     "#berryDeskGrid { background: transparent; border: none;"
     " color: #ffffff; font-weight: bold; outline: none; }"
     "#berryDeskGrid::item { background: transparent; color: #ffffff;"
@@ -560,9 +634,11 @@ TAB_SPEC = {
               "tooltip": "Open one of BerryVM's programs; a program already "
                          "open is raised rather than started again"},
              {"kind": "list", "id": TASK_LIST, "object_name": "berryTasks",
-              "on": ["selected"], "expand": True, "flow": "horizontal",
+              "on": ["selected", "context"], "expand": True,
+              "flow": "horizontal",
               "tooltip": "One button per window on the desktop. Select one "
-                         "and it comes forward."},
+                         "and it comes forward; right-click for the "
+                         "taskbar's window menu."},
              {"kind": "row", "id": TRAY, "object_name": "berryTray",
               "children": [
                   {"kind": "button", "id": "tray_net", "text": "\u25d1",
@@ -572,6 +648,9 @@ TAB_SPEC = {
                   {"kind": "button", "id": "tray_wbr", "text": "\u25ce",
                    "object_name": "berryTrayBtn", "on": ["clicked"],
                    "tooltip": "Open the Web Browser"},
+                  {"kind": "button", "id": "tray_show", "text": "\u25a1",
+                   "object_name": "berryTrayBtn", "on": ["clicked"],
+                   "tooltip": "Show desktop: minimise every window at once"},
                   {"kind": "label", "id": CLOCK, "object_name": "berryClock",
                    "text": ""},
               ]},
@@ -594,6 +673,9 @@ berrypads: dict = {}           # win_id -> {"path", "origin", "title"}
 viewers: dict = {}             # win_id -> {"path", "origin", "size"}
 consoles: dict = {}            # win_id -> {"proc", "pending", "cwd", "alive"}
 terminals: dict = {}           # terminal id -> win_id it lives inside
+paint_state: dict = {}         # win_id -> {"color", "width", "tool"} for Paint
+media_state: dict = {}         # win_id -> {"tracks", "index"} for Media Player
+minesweeper: dict = {}         # the live Minesweeper board and its flags
 pane_pick: dict = {}           # table id -> the name its cursor is on
 pane_rows: dict = {}           # table id -> {display name: {"path", ...}}
 pane_path: dict = {}           # pane prefix -> the folder that side shows
@@ -638,11 +720,20 @@ def init(plugin_api: Any) -> None:
     reload_machines()
     open_icon_layer()
     refresh_taskbar()
+    # The network mark is refreshed on its own beat, apart from the clock:
+    # a person who switches the clock off still expects the tray to say
+    # whether the machine is online, and a link can come and go between the
+    # clock's thirty-second ticks.
+    _update_net_tray()
+    api.schedule.every(15, _update_net_tray)
     if bool(config("clock_on", True)):
         api.schedule.every(30, tick_clock)
         tick_clock()
     api.schedule.every(0.5, pump_consoles)
     api.schedule.every(0.5, tick_flash)
+    # Minesweeper's clock: a no-op unless a board is being played, so it
+    # costs nothing on a desktop with no game open.
+    api.schedule.every(1, tick_mine_timer)
     api.log("BerryVM ready: an XP-styled desktop in one tab.")
     _welcome()
 
@@ -660,6 +751,9 @@ def shutdown() -> None:
     viewers.clear()
     consoles.clear()
     terminals.clear()
+    paint_state.clear()
+    media_state.clear()
+    minesweeper.clear()
     pane_pick.clear()
     pane_rows.clear()
     pane_path.clear()
@@ -1460,6 +1554,10 @@ def forget_window(win_id: str) -> None:
     opened.pop(win_id, None)
     berrypads.pop(win_id, None)
     viewers.pop(win_id, None)
+    paint_state.pop(win_id, None)
+    media_state.pop(win_id, None)
+    if win_id == P_MINE:
+        minesweeper.clear()
     record = consoles.pop(win_id, None)
     if record is not None:
         _stop_shell(record)
@@ -1912,11 +2010,41 @@ def _tray_stub(name: str) -> None:
                  f"the real state - no OS handle is exposed to addons.")
 
 
+def _link_up() -> bool:
+    """Whether this machine has a live route to the network right now.
+
+    An addon is handed no OS handle for the wireless radio, so the desktop
+    cannot read a WiFi card directly. What it *can* do is ask the operating
+    system which interface it would use to reach the wider net: an unconnected
+    ``SOCK_DGRAM`` socket's ``connect`` chooses a route without ever sending a
+    packet, so it answers instantly and fails only when there is no way out.
+    That is the honest signal a person means by "the browser works" - if a
+    page loads, this succeeds too. Any hiccup is read as offline rather than
+    raised, because the tray mark must never be the reason the desktop trips.
+    """
+    import socket
+    probe = None
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.settimeout(0.2)
+        probe.connect(("8.8.8.8", 53))
+        return True
+    except OSError:
+        return False
+    finally:
+        if probe is not None:
+            try:
+                probe.close()
+            except OSError:
+                pass
+
+
 def _net_summary() -> str:
-    """The three lines the tray's network popup says: SSH, SFTP, and what
-    the desktop thinks WiFi is. The addon has no handle for the machine's
-    wireless radio - Berry Manager itself is a network client, so a WiFi
-    mark reflects whether the app reached its device at all."""
+    """The three lines the tray's network popup says: WiFi, SSH and SFTP.
+    WiFi is the machine's own reachability, read with :func:`_link_up` - a
+    desktop that can load a web page is online whether or not the app has
+    opened a device session, so the mark no longer goes dark just because
+    SSH and SFTP are down."""
     ssh = sftp = False
     host = ""
     if api is not None:
@@ -1933,9 +2061,10 @@ def _net_summary() -> str:
             host = str(profile.get("host") or "")
         except Exception:
             host = ""
-    # WiFi is not readable from an addon, but a device that answers SSH
-    # is on a network the app can reach: same link, said twice.
-    wifi = ssh or sftp
+    # WiFi is the machine's link; a device session that is up is proof of a
+    # network too, so the mark reads online if either the probe or a session
+    # says so.
+    wifi = _link_up() or ssh or sftp
     lines = [
         f"WiFi: {'connected' if wifi else 'offline'}",
         f"SSH:  {'connected' if ssh else 'offline'}"
@@ -2056,6 +2185,12 @@ def start_program(win_id: str) -> None:
         open_settings()
     elif win_id == P_CALC:
         open_calc()
+    elif win_id == P_PAINT:
+        open_paint()
+    elif win_id == P_MINE:
+        open_mine()
+    elif win_id == P_MEDIA:
+        open_media()
     elif win_id == P_RECYCLE:
         open_recycle()
     elif win_id == P_BROWSER:
@@ -2089,6 +2224,181 @@ def log_off() -> None:
     refresh_taskbar()
     api.ui.notify("BerryVM: windows closed. The desktop stays until you "
                   "close the tab.")
+
+
+# --- window management: show desktop, taskbar menu, cascade and tile ---
+
+def _ui_zoom() -> float:
+    """The app's interface zoom as a factor, or ``1.0`` when it cannot be
+    read. ``area`` and ``geometry`` come back in device pixels, while
+    ``move_window`` and ``resize_window`` multiply their numbers by this
+    zoom, so a layout worked out from a read is divided back through it."""
+    if api is None:
+        return 1.0
+    try:
+        return max(0.25, float(api.session.zoom()) / 100.0)
+    except Exception:
+        return 1.0
+
+
+def _frame_geometry(win_id: str) -> dict:
+    """One window's live place and size in device pixels, as the canvas
+    reports it; an empty dict when the frame cannot be read."""
+    if api is None:
+        return {}
+    try:
+        found = api.tabs.widget_value(TAB, win_id, "geometry")
+    except Exception:
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def _desktop_area() -> tuple[int, int]:
+    """The desktop canvas' own room in device pixels, the box a cascade or a
+    tile fills; the config's default window size is the floor when the canvas
+    cannot be read."""
+    if api is not None:
+        try:
+            found = api.tabs.widget_value(TAB, DESKTOP, "area")
+            if isinstance(found, dict):
+                wide = int(found.get("width") or 0)
+                tall = int(found.get("height") or 0)
+                if wide > 0 and tall > 0:
+                    return (wide, tall)
+        except Exception:
+            pass
+    return window_size()
+
+
+def show_desktop() -> None:
+    """Minimise every program window at once - the tray's Show desktop
+    button and the taskbar menu both reach it. The icon layer is not a
+    program window, so it stays; a window already hidden is left alone."""
+    if api is None:
+        return
+    for win_id in program_window_ids():
+        if minimized.get(win_id):
+            continue
+        api.tabs.set_widget(TAB, DESKTOP, "minimize_window", win_id)
+        minimized[win_id] = True
+    refresh_taskbar()
+
+
+def _restore_first(win_id: str) -> None:
+    """Bring a window down from minimize or maximize before it is laid into
+    a cascade or a tile, so the target rect actually takes it."""
+    if minimized.pop(win_id, None):
+        api.tabs.set_widget(TAB, DESKTOP, "restore_window", {"id": win_id})
+
+
+def _place_window(win_id: str, rect: dict) -> None:
+    """Move and size one window into a device-pixel rect, undoing the
+    interface zoom on the way to the primitive's unscaled units."""
+    zoom = _ui_zoom()
+    api.tabs.set_widget(TAB, DESKTOP, "move_window", {
+        "id": win_id, "x": int(rect["x"] / zoom), "y": int(rect["y"] / zoom)})
+    api.tabs.set_widget(TAB, DESKTOP, "resize_window", {
+        "id": win_id,
+        "width": int(rect["width"] / zoom),
+        "height": int(rect["height"] / zoom)})
+
+
+def cascade_windows() -> None:
+    """Stand every program window up in a falling stack from the top-left,
+    each nudged down and right of the last, all the same readable size."""
+    if api is None:
+        return
+    win_ids = program_window_ids()
+    if not win_ids:
+        return
+    area_w, area_h = _desktop_area()
+    wide = max(scaled(280), int(area_w * 0.55))
+    tall = max(scaled(220), int(area_h * 0.6))
+    step = scaled(28)
+    for index, win_id in enumerate(win_ids):
+        _restore_first(win_id)
+        x = step * index
+        y = step * index
+        x = min(x, max(0, area_w - wide))
+        y = min(y, max(0, area_h - tall))
+        _place_window(win_id, {"x": x, "y": y, "width": wide, "height": tall})
+        raise_window(win_id)
+    keep_icons_behind()
+    refresh_taskbar()
+
+
+def tile_windows(vertical: bool = True) -> None:
+    """Spread every program window across the desktop in a grid: side by
+    side down the columns when ``vertical``, stacked in rows when not."""
+    if api is None:
+        return
+    win_ids = program_window_ids()
+    if not win_ids:
+        return
+    area_w, area_h = _desktop_area()
+    count = len(win_ids)
+    cols = count if vertical else 1
+    rows = 1 if vertical else count
+    cols = max(1, cols)
+    rows = max(1, rows)
+    cell_w = int(area_w / cols)
+    cell_h = int(area_h / rows)
+    for index, win_id in enumerate(win_ids):
+        _restore_first(win_id)
+        col = index % cols
+        row = index // cols
+        _place_window(win_id, {
+            "x": col * cell_w, "y": row * cell_h,
+            "width": cell_w, "height": cell_h})
+    keep_icons_behind()
+    refresh_taskbar()
+
+
+def _window_row_for(text: str) -> str:
+    """The window id whose taskbar caption is ``text``, or ``""`` when the
+    right-click landed on empty bar rather than a button."""
+    if not text:
+        return ""
+    win_ids = program_window_ids()
+    captions = [caption_for(win_id) for win_id in win_ids]
+    if text in captions:
+        return win_ids[captions.index(text)]
+    return ""
+
+
+def taskbar_menu(row_text: str) -> None:
+    """The taskbar's right-click. Over a window's button the menu is that
+    window's own - Restore, Minimize, Close; over empty bar it lays the whole
+    desktop out - Cascade, tile side by side, tile top and bottom, Show
+    desktop."""
+    if api is None:
+        return
+    win_id = _window_row_for(row_text)
+    if win_id:
+        picked = api.ui.choose(["Restore", "Minimize", "Close"])
+        if picked == "Restore":
+            _restore_first(win_id)
+            raise_window(win_id)
+        elif picked == "Minimize":
+            if not minimized.get(win_id):
+                api.tabs.set_widget(TAB, DESKTOP, "minimize_window", win_id)
+                minimized[win_id] = True
+            refresh_taskbar()
+        elif picked == "Close":
+            close_window(win_id)
+            forget_window(win_id)
+            refresh_taskbar()
+        return
+    picked = api.ui.choose(["Cascade windows", "Tile side by side",
+                           "Tile top bottom", "Show desktop"])
+    if picked == "Cascade windows":
+        cascade_windows()
+    elif picked == "Tile side by side":
+        tile_windows(vertical=True)
+    elif picked == "Tile top bottom":
+        tile_windows(vertical=False)
+    elif picked == "Show desktop":
+        show_desktop()
 
 
 # --- program windows: shared bits ---
@@ -3755,6 +4065,712 @@ def _calc_show() -> None:
     api.tabs.set_widget(TAB, "calc_disp", "value", calc_expr or "0")
 
 
+# --- 10. Paint: a canvas drawing program ---
+
+#: The tools, in the order they stand on the window's tool row, each paired
+#: with the ``canvas`` leaf's own ``tool`` word. The button's label is what a
+#: person reads; the word is what the surface is told to draw with.
+PAINT_TOOLS = (
+    ("Pen", "pen"),
+    ("Line", "line"),
+    ("Rect", "rect"),
+    ("Ellipse", "ellipse"),
+    ("Eraser", "eraser"),
+    ("Fill", "fill"),
+)
+
+#: The colour and width a fresh canvas starts in.
+PAINT_DEFAULT_COLOR = "#000000"
+PAINT_DEFAULT_WIDTH = 3
+
+
+def paint_spec(win_id: str) -> dict:
+    """A row of tools and a row of errands over the drawing surface. The
+    surface is one ``canvas`` leaf that paints the hand's strokes itself, so
+    a line lands with no round trip; the buttons and the slider only ever
+    name the tool, the colour and the width, or ask for a file."""
+    tools = [{"kind": "button", "id": f"{win_id}_pt_{word}", "text": label,
+              "on": ["clicked"],
+              "tooltip": f"Draw with the {label.lower()} tool"}
+             for label, word in PAINT_TOOLS]
+    return {"kind": "column", "children": [
+        {"kind": "row", "children": tools + [
+            {"kind": "button", "id": f"{win_id}_undo", "text": "Undo",
+             "on": ["clicked"], "tooltip": "Take the last stroke back"},
+            {"kind": "button", "id": f"{win_id}_clear", "text": "Clear",
+             "on": ["clicked"], "tooltip": "Blank the whole picture"},
+        ]},
+        {"kind": "row", "children": [
+            {"kind": "button", "id": f"{win_id}_color", "text": "Colour",
+             "on": ["clicked"], "tooltip": "Pick the pen colour"},
+            {"kind": "label", "id": f"{win_id}_colorname",
+             "text": PAINT_DEFAULT_COLOR, "word_wrap": True},
+            {"kind": "label", "id": f"{win_id}_wlabel", "text": "Width"},
+            {"kind": "slider", "id": f"{win_id}_width", "minimum": 1,
+             "maximum": 32, "value": PAINT_DEFAULT_WIDTH,
+             "on": ["changed"], "expand": True},
+            {"kind": "button", "id": f"{win_id}_open", "text": "Open",
+             "on": ["clicked"]},
+            {"kind": "button", "id": f"{win_id}_save", "text": "Save As",
+             "on": ["clicked"]},
+        ]},
+        {"kind": "canvas", "id": f"{win_id}_surface", "expand": "both",
+         "tool": "pen", "color": PAINT_DEFAULT_COLOR,
+         "width": PAINT_DEFAULT_WIDTH},
+        {"kind": "label", "id": f"{win_id}_note", "text": "",
+         "word_wrap": True},
+    ]}
+
+
+def open_paint() -> str:
+    """Bring Paint up: a single window, raised rather than rebuilt if a
+    canvas is already on the desktop. The surface keeps whatever the person
+    drew, so reopening never wipes the picture."""
+    if api is None:
+        return ""
+    if P_PAINT in open_window_ids():
+        raise_window(P_PAINT)
+        return P_PAINT
+    title = CAPTIONS[P_PAINT]
+    width, height = window_size()
+    open_window(_program_entry(P_PAINT, title, paint_spec(P_PAINT),
+                               int(width * 1.4), int(height * 1.3)))
+    opened[P_PAINT] = {"title": title, "kind": "paint"}
+    paint_state[P_PAINT] = {"color": PAINT_DEFAULT_COLOR,
+                            "width": PAINT_DEFAULT_WIDTH, "tool": "pen"}
+    refresh_taskbar()
+    return P_PAINT
+
+
+def paint_tool(tool: str) -> None:
+    """Name the surface's tool. Only the six the leaf knows are accepted, so
+    a stray id on the row cannot put the canvas into an unknown state."""
+    if api is None:
+        return
+    api.tabs.set_widget(TAB, f"{P_PAINT}_surface", "tool", tool)
+    paint_state.setdefault(P_PAINT, {})["tool"] = tool
+
+
+def paint_colour() -> None:
+    """The colour wheel, then hand the choice to the surface and show the
+    hex on the row so the person can see what the pen is wearing now."""
+    if api is None:
+        return
+    state = paint_state.get(P_PAINT) or {}
+    picked = api.ui.pick_color("Paint colour",
+                               str(state.get("color") or PAINT_DEFAULT_COLOR))
+    picked = str(picked or "").strip()
+    if not picked:
+        return
+    api.tabs.set_widget(TAB, f"{P_PAINT}_surface", "color", picked)
+    api.tabs.set_widget(TAB, f"{P_PAINT}_colorname", "text", picked)
+    state["color"] = picked
+    paint_state[P_PAINT] = state
+
+
+def paint_width(value: Any) -> None:
+    """The slider's stroke width, in pixels, straight to the surface."""
+    if api is None:
+        return
+    try:
+        width = int(value)
+    except (TypeError, ValueError):
+        return
+    api.tabs.set_widget(TAB, f"{P_PAINT}_surface", "width", width)
+    paint_state.setdefault(P_PAINT, {})["width"] = width
+
+
+def paint_undo() -> None:
+    if api is not None:
+        api.tabs.set_widget(TAB, f"{P_PAINT}_surface", "undo", True)
+
+
+def paint_clear() -> None:
+    if api is not None:
+        api.tabs.set_widget(TAB, f"{P_PAINT}_surface", "clear", "")
+
+
+def paint_open() -> None:
+    """A picture off this machine, laid under the pen as the working
+    surface - the canvas draws its own blank, so opening is only a load."""
+    if api is None:
+        return
+    picked = api.ui.pick_file(
+        "Open picture",
+        filter="Pictures (*.png *.jpg *.jpeg *.bmp *.gif);;All files (*)")
+    picked = str(picked or "").strip()
+    if not picked:
+        _note(P_PAINT, "Nothing was opened.")
+        return
+    api.tabs.set_widget(TAB, f"{P_PAINT}_surface", "open", picked)
+    _note(P_PAINT, f"opened {short_name(picked)}")
+
+
+def paint_save() -> None:
+    """Write the picture out as a PNG and, the way XP's Paint did, offer to
+    look at what was just drawn in the Picture Viewer."""
+    if api is None:
+        return
+    target = api.ui.pick_file("Save picture", kind="save",
+                              initial="drawing.png")
+    target = str(target or "").strip()
+    if not target:
+        _note(P_PAINT, "Nothing was saved.")
+        return
+    if Path(target).suffix.lower() not in IMAGE_SUFFIXES:
+        target = target + ".png"
+    api.tabs.set_widget(TAB, f"{P_PAINT}_surface", "save", target)
+    if api.ui.question("Paint", f"Saved {short_name(target)}. Open it in "
+                                f"the Picture Viewer?"):
+        open_viewer(target, "local")
+    _note(P_PAINT, f"saved {short_name(target)}")
+
+
+# --- 11. Minesweeper ---
+
+#: The three shipped boards: a name, the rows and columns, and how many
+#: mines hide in them. Beginner is the default the window opens on.
+MINE_LEVELS = (
+    ("Beginner", 9, 9, 10),
+    ("Intermediate", 16, 16, 40),
+    ("Expert", 16, 30, 99),
+)
+
+#: The colour each neighbour-count is written in, the XP table of numbers.
+MINE_NUMBER_COLORS = {
+    1: "#0000ff", 2: "#007b00", 3: "#d40000", 4: "#00007f",
+    5: "#7f0000", 6: "#007f7f", 7: "#000000", 8: "#7f7f7f",
+}
+
+#: One cell's stylesheet: a fixed square so a blank and a nine fall in the
+#: same grid, and a flat grey when it is open.
+MINE_CELL_STYLE = ("min-width: 22px; max-width: 22px; min-height: 22px;"
+                   " max-height: 22px; padding: 0px; margin: 0px;"
+                   " font-weight: bold;")
+
+
+def _mine_level(name: str) -> tuple:
+    """The level a caption names, or Beginner when nothing matches."""
+    for entry in MINE_LEVELS:
+        if str(entry[0]).lower() == str(name or "").lower():
+            return entry
+    return MINE_LEVELS[0]
+
+
+def _mine_neighbors(rows: int, cols: int, r: int, c: int):
+    """The eight squares around one cell that are on the board."""
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            if dr == 0 and dc == 0:
+                continue
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                yield nr, nc
+
+
+def mine_make_board(rows: int, cols: int, mines: int) -> dict:
+    """A fresh, empty board: no mines laid yet (that waits for the first
+    press, so the opening click is always safe), all cells covered."""
+    cells = [[{"mine": False, "adj": 0, "revealed": False,
+               "flagged": False} for _ in range(cols)]
+             for _ in range(rows)]
+    return {"rows": rows, "cols": cols, "mines": mines, "cells": cells,
+            "state": "ready", "flags": 0, "elapsed": 0, "revealed": 0}
+
+
+def mine_place(board: dict, safe_r: int, safe_c: int) -> dict:
+    """Drop the mines on the first press, keeping that square and (when the
+    board has room) its neighbours clear, then count each open cell's mines.
+    Kept whole and deterministic in structure so a test can drive it."""
+    import random
+    rows, cols, mines = board["rows"], board["cols"], board["mines"]
+    cells = board["cells"]
+    around = list(_mine_neighbors(rows, cols, safe_r, safe_c))
+    forbidden = {(safe_r, safe_c)}
+    if mines + 1 + len(around) <= rows * cols:
+        forbidden.update(around)
+    spots = [(r, c) for r in range(rows) for c in range(cols)
+             if (r, c) not in forbidden]
+    random.shuffle(spots)
+    placed = 0
+    for r, c in spots:
+        if placed >= mines:
+            break
+        cells[r][c]["mine"] = True
+        placed += 1
+    for r in range(rows):
+        for c in range(cols):
+            if cells[r][c]["mine"]:
+                continue
+            cells[r][c]["adj"] = sum(
+                1 for nr, nc in _mine_neighbors(rows, cols, r, c)
+                if cells[nr][nc]["mine"])
+    board["mines"] = placed
+    board["state"] = "playing"
+    return board
+
+
+def mine_reveal(board: dict, r: int, c: int) -> bool:
+    """Open one cell, flooding the blank run around it. ``False`` when the
+    press hit a mine (the board is lost and every mine is laid bare); ``True``
+    otherwise. A board with every safe square open is won."""
+    if board["state"] in ("won", "lost"):
+        return board["state"] == "won"
+    cells = board["cells"]
+    cell = cells[r][c]
+    if cell["flagged"] or cell["revealed"]:
+        return True
+    if cell["mine"]:
+        cell["revealed"] = True
+        board["state"] = "lost"
+        for row in cells:
+            for one in row:
+                if one["mine"]:
+                    one["revealed"] = True
+        return False
+    stack = [(r, c)]
+    while stack:
+        cr, cc = stack.pop()
+        cur = cells[cr][cc]
+        if cur["revealed"] or cur["flagged"]:
+            continue
+        cur["revealed"] = True
+        board["revealed"] += 1
+        if cur["adj"] == 0:
+            for nr, nc in _mine_neighbors(board["rows"], board["cols"],
+                                          cr, cc):
+                if not cells[nr][nc]["revealed"]:
+                    stack.append((nr, nc))
+    if board["revealed"] == board["rows"] * board["cols"] - board["mines"]:
+        board["state"] = "won"
+    return True
+
+
+def mine_toggle_flag(board: dict, r: int, c: int) -> None:
+    """Put a flag on, or take it off, a covered cell. An open cell and a
+    finished board ignore the press entirely."""
+    if board["state"] in ("won", "lost"):
+        return
+    cell = board["cells"][r][c]
+    if cell["revealed"]:
+        return
+    if cell["flagged"]:
+        cell["flagged"] = False
+        board["flags"] -= 1
+    else:
+        cell["flagged"] = True
+        board["flags"] += 1
+
+
+def mine_spec(win_id: str, rows: int, cols: int, level: str) -> dict:
+    """The toolbar over the field: New, the difficulty combo, a Flag-mode
+    tick, the mine count and the timer, then a grid of one small button per
+    square, each named ``mc<row>c<col>``."""
+    cells = [{"kind": "button", "id": f"mc{r}c{c}", "row": r, "col": c,
+              "on": ["clicked"], "style": MINE_CELL_STYLE}
+             for r in range(rows) for c in range(cols)]
+    return {"kind": "column", "children": [
+        {"kind": "row", "children": [
+            {"kind": "button", "id": "mine_new", "text": "New",
+             "on": ["clicked"]},
+            {"kind": "combo", "id": "mine_level",
+             "items": [entry[0] for entry in MINE_LEVELS], "value": level,
+             "on": ["changed"]},
+            {"kind": "check", "id": "mine_flag", "text": "Flag mode",
+             "on": ["changed"],
+             "tooltip": "On, a press plants a flag instead of opening a "
+                        "square"},
+            {"kind": "label", "id": "mine_count", "text": ""},
+            {"kind": "label", "id": "mine_timer", "text": "Time: 0"},
+        ]},
+        {"kind": "grid", "children": cells},
+        {"kind": "label", "id": f"{win_id}_note", "text": "",
+         "word_wrap": True},
+    ]}
+
+
+def _mine_open_window(name: str, rows: int, cols: int, mines: int) -> str:
+    """Stand a board of the given shape up. The field's buttons are built at
+    the level's size, so a difficulty that differs in shape rebuilds the
+    window rather than relaying it."""
+    board = mine_make_board(rows, cols, mines)
+    minesweeper.clear()
+    minesweeper.update({"level": name, "rows": rows, "cols": cols,
+                        "board": board, "flagmode": False})
+    title = CAPTIONS[P_MINE]
+    width = cols * scaled(26) + scaled(40)
+    height = rows * scaled(26) + scaled(96)
+    open_window(_program_entry(P_MINE, title,
+                               mine_spec(P_MINE, rows, cols, name),
+                               width, height))
+    opened[P_MINE] = {"title": title, "kind": "mine"}
+    refresh_taskbar()
+    draw_mine_board(board)
+    return P_MINE
+
+
+def open_mine() -> str:
+    """Bring Minesweeper up on Beginner (or whatever the last board used),
+    raising the window if it is already on the desktop."""
+    if api is None:
+        return ""
+    if P_MINE in open_window_ids():
+        raise_window(P_MINE)
+        return P_MINE
+    entry = _mine_level(minesweeper.get("level") or MINE_LEVELS[0][0])
+    return _mine_open_window(entry[0], entry[1], entry[2], entry[3])
+
+
+def mine_new(level: str = "") -> None:
+    """Start a fresh game. The same shape as the board on the desktop just
+    wipes it; a different one (a combo change) rebuilds the window, because
+    the field's buttons are made for one grid and cannot change their count
+    in place."""
+    if api is None:
+        return
+    entry = _mine_level(level or minesweeper.get("level") or MINE_LEVELS[0][0])
+    name, rows, cols, mines = entry
+    if (minesweeper.get("board") is not None
+            and minesweeper.get("level") == name):
+        minesweeper["board"] = mine_make_board(rows, cols, mines)
+        draw_mine_board(minesweeper["board"])
+        return
+    if P_MINE in open_window_ids():
+        close_window(P_MINE)
+        forget_window(P_MINE)
+    _mine_open_window(name, rows, cols, mines)
+
+
+def _mine_draw_cell(board: dict, r: int, c: int) -> None:
+    """One square's face: blank grey when covered, a flag when ticked, the
+    count in its colour when open, and a mine, red, when the game is lost."""
+    cell = board["cells"][r][c]
+    ident = f"mc{r}c{c}"
+    if not cell["revealed"]:
+        if cell["flagged"]:
+            api.tabs.set_widget(TAB, ident, "text", "\u2691")
+            api.tabs.set_widget(TAB, ident, "style",
+                                MINE_CELL_STYLE + " background: #ffe08a;")
+        else:
+            api.tabs.set_widget(TAB, ident, "text", "")
+            api.tabs.set_widget(TAB, ident, "style", MINE_CELL_STYLE)
+        return
+    if cell["mine"]:
+        api.tabs.set_widget(TAB, ident, "text", "\u2731")
+        api.tabs.set_widget(TAB, ident, "style",
+                            MINE_CELL_STYLE + " background: #d40000;")
+        return
+    adj = cell["adj"]
+    colour = MINE_NUMBER_COLORS.get(adj, "#000000")
+    api.tabs.set_widget(TAB, ident, "text", str(adj) if adj else "")
+    api.tabs.set_widget(TAB, ident, "style",
+                        MINE_CELL_STYLE + f" background: #d6d3ce;"
+                        f" color: {colour}; border: 1px solid #a0a0a0;")
+
+
+def draw_mine_board(board: dict) -> None:
+    """Repaint every square and the two readouts, after a press or a new
+    game. A full redraw keeps the field honest without tracking which cells
+    a flood reached."""
+    if api is None:
+        return
+    for r in range(board["rows"]):
+        for c in range(board["cols"]):
+            _mine_draw_cell(board, r, c)
+    api.tabs.set_widget(TAB, "mine_count", "text",
+                        f"Mines: {max(0, board['mines'] - board['flags'])}")
+    api.tabs.set_widget(TAB, "mine_timer", "text",
+                        f"Time: {board.get('elapsed', 0)}")
+
+
+def mine_press(r: int, c: int) -> None:
+    """A square was pressed. The first press of a game lays the mines round
+    it; after that a press either plants a flag (Flag mode on) or opens the
+    square. Either way the field and the readouts are redrawn."""
+    board = minesweeper.get("board")
+    if board is None or board["state"] in ("won", "lost"):
+        return
+    if board["state"] == "ready":
+        mine_place(board, r, c)
+    if minesweeper.get("flagmode"):
+        mine_toggle_flag(board, r, c)
+    else:
+        mine_reveal(board, r, c)
+        if board["state"] == "lost":
+            _note(P_MINE, "Boom - you hit a mine. Press New to try again.")
+        elif board["state"] == "won":
+            _note(P_MINE, "Cleared! Every safe square is open.")
+    draw_mine_board(board)
+
+
+def mine_flagmode(on: bool) -> None:
+    minesweeper["flagmode"] = bool(on)
+
+
+def _mine_parse(ident: str):
+    """The (row, col) a field button's id names, or ``None`` when the id is
+    not a square (``mine_new``, ``mine_level`` and the rest share the row)."""
+    text = str(ident or "")
+    if not text.startswith("mc"):
+        return None
+    rest = text[2:]
+    if "c" not in rest:
+        return None
+    head, _, tail = rest.partition("c")
+    try:
+        return int(head), int(tail)
+    except ValueError:
+        return None
+
+
+def tick_mine_timer() -> None:
+    """One second on a live game's clock. Only ticks while a board is being
+    played and its window stands on the desktop, so it costs nothing at any
+    other time - no game open, an ended game, or a hidden window."""
+    if api is None:
+        return
+    board = minesweeper.get("board")
+    if board is None or board.get("state") != "playing":
+        return
+    if P_MINE not in open_window_ids():
+        return
+    board["elapsed"] = int(board.get("elapsed", 0)) + 1
+    api.tabs.set_widget(TAB, "mine_timer", "text",
+                        f"Time: {board['elapsed']}")
+
+
+# --- 12. Media Player ---
+
+#: The endings Open offers. What QtMultimedia can actually decode is its
+#: own business; the filter only keeps the picker from hiding a file the
+#: person meant to play.
+AUDIO_FILTER = ("Audio (*.mp3 *.ogg *.wav *.flac *.m4a *.aac *.opus);;"
+                "All files (*)")
+
+
+def media_spec(win_id: str) -> dict:
+    """A transport row and a volume slider over a playlist, with the audio
+    leaf itself below - invisible, since it plays rather than shows. The
+    playlist and the leaf report back: double-click a row to play it, and the
+    leaf says when a track ends or fails."""
+    return {"kind": "column", "children": [
+        {"kind": "row", "children": [
+            {"kind": "button", "id": f"{win_id}_open", "text": "Open",
+             "on": ["clicked"], "tooltip": "Queue a track off this machine"},
+            {"kind": "button", "id": f"{win_id}_add", "text": "From device",
+             "on": ["clicked"],
+             "tooltip": "Pull a track off the device over the main "
+                        "connection and queue it"},
+            {"kind": "button", "id": f"{win_id}_play", "text": "Play",
+             "on": ["clicked"]},
+            {"kind": "button", "id": f"{win_id}_pause", "text": "Pause",
+             "on": ["clicked"]},
+            {"kind": "button", "id": f"{win_id}_stop", "text": "Stop",
+             "on": ["clicked"]},
+        ]},
+        {"kind": "row", "children": [
+            {"kind": "label", "id": f"{win_id}_vollabel", "text": "Volume"},
+            {"kind": "slider", "id": f"{win_id}_volume", "minimum": 0,
+             "maximum": 100, "value": 80, "on": ["changed"], "expand": True},
+        ]},
+        {"kind": "list", "id": f"{win_id}_list", "on": ["activated"],
+         "expand": "both", "tooltip": "Double-click a track to play it"},
+        {"kind": "player", "id": f"{win_id}_player", "volume": 80,
+         "on": ["state", "done", "error"]},
+        {"kind": "label", "id": f"{win_id}_now", "text": "No track loaded",
+         "word_wrap": True},
+        {"kind": "label", "id": f"{win_id}_note", "text": "",
+         "word_wrap": True},
+    ]}
+
+
+def open_media() -> str:
+    """Bring Media Player up: a single window, raised if one already stands.
+    The playlist it holds is kept between openings in this session."""
+    if api is None:
+        return ""
+    if P_MEDIA in open_window_ids():
+        raise_window(P_MEDIA)
+        return P_MEDIA
+    title = CAPTIONS[P_MEDIA]
+    open_window(_program_entry(P_MEDIA, title, media_spec(P_MEDIA)))
+    opened[P_MEDIA] = {"title": title, "kind": "media"}
+    media_state[P_MEDIA] = {"tracks": [], "index": -1}
+    refresh_taskbar()
+    return P_MEDIA
+
+
+def _media_state() -> dict:
+    return media_state.setdefault(P_MEDIA, {"tracks": [], "index": -1})
+
+
+def _media_draw_list() -> None:
+    """Lay the playlist out, with a mark on whichever row is loaded."""
+    if api is None:
+        return
+    state = _media_state()
+    rows = []
+    for index, path in enumerate(state.get("tracks") or []):
+        mark = "\u25b6 " if index == state.get("index") else ""
+        rows.append(mark + short_name(path))
+    api.tabs.set_widget(TAB, f"{P_MEDIA}_list", "items", rows)
+
+
+def media_add(path: str) -> None:
+    if not path:
+        return
+    state = _media_state()
+    if path not in state["tracks"]:
+        state["tracks"].append(path)
+    _media_draw_list()
+
+
+def media_play_index(index: int) -> None:
+    """Load the row and start it. The leaf's ``open`` sets the source and
+    ``play`` begins; the state events it sends back keep the caption honest."""
+    state = _media_state()
+    tracks = state.get("tracks") or []
+    if index < 0 or index >= len(tracks):
+        return
+    state["index"] = index
+    path = tracks[index]
+    api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "open", path)
+    api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "play", True)
+    api.tabs.set_widget(TAB, f"{P_MEDIA}_now", "text",
+                        f"Playing: {short_name(path)}")
+    _media_draw_list()
+
+
+def media_open_local() -> None:
+    if api is None:
+        return
+    picked = api.ui.pick_file("Open audio", filter=AUDIO_FILTER)
+    picked = str(picked or "").strip()
+    if not picked:
+        _note(P_MEDIA, "Nothing was opened.")
+        return
+    state = _media_state()
+    media_add(picked)
+    media_play_index(len(state["tracks"]) - 1)
+
+
+def media_add_device() -> None:
+    """A track off the device: pulled into the VM's ``tmp`` over the main
+    connection, then queued - the same path a picture takes to the viewer."""
+    if api is None:
+        return
+    if not api.device.is_connected("sftp"):
+        api.ui.notify("The main connection is not open, so the device has "
+                      "no music to add.")
+        return
+    wanted = api.ui.input("Add track from the device",
+                          "Path inside the remote root",
+                          pane_path.get(PANE_REMOTE) or "")
+    wanted = str(wanted or "").strip().lstrip("/")
+    if not wanted:
+        return
+    into = home_root() / TMP_DIR_NAME / short_name(wanted)
+    try:
+        landed = api.device.download(wanted, str(into))
+    except Exception as error:
+        _note(P_MEDIA, f"could not pull {short_name(wanted)} down: {error}")
+        return
+    path = str(landed or into)
+    state = _media_state()
+    media_add(path)
+    if state.get("index", -1) < 0:
+        media_play_index(len(state["tracks"]) - 1)
+    _note(P_MEDIA, f"queued {short_name(wanted)}")
+
+
+def media_button(tail: str) -> None:
+    """One transport button by the id's tail: the two file doors, and the
+    three that steer the leaf."""
+    if api is None:
+        return
+    if tail == "open":
+        media_open_local()
+    elif tail == "add":
+        media_add_device()
+    elif tail == "play":
+        state = _media_state()
+        if state.get("index", -1) < 0 and state.get("tracks"):
+            media_play_index(0)
+        else:
+            api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "play", True)
+    elif tail == "pause":
+        api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "pause", True)
+    elif tail == "stop":
+        api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "stop", True)
+
+
+def media_pick(payload: dict) -> None:
+    """A double-click on the playlist: the row's index plays that track."""
+    try:
+        index = int((payload or {}).get("row"))
+    except (TypeError, ValueError):
+        index = -1
+    if index >= 0:
+        media_play_index(index)
+
+
+def media_volume(value: Any) -> None:
+    if api is None:
+        return
+    try:
+        level = int(value or 0)
+    except (TypeError, ValueError):
+        return
+    api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "volume", level)
+
+
+def media_seek(value: Any) -> None:
+    if api is None:
+        return
+    try:
+        point = int(value or 0)
+    except (TypeError, ValueError):
+        return
+    api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "seek", point)
+
+
+def _media_next() -> None:
+    """Step to the track after the one just loaded, or stop when the list is
+    at its end. This is what a ``done`` event reaches."""
+    state = _media_state()
+    tracks = state.get("tracks") or []
+    nxt = state.get("index", -1) + 1
+    if 0 <= nxt < len(tracks):
+        media_play_index(nxt)
+    else:
+        api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "stop", True)
+        api.tabs.set_widget(TAB, f"{P_MEDIA}_now", "text",
+                            "Playlist finished")
+
+
+def media_news(event: str, payload: dict) -> None:
+    """What the leaf says about the track it holds: a new transport state
+    relabels the now-playing line, an end advances the playlist, and a
+    failure is said on the note rather than swallowed."""
+    if api is None:
+        return
+    payload = payload or {}
+    if event == "state":
+        word = str(payload.get("state") or "")
+        state = _media_state()
+        tracks = state.get("tracks") or []
+        index = state.get("index", -1)
+        if 0 <= index < len(tracks):
+            label = {"playing": "Playing", "paused": "Paused",
+                     "stopped": "Stopped"}.get(word, word or "Idle")
+            api.tabs.set_widget(TAB, f"{P_MEDIA}_now", "text",
+                                f"{label}: {short_name(tracks[index])}")
+    elif event == "done":
+        _media_next()
+    elif event == "error":
+        _note(P_MEDIA, f"cannot play: {payload.get('text') or 'an error'}")
+
+
 # --- what the tab says back ---
 
 def is_terminal_id(identifier: str) -> bool:
@@ -3821,6 +4837,9 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         if win_id:
             raise_window(win_id)
         return
+    if body == TASK_LIST and event == "context":
+        taskbar_menu(str(payload.get("text") or ""))
+        return
     # 3. The icon layer: double-click opens, right-click is the menu, a lone
     # selection just remembers which tile the cursor is on.
     if body == ICON_GRID:
@@ -3854,6 +4873,57 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
             main_ssh_news(event, payload)
         else:
             machine_news(owner, event, payload)
+        return
+    # 4b. Paint, Minesweeper and Media Player. Their controls are handled
+    # ahead of the generic button-suffix cases below, so a ``_save`` on the
+    # Paint window is read as the picture's Save As and not a Notepad save,
+    # and a grid square or a playlist row reaches the right program.
+    if event == "changed" and body == f"{P_PAINT}_width":
+        paint_width(payload.get("value"))
+        return
+    if event == "clicked" and body.startswith(f"{P_PAINT}_"):
+        tail = body[len(P_PAINT) + 1:]
+        if tail.startswith("pt_"):
+            paint_tool(tail[3:])
+        elif tail == "color":
+            paint_colour()
+        elif tail == "undo":
+            paint_undo()
+        elif tail == "clear":
+            paint_clear()
+        elif tail == "open":
+            paint_open()
+        elif tail == "save":
+            paint_save()
+        return
+    if event == "changed" and body == "mine_level":
+        mine_new(str(payload.get("text") or ""))
+        return
+    if event == "changed" and body == "mine_flag":
+        mine_flagmode(bool(payload.get("checked")))
+        return
+    if event == "clicked" and body == "mine_new":
+        mine_new("")
+        return
+    if event == "clicked" and body.startswith("mc"):
+        cell = _mine_parse(body)
+        if cell:
+            mine_press(cell[0], cell[1])
+        return
+    if event == "changed" and body == f"{P_MEDIA}_volume":
+        media_volume(payload.get("value"))
+        return
+    if event == "changed" and body == f"{P_MEDIA}_seek":
+        media_seek(payload.get("value"))
+        return
+    if event == "activated" and body == f"{P_MEDIA}_list":
+        media_pick(payload)
+        return
+    if body == f"{P_MEDIA}_player" and event in ("state", "done", "error"):
+        media_news(event, payload)
+        return
+    if event == "clicked" and body.startswith(f"{P_MEDIA}_"):
+        media_button(body[len(P_MEDIA) + 1:])
         return
     # 5. The Explorer: its two tables and their buttons.
     if body.endswith("_table") and body[:3] in PANE_KINDS:
@@ -3929,6 +4999,9 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     # 9. The calculator's keys.
     if event == "clicked" and body in CALC_IDS:
         calc_press(CALC_IDS[body])
+        return
+    if event == "clicked" and body == "tray_show":
+        show_desktop()
         return
     if event == "clicked" and body in ("tray_net", "tray_wbr"):
         _tray_stub(body)

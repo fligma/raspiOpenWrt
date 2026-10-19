@@ -21,9 +21,9 @@
     {
       "id": "berryvm",
       "name": "BerryVM",
-      "version": "2.2",
+      "version": "2.3",
       "author": "fligma",
-      "description": "A Windows XP-styled desktop in one tab: wallpaper, Start menu, taskbar and desktop icons, with a two-paned local + device file manager, Notepad for local and remote files, a picture viewer, a local command prompt, SSH terminals, a calculator and Display Properties for the look.",
+      "description": "A Windows XP-styled desktop in one tab: wallpaper, Start menu, taskbar and desktop icons, with a two-paned local + device file manager, Notepad for local and remote files, a picture viewer, a local command prompt, SSH terminals, a calculator, Paint, Minesweeper, a Media Player and Display Properties for the look. Windows snap to half, quarter or full by their title bar, and the taskbar right-clicks into cascade, tile and Show desktop.",
       "filename": "berryvm.py",
       "requires": [
         "ssh",

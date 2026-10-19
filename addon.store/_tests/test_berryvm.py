@@ -330,8 +330,8 @@ def test_manifest(addon: Any, api: Api) -> None:
     print("\n1. what the addon says it is")
     check(str(addon.ADDON.get("name")) == "BerryVM",
           f"the name the store shows: {addon.ADDON.get('name')!r}")
-    check(str(addon.ADDON.get("version")) == "2.2",
-          f"the shipped version is 2.2: {addon.ADDON.get('version')!r}")
+    check(str(addon.ADDON.get("version")) == "2.3",
+          f"the shipped version is 2.3: {addon.ADDON.get('version')!r}")
     check(str(addon.ADDON.get("api")) == "1", "the api version is 1")
     check(sorted(addon.ADDON.get("requires") or []) == ["sftp", "ssh"],
           f"both transports are declared: {addon.ADDON.get('requires')!r}")
@@ -352,8 +352,13 @@ def test_manifest(addon: Any, api: Api) -> None:
     check(ids == [addon.P_EXPLORER, addon.P_NOTEPAD, addon.P_VIEWER,
                   addon.P_CONSOLE, addon.P_BROWSER, addon.P_MAIN,
                   addon.P_MACHINES, addon.P_SETTINGS, addon.P_CALC,
+                  addon.P_PAINT, addon.P_MINE, addon.P_MEDIA,
                   addon.P_RECYCLE],
-          f"the desktop ships ten programs in order: {ids}")
+          f"the desktop ships thirteen programs in order: {ids}")
+    check("Paint" in addon.CAPTIONS.values()
+          and "Minesweeper" in addon.CAPTIONS.values()
+          and "Media Player" in addon.CAPTIONS.values(),
+          "the three new programs are captioned the way Start names them")
     check(addon.CAPTIONS[addon.P_EXPLORER] == "My Computer",
           "the file manager wears the XP name")
 
@@ -1151,6 +1156,9 @@ def fresh(api: Api) -> None:
     addon_module.view_seq = 0
     addon_module.console_seq = 0
     addon_module.calc_expr = ""
+    addon_module.paint_state = {}
+    addon_module.media_state = {}
+    addon_module.minesweeper = {}
     addon_module.home_ready = False
     # The taskbar's skip-when-unchanged signature and the tray clock's last
     # written text are module state too; a fresh section has to be able to
@@ -1187,6 +1195,261 @@ def fresh(api: Api) -> None:
     api.last_run = ""
     api.config_values = {}
     api.run_clear()
+
+
+def test_net_and_wallpaper(addon: Any, api: Api) -> None:
+    """The tray's WiFi mark reads the machine's own link, and the icon layer
+    lets the wallpaper through its whole subtree.
+
+    Two things a person sees daily and cannot be proven from the SSH/SFTP
+    switches alone: the network mark must say *connected* whenever the
+    machine can reach the net (a browser working is exactly that), whether or
+    not the app has opened a device session; and the desktop must not be a
+    black box - the chromeless icon layer spans the whole desktop, so every
+    widget it wraps has to be transparent for the wallpaper to show."""
+    print("\n15. the WiFi mark reads the link, and the wallpaper shows through")
+    fresh(api)
+    addon.init(api)
+    api.run_clear()
+    real_link = addon._link_up
+    try:
+        # No SSH or SFTP, but the machine is online: WiFi reads connected.
+        api.ssh_connected = api.sftp_connected = False
+        addon._link_up = lambda: True
+        summary = addon._net_summary()
+        check("WiFi: connected" in summary,
+              f"an online machine with no device session said offline: "
+              f"{summary!r}")
+        check("SSH:  offline" in summary and "SFTP: offline" in summary,
+              f"the two sessions were reported up while they were down: "
+              f"{summary!r}")
+        # Offline link, no session: honest offline.
+        addon._link_up = lambda: False
+        check("WiFi: offline" in addon._net_summary(),
+              "no link and no session still showed connected")
+        # A live session is proof of a network even with the probe unavailable.
+        api.ssh_connected = True
+        check("WiFi: connected" in addon._net_summary(),
+              "an open SSH session did not put the mark to connected")
+    finally:
+        addon._link_up = real_link
+        api.run_clear()
+    # The icon layer's sheet must make the frame's whole widget subtree
+    # transparent, not just the frame and its body - the intermediate column
+    # the grid is wrapped in was what painted a black box over the wallpaper.
+    sheet = str(addon.ICON_FRAME_SHEET)
+    check("#addonWindow QWidget { background: transparent" in sheet,
+          "the icon layer does not clear its whole subtree, so a container "
+          "widget paints a black box over the wallpaper")
+
+
+def test_paint_mine_media(addon: Any, api: Api) -> None:
+    """The three new programs and the api kinds they ride on.
+
+    Paint drives a ``canvas`` leaf through tool / colour / width / undo /
+    clear / save, Minesweeper's board logic is checked as pure functions and
+    its field is built as a ``grid`` of small buttons, and Media Player drives
+    a ``player`` leaf over a playlist. None of it needs Qt: the checks read
+    the commands the addon hands its widgets and the specs it opens."""
+    print("\n16. Paint, Minesweeper and Media Player")
+    fresh(api)
+    addon.init(api)
+
+    # --- Paint: the canvas drawing program ---
+    addon.start_program(addon.P_PAINT)
+    check(addon.P_PAINT in api.windows, "Paint opened a window")
+    entry = api.open_entry(addon.P_PAINT)
+    surface = find_kind(entry.get("spec"), "canvas")
+    check(surface.get("id") == f"{addon.P_PAINT}_surface",
+          "Paint's window carries a canvas surface")
+    api.run_clear()
+    addon.on_widget(addon.TAB, f"{addon.P_PAINT}_pt_rect", "clicked", {})
+    check(api.last_set(f"{addon.P_PAINT}_surface", "tool") == "rect",
+          "a tool button names that tool on the canvas")
+    addon.on_widget(addon.TAB, f"{addon.P_PAINT}_width", "changed",
+                    {"value": 8})
+    check(api.last_set(f"{addon.P_PAINT}_surface", "width") == 8,
+          "the width slider's value is handed to the surface")
+    api.colour_picks.append("#ff0000")
+    addon.on_widget(addon.TAB, f"{addon.P_PAINT}_color", "clicked", {})
+    check(api.last_set(f"{addon.P_PAINT}_surface", "color") == "#ff0000",
+          "the colour button's pick reaches the surface")
+    check(api.last_set(f"{addon.P_PAINT}_colorname", "text") == "#ff0000",
+          "and the chosen hex is shown on the row")
+    addon.on_widget(addon.TAB, f"{addon.P_PAINT}_undo", "clicked", {})
+    check(api.last_set(f"{addon.P_PAINT}_surface", "undo") is True,
+          "Undo drives the canvas's undo")
+    addon.on_widget(addon.TAB, f"{addon.P_PAINT}_clear", "clicked", {})
+    check(api.last_set(f"{addon.P_PAINT}_surface", "clear") == "",
+          "Clear blanks the surface")
+    out = str(Path(api.paths.data) / "draw.png")
+    api.file_picks.append(out)
+    api.questions = False
+    addon.on_widget(addon.TAB, f"{addon.P_PAINT}_save", "clicked", {})
+    check(api.last_set(f"{addon.P_PAINT}_surface", "save") == out,
+          "Save As hands the surface a path to write")
+    api.run_clear()
+    api.file_picks.append(str(Path(api.paths.data) / "noext"))
+    addon.on_widget(addon.TAB, f"{addon.P_PAINT}_save", "clicked", {})
+    saved = str(api.last_set(f"{addon.P_PAINT}_surface", "save") or "")
+    check(saved.endswith(".png"),
+          f"a name with no picture suffix is saved as a PNG: {saved!r}")
+
+    # --- Minesweeper: the pure board logic ---
+    board = addon.mine_make_board(9, 9, 10)
+    check(board["rows"] == 9 and board["cols"] == 9 and board["mines"] == 10,
+          "a fresh Beginner board is 9x9 with ten mines")
+    check(all(len(row) == 9 for row in board["cells"])
+          and len(board["cells"]) == 9, "the grid holds 81 cells")
+    check(board["state"] == "ready",
+          "no mines are laid until the first press")
+    addon.mine_place(board, 4, 4)
+    placed = sum(cell["mine"] for row in board["cells"] for cell in row)
+    check(placed == 10, f"ten mines were placed: {placed}")
+    check(not board["cells"][4][4]["mine"],
+          "the first-pressed square stayed clear")
+    check(all(not board["cells"][r][c]["mine"]
+              for r, c in addon._mine_neighbors(9, 9, 4, 4)),
+          "and the squares around it were kept mine-free, so it opens blank")
+    check(board["state"] == "playing", "placing the mines starts the game")
+    addon.mine_toggle_flag(board, 0, 0)
+    check(board["cells"][0][0]["flagged"] and board["flags"] == 1,
+          "a flag can be planted on a covered square")
+    addon.mine_toggle_flag(board, 0, 0)
+    check(not board["cells"][0][0]["flagged"] and board["flags"] == 0,
+          "pressing again takes the flag back off")
+    addon.mine_reveal(board, 4, 4)
+    check(board["cells"][4][4]["revealed"], "opening the safe centre works")
+    check(board["state"] != "lost", "opening a safe square never loses")
+    # A press on a known mine loses and bares every mine.
+    mine_at = next((r, c) for r in range(9) for c in range(9)
+                   if board["cells"][r][c]["mine"])
+    addon.mine_reveal(board, mine_at[0], mine_at[1])
+    check(board["state"] == "lost", "hitting a mine ends the game")
+    check(all(cell["revealed"] for row in board["cells"] for cell in row
+              if cell["mine"]), "and every mine is laid bare")
+
+    # --- Minesweeper: the window it builds and drives ---
+    addon.start_program(addon.P_MINE)
+    check(addon.P_MINE in api.windows, "Minesweeper opened a window")
+    entry = api.open_entry(addon.P_MINE)
+    grid = find_kind(entry.get("spec"), "grid")
+    cells = [c for c in (grid.get("children") or []) if isinstance(c, dict)]
+    check(len(cells) == 9 * 9, f"Beginner lays 81 squares: {len(cells)}")
+    check(cells[0].get("id") == "mc0c0" and cells[0].get("style"),
+          "each square is named mc<r>c<c> and sized by its style")
+    combo = find_kind(entry.get("spec"), "combo")
+    check("Beginner" in (combo.get("items") or [])
+          and "Expert" in (combo.get("items") or []),
+          "the difficulty combo offers the levels")
+    api.run_clear()
+    addon.on_widget(addon.TAB, "mc0c0", "clicked", {})
+    live = addon.minesweeper.get("board")
+    check(live is not None and live["cells"][0][0]["revealed"],
+          "a press lays the mines and opens the square")
+    check(api.last_set("mine_count", "text") is not None,
+          "and the readouts are redrawn")
+    addon.on_widget(addon.TAB, "mine_level", "changed", {"text": "Expert"})
+    entry = api.open_entry(addon.P_MINE)
+    grid = find_kind(entry.get("spec"), "grid")
+    cells = [c for c in (grid.get("children") or []) if isinstance(c, dict)]
+    check(len(cells) == 16 * 30, f"Expert rebuilds the field to 16x30: {len(cells)}")
+    check(addon.minesweeper.get("level") == "Expert",
+          "a difficulty change is remembered")
+
+    # --- Media Player: the player leaf over a playlist ---
+    addon.start_program(addon.P_MEDIA)
+    check(addon.P_MEDIA in api.windows, "Media Player opened a window")
+    entry = api.open_entry(addon.P_MEDIA)
+    player = find_kind(entry.get("spec"), "player")
+    check(player.get("id") == f"{addon.P_MEDIA}_player",
+          "the window carries an audio player leaf")
+    check("state" in (player.get("on") or [])
+          and "done" in (player.get("on") or []),
+          "the leaf reports state and done")
+    listing = find_kind(entry.get("spec"), "list")
+    check("activated" in (listing.get("on") or []),
+          "the playlist plays a row on activate")
+    api.run_clear()
+    track = str(Path(api.paths.data) / "song.mp3")
+    Path(track).write_bytes(b"fake audio")
+    api.file_picks.append(track)
+    addon.on_widget(addon.TAB, f"{addon.P_MEDIA}_open", "clicked", {})
+    check(api.last_set(f"{addon.P_MEDIA}_player", "open") == track,
+          "the picked track is loaded onto the player")
+    check(api.last_set(f"{addon.P_MEDIA}_player", "play") is True,
+          "and playback is started")
+    rows = api.last_set(f"{addon.P_MEDIA}_list", "items") or []
+    check(rows and "song.mp3" in str(rows[0]),
+          f"the track lands in the playlist: {rows}")
+    addon.on_widget(addon.TAB, f"{addon.P_MEDIA}_volume", "changed",
+                    {"value": 55})
+    check(api.last_set(f"{addon.P_MEDIA}_player", "volume") == 55,
+          "the volume slider drives the leaf")
+    addon.on_widget(addon.TAB, f"{addon.P_MEDIA}_player", "done", {})
+    now = str(api.last_set(f"{addon.P_MEDIA}_now", "text") or "")
+    check("Playlist finished" in now,
+          f"the last track ending says so: {now!r}")
+
+
+def test_window_management(addon: Any, api: Api) -> None:
+    """Show desktop, the taskbar's right-click, and cascade / tile.
+
+    These drive the ``windows`` canvas' window-management commands, so the
+    check is which commands the addon issues against the fake desktop: every
+    program window is minimised on Show desktop, and a cascade or a tile
+    moves and sizes each window once."""
+    print("\n17. Show desktop, the taskbar menu, cascade and tile")
+    fresh(api)
+    addon.init(api)
+    addon.start_program(addon.P_EXPLORER)
+    addon.start_program(addon.P_CALC)
+    ids = addon.program_window_ids()
+    check(addon.P_EXPLORER in ids and addon.P_CALC in ids,
+          "two program windows stand on the desktop")
+
+    def prop_values(prop: str) -> list:
+        return [a[3] for _w, a, _k in api.calls
+                if _w == "tabs.set_widget" and len(a) >= 4 and a[2] == prop]
+
+    api.run_clear()
+    addon.show_desktop()
+    mins = prop_values("minimize_window")
+    check(set(mins) >= {addon.P_EXPLORER, addon.P_CALC},
+          f"Show desktop hides every program window: {mins}")
+    check(addon.minimized.get(addon.P_EXPLORER)
+          and addon.minimized.get(addon.P_CALC),
+          "and each is marked hidden so the taskbar row shows it")
+
+    addon.minimized.clear()
+    api.run_clear()
+    addon.cascade_windows()
+    check(len(prop_values("move_window")) >= 2
+          and len(prop_values("resize_window")) >= 2,
+          "a cascade moves and sizes each window")
+    api.run_clear()
+    addon.tile_windows(vertical=True)
+    check(len(prop_values("resize_window")) >= 2,
+          "tiling sizes each window as well")
+
+    # Over an empty bar the menu offers the layout list; picking a word runs it.
+    api.picks.append("Cascade windows")
+    addon.minimized.clear()
+    api.run_clear()
+    addon.taskbar_menu("")
+    choice = [a for _w, a, _k in api.calls if _w == "ui.choose"]
+    check(choice and "Cascade windows" in (choice[0][0] if choice[0] else []),
+          "the empty-bar menu lists cascade, tile and Show desktop")
+    check(len(prop_values("move_window")) >= 2,
+          "and naming Cascade lays the windows out")
+
+    # Over a window's button the menu is that window's own; Close shuts it.
+    addon.minimized.clear()
+    api.picks.append("Close")
+    api.run_clear()
+    addon.taskbar_menu(addon.CAPTIONS[addon.P_CALC])
+    check(addon.P_CALC not in addon.program_window_ids(),
+          "closing a taskbar button takes its window off the desktop")
 
 
 def main() -> int:
@@ -1230,6 +1493,9 @@ def main() -> int:
     test_machines(addon, api)
     test_display_properties(addon, api)
     test_extras(addon, api)
+    test_net_and_wallpaper(addon, api)
+    test_paint_mine_media(addon, api)
+    test_window_management(addon, api)
 
     shutil.rmtree(WORK, ignore_errors=True)
     if FAILURES:
