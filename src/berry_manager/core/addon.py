@@ -1681,6 +1681,35 @@ class AddonManager:
             except Exception as error:      # a layout fix-up never breaks a load
                 self.log("", f"restore tab order: {error}", warning=True)
 
+    def _atomic_sweep(self, work: Callable[[], None]) -> None:
+        """Do a whole-world job with the tab widget frozen so nothing cascades.
+
+        ``setUpdatesEnabled(False)`` on the QTabWidget stops its own repaint and
+        its children's, so every unload and load the sweep performs lands
+        silently on the model and only the final state is drawn when the freeze
+        lifts. A person pressing Reload, launching an installer that re-scans
+        the folder, or closing the app sees one transition rather than a run
+        of tabs blinking out and back in the order the addons happen to be
+        held in. The call is wrapped in try/finally so a raise in one addon
+        cannot leave the bar stuck silent.
+        """
+        tabs = getattr(self.win, "tabs", None)
+        frozen = False
+        if tabs is not None:
+            try:
+                tabs.setUpdatesEnabled(False)
+                frozen = True
+            except Exception:                    # a bar that will not freeze
+                frozen = False                   # still lets the work run
+        try:
+            work()
+        finally:
+            if frozen:
+                try:
+                    tabs.setUpdatesEnabled(True)
+                except Exception:
+                    pass
+
     def reload(self, only: Any = None, force: bool = False) -> None:
         """Rescan the folder, then start whatever the profile has enabled.
 
@@ -1690,12 +1719,28 @@ class AddonManager:
         ``force`` those ids run whatever their switch says, which is what a
         Desktop link asks for: the link was made on purpose, and an addon left
         switched off in some profile should still open rather than refuse.
+
+        A whole-world reload (no ``only``) is atomic: every tab is taken down
+        and every enabled one is brought back with the tab widget frozen, so
+        the bar shows one transition instead of a cascade of removals and
+        re-insertions. A narrowed reload (with ``only``) is incremental and
+        leaves every other addon's tab exactly where it was - the two paths
+        used to share one implementation, which meant a Desktop-shortcut press
+        tore the whole bar down before starting the one addon it was asked to
+        bring up.
         """
         wanted = {str(item).strip().lower() for item in
                   (([only] if isinstance(only, str) else list(only or []))
                    if only else []) if str(item).strip()}
-        keep = {addon.id: addon for addon in self.addons}
         active = self._active_tab()
+        if wanted:
+            self._reload_narrow(wanted, force, active)
+            return
+        self._atomic_sweep(lambda: self._reload_full(force, active))
+
+    def _reload_full(self, force: bool, active: str) -> None:
+        """The whole-world branch of :meth:`reload`, run inside an atomic sweep."""
+        keep = {addon.id: addon for addon in self.addons}
         for addon in list(self.addons):
             # One addon that refuses to die must not take the rescan - and the
             # window, since this runs from a Qt slot - down with it, the same
@@ -1715,9 +1760,6 @@ class AddonManager:
                      warning=True)
             self.refresh_rows()
             return
-        if wanted:
-            discovered = [addon for addon in discovered
-                          if str(addon.id).lower() in wanted]
         for addon in discovered:
             # A broken record or a stale tab slot is this addon's problem
             # alone: the row carries the error and every other addon comes up.
@@ -1750,6 +1792,63 @@ class AddonManager:
                 addon.loaded = False
                 self.log(addon.id, f"failed to load: {error}", warning=True)
         self._wait_boot([worker for worker in started if worker is not None])
+        self.refresh_rows()
+        self._restore_window_tabs()
+        self._reactivate_tab(active)
+
+    def _reload_narrow(self, wanted: set[str], force: bool,
+                       active: str) -> None:
+        """The :meth:`reload` branch that brings back only the addons it names.
+
+        Every other addon keeps its module, its worker, its process and its
+        tabs: only the ids in ``wanted`` are unloaded and re-read from the
+        folder. The freshly discovered records for those ids are merged into
+        the retained list exactly as :meth:`reload_one` does for a single id,
+        so the Settings rows keep their folder-order and no other addon's tab
+        is moved, closed or rebuilt.
+        """
+        for addon in [item for item in self.addons
+                      if str(item.id).lower() in wanted]:
+            try:
+                self.unload(addon, reason="rescan of one addon")
+            except Exception as error:              # noqa: BLE001 - the rest still go
+                self.log(addon.id, f"stopping for the rescan: {error}",
+                         warning=True)
+        try:
+            discovered = self.scan()
+        except Exception as error:                  # noqa: BLE001 - keep the old list
+            self.log("addons", f"the folder could not be read again: {error}",
+                     warning=True)
+            self.refresh_rows()
+            return
+        hits = [item for item in discovered
+                if str(item.id).lower() in wanted]
+        retained = {item.id: item for item in self.addons
+                    if str(item.id).lower() not in wanted}
+        # The folder's order is kept, so the Settings rows do not shuffle; every
+        # other addon is put back object for object, with its process, its tabs
+        # and its loaded flag still its own.
+        self.addons = [retained.get(item.id, item) for item in discovered]
+        gone = {item.id for item in discovered}
+        self.addons += [item for item in retained.values()
+                        if item.id not in gone]
+        for addon in hits:
+            try:
+                self.apply_record(addon)
+                if force:
+                    addon.enabled = True
+            except Exception as error:              # noqa: BLE001 - one row, not the world
+                addon.error = f"rescan: {error}"
+                self.log(addon.id, str(error), warning=True)
+        for addon in hits:
+            if not addon.enabled:
+                continue
+            try:
+                self.load(addon)
+            except Exception as error:              # noqa: BLE001 - load() guards itself
+                addon.error = f"rescan: {error}"
+                addon.loaded = False
+                self.log(addon.id, f"failed to load: {error}", warning=True)
         self.refresh_rows()
         self._restore_window_tabs()
         self._reactivate_tab(active)
@@ -2351,12 +2450,20 @@ class AddonManager:
         # Every addon's stop waits for its thread, and a queue of addons each given
         # the full grace is a person watching a window that will not go away.
         self.stop_grace = self.SHUTDOWN_GRACE
-        for addon in self.loaded():
-            try:
-                self.unload(addon, reason="app closing")
-            except Exception as error:
-                self.log(addon.id, f"closing: {error}", warning=True)
-        # Whatever a broken unload left behind goes down with the app.
+
+        def _unload_all() -> None:
+            for addon in self.loaded():
+                try:
+                    self.unload(addon, reason="app closing")
+                except Exception as error:
+                    self.log(addon.id, f"closing: {error}", warning=True)
+        # Freeze the tab widget for the whole loop so the bar goes down as one
+        # transition rather than one tab at a time; the person pressing the
+        # window's close button sees the tab area blank once, not a cascade.
+        self._atomic_sweep(_unload_all)
+        # Whatever a broken unload left behind goes down with the app. These
+        # threads and processes are not tab work, so they run after the freeze
+        # has been lifted.
         for addon in self.addons:
             worker = addon.worker
             if worker is not None:

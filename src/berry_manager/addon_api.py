@@ -2199,6 +2199,14 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
                                           side + zoom_size(56)))
             listing._addon_grid = {"icon": side, "tile": wide,
                                    "movement": "free" if free else "static"}
+            # A grid laid on a desktop layer has to let the wallpaper show
+            # through its scroll-area viewport: Qt paints the palette Base
+            # on that child widget, and an app-wide ``QWidget { background:
+            # #121212 }`` rule catches it, filling the whole layer with a
+            # black box that hides the wall the addon just drew. Turning
+            # the fill off lets the frame's own transparent background
+            # reach the eye.
+            listing.viewport().setAutoFillBackground(False)
             if spec.get("renamable"):
                 listing._addon_grid["renamable"] = True
                 listing.setEditTriggers(

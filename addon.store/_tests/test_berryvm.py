@@ -350,9 +350,10 @@ def test_manifest(addon: Any, api: Api) -> None:
           f"the picture is where a shipped addon keeps it: {candidates}")
     ids = [pid for pid, _cap in addon.PROGRAMS]
     check(ids == [addon.P_EXPLORER, addon.P_NOTEPAD, addon.P_VIEWER,
-                  addon.P_CONSOLE, addon.P_MAIN, addon.P_MACHINES,
-                  addon.P_SETTINGS, addon.P_CALC, addon.P_RECYCLE],
-          f"the desktop ships nine programs in order: {ids}")
+                  addon.P_CONSOLE, addon.P_BROWSER, addon.P_MAIN,
+                  addon.P_MACHINES, addon.P_SETTINGS, addon.P_CALC,
+                  addon.P_RECYCLE],
+          f"the desktop ships ten programs in order: {ids}")
     check(addon.CAPTIONS[addon.P_EXPLORER] == "My Computer",
           "the file manager wears the XP name")
 

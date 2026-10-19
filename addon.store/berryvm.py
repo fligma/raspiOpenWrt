@@ -115,6 +115,7 @@ P_MACHINES = "machines"       # the SSH bookmark window
 P_SETTINGS = "settings"       # Display Properties
 P_CALC = "calc"               # Calculator
 P_RECYCLE = "recycle"         # the desktop's Recycle Bin window
+P_BROWSER = "browser"         # the Web Browser window (single instance)
 
 #: What Start and the desktop know as the program list: an id, a caption, and
 #: the mark the tile wears. The caption is the one name the icon layer, the
@@ -124,6 +125,7 @@ PROGRAMS: list[tuple[str, str]] = [
     (P_NOTEPAD, "Notepad"),
     (P_VIEWER, "Picture Viewer"),
     (P_CONSOLE, "Command Prompt"),
+    (P_BROWSER, "Internet"),
     (P_MAIN, "Terminal"),
     (P_MACHINES, "Machines"),
     (P_SETTINGS, "Display Properties"),
@@ -273,6 +275,21 @@ ICON_RECYCLE = (
     '</svg>'
 )
 
+# The Web Browser's mark: a blue globe with a lat/long cross, the shape
+# XP's Internet Explorer wore on the desktop and the tray both.
+ICON_GLOBE = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<circle cx="16" cy="16" r="12" fill="#4f9ee8" stroke="#1e4a80"'
+    ' stroke-width="1.4"/>'
+    '<path d="M4 12.5h24M4 19.5h24" stroke="#ffffff" stroke-width="1.1"'
+    ' fill="none"/>'
+    '<path d="M16 4c-4.5 4.5-4.5 19.5 0 24M16 4c4.5 4.5 4.5 19.5 0 24"'
+    ' stroke="#ffffff" stroke-width="1.1" fill="none"/>'
+    '<path d="M6.5 8.5c4 3 15 3 19 0M6.5 23.5c4-3 15-3 19 0"'
+    ' stroke="#ffffff" stroke-width="1" fill="none"/>'
+    '</svg>'
+)
+
 #: Program id to the mark its desktop tile wears.
 TILE_ICONS = {
     P_EXPLORER: ICON_COMPUTER,
@@ -284,6 +301,7 @@ TILE_ICONS = {
     P_SETTINGS: ICON_GEAR,
     P_CALC: ICON_CALC,
     P_RECYCLE: ICON_RECYCLE,
+    P_BROWSER: ICON_GLOBE,
 }
 
 #: The mark a taskbar button wears, from the ``kind`` its opened record
@@ -300,6 +318,7 @@ KIND_ICONS = {
     "settings": ICON_GEAR,
     "calc": ICON_CALC,
     "recycle": ICON_RECYCLE,
+    "browser": ICON_GLOBE,
 }
 
 #: The taskbar's own shape, in unscaled pixels: one row of buttons tall, and
@@ -548,14 +567,11 @@ TAB_SPEC = {
               "children": [
                   {"kind": "button", "id": "tray_net", "text": "\u25d1",
                    "object_name": "berryTrayBtn", "on": ["clicked"],
-                   "tooltip": "Network - not wired; BerryVM has no OS "
-                              "handle to read"},
-                  {"kind": "button", "id": "tray_snd", "text": "\u266a",
+                   "tooltip": "Network: shows whether the app's SSH and "
+                              "SFTP sessions are up"},
+                  {"kind": "button", "id": "tray_wbr", "text": "\u25ce",
                    "object_name": "berryTrayBtn", "on": ["clicked"],
-                   "tooltip": "Sound - not wired"},
-                  {"kind": "button", "id": "tray_shd", "text": "\u26e8",
-                   "object_name": "berryTrayBtn", "on": ["clicked"],
-                   "tooltip": "Security - not wired"},
+                   "tooltip": "Open the Web Browser"},
                   {"kind": "label", "id": CLOCK, "object_name": "berryClock",
                    "text": ""},
               ]},
@@ -607,6 +623,11 @@ def init(plugin_api: Any) -> None:
     """
     global api
     api = plugin_api
+    # The screen's own size and the app's UI zoom together say what a fresh
+    # install should open with, so a small netbook is not asked to drag a
+    # 520x360 window around a 768-pixel screen. Anything already stored in
+    # the config still wins: this only shapes what has never been set.
+    _apply_screen_defaults()
     api.config.declare(fields=FIELDS, defaults=DEFAULTS, title="BerryVM")
     _ensure_home()
     mirror_settings()
@@ -688,6 +709,76 @@ def _welcome() -> None:
                          "file panes will say so until it is.")
     except Exception:                        # a toast is never worth a stack
         api.log("berryvm: welcome popup skipped")
+
+
+def _screen_geometry() -> tuple[int, int]:
+    """The main window's screen, in pixels. Falls back to a modest 1366x768
+    when no window is up (an off-screen test run) or the ask itself fails
+    on a headless box; the point is a shape to size against, not a truth
+    to obey when the machine says nothing."""
+    if api is None:
+        return 1366, 768
+    try:
+        win = api.ui.window()
+        if win is not None:
+            scr = win.screen()
+            if scr is not None:
+                geo = scr.availableGeometry()
+                w, h = int(geo.width()), int(geo.height())
+                if w >= 320 and h >= 240:
+                    return w, h
+    except Exception:
+        pass
+    return 1366, 768
+
+
+def _app_zoom() -> int:
+    """The interface zoom the app is running at, as a percent. 100 is what
+    was shipped: the addon has no handle to change it, only to see it, and
+    the desktop's own scale is nudged against a UI that is already grown."""
+    if api is None:
+        return 100
+    try:
+        return max(50, min(200, int(api.ui.zoom() or 100)))
+    except Exception:
+        return 100
+
+
+def _apply_screen_defaults() -> None:
+    """Bake DEFAULTS from the machine's own shape before the app reads it.
+
+    The stored config still wins - these values are what the person gets
+    only when a key has never been set - but a first install now opens a
+    sensible window on a 1024x600 netbook and on a 4K monitor both, rather
+    than one hard-coded pixel size. The desktop's own scale is factored
+    against the app's UI zoom too, so a machine already running at 120%
+    does not stack a second 20% on top of it."""
+    screen_w, screen_h = _screen_geometry()
+    zoom = _app_zoom()
+    # A window sized for the middle of the screen at 100% zoom: 42% across,
+    # 48% down, kept inside the range the settings form offers. Larger
+    # screens get larger windows, but a 4K monitor does not want a 3000px
+    # Explorer either, so the top end is capped at what reads well.
+    width = int(max(240, min(1400, screen_w * 0.42)))
+    height = int(max(180, min(1000, screen_h * 0.48)))
+    # BerryVM's own scale moves the other way against the app's zoom: an
+    # app already at 120% gets a slightly smaller desktop scale so the two
+    # together do not push the tiles off the edge on a modest screen.
+    scale_pct = 10000 // zoom if zoom else 100
+    if screen_w >= 2400:
+        scale_pct = max(scale_pct, 130)
+    elif screen_w >= 1600:
+        scale_pct = max(scale_pct, 115)
+    elif screen_w >= 1280:
+        scale_pct = max(scale_pct, 100)
+    elif screen_w >= 1024:
+        scale_pct = min(scale_pct, 90)
+    else:
+        scale_pct = min(scale_pct, 80)
+    scale_pct = max(80, min(160, scale_pct))
+    DEFAULTS["window_width"] = width
+    DEFAULTS["window_height"] = height
+    DEFAULTS["ui_scale"] = scale_pct
 
 
 # --- small pure helpers, so the shapes above can be read without a window ---
@@ -1137,17 +1228,24 @@ def tick_clock() -> None:
     """Put the current time on the tray; a clock turned off in the config
     writes an empty string rather than hiding the label. The label only
     hears when the line actually moves - the tick runs every thirty seconds
-    and the text changes once a minute."""
+    and the text changes once a minute. The tray's network mark is refreshed
+    here too, so SSH / SFTP changes reach the bar on the same beat."""
     global _clock_shown
     if api is None:
         return
     if not bool(config("clock_on", True)):
         text = ""
     else:
-        text = datetime.now().strftime("%H:%M")
+        now = datetime.now()
+        text = now.strftime("%H:%M")
+        # A long date on hover, the way XP's clock tooltip read: "Monday,
+        # October 19, 2026" - the person gets the day without clicking.
+        api.tabs.set_widget(TAB, CLOCK, "tooltip",
+                             now.strftime("%A, %B %d, %Y"))
     if text != _clock_shown:
         _clock_shown = text
         api.tabs.set_widget(TAB, CLOCK, "text", text)
+    _update_net_tray()
 
 
 def open_window_ids() -> list:
@@ -1796,18 +1894,71 @@ def desktop_menu(text: str) -> None:
 
 
 def _tray_stub(name: str) -> None:
-    """A tray icon was pressed. BerryVM has no OS handle for network, volume
-    or security centre, so the button is a visual affordance and says so.
-    The click still means something, which is more than a bare label does."""
+    """A tray icon was pressed. BerryVM has no OS handle for a real network
+    centre, so the mark for the network button reads what the app itself
+    can see - the SSH and SFTP sessions - and the Web Browser button opens
+    the browser window; anything else falls back to a plain "not wired"
+    note."""
     if api is None:
         return
-    labels = {"tray_net": "Network",
-              "tray_snd": "Volume",
-              "tray_shd": "Security"}
+    if name == "tray_wbr":
+        start_program(P_BROWSER)
+        return
+    if name == "tray_net":
+        api.ui.popup("Network", _net_summary())
+        return
     api.ui.popup("Not wired",
-                 f"BerryVM shows a {labels.get(name, name)} mark for shape "
-                 f"but cannot read the real state - no OS handle is exposed "
-                 f"to addons.")
+                 f"BerryVM shows a {name} mark for shape but cannot read "
+                 f"the real state - no OS handle is exposed to addons.")
+
+
+def _net_summary() -> str:
+    """The three lines the tray's network popup says: SSH, SFTP, and what
+    the desktop thinks WiFi is. The addon has no handle for the machine's
+    wireless radio - Berry Manager itself is a network client, so a WiFi
+    mark reflects whether the app reached its device at all."""
+    ssh = sftp = False
+    host = ""
+    if api is not None:
+        try:
+            ssh = bool(api.device.is_connected("ssh"))
+        except Exception:                       # a headless run has no device
+            ssh = False
+        try:
+            sftp = bool(api.device.is_connected("sftp"))
+        except Exception:
+            sftp = False
+        try:
+            profile = api.session.profile() or {}
+            host = str(profile.get("host") or "")
+        except Exception:
+            host = ""
+    # WiFi is not readable from an addon, but a device that answers SSH
+    # is on a network the app can reach: same link, said twice.
+    wifi = ssh or sftp
+    lines = [
+        f"WiFi: {'connected' if wifi else 'offline'}",
+        f"SSH:  {'connected' if ssh else 'offline'}"
+        + (f" ({host})" if ssh and host else ""),
+        f"SFTP: {'connected' if sftp else 'offline'}",
+    ]
+    return "\n".join(lines)
+
+
+def _update_net_tray() -> None:
+    """Put the current SSH / SFTP / WiFi answer on the network mark. The
+    glyph changes when the link does, so a glance at the bar says whether
+    the device is reachable; the tooltip spells the three lines out."""
+    if api is None:
+        return
+    text = _net_summary()
+    wifi = "WiFi: connected" in text
+    ssh = "SSH:  connected" in text
+    # A filled circle for anything live, a hollow one for none; SSH on top
+    # of WiFi gets the quarter-split disk so the two are told apart.
+    glyph = "\u25d0" if (ssh and wifi) else "\u25cf" if wifi else "\u25cb"
+    api.tabs.set_widget(TAB, "tray_net", "text", glyph)
+    api.tabs.set_widget(TAB, "tray_net", "tooltip", text)
 
 
 def new_desk_folder() -> str:
@@ -1907,6 +2058,8 @@ def start_program(win_id: str) -> None:
         open_calc()
     elif win_id == P_RECYCLE:
         open_recycle()
+    elif win_id == P_BROWSER:
+        open_browser()
     else:
         api.ui.notify(f"BerryVM has no program {win_id!r}.")
 
@@ -3493,6 +3646,80 @@ def open_calc() -> str:
     return P_CALC
 
 
+# --- 9. Internet: the Web Browser window ---
+
+#: The address a fresh browser starts on, and the label the URL bar carries
+#: so the person sees what "no page loaded yet" looks like in the field.
+BROWSER_HOME = "https://www.wikipedia.org"
+
+
+def browser_spec(start_url: str = BROWSER_HOME) -> dict:
+    """One row of furniture over a web leaf: an address field, a Go button
+    beside it, and the QtWebEngine view underneath. The leaf is named
+    ``browser_view`` so a later ``set_widget`` can push a new address into
+    it without rebuilding the whole window."""
+    return {"kind": "column", "children": [
+        {"kind": "row", "children": [
+            {"kind": "line", "id": f"{P_BROWSER}_url",
+             "text": start_url,
+             "placeholder": "Address - press Enter or Go",
+             "on": ["activated"], "expand": True},
+            {"kind": "button", "id": f"{P_BROWSER}_go", "text": "Go",
+             "on": ["clicked"]},
+            {"kind": "button", "id": f"{P_BROWSER}_home", "text": "Home",
+             "on": ["clicked"]},
+        ]},
+        {"kind": "web", "id": f"{P_BROWSER}_view", "url": start_url,
+         "expand": "both"},
+        {"kind": "label", "id": f"{P_BROWSER}_note", "text": "",
+         "word_wrap": True},
+    ]}
+
+
+def open_browser(url: str = "") -> str:
+    """Bring the Web Browser up on the app's main screen. The window is
+    single-instance: a second call raises what is already there and, if a
+    fresh address came with it, points the leaf at the new page."""
+    if api is None:
+        return ""
+    title = CAPTIONS[P_BROWSER]
+    target = str(url or "").strip() or BROWSER_HOME
+    if P_BROWSER in open_window_ids():
+        if url:
+            api.tabs.set_widget(TAB, f"{P_BROWSER}_view", "url", target)
+            api.tabs.set_widget(TAB, f"{P_BROWSER}_url", "text", target)
+        raise_window(P_BROWSER)
+        return P_BROWSER
+    # A browser wants the whole middle of the screen: two default widths
+    # across and one and a half down is roughly a web page's aspect.
+    default_w, default_h = window_size()
+    open_window(_program_entry(P_BROWSER, title, browser_spec(target),
+                                default_w * 2, int(default_h * 1.5)))
+    opened[P_BROWSER] = {"title": title, "kind": "browser"}
+    refresh_taskbar()
+    return P_BROWSER
+
+
+def browser_go() -> None:
+    """Read the URL bar and hand it to the leaf. A bare host without a
+    scheme gets ``https://`` prepended, the same bargain every browser
+    strikes with a hand that forgets to type one."""
+    if api is None:
+        return
+    try:
+        text = str(api.tabs.widget_value(TAB, f"{P_BROWSER}_url",
+                                          "value") or "").strip()
+    except Exception:
+        text = ""
+    if not text:
+        return
+    low = text.lower()
+    if not (low.startswith("http://") or low.startswith("https://")
+            or low.startswith("file://") or low.startswith("about:")):
+        text = "https://" + text
+    api.tabs.set_widget(TAB, f"{P_BROWSER}_view", "url", text)
+
+
 def calc_press(key: str) -> None:
     """One key's arithmetic. ``calc_expr`` is the line as it stands; ``=``
     asks :func:`calc_eval`, which knows only numbers and the four marks, and
@@ -3703,8 +3930,19 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     if event == "clicked" and body in CALC_IDS:
         calc_press(CALC_IDS[body])
         return
-    if event == "clicked" and body in ("tray_net", "tray_snd", "tray_shd"):
+    if event == "clicked" and body in ("tray_net", "tray_wbr"):
         _tray_stub(body)
+        return
+    # 9a. The Web Browser: Go and Home buttons, and Enter on the URL bar.
+    if body == f"{P_BROWSER}_go" and event == "clicked":
+        browser_go()
+        return
+    if body == f"{P_BROWSER}_home" and event == "clicked":
+        api.tabs.set_widget(TAB, f"{P_BROWSER}_url", "value", BROWSER_HOME)
+        api.tabs.set_widget(TAB, f"{P_BROWSER}_view", "url", BROWSER_HOME)
+        return
+    if body == f"{P_BROWSER}_url" and event == "activated":
+        browser_go()
         return
     # 9b. The Recycle Bin window: a row's double-click restores it, and
     # the three buttons below the table do the same thing plus a wipe.

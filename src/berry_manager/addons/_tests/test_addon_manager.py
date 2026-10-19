@@ -1372,6 +1372,175 @@ def test_the_window_moves() -> None:
           "the switch went off and the tab still offers to leave the bar")
 
 
+class _UnloadSpy:
+    """Stand-in for :meth:`AddonManager.unload` on a test world.
+
+    The real unload tears down a worker thread and unwires the addon's api -
+    neither of which a test world has - but the visible effect the tests below
+    care about is that the addon's tabs leave the bar and its ``loaded`` flag
+    comes down. That is all this does, alongside remembering which addon was
+    asked to go so the caller can check the sweep reached only the ids it was
+    supposed to touch.
+    """
+
+    def __init__(self, win: Any) -> None:
+        self.win = win
+        self.calls: list[str] = []
+
+    def __call__(self, addon: Any, reason: str = "disabled") -> None:
+        self.calls.append(str(addon.id))
+        for name in list(addon.tabs):
+            page = addon.tabs[name]["page"]
+            index = self.win.tabs.indexOf(page)
+            if index >= 0:
+                self.win.tabs.removeTab(index)
+            addon.tabs.pop(name, None)
+        addon.loaded = False
+
+
+def _watch_freeze(win: Any) -> list[bool]:
+    """Record every ``setUpdatesEnabled`` call on the fake window's tab bar.
+
+    A PyQt instance happily takes a Python attribute over a Qt method: the
+    instance's ``__dict__`` shadows the class-level descriptor, so
+    ``self.tabs.setUpdatesEnabled(False)`` in :meth:`AddonManager._atomic_sweep`
+    lands here before calling through to the original."""
+    log: list[bool] = []
+    original = win.tabs.setUpdatesEnabled
+
+    def spy(on: bool) -> None:
+        log.append(bool(on))
+        original(on)
+
+    win.tabs.setUpdatesEnabled = spy           # type: ignore[method-assign]
+    return log
+
+
+def test_the_lifecycle() -> None:
+    """The tab bar's lifecycle: what an enable, a disable, a narrowed reload,
+    a whole-world reload and the app's close do to the other addons' tabs.
+
+    A person switching one addon off wants its tab to go and nothing else on
+    the bar to move; installing, Reload or closing the app wants every tab to
+    leave and come back as one transition rather than a cascade; launching a
+    Desktop shortcut for one addon has never been allowed to take the world
+    down with it. The three paths are what this section checks."""
+    print("\n35. disabling one addon leaves every other tab exactly where it was")
+    win, manager, addons = world(names=("hello", "berry"))
+    berry_page = addons["berry"].tabs["Home"]["page"]
+    manager.unload = _UnloadSpy(win)            # type: ignore[method-assign]
+    manager.set_enabled("hello", False)
+    spy = manager.unload                          # type: ignore[assignment]
+    check(spy.calls == ["hello"],
+          f"a single disable reached further than the one addon: {spy.calls}")
+    check(addons["hello"].loaded is False,
+          "the disabled addon was not marked stopped")
+    check(addons["berry"].loaded is True,
+          "the other addon went down with the one that was disabled")
+    check(win.tabs.indexOf(berry_page) >= 0,
+          "a disable took the tab of the addon that was not named")
+    check(win.names() == ["berry Home"],
+          f"the bar kept something other than the one untouched tab: "
+          f"{win.names()}")
+
+    print("\n36. reload(only=[a]) leaves an untouched addon's tab and object alone")
+    win, manager, addons = world(names=("hello", "berry"))
+    berry_page = addons["berry"].tabs["Home"]["page"]
+    unload_spy = _UnloadSpy(win)
+    manager.unload = unload_spy                   # type: ignore[method-assign]
+    load_calls: list[str] = []
+
+    def fake_load(addon: Any, later: bool = False) -> bool:
+        load_calls.append(str(addon.id))
+        addon.loaded = True
+        return True
+
+    manager.load = fake_load                      # type: ignore[method-assign]
+    # Re-scan hands back a fresh record for the narrowed id and the very
+    # same object for the untouched one, so the merge is visible.
+    fresh_hello = make_addon("hello")
+    manager.scan = lambda: [fresh_hello, addons["berry"]]  # type: ignore[assignment]
+    manager.refresh_rows = lambda: None           # type: ignore[method-assign]
+    manager._restore_window_tabs = lambda: None   # type: ignore[method-assign]
+    manager._reactivate_tab = lambda _caption: None  # type: ignore[method-assign]
+    manager.reload(only=["hello"], force=True)
+    check(unload_spy.calls == ["hello"],
+          f"a narrowed reload touched an addon that was not named: "
+          f"{unload_spy.calls}")
+    check(load_calls == ["hello"],
+          f"a narrowed reload started an addon it did not name: {load_calls}")
+    keeper = next(item for item in manager.addons if item.id == "berry")
+    check(keeper is addons["berry"],
+          "a narrowed reload turned an untouched addon into a fresh object")
+    check(win.tabs.indexOf(berry_page) >= 0,
+          "a narrowed reload took the untouched addon's tab away")
+    check(addons["berry"].loaded is True,
+          "a narrowed reload stopped an addon that was not named")
+
+    print("\n37. a whole-world reload freezes the tab widget exactly once")
+    win, manager, addons = world(names=("hello", "berry"))
+    transitions = _watch_freeze(win)
+    unload_spy = _UnloadSpy(win)
+    manager.unload = unload_spy                   # type: ignore[method-assign]
+    # The two addons were made enabled by ``world()`` before ``apply_record``
+    # overrode that with an empty profile record; put them back for the
+    # reload's own enable filter to see, and stub ``apply_record`` so it
+    # cannot undo it again mid-sweep.
+    addons["hello"].enabled = addons["berry"].enabled = True
+    manager.apply_record = lambda _a: None        # type: ignore[method-assign]
+    manager.scan = lambda: [addons["hello"], addons["berry"]]  # type: ignore[assignment]
+    started: list[str] = []
+
+    def fake_load_note(addon: Any, later: bool = False) -> Any:
+        started.append(str(addon.id))
+        return None
+
+    manager._load_note = fake_load_note           # type: ignore[method-assign]
+    manager._wait_boot = lambda _ws: None         # type: ignore[method-assign]
+    manager.refresh_rows = lambda: None           # type: ignore[method-assign]
+    manager._restore_window_tabs = lambda: None   # type: ignore[method-assign]
+    manager._reactivate_tab = lambda _caption: None  # type: ignore[method-assign]
+    manager.reload()
+    check(transitions == [False, True],
+          f"a whole-world reload did not freeze the bar exactly once: "
+          f"{transitions}")
+    check(sorted(unload_spy.calls) == ["berry", "hello"],
+          f"a whole-world reload did not unload both addons: {unload_spy.calls}")
+    check(sorted(started) == ["berry", "hello"],
+          f"a whole-world reload did not start both addons: {started}")
+
+    print("\n38. the atomic sweep lifts the freeze even when the work raises")
+    win, manager, _addons = world(names=("hello",))
+    transitions = _watch_freeze(win)
+
+    def boom() -> None:
+        raise RuntimeError("a whole-world job that fails")
+
+    try:
+        manager._atomic_sweep(boom)
+    except RuntimeError:
+        pass
+    check(transitions == [False, True],
+          f"a sweep that raised did not lift the freeze: {transitions}")
+
+    print("\n39. shutdown_all sweeps once, not one freeze per addon")
+    win, manager, addons = world(names=("hello", "berry"))
+    transitions = _watch_freeze(win)
+    closed: list[str] = []
+
+    def fake_unload(addon: Any, reason: str = "disabled") -> None:
+        closed.append(str(addon.id))
+        addon.loaded = False
+
+    manager.unload = fake_unload                  # type: ignore[method-assign]
+    manager.shutdown_all()
+    check(sorted(closed) == ["berry", "hello"],
+          f"shutdown_all did not take both loaded addons down: {closed}")
+    check(transitions == [False, True],
+          f"shutdown_all did not sweep the tab bar as one transition: "
+          f"{transitions}")
+
+
 #: How long a requester is told to wait for the app, and how long the fake app
 #: keeps one answer back: the wait has to run out first, since the point of the
 #: pair is an answer that arrives after nobody is asking any more.
@@ -1531,6 +1700,7 @@ def main() -> int:
     test_the_rows_from_the_app()
     test_the_button_in_settings()
     test_the_window_moves()
+    test_the_lifecycle()
     test_the_pipe(addon_client)
 
     if FAILURES:
