@@ -157,6 +157,93 @@ def test_silent_repaint(api: Any) -> None:
           "wearing a switch")
 
 
+# --- four: the store's ACTUAL shelf is a grid of tiles, not a table ---
+
+def _store_grid(api: Any, events: list) -> Any:
+    """The store's list shelf exactly as its tab_spec() declares it: a grid.
+
+    This is the widget the store really builds - ``kind: list, grid: True`` -
+    a QListWidget whose tiles are QListWidgetItem, not the QTreeWidget the
+    sections above stand in for. A QListWidgetItem's ``setCheckState`` and
+    ``checkState`` take NO column, and a v1.6.x store drove them as if they
+    were table rows, so an install died on the final repaint with
+    ``setCheckState(self, state): argument 1 has unexpected type 'int'``.
+    """
+    def emit(identifier: str, event: str, payload: dict) -> None:
+        events.append((identifier, event, payload))
+
+    spec = {"kind": "list", "id": "list", "grid": True,
+            "icon_size": 64, "tile_width": 150, "spacing": 10,
+            "font_size": 10, "multi": True, "checkbox": 0,
+            "on": ["selected", "context", "toggled"]}
+    widget, _registry = api.build_spec(spec, events=emit)
+    return widget
+
+
+def test_grid_repaint(app: Any, api: Any) -> None:
+    print("\n4. grid tiles laying a tick down do not raise (the install crash)")
+    from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
+
+    events: list = []
+    grid = _store_grid(api, events)
+    check(grid is not None, "the store's grid spec built")
+    events.clear()                       # forget the build itself
+    rows = _store_rows()
+    raised = ""
+    try:
+        api.apply_widget_property(grid, "rows", rows)
+    except Exception as error:                    # noqa: BLE001 - the crash itself
+        raised = f"{type(error).__name__}: {error}"
+    check(not raised,
+          f"laying a ticked tile down raised, which is the install crash: "
+          f"{raised!r}")
+    if raised:
+        return
+    check(grid.count() == len(rows),
+          f"only {grid.count()} of {len(rows)} tiles landed")
+    # A repaint sets ticks behind the silent flag: nothing is reported.
+    flips = [item for item in events if item[1] == "toggled"]
+    check(not flips, f"a tile repaint reported {len(flips)} tick flips")
+    # The ticks the store said are the ticks the tiles wear.
+    check(grid.item(0).checkState() == api.Qt.CheckState.Checked,
+          "a ticked tile was not laid down ticked")
+    check(grid.item(1).checkState() == api.Qt.CheckState.Unchecked,
+          "a switched-off tile came back ticked")
+    # Show it and paint it, which is where a compiled store actually dies.
+    holder = QTabWidget()
+    pane = QWidget()
+    QVBoxLayout(pane).addWidget(grid)
+    holder.addTab(pane, "store")
+    holder.resize(600, 400)
+    holder.show()
+    app.processEvents()
+    grid.grab()
+    app.processEvents()
+    check(True, "the tiles painted after a ticked repaint without raising")
+    holder.close()
+
+
+def test_grid_flip(api: Any) -> None:
+    print("\n5. a tile flipped by hand comes back as one toggled event")
+    events: list = []
+    grid = _store_grid(api, events)
+    api.apply_widget_property(grid, "rows", _store_rows())
+    events.clear()
+    grid.item(0).setCheckState(api.Qt.CheckState.Unchecked)
+    flips = [item for item in events if item[1] == "toggled"]
+    check(len(flips) == 1,
+          f"flipping a tile reported {len(flips)} events, not one (a tile's "
+          "itemChanged carries no column)")
+    if flips:
+        ident, _event, payload = flips[0]
+        look(f"{ident}: {payload}")
+        check(ident == "list" and payload.get("text") == "Berry Terminal\u2713",
+              f"the flip named the wrong tile: {payload.get('text')!r}")
+        check(payload.get("checked") is False, "an unticked tile read as ticked")
+        check(payload.get("cells") == ["Berry Terminal\u2713", "1.2", "installed"],
+              f"the flip lost the tile's line: {payload.get('cells')}")
+
+
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
@@ -176,6 +263,8 @@ def main() -> int:
     test_paint(app, api)
     test_flip(api)
     test_silent_repaint(api)
+    test_grid_repaint(app, api)
+    test_grid_flip(api)
     app.processEvents()
 
     if FAILURES:

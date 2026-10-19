@@ -1203,7 +1203,10 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
         # with "check": the same report a table row gives, so an addon acts
         # on the entry without a second round trip. A repaint sets the ticks
         # behind the silent flag and is never reported.
-        def _tile_toggled(item, _col):
+        # QListWidget.itemChanged hands over the tile alone, with no column,
+        # so the handler takes just the item; checkState() likewise reads the
+        # tile's one tick with no column.
+        def _tile_toggled(item):
             if getattr(widget, "_addon_check_silent", False):
                 return
             if not item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
@@ -1214,7 +1217,7 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
                      else [str(item.text() or "").split("\n")[0]])
             events(identifier, "toggled", {
                 "text": cells[0] if cells else "",
-                "checked": item.checkState(0) == Qt.CheckState.Checked,
+                "checked": item.checkState() == Qt.CheckState.Checked,
                 "cells": cells})
         widget.itemChanged.connect(_tile_toggled)
     if "returned" in names and isinstance(widget, QLineEdit):
@@ -2574,7 +2577,9 @@ def _place_grid_tile(listing: QListWidget, row: Any) -> None:
         # Only a tile that says so wears a tick: the store switches the
         # addons it can act on and leaves the rest plain.
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setCheckState(0, Qt.CheckState.Checked if data.get("check")
+        # A tile is a QListWidgetItem, whose setCheckState takes the state
+        # alone - there is no column to name - unlike a table row's item.
+        item.setCheckState(Qt.CheckState.Checked if data.get("check")
                            else Qt.CheckState.Unchecked)
     listing.addItem(item)
 
