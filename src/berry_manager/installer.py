@@ -1912,9 +1912,31 @@ class InstallerCard(QWidget):
     def _close_or_cancel(self) -> None:
         self._leave()
 
+    def _reap_aboard(self) -> None:
+        """Wait out every probe this card overtook, so none dies mid-run.
+
+        Retargeting the git fields parks a still-asking probe in ``_ABOARD`` to
+        keep it referenced until it lands unheard. On the way out any that has
+        not landed would otherwise be destroyed while running, which is a Qt
+        abort the crash dialog never sees - so each is given the same patience
+        the live one gets, then let go.
+        """
+        for probe in list(_ABOARD):
+            try:
+                if not probe.wait(NEWEST_WAIT_MS):
+                    probe.terminate()
+                    probe.wait(NEWEST_WAIT_MS)
+            except RuntimeError:
+                pass                        # it landed and was already deleted
+            try:
+                _ABOARD.remove(probe)
+            except ValueError:
+                pass
+
     def closeEvent(self, event) -> None:           # noqa: N802 - Qt's name
         self._stop_probe()
         self._stop_gprobe()
+        self._reap_aboard()
         if self._worker is not None and self._worker.isRunning() \
                 and not self._leaving:
             event.ignore()

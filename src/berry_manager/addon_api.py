@@ -1378,6 +1378,26 @@ def _context_text(item: Any) -> str:
     return str(getattr(item, "text", "") or "")
 
 
+def _selected_text(item: Any) -> str:
+    """The one line that names a picked row, whichever kind of row it is.
+
+    A table row is read by column and its first column is its name; a grid
+    tile holds its whole stack in ``text()``, which takes no column at all -
+    asking it for column 0 raises ``TypeError: text(self): too many
+    arguments`` rather than answering. This is what the ``selected`` read hands
+    back to an addon, so it has to be the plain name - the first line - exactly
+    as a pick event already reports it, and it must never throw on the tile
+    shape a store shelf is laid out as.
+    """
+    getter = getattr(item, "text", None)
+    if not callable(getter):
+        return str(item)
+    try:
+        return str(getter(0) or "")
+    except TypeError:                        # a grid tile takes no column
+        return str(getter() or "").split("\n")[0]
+
+
 # --- syntax highlighting for a ``multi``: an addon only names a language ---
 
 def _hl_format(color: str, bold: bool = False, italic: bool = False) -> QTextCharFormat:
@@ -3393,11 +3413,7 @@ def read_widget_value(widget: QWidget, what: str = "value") -> Any:
         return out
     if what == "selected":
         if hasattr(widget, "selectedItems"):
-            out = []
-            for item in widget.selectedItems():
-                text = getattr(item, "text", None)
-                out.append(text(0) if callable(text) else str(item))
-            return out
+            return [_selected_text(item) for item in widget.selectedItems()]
         return None
     if what in ("index", "current"):
         # The page a ``tabs`` container shows, or a combo's entry.

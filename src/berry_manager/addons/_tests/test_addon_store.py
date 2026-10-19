@@ -3178,6 +3178,51 @@ def test_the_job_view(store: Any) -> None:
 
 # --- run it ---
 
+# --- the store's own read of a picked row, against the real Qt widgets ---
+
+def test_the_selection_read() -> None:
+    """Reading the picked row back must not choke on a tile's no-argument text().
+
+    The store looks its selection up through ``addon_api.read_widget_value`` with
+    ``"selected"``, which walks ``selectedItems()`` and reads each item's name. A
+    table row is read by column, but a grid tile's ``text()`` takes no column and
+    raises if handed one - which is how picking a tile made Install, Update and
+    Delete do nothing at all. Both shapes are read here for what they actually
+    answer, and neither is allowed to throw.
+    """
+    print("\n3h. a picked row is read back whole, tile or table row")
+    global _QT_APP
+    try:
+        import addon_api
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import (QApplication, QListWidget, QListWidgetItem,
+                                     QTreeWidget, QTreeWidgetItem)
+    except Exception as error:                      # noqa: BLE001 - Qt is optional
+        look(f"no Qt here, so the selection read is not driven: {error}")
+        return
+    _QT_APP = QApplication.instance() or QApplication([])
+
+    shelf = QListWidget()
+    tile = QListWidgetItem("Hello from the store  \u25cf new\n1.0\nneeds download")
+    tile.setData(Qt.ItemDataRole.UserRole,
+                 ["Hello from the store  \u25cf new", "1.0", "needs download"])
+    shelf.addItem(tile)
+    tile.setSelected(True)
+    got = addon_api.read_widget_value(shelf, "selected")
+    check(isinstance(got, (list, tuple)) and len(got) == 1
+          and got[0] == "Hello from the store  \u25cf new",
+          f"a tile's pick was not read back as its plain name: {got!r}")
+
+    table = QTreeWidget()
+    table.setColumnCount(3)
+    row = QTreeWidgetItem(["Odd", "2.0", "installed"])
+    table.addTopLevelItem(row)
+    row.setSelected(True)
+    got2 = addon_api.read_widget_value(table, "selected")
+    check(isinstance(got2, (list, tuple)) and len(got2) == 1 and got2[0] == "Odd",
+          f"a table row's pick was not read as its first column: {got2!r}")
+
+
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         # The Test pane wants it live; and a Windows console often speaks
@@ -3195,6 +3240,7 @@ def main() -> int:
     test_the_tab(store)
     test_the_layout(store)
     test_the_pane(store)
+    test_the_selection_read()
     test_installed(store)
     test_the_updates(store)
     test_the_switches(store)
