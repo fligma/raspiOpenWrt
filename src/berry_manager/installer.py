@@ -1303,9 +1303,14 @@ class InstallerCard(QWidget):
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
 
-        # The newest release this setup can find, named on the form before
-        # anything is pressed - what "Install" would actually bring down.
-        self.newest = QLabel("checking for the newest release...", page)
+        # The version "Install" would actually bring down, named on the
+        # form before anything is pressed. Only the number is shown: the
+        # card is not a changelog, and a person scanning for "what will
+        # this put on my disk" wants one answer, not a sentence around it.
+        # The setup's own version is the floor - it is what lands when the
+        # probe cannot reach GitHub - so it goes up first and is corrected
+        # by ``_on_newest`` when the probe answers.
+        self.newest = QLabel(f"V{_readable(APP_VERSION)}", page)
         self.newest.setObjectName("splashStep")
         self.newest.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.newest.setWordWrap(True)
@@ -1697,13 +1702,16 @@ class InstallerCard(QWidget):
                 old.deleteLater()
         owner = self.owner_edit.text().strip() or OWNER
         repo = self.repo_edit.text().strip() or REPO
-        self.newest.setText("checking for the newest release...")
+        # The label keeps the setup's own version while the probe runs:
+        # that is what would land if the probe never answers, and a "check-
+        # ing..." line on a form that promises only a number is noise.
+        self.newest.setText(f"V{_readable(APP_VERSION)}")
         self._gprobe = GitHubProbe(owner, repo)
         self._gprobe.answered.connect(self._on_newest)
         self._gprobe.start()
 
     def _on_newest(self, text: str) -> None:
-        """A release probe's answer: the newest the setup can find, by name."""
+        """A release probe's answer: the version Install will bring down."""
         if self._worker is not None:
             return            # a job owns the card now; the label waits for none
         if not text:
@@ -1711,7 +1719,7 @@ class InstallerCard(QWidget):
             # a probe that died trying): the version this setup itself carries
             # is the newest one the machine has any word on.
             text = _readable(APP_VERSION)
-        self.newest.setText(f"Newest release I can find: V{text}")
+        self.newest.setText(f"V{text}")
 
     def _stop_gprobe(self) -> None:
         """End a release probe: a QThread deleted while it still runs is a crash."""

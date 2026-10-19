@@ -272,6 +272,13 @@ class Api(addon_client.StubAPI):
                 return arguments[3]
         return None
 
+    def sets_count(self, identifier: str, prop: str) -> int:
+        """How many times this id was told this property since the last
+        ``run_clear`` - what a skip-path check reads as a write count."""
+        return sum(1 for where, arguments, _k in self.calls
+                   if where == "tabs.set_widget" and len(arguments) >= 4
+                   and arguments[1] == identifier and arguments[2] == prop)
+
     def open_entry(self, win_id: str) -> dict:
         """The last ``open_window`` descriptor this id was handed: the test
         reads its ``chrome``, ``lower``, ``min_size`` and ``spec``."""
@@ -323,8 +330,8 @@ def test_manifest(addon: Any, api: Api) -> None:
     print("\n1. what the addon says it is")
     check(str(addon.ADDON.get("name")) == "BerryVM",
           f"the name the store shows: {addon.ADDON.get('name')!r}")
-    check(str(addon.ADDON.get("version")) == "2.0",
-          f"the shipped version is 2.0: {addon.ADDON.get('version')!r}")
+    check(str(addon.ADDON.get("version")) == "2.2",
+          f"the shipped version is 2.2: {addon.ADDON.get('version')!r}")
     check(str(addon.ADDON.get("api")) == "1", "the api version is 1")
     check(sorted(addon.ADDON.get("requires") or []) == ["sftp", "ssh"],
           f"both transports are declared: {addon.ADDON.get('requires')!r}")
@@ -344,8 +351,8 @@ def test_manifest(addon: Any, api: Api) -> None:
     ids = [pid for pid, _cap in addon.PROGRAMS]
     check(ids == [addon.P_EXPLORER, addon.P_NOTEPAD, addon.P_VIEWER,
                   addon.P_CONSOLE, addon.P_MAIN, addon.P_MACHINES,
-                  addon.P_SETTINGS, addon.P_CALC],
-          f"the desktop ships eight programs in order: {ids}")
+                  addon.P_SETTINGS, addon.P_CALC, addon.P_RECYCLE],
+          f"the desktop ships nine programs in order: {ids}")
     check(addon.CAPTIONS[addon.P_EXPLORER] == "My Computer",
           "the file manager wears the XP name")
 
@@ -548,6 +555,31 @@ def test_desktop_and_taskbar(addon: Any, api: Api) -> None:
           "My Computer's button wears the computer mark")
     check(addon.icon_for(addon.P_CALC) == addon.ICON_CALC,
           "and the calculator's wears its own")
+    # The rewrite guard: dragging a window re-runs the taskbar refresh on
+    # every mouse move, and none of it changes a button - so a refresh that
+    # changes nothing must rewrite nothing, while a window coming and going
+    # still moves the bar for real.
+    writes = api.sets_count(addon.TASK_LIST, "items")
+    addon.refresh_taskbar()
+    addon.refresh_taskbar()
+    check(api.sets_count(addon.TASK_LIST, "items") == writes,
+          "a taskbar refresh with nothing changed rewrote the row anyway")
+    api.windows.remove(addon.P_CALC)
+    addon.on_widget(addon.TAB, addon.P_CALC, "closed", {"by": "user"})
+    check(api.sets_count(addon.TASK_LIST, "items") == writes + 1,
+          "closing a window did not land exactly one new row")
+    drawn = api.last_set(addon.TASK_LIST, "items") or []
+    texts = [row.get("text") for row in drawn]
+    check(addon.caption_for(addon.P_CALC) not in texts
+          and addon.caption_for(addon.P_EXPLORER) in texts,
+          f"the bar lost the closed window and kept the other: {texts}")
+    addon.start_program(addon.P_CALC)
+    check(api.sets_count(addon.TASK_LIST, "items") == writes + 2,
+          "reopening a program did not get the bar rewritten")
+    drawn = api.last_set(addon.TASK_LIST, "items") or []
+    check(addon.caption_for(addon.P_CALC)
+          in [row.get("text") for row in drawn],
+          "and its button came back")
 
 
 def test_menus(addon: Any, api: Api) -> None:
@@ -1119,6 +1151,17 @@ def fresh(api: Api) -> None:
     addon_module.console_seq = 0
     addon_module.calc_expr = ""
     addon_module.home_ready = False
+    # The taskbar's skip-when-unchanged signature and the tray clock's last
+    # written text are module state too; a fresh section has to be able to
+    # paint its first row, not be told it already showed it.
+    addon_module._taskbar_shown = ()
+    addon_module._clock_shown = None
+    addon_module._desk_positions = {}
+    addon_module._desk_renames = {}
+    addon_module._desk_recycled = []
+    addon_module.minimized = {}
+    addon_module.attention = {}
+    addon_module._flash_on = False
     api.windows = []
     api.titles = {}
     api.form = {}

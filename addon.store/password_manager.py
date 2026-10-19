@@ -62,7 +62,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Password manager",
-    "version": "1.2",
+    "version": "1.3",
     "author": "fligma",
     "description": "Keeps logins in one encrypted file on this computer - no device, "
                    "no cloud - unlocked for the session with a master password, with "
@@ -1634,22 +1634,39 @@ def wipe_clipboard() -> None:
 
 # --- the clock that locks the vault ---
 
-def lock_due(now: float | None = None) -> bool:
-    """Whether the idle switch says the vault should be shut by now."""
-    minutes = number("auto_lock_minutes", DEFAULTS["auto_lock_minutes"])
-    if not is_open() or minutes <= 0:
+def lock_due(now: float | None = None,
+             minutes: int | None = None) -> bool:
+    """Whether the idle switch says the vault should be shut by now.
+
+    A shut vault is never due, and that answer needs no config at all; the
+    switch is only read for an open one, and the caller that has read it can
+    hand the number in so one tick asks for it once.
+    """
+    if not is_open():
+        return False
+    if minutes is None:
+        minutes = number("auto_lock_minutes", DEFAULTS["auto_lock_minutes"])
+    if minutes <= 0:
         return False
     waited = (time.monotonic() if now is None else float(now)) - last_touch
     return waited >= minutes * 60
 
 
 def tick() -> None:
-    """The lock check the app keeps asking for, and the one line it leaves behind."""
+    """The lock check the app keeps asking for, and the one line it leaves behind.
+
+    The vault is shut for most of any session, and a shut vault has nothing to
+    lock, so the tick stops there without reading anything; an open one asks
+    for the idle switch once, and that one answer serves the decision and the
+    sentence about it alike.
+    """
     if api is None:
         return
-    if not lock_due():
+    if not is_open():
         return
     minutes = number("auto_lock_minutes", DEFAULTS["auto_lock_minutes"])
+    if not lock_due(minutes=minutes):
+        return
     lock(quiet=True)
     say(f"the vault locked itself after {minutes} minute(s) without a press")
 

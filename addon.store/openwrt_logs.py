@@ -14,7 +14,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "OpenWrt Log Viewer",
-    "version": "3.2",
+    "version": "3.3",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],
@@ -162,6 +162,16 @@ api = None
 _single_entries: list[dict] = []
 _multi_entries: list[dict] = []
 _multi_failed: dict[str, str] = {}
+
+#: The log text each view last showed, or None before its first fetch.
+#: Auto-refresh reads the ring buffer again and again; a device whose log
+#: has not grown gets the same text back, and nothing on screen has to move.
+_single_raw: str | None = None
+_multi_raw: tuple | None = None
+
+#: What the filter combos were last offered, keyed by tab and prefix; the
+#: word scan over the whole log only runs again for words actually new.
+_combo_items: dict[str, dict] = {}
 
 #: Passwords for this session, keyed by (host, username). Never stored.
 _passwords: dict[tuple, str] = {}
@@ -489,9 +499,9 @@ def init(plugin_api: Any) -> None:
 
     api.events.on("tab_changed", _on_tab_changed)
     _arm_refresh()
-    api.log("OpenWrt Log Viewer v2.6 initialized (the tab wears its own "
-            "picture, device colours painted into the rows, colour wheel "
-            "with a self-filling hex line, faint white search overlay).")
+    api.log(f"OpenWrt Log Viewer v{ADDON['version']} initialized (the tab wears "
+            "its own picture, device colours painted into the rows, colour "
+            "wheel with a self-filling hex line, faint white search overlay).")
 
 
 def shutdown() -> None:
@@ -597,11 +607,18 @@ def fetch_logs() -> None:
 
 
 def _got_single(result: dict) -> None:
-    global _single_entries
+    global _single_entries, _single_raw
     if int(result.get("code", -1)) != 0:
         api.error(f"Could not read the log: {result.get('err') or 'command failed'}")
         return
-    _single_entries = make_entries(str(result.get("out", "")).splitlines())
+    raw = str(result.get("out", ""))
+    if raw == _single_raw:
+        # The buffer holds exactly what is on screen already: filters and
+        # order are read off the controls at render time, so there is truly
+        # nothing new to parse, repaint or announce.
+        return
+    _single_raw = raw
+    _single_entries = make_entries(raw.splitlines())
     _update_filter_items(ONE_TAB, "s_", _single_entries)
     render_single()
     api.ui.notify(f"Read {len(_single_entries)} log lines.")
@@ -725,11 +742,26 @@ def _check_poll() -> None:
 
 def _finish_poll() -> None:
     """Every answer is in: merge the logs, newest first, each device in its colour."""
-    global _poll, _multi_entries, _multi_failed
+    global _poll, _multi_entries, _multi_failed, _multi_raw
     if _poll is not None:
         _stop(_poll.get("timer"))
     results = dict(_poll["results"]) if _poll else {}
     _poll = None
+    try:
+        signature = tuple(
+            (str(int((results.get(_label(conn)) or {}).get("code", -1))),
+             str((results.get(_label(conn)) or {}).get("out", "")))
+            if results.get(_label(conn)) is not None else None
+            for conn in _connections())
+    except (TypeError, ValueError):
+        # A code this check cannot read as a number is not a reason to skip
+        # a refresh; the merge below reports it the way it always has.
+        signature = None
+    if signature == _multi_raw:
+        # Every device answered with the text already merged on screen;
+        # re-parsing and re-painting the merged table would show the same rows.
+        return
+    _multi_raw = signature
     entries: list[dict] = []
     failed: dict[str, str] = {}
     for conn in _connections():
@@ -767,12 +799,24 @@ def _update_filter_items(tab: str, prefix: str, entries: list[dict],
     def items(words: list[str]) -> list[str]:
         return ["All"] + words
 
-    api.tabs.set_widget(tab, prefix + "iface", "items", items(iface_words(entries)))
-    api.tabs.set_widget(tab, prefix + "proc", "items", items(proc_words(entries)))
-    api.tabs.set_widget(tab, prefix + "mac", "items", items(mac_words(entries)))
-    api.tabs.set_widget(tab, prefix + "ip", "items", items(ip_words(entries)))
+    built = {
+        prefix + "iface": items(iface_words(entries)),
+        prefix + "proc": items(proc_words(entries)),
+        prefix + "mac": items(mac_words(entries)),
+        prefix + "ip": items(ip_words(entries)),
+    }
     if device_items is not None:
-        api.tabs.set_widget(tab, prefix + "device", "items", device_items)
+        built[prefix + "device"] = device_items
+    # Each combo's scan over the whole log still runs - the words come from
+    # the entries, not from what was shown - but a combo already offered
+    # these exact items is not written again, so an unchanged refresh costs
+    # no per-combo rebuild.
+    seen = _combo_items.setdefault(tab + "|" + prefix, {})
+    for identifier, offer in built.items():
+        if seen.get(identifier) == offer:
+            continue
+        seen[identifier] = offer
+        api.tabs.set_widget(tab, identifier, "items", offer)
 
 
 def _search_matcher(term: str) -> Callable[[Any], bool] | None:

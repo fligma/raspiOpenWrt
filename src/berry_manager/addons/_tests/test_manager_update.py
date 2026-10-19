@@ -475,6 +475,10 @@ def fresh(upd: Any, config: dict | None = None, version: str = "0x1.0x6.0x0",
     upd.opened.clear()
     upd.notes.clear()
     upd.slot_names.clear()
+    # A fresh stub has seen no writes: the pane's skip-when-unchanged memo has
+    # to be empty too, or a section's first paint would be told it already said
+    # what this api has never been told.
+    upd.slot_words.clear()
     upd.filling = False
     upd.announced.clear()
     if ask:

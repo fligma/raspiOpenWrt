@@ -27,7 +27,7 @@ from addon_common import AddonError, find_addon_picture      # the Qt-free half 
 
 ADDON = {
     "name": "Berry file manager",
-    "version": "1.4",
+    "version": "1.5",
     "author": "fligma",
     "description": "A device-and-local file manager with a notepad-style editor: "
                    "browse both sides in one tab, edit files with syntax "
@@ -54,6 +54,11 @@ editing: dict | None = None   # {"side","path","text","detected"}
 _places_guard: bool = False   # set while repopulating a Places combo
 
 STATE: dict[str, dict] = {}
+#: The rows each page's table was last told to wear. Pressing Refresh, or a
+#: config reload syncing both pages, re-lists a folder that has most likely not
+#: changed; rebuilding a table the widget already holds is a whole layout pass
+#: to say nothing new, so an unchanged listing is left where it is.
+_drawn: dict[str, list] = {}
 
 
 def _fresh_state() -> dict:
@@ -682,7 +687,9 @@ def render(side: str) -> None:
             row.append(_mode(entry))
         row.append(str(entry.get("path") or ""))
         rows.append(row)
-    api.tabs.set_widget(TAB, pid(side, "files"), "rows", rows)
+    if _drawn.get(side) != rows:
+        _drawn[side] = rows
+        api.tabs.set_widget(TAB, pid(side, "files"), "rows", rows)
 
 
 def selected(side: str) -> dict | None:
@@ -1489,6 +1496,7 @@ def shutdown() -> None:
     clip = None
     editing = None
     STATE = {}
+    _drawn.clear()
 
 
 def _sync_chrome(side: str) -> None:
@@ -1526,6 +1534,10 @@ def on_profile_changed(payload: dict) -> None:
     st(DEVICE)["cwd"] = default_root()
     api.tabs.set_widget(TAB, pid(DEVICE, "path"), "value", st(DEVICE)["cwd"])
     api.tabs.set_widget(TAB, pid(DEVICE, "files"), "rows", [])
+    # The table was emptied behind the memo's back; it now holds nothing, and
+    # the next listing of the new device has to be written even if an old page
+    # once wore these very rows.
+    _drawn[DEVICE] = []
     say("profile changed - press Go to list the new device", side=DEVICE)
 
 

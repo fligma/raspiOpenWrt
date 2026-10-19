@@ -319,6 +319,13 @@ def test_window_body_name(api: Any) -> None:
     ]}
     canvas, _registry = api.build_spec(spec)
     check(canvas is not None, "the desktop canvas built with its layer")
+    # The canvas paints its wallpaper from a stylesheet rule, and Qt only
+    # fills a bare QWidget subclass's background when it carries this
+    # attribute - without it the desktop came out black.
+    from PyQt6.QtCore import Qt
+    check(canvas.testAttribute(Qt.WidgetAttribute.WA_StyledBackground) is True,
+          "the desktop canvas does not paint its stylesheet background, so "
+          "a wallpaper set on it never shows")
     frame = canvas._addon_windows["frames"].get("icons")
     check(frame is not None, "the chromeless window did not open")
     if frame is None:
@@ -357,6 +364,288 @@ def test_zoom_ladder() -> None:
           f"an old 150 zoom did not clamp down: {const.step_zoom(150, 0)}")
 
 
+# --- nine: the icon cache answers twice from one decoding ---
+
+def test_icon_cache(api: Any) -> None:
+    """A repaint that re-asks for a mark gets the same QIcon back.
+
+    A taskbar or a store shelf lays the same pictures down on every
+    refresh, and decoding and scaling the same SVG each time is repaint
+    work nobody asked for. The cache must hand back the very same icon -
+    not a re-decoded look-alike - and what it hands back must still paint
+    at the size the old code built.
+    """
+    print("\n9. the same icon source builds one mark, kept between calls")
+    mark = ('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">'
+            '<rect width="32" height="32" fill="#2b8aa8"/></svg>')
+    first = api.build_icon(mark)
+    check(first is not None, "the svg text did not build an icon at all")
+    if first is None:
+        return
+    check(api.build_icon(mark) is first,
+          "a second build of the same source decoded again instead of caching")
+    shot = first.pixmap(64, 64)
+    check(shot is not None and shot.isNull() is False
+          and shot.width() <= 64 and shot.height() <= 64,
+          f"the cached icon no longer paints whole: {shot}")
+    check(api.build_icon("") is None and api.build_icon(None) is None,
+          "a blank source grew an icon it was never given")
+
+
+# --- ten: a cached config read stays true to its file ---
+
+def test_config_cache() -> None:
+    """The parse cache is keyed on the file's own stamp, not on hope.
+
+    Every addon's ``config.get`` funnels through ``read_config_cached``,
+    which remembers the parsed file between calls. The bargain is that a
+    hand edit between two reads still comes back fresh, that the answer
+    handed out is a copy the caller may merge into, and that a write
+    through the API drops the old reading at once.
+    """
+    print("\n10. the config cache follows the file, hand edits included")
+    import tempfile
+    from pathlib import Path
+
+    import addon_common
+
+    with tempfile.TemporaryDirectory(prefix="rowcheck-config-") as folder:
+        path = Path(folder) / "config.json"
+        addon_common.write_config_json(path, {"theme": "bliss"})
+        check(addon_common.read_config_cached(path) == {"theme": "bliss"},
+              "the first read of a fresh config did not come back")
+        check(addon_common.read_config_cached(path) == {"theme": "bliss"},
+              "the cached second read changed the answer")
+        # A hand edit, not through the API: different bytes, a different
+        # size, and the next read has to see them.
+        path.write_text('{"theme": "classic", "extra": 1}\n',
+                        encoding="utf-8")
+        check(addon_common.read_config_cached(path)
+              == {"theme": "classic", "extra": 1},
+              "a hand-edited config did not reach the next read")
+        # The answer is a copy: merging into it must not poison the cache
+        # for the next caller, who expects the file's own words.
+        held = addon_common.read_config_cached(path)
+        held["theme"] = "poisoned"
+        check(addon_common.read_config_cached(path)
+              == {"theme": "classic", "extra": 1},
+              "the cached reading was shared out, not copied")
+        addon_common.write_config_json(path, {"theme": "zune"})
+        check(addon_common.read_config_cached(path) == {"theme": "zune"},
+              "a write through the API left an old reading in place")
+
+
+# --- eleven: a free-movement grid seats tiles by name and reports a drop ---
+
+def test_grid_movement_and_rename(api: Any) -> None:
+    """The desktop icon layer's own primitives: draggable tiles, inline
+    rename, and a saved position on each row.
+
+    BerryVM's icon layer is a ``kind: list`` grid built with
+    ``movement: free`` and ``renamable: True``. Qt's default is a Static
+    grid that snaps every tile back; the free movement lets the person
+    drag one anywhere, and the tile's row can carry a ``pos`` that gets
+    it put back where it was. A rename is fired through ``itemChanged``
+    as a display-role mismatch; the event the addon wants is ``renamed``,
+    and cells are the tile's shown caption."""
+    print("\n11. a free-movement grid drags, renames and lands at a ``pos``")
+    from PyQt6.QtWidgets import QListView, QListWidget
+    from PyQt6.QtCore import Qt
+
+    events: list = []
+
+    def emit(identifier: str, event: str, payload: dict) -> None:
+        events.append((identifier, event, payload))
+
+    spec = {"kind": "list", "id": "icons", "grid": True,
+            "icon_size": 32, "tile_width": 60, "spacing": 6,
+            "movement": "free", "renamable": True,
+            "on": ["activated", "moved", "renamed"]}
+    grid, _registry = api.build_spec(spec, events=emit)
+    check(grid is not None, "the free-movement grid spec built")
+    check(grid.movement() == QListView.Movement.Free,
+          "movement: free did not put the list in free mode")
+    triggers = grid.editTriggers()
+    check(bool(triggers & QListWidget.EditTrigger.DoubleClicked),
+          "a renamable grid does not accept a double-click edit")
+    rows = [{"cells": ["Notepad"], "name": "Notepad", "pos": [40, 30]},
+            {"cells": ["My Computer"], "name": "My Computer"}]
+    api.apply_widget_property(grid, "rows", rows)
+    check(grid.count() == 2, f"only {grid.count()} tiles landed")
+    # ItemIsEditable rides every row when the grid was built renamable.
+    first = grid.item(0)
+    check(bool(first.flags() & Qt.ItemFlag.ItemIsEditable),
+          "a renamable grid laid an un-renamable tile")
+    # The ``pos`` is honoured: item 0 sits at (40*zoom, 30*zoom) on the
+    # viewport; item 1 has no pos and is left to Qt's cascade.
+    want_x = api.zoom_size(40)
+    want_y = api.zoom_size(30)
+    # The tile's own seat is read back through the view's rect - Qt has
+    # no direct item->pos() in the Python binding, and the rect's
+    # top-left is where the drop landed.
+    rect = grid.visualItemRect(first)
+    check(abs(rect.x() - want_x) <= api.zoom_size(4)
+          and abs(rect.y() - want_y) <= api.zoom_size(4),
+          f"pos [40, 30] did not reach the tile: got ({rect.x()}, "
+          f"{rect.y()}), wanted roughly ({want_x}, {want_y})")
+    # A live re-seat via the ``positions`` prop: a rebuild is not needed.
+    api.apply_widget_property(grid, "positions",
+                              {"My Computer": [10, 20]})
+    second = grid.item(1)
+    rect2 = grid.visualItemRect(second)
+    check(abs(rect2.x() - api.zoom_size(10)) <= api.zoom_size(4)
+          and abs(rect2.y() - api.zoom_size(20)) <= api.zoom_size(4),
+          f"positions prop did not re-seat My Computer: ({rect2.x()}, "
+          f"{rect2.y()})")
+
+
+# --- twelve: window minimize, maximize, restore and attention ---
+
+def test_window_min_max_attention(api: Any) -> None:
+    """The three frame commands a taskbar drives, plus the highlight.
+
+    A desktop's bar does more than raise; the person expects a minimize,
+    a maximize, and a way to bring the frame back. The canvas answers to
+    ``minimize_window``, ``toggle_maximize``, ``restore_window`` and
+    ``attention_window`` through ``_window_command``; the frame reports
+    the first three back so the taskbar's row can follow."""
+    print("\n12. a frame can minimize, maximize and be flagged")
+    events: list = []
+
+    def emit(identifier: str, event: str, payload: dict) -> None:
+        events.append((identifier, event, payload))
+
+    spec = {"kind": "windows", "id": "desk",
+            "on": ["minimized", "maximized", "restored"],
+            "children": [
+                {"id": "w1", "title": "Window one",
+                 "x": 10, "y": 10, "width": 200, "height": 120,
+                 "spec": {"kind": "label", "text": "hi"}},
+            ]}
+    canvas, _registry = api.build_spec(spec, events=emit)
+    check(canvas is not None, "the desktop canvas built")
+    frame = canvas._addon_windows["frames"].get("w1")
+    check(frame is not None, "the child window did not open")
+    if frame is None:
+        return
+    # The min / max buttons exist and are named the way the sheet wants.
+    bar = frame.findChild(api.QtCore.QObject, "addonWindowBar") \
+        if hasattr(api, "QtCore") else None
+    from PyQt6.QtWidgets import QPushButton
+    btn_min = frame.findChild(QPushButton, "btnMin")
+    btn_max = frame.findChild(QPushButton, "btnMax")
+    btn_close = frame.findChild(QPushButton, "btnClose")
+    check(btn_min is not None and btn_max is not None
+          and btn_close is not None,
+          "a frame's title bar does not carry btnMin/btnMax/btnClose")
+    # The commands run through the same path the addon uses.
+    events.clear()
+    api._window_command(canvas, "minimize_window", {"id": "w1"})
+    check(frame.isHidden(), "minimize_window did not hide the frame")
+    check(any(e[1] == "minimized" for e in events),
+          f"the minimize did not report back: {events}")
+    api._window_command(canvas, "restore_window", {"id": "w1"})
+    # The canvas is offscreen, so ``isVisible`` stays False even after a
+    # restore; what actually flips is the frame's own hidden flag.
+    check(not frame.isHidden(), "restore_window did not show the frame again")
+    check(any(e[1] == "restored" for e in events),
+          "the restore did not report back")
+    # A maximize grows the frame to the canvas's viewport.
+    api._window_command(canvas, "toggle_maximize", {"id": "w1"})
+    check(any(e[1] == "maximized" for e in events),
+          "the maximize did not report maximized")
+    inside = canvas.viewport().size() if hasattr(canvas, "viewport") \
+        else canvas.size()
+    check(frame.width() >= inside.width() - 4
+          and frame.height() >= inside.height() - 4,
+          f"the maximized frame ({frame.width()}x{frame.height()}) is "
+          f"smaller than the viewport ({inside.width()}x{inside.height()})")
+    # Attention is a state flag the sheet can paint from.
+    api._window_command(canvas, "attention_window",
+                        {"id": "w1", "on": True})
+    check(frame.property("attention") is True,
+          "attention_window on=True did not set the frame's property")
+    api._window_command(canvas, "attention_window",
+                        {"id": "w1", "on": False})
+    check(frame.property("attention") in (False, None),
+          "attention_window off left the frame flagged")
+
+
+# --- thirteen: a shortcut prop installs a QShortcut and fires the event ---
+
+def test_shortcut_prop(api: Any) -> None:
+    """An addon's ``Alt+Tab`` reaches its dispatcher through the canvas.
+
+    BerryVM puts ``shortcuts: [{"keys": "Alt+Tab", "event": "shortcut"}]``
+    on its ``windows`` canvas; the host builds a ``QShortcut`` for each
+    entry and connects it to the addon's event callback. The context is
+    ``WindowShortcut`` - fires only while the app has focus - and no
+    OS-level grab is offered, so this is what an addon can actually see."""
+    print("\n13. a windows canvas installs Alt+Tab and reports the cycle")
+    # QShortcut lives in QtGui since Qt6 moved it out of QtWidgets.
+    from PyQt6.QtGui import QShortcut
+    from PyQt6.QtCore import Qt
+
+    events: list = []
+
+    def emit(identifier: str, event: str, payload: dict) -> None:
+        events.append((identifier, event, payload))
+
+    spec = {"kind": "windows", "id": "desk",
+            "on": ["shortcut"],
+            "shortcuts": [{"keys": "Alt+Tab", "event": "shortcut"}],
+            "children": []}
+    canvas, _registry = api.build_spec(spec, events=emit)
+    check(canvas is not None, "the canvas with a shortcut built")
+    shorts = canvas.findChildren(QShortcut)
+    check(len(shorts) >= 1,
+          f"Alt+Tab never became a QShortcut: {shorts}")
+    if not shorts:
+        return
+    shot = shorts[0]
+    check(shot.context() == Qt.ShortcutContext.WindowShortcut,
+          "the Alt+Tab shortcut does not use the WindowShortcut context")
+    # Fire it by hand: the callback the addon registered gets its event.
+    shot.activated.emit()
+    names = [e[1] for e in events if e[0] == "desk"]
+    check("shortcut" in names,
+          f"firing Alt+Tab did not reach the dispatcher: {events}")
+
+
+# --- fourteen: a list prop flips item backgrounds for a taskbar flash ---
+
+def test_list_attention_prop(api: Any) -> None:
+    """``attention: ["Notepad"]`` tints one button; ``attention: []`` clears.
+
+    The bar's blink is a colour swap rather than a rebuild, so a taskbar
+    can flash without disturbing the row's height or icon."""
+    print("\n14. a horizontal list flashes a named row via ``attention``")
+    from PyQt6.QtGui import QBrush
+
+    events: list = []
+    spec = {"kind": "list", "id": "tasks", "flow": "horizontal",
+            "icon_size": 16, "on": ["selected"]}
+    bar, _registry = api.build_spec(spec, events=lambda *a: events.append(a))
+    api.apply_widget_property(bar, "items", [
+        {"text": "Notepad"}, {"text": "My Computer"}])
+    # Nothing named: no item wears a special brush.
+    api.apply_widget_property(bar, "attention", [])
+    first = bar.item(0)
+    check(first.background() is None or not first.background().isOpaque()
+          or first.data(api.Qt.ItemDataRole.BackgroundRole) is None,
+          "a row was tinted before the attention list named it")
+    api.apply_widget_property(bar, "attention", ["Notepad"])
+    check(first.data(api.Qt.ItemDataRole.BackgroundRole) is not None,
+          "attention: [Notepad] left the row without a background brush")
+    brush = first.background()
+    check(isinstance(brush, QBrush) and brush.color().isValid(),
+          "the tinted row's background did not read as a colour brush")
+    # Clearing it drops the tint again.
+    api.apply_widget_property(bar, "attention", [])
+    check(first.data(api.Qt.ItemDataRole.BackgroundRole) is None,
+          "attention: [] did not clear the tint")
+
+
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
@@ -381,6 +670,12 @@ def main() -> int:
     test_taskbar_primitives(api)
     test_window_body_name(api)
     test_zoom_ladder()
+    test_icon_cache(api)
+    test_config_cache()
+    test_grid_movement_and_rename(api)
+    test_window_min_max_attention(api)
+    test_shortcut_prop(api)
+    test_list_attention_prop(api)
     app.processEvents()
 
     if FAILURES:

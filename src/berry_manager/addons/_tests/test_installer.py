@@ -277,8 +277,8 @@ def test_the_newest_and_the_notice(inst: object) -> None:
     # card that opens the door
     check("class GitHubProbe" in text and "answered = pyqtSignal(str)" in text,
           "there is no off-thread probe for the newest release")
-    check("self._start_gprobe()" in text and "Newest release I can find" in text,
-          "the setup form never shows the newest release it found")
+    check("self._start_gprobe()" in text and 'self.newest.setText(f"V{text}")' in text,
+          "the setup form does not name the version Install will bring down")
     check("self._stop_gprobe()" in text,
           "a release probe is left running when the card closes - which is a "
           "QThread destroyed mid-run, the crash this file's whole third section "

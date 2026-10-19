@@ -34,7 +34,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "Multi SSH",
-    "version": "1.3",
+    "version": "1.4",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh"],
@@ -245,13 +245,17 @@ def split_address(text: Any) -> dict:
     return out
 
 
-def normalise_entry(raw: Any) -> dict:
+def normalise_entry(raw: Any, defaults: tuple | None = None) -> dict:
     """One quickstart entry, in the shape this addon uses, from whatever the
     file held: a bare address, or an object whose fields may be missing.
 
     What the address itself says wins over the entry's own fields, since it is
     the more specific of two answers written by the same person. An entry with
     no address is dropped rather than kept as a row that can only fail.
+
+    ``defaults`` is the ``(port, user)`` pair the config falls back to, read
+    once by :func:`entries_for` for the whole list; alone, an entry reads
+    them itself - two api calls per bookmark is two too many.
     """
     if isinstance(raw, str):
         raw = {"host": raw}
@@ -264,13 +268,16 @@ def normalise_entry(raw: Any) -> dict:
     name = " ".join(str(raw.get("name") or "").split())
     stored = str(raw.get("icon") or "").strip()
     key = str(raw.get("key_file", raw.get("key", "")) or "").strip()
+    fall_port, fall_user = (defaults if defaults is not None
+                            else (config("default_port", 22),
+                                  config("default_user", "root")))
     return {
         "name": name or host,
         "host": host,
         "port": port_of(given["port"], 0) or port_of(raw.get("port"), 0)
-                or port_of(config("default_port", 22), 22),
+                or port_of(fall_port, 22),
         "username": (given["username"] or str(raw.get("username") or "").strip()
-                     or str(config("default_user", "root") or "")),
+                     or str(fall_user or "")),
         "key_file": key,
         "icon": stored,
     }
@@ -280,9 +287,10 @@ def entries_for(raw: Any) -> list:
     """The config file's list as the addon uses it; anything unreadable is left
     out, so one broken entry does not hide the machines beside it."""
     items = raw if isinstance(raw, (list, tuple)) else []
+    defaults = (config("default_port", 22), config("default_user", "root"))
     out: list[dict] = []
     for item in items:
-        entry = normalise_entry(item)
+        entry = normalise_entry(item, defaults)
         if entry:
             out.append(entry)
     return out
@@ -525,8 +533,9 @@ def open_session(entry: dict, password: Any = None) -> str:
     if not host:
         api.ui.error(TAB, "That entry has no address to connect to.")
         return ""
+    fall_port = config("default_port", 22)
     user = str((entry or {}).get("username") or "")
-    port = port_of((entry or {}).get("port"), config("default_port", 22))
+    port = port_of((entry or {}).get("port"), fall_port)
     if password is None:
         password = api.ui.input("Connect", f"Password for {user}@{host}:{port}",
                                "", secret=True)
@@ -540,17 +549,23 @@ def open_session(entry: dict, password: Any = None) -> str:
         "label": caption, "spec": session_spec(identifier, f"{user}@{host}:{port}")})
     sessions[identifier] = {"caption": caption, "host": host, "port": port,
                             "username": user, "connected": False, "error": ""}
-    connect(identifier, entry, str(password or ""))
+    connect(identifier, entry, str(password or ""), fall_port)
     status()
     return identifier
 
 
-def connect(identifier: str, entry: dict, password: str) -> None:
+def connect(identifier: str, entry: dict, password: str,
+            fall_port: Any = None) -> None:
     """Hand one terminal the machine it belongs on. The password goes here and
-    nowhere else: not into the config file, not into the session record."""
+    nowhere else: not into the config file, not into the session record.
+
+    ``fall_port`` is the config's default port when the caller has already
+    read it; given nothing, this reads the two keys it needs itself."""
+    if fall_port is None:
+        fall_port = config("default_port", 22)
     api.tabs.set_widget(TAB, identifier, "connect", {
         "host": str(entry.get("host") or ""),
-        "port": port_of(entry.get("port"), config("default_port", 22)),
+        "port": port_of(entry.get("port"), fall_port),
         "username": str(entry.get("username") or ""),
         "password": str(password or ""),
         "key_file": str(entry.get("key_file") or ""),

@@ -395,9 +395,11 @@ from PyQt6.QtGui import (
     QFont,
     QFontMetrics,
     QIcon,
+    QKeySequence,
     QPainter,
     QPen,
     QPixmap,
+    QShortcut,
     QSyntaxHighlighter,
     QTextCharFormat,
 )
@@ -452,6 +454,7 @@ from addon_common import (
     jsonable,
     merge_config,
     put_config_value,
+    read_config_cached,
     read_config_json,
     take_config_value,
     write_config_json,
@@ -1174,6 +1177,14 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
     wanted = spec.get("on")
     if events is not None and wanted is not None:
         _connect_events(widget, wanted, str(identifier or ""), events)
+    # Remember the pair every shortcut-install needs: the widget's own id
+    # and the events callback its tab hands it. A later ``set_widget(id,
+    # "shortcut", ...)`` reaches the same callback without needing the
+    # whole tab context again.
+    widget._addon_identifier = str(identifier or "")
+    widget._addon_events = events
+    for entry in (spec.get("shortcuts") or []):
+        _install_shortcut(widget, entry)
 
 
 def _connect_events(widget: QWidget, wanted: Any, identifier: str,
@@ -1197,7 +1208,8 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
                 "checked": item.checkState(_col) == Qt.CheckState.Checked,
                 "cells": _row_cells(item)})
         widget.itemChanged.connect(_row_toggled)
-    if "toggled" in names and isinstance(widget, QListWidget) \
+    if ("toggled" in names or "renamed" in names) \
+            and isinstance(widget, QListWidget) \
             and getattr(widget, "_addon_grid", None) is not None:
         # A tile's tick flipped by hand, in a grid that lays its rows down
         # with "check": the same report a table row gives, so an addon acts
@@ -1206,15 +1218,34 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
         # QListWidget.itemChanged hands over the tile alone, with no column,
         # so the handler takes just the item; checkState() likewise reads the
         # tile's one tick with no column.
+        #
+        # The same signal is what reports a rename in a grid that asked for
+        # ``renamable``: when the tile's visible first line no longer matches
+        # the first cell it was laid down with, the item has been edited in
+        # place. Rename is reported instead of a toggle in that case, and
+        # the item's stored cells follow what the person typed so the next
+        # compare sees a fresh baseline.
         def _tile_toggled(item):
             if getattr(widget, "_addon_check_silent", False):
-                return
-            if not item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
                 return
             stored = item.data(Qt.ItemDataRole.UserRole)
             cells = ([str(cell) for cell in stored]
                      if isinstance(stored, (list, tuple))
                      else [str(item.text() or "").split("\n")[0]])
+            display_lines = str(item.text() or "").split("\n")
+            first = display_lines[0] if display_lines else ""
+            if "renamed" in names and cells and first and first != cells[0]:
+                key = item.data(Qt.ItemDataRole.UserRole + 1) or cells[0]
+                new_cells = [first] + list(cells[1:])
+                item.setData(Qt.ItemDataRole.UserRole, new_cells)
+                events(identifier, "renamed", {
+                    "name": first, "old": cells[0], "key": str(key),
+                    "cells": new_cells})
+                return
+            if not item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                return
+            if "toggled" not in names:
+                return
             events(identifier, "toggled", {
                 "text": cells[0] if cells else "",
                 "checked": item.checkState() == Qt.CheckState.Checked,
@@ -1343,6 +1374,86 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
         if "title" in asked:
             widget.title_changed.connect(
                 lambda text: report("title", {"text": str(text)}))
+    if "moved" in names and isinstance(widget, QListWidget) \
+            and getattr(widget, "_addon_grid", None) is not None \
+            and (widget._addon_grid or {}).get("movement") == "free":
+        # A free-positioned icon layer reports where a tile landed after a
+        # drag. QListWidget has no built-in ``moved`` signal; the one Qt
+        # does have (``QAbstractItemView``'s viewport) fires on every mouse
+        # event, so an event filter catches the release and reads back the
+        # tile under the cursor plus every tile's position - the whole
+        # layout in one shot, which is what an addon persisting a desktop
+        # wants to write in one pass.
+        widget.viewport().installEventFilter(
+            _GridMovedFilter(widget, identifier, events))
+
+
+class _GridMovedFilter(QObject):
+    """Watches a free-positioned tile grid and reports where a tile landed.
+
+    A desktop icon layer that asks for ``"movement": "free"`` needs to know
+    when the person has dropped a tile, so it can save the new place. Qt's
+    ``QListWidget`` has no ``moved`` signal of its own: the position a tile
+    sits at is set by the view's internal drag handling. This filter catches
+    the mouse release on the viewport after a drag and reads back every
+    tile's position in one pass, so the addon gets the whole layout at once
+    and can persist it in a single write.
+    """
+
+    def __init__(self, listing: QListWidget, identifier: str,
+                 events: Callable[[str, str, dict], None]) -> None:
+        super().__init__(listing)
+        self._listing = listing
+        self._id = str(identifier)
+        self._events = events
+        self._pressed = False
+
+    def eventFilter(self, watched, event) -> bool:          # noqa: N802
+        try:
+            if event.type() == QEvent.Type.MouseButtonPress \
+                    and event.button() == Qt.MouseButton.LeftButton:
+                self._pressed = True
+            elif event.type() == QEvent.Type.MouseButtonRelease \
+                    and self._pressed:
+                self._pressed = False
+                self._report_all()
+        except Exception:
+            # A view being torn down mid-drag must not take the addon with
+            # it: the filter says nothing and lets the release fall through.
+            pass
+        return False
+
+    def _report_all(self) -> None:
+        listing = self._listing
+        if listing is None or listing.model() is None:
+            return
+        rows = []
+        moved = None
+        for index in range(listing.count()):
+            item = listing.item(index)
+            if item is None:
+                continue
+            rect = listing.visualItemRect(item)
+            stored = item.data(Qt.ItemDataRole.UserRole)
+            cells = ([str(cell) for cell in stored]
+                     if isinstance(stored, (list, tuple))
+                     else [str(item.text() or "").split("\n")[0]])
+            key = item.data(Qt.ItemDataRole.UserRole + 1) or (
+                cells[0] if cells else "")
+            one = {"key": str(key), "cells": cells,
+                   "x": int(rect.x()), "y": int(rect.y())}
+            rows.append(one)
+            if listing.currentItem() is item:
+                moved = one
+        # The tile under the cursor is the one the hand dragged; every
+        # other position rides along so a bulk save is a single call.
+        payload = {"all": rows}
+        if moved is not None:
+            payload.update({
+                "key": moved["key"], "cells": moved["cells"],
+                "text": moved["cells"][0] if moved["cells"] else "",
+                "x": moved["x"], "y": moved["y"]})
+        self._events(self._id, "moved", payload)
 
 
 def _row_cells(item: QTreeWidgetItem) -> list[str]:
@@ -2056,13 +2167,28 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
             # nudged and do not keep a hidden second dimension - the grid
             # re-flows its columns when the pane is moved and never grows a
             # bar sideways to scroll words nobody asked to hide.
+            #
+            # A desktop icon layer asks for ``"movement": "free"`` and
+            # ``"renamable": True``: tiles then drag to anywhere the canvas
+            # shows and can be edited in place, the way a real desktop lets
+            # its shortcuts be moved and named. ``Fixed`` resize mode stops
+            # Qt re-flowing the tiles the moment the pane changes size.
             side = zoom_size(int(spec.get("icon_size") or 64))
+            free = str(spec.get("movement") or "").lower() == "free"
             listing.setViewMode(QListView.ViewMode.IconMode)
             listing.setIconSize(QSize(side, side))
             listing.setWordWrap(True)
             listing.setTextElideMode(Qt.TextElideMode.ElideNone)
-            listing.setResizeMode(QListView.ResizeMode.Adjust)
-            listing.setMovement(QListView.Movement.Static)
+            if free:
+                # ``Fixed`` keeps the tiles where they are on a resize -
+                # the same reason a real desktop does not re-flow its icons
+                # when the window moves - and pairs with ``Movement.Free``
+                # so a dropped tile stays exactly where the hand left it.
+                listing.setResizeMode(QListView.ResizeMode.Fixed)
+                listing.setMovement(QListView.Movement.Free)
+            else:
+                listing.setResizeMode(QListView.ResizeMode.Adjust)
+                listing.setMovement(QListView.Movement.Static)
             listing.setUniformItemSizes(True)
             listing.setSpacing(zoom_size(int(spec.get("spacing") or 12)))
             listing.setHorizontalScrollBarPolicy(
@@ -2071,7 +2197,14 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
             if wide:
                 listing.setGridSize(QSize(zoom_size(wide),
                                           side + zoom_size(56)))
-            listing._addon_grid = {"icon": side, "tile": wide}
+            listing._addon_grid = {"icon": side, "tile": wide,
+                                   "movement": "free" if free else "static"}
+            if spec.get("renamable"):
+                listing._addon_grid["renamable"] = True
+                listing.setEditTriggers(
+                    QListWidget.EditTrigger.DoubleClicked
+                    | QListWidget.EditTrigger.EditKeyPressed
+                    | QListWidget.EditTrigger.AnyKeyPressed)
         if str(spec.get("flow") or "").lower() in ("horizontal", "left", "row"):
             # A taskbar lays its buttons out sideways along one line rather
             # than down a column: Qt's own LeftToRight flow with no wrapping,
@@ -2348,14 +2481,20 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
         elif isinstance(widget, QListWidget):
             # A list entry may wear a mark of its own: naming it in a dict
             # ({"text": ..., "icon": ...}) puts the picture before the words.
-            widget.clear()
-            for entry, name in zip(raw, names):
-                item = QListWidgetItem(name)
-                mark = entry.get("icon") if isinstance(entry, dict) else None
-                icon = build_icon(mark) if mark else None
-                if icon is not None:
-                    item.setIcon(icon)
-                widget.addItem(item)
+            # The rebuild runs with painting held off: a clear and a row of
+            # adds would else repaint the widget once per item.
+            widget.setUpdatesEnabled(False)
+            try:
+                widget.clear()
+                for entry, name in zip(raw, names):
+                    item = QListWidgetItem(name)
+                    mark = entry.get("icon") if isinstance(entry, dict) else None
+                    icon = build_icon(mark) if mark else None
+                    if icon is not None:
+                        item.setIcon(icon)
+                    widget.addItem(item)
+            finally:
+                widget.setUpdatesEnabled(True)
         elif hasattr(widget, "clear") and hasattr(widget, "addItems"):
             # A combo keeps its choice; a list widget has no currentText.
             current = widget.currentText() if hasattr(widget, "currentText") else None
@@ -2389,6 +2528,9 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
             # Laying rows down sets each tick, which fires itemChanged; the
             # table must not report those as the user flipping them.
             widget._addon_check_silent = True
+        # Clearing and re-adding repaints each row as it lands; one quiet
+        # pass lets Qt lay the whole batch out at the end instead.
+        widget.setUpdatesEnabled(False)
         try:
             if hasattr(widget, "clear"):
                 widget.clear()
@@ -2398,11 +2540,64 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
                 else:
                     _place_row(widget, row, None)
         finally:
+            widget.setUpdatesEnabled(True)
             if silent:
                 widget._addon_check_silent = False
+        if grid:
+            # A free-movement grid has to be laid before any tile can be
+            # seated, and the seat has to be asked after the batch's own
+            # paint pass, so a ``pos`` named on a row lands where the
+            # addon said rather than where Qt's cascade put it.
+            widget.doItemsLayout()
+            from PyQt6.QtCore import QPoint
+            for index in range(widget.count()):
+                item = widget.item(index)
+                if item is None:
+                    continue
+                pair = item.data(Qt.ItemDataRole.UserRole + 2)
+                if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                    widget.setPositionForIndex(
+                        QPoint(int(pair[0]), int(pair[1])),
+                        widget.model().index(index, 0))
     elif prop == "clear":
         if hasattr(widget, "clear"):
             widget.clear()
+    elif prop == "attention":
+        # A taskbar row lights up: the value is a list of item texts, each
+        # one painted on a Luna orange. Anything not named goes back to
+        # the style's own ground. No widget is rebuilt: the addon flips
+        # this prop every half second for the blink and a rebuild on that
+        # cadence would steal focus out from under the person.
+        if isinstance(widget, QListWidget):
+            _apply_list_attention(widget, value)
+        else:
+            raise AddonError("'attention' lights a row of a taskbar list")
+    elif prop == "positions":
+        # Re-seat tiles in a free-positioned grid after a rebuild, so an
+        # addon that redraws the whole icon layer still brings each tile
+        # back to where the hand left it. The value is a ``{key: [x, y]}``
+        # map; each key matches a tile's ``name`` from :func:`_place_grid_tile`.
+        if isinstance(widget, QListWidget) \
+                and getattr(widget, "_addon_grid", None) is not None:
+            _apply_tile_positions(widget, value)
+        else:
+            raise AddonError("'positions' re-seats the tiles of a grid list")
+    elif prop in ("movement", "renamable"):
+        # Change how a grid behaves after it was built: ``movement`` is
+        # ``"free"`` or ``"static"``, ``renamable`` is a bool. Both are the
+        # same switches the spec takes when the widget is first made.
+        if not isinstance(widget, QListWidget) \
+                or getattr(widget, "_addon_grid", None) is None:
+            raise AddonError(f"'{prop}' needs a grid list")
+        _apply_grid_mode(widget, prop, value)
+    elif prop == "shortcut":
+        # Ask the widget's tab to listen for a key combination and report
+        # it back as an event. The value is either a lone key string
+        # (``"Alt+Tab"``) reported as ``"shortcut"``, or a dict of
+        # ``{"keys": "Alt+Tab", "event": "cycled"}``. Only fires while the
+        # Berry Manager window itself is focused - a global key grab is
+        # not offered to addons.
+        _install_shortcut(widget, value)
     elif prop in ("connect", "disconnect", "send", "command", "write"):
         # A terminal's own connection, and the note an addon prints on it. The
         # first three reach the device, so they pass the gates of
@@ -2499,6 +2694,161 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
         hug.cap(widget.width())
 
 
+def _apply_list_attention(widget: QListWidget, value: Any) -> None:
+    """Light the named rows of a taskbar list in a Luna orange.
+
+    Anything on the list whose text is not in `value` goes back to the
+    style's own ground. The brush is set per item rather than through a
+    stylesheet, so a repaint on the half-second blink cadence is one item
+    call apiece instead of a re-polish of the whole bar.
+    """
+    wanted = {str(one) for one in (value or [])}
+    orange = QColor("#ffb347")
+    dark = QColor("#1c1c1c")
+    default_fore = QBrush()
+    default_back = QBrush()
+    widget.setUpdatesEnabled(False)
+    try:
+        for index in range(widget.count()):
+            item = widget.item(index)
+            if item is None:
+                continue
+            if str(item.text() or "") in wanted:
+                item.setBackground(QBrush(orange))
+                item.setForeground(QBrush(dark))
+            else:
+                item.setBackground(default_back)
+                item.setForeground(default_fore)
+    finally:
+        widget.setUpdatesEnabled(True)
+
+
+def _apply_tile_positions(widget: QListWidget, value: Any) -> None:
+    """Re-seat tiles in a free-positioned grid by their persistent name.
+
+    Each entry in the map is ``{key: [x, y]}``, where the key is what
+    :func:`_place_grid_tile` stored in ``UserRole + 1``. A tile that is not
+    named is left wherever the grid's own layout put it, so an addon can
+    hand back just the entries it knows changed.
+    """
+    if not isinstance(value, dict):
+        return
+    for index in range(widget.count()):
+        item = widget.item(index)
+        if item is None:
+            continue
+        key = item.data(Qt.ItemDataRole.UserRole + 1)
+        if key is None:
+            stored = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(stored, (list, tuple)) and stored:
+                key = str(stored[0])
+        if key is None:
+            continue
+        pair = value.get(str(key))
+        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            try:
+                from PyQt6.QtCore import QPoint
+                widget.setPositionForIndex(
+                    QPoint(int(zoom_size(int(pair[0]))),
+                           int(zoom_size(int(pair[1])))),
+                    widget.model().index(index, 0))
+            except (TypeError, ValueError):
+                continue
+
+
+def _apply_grid_mode(widget: QListWidget, prop: str, value: Any) -> None:
+    """Change how a grid behaves after it has been built.
+
+    ``movement`` is ``"free"`` or ``"static"``; a free grid lets the hand
+    put a tile anywhere and keeps it there, a static one snaps every tile
+    back to the row. ``renamable`` is a bool; when it turns on, every tile
+    becomes editable in place. The listing's own ``_addon_grid`` memo is
+    updated so a later ``moved`` event filter finds the same switch.
+    """
+    grid = getattr(widget, "_addon_grid", None) or {}
+    if prop == "movement":
+        free = str(value or "").lower() == "free"
+        widget.setMovement(
+            QListView.Movement.Free if free else QListView.Movement.Static)
+        widget.setResizeMode(
+            QListView.ResizeMode.Fixed if free
+            else QListView.ResizeMode.Adjust)
+        grid["movement"] = "free" if free else "static"
+        widget._addon_grid = grid
+    else:
+        on = bool(value)
+        grid["renamable"] = on
+        widget._addon_grid = grid
+        if on:
+            widget.setEditTriggers(
+                QListWidget.EditTrigger.DoubleClicked
+                | QListWidget.EditTrigger.EditKeyPressed
+                | QListWidget.EditTrigger.AnyKeyPressed)
+        else:
+            widget.setEditTriggers(
+                QListWidget.EditTrigger.NoEditTriggers)
+        for index in range(widget.count()):
+            item = widget.item(index)
+            if item is None:
+                continue
+            if on:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            else:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+
+#: The shortcuts a widget is already listening for, remembered so an addon
+#: that sets the same one twice does not stack a second one behind it.
+_shortcut_keys = "_addon_shortcuts"
+
+
+def _install_shortcut(widget: QWidget, entry: Any) -> None:
+    """Wire one key combination on a widget to an event on its tab.
+
+    ``entry`` is either a bare key string (``"Alt+Tab"``, reported as
+    ``"shortcut"``) or a dict of ``{"keys": ..., "event": ...}``. The
+    widget's ``_addon_identifier`` and ``_addon_events`` are what
+    :func:`_apply_common` remembered when the widget was first built, so
+    a later ``set_widget(id, "shortcut", ...)`` call still knows where to
+    send the news. The context is ``WindowShortcut``: the shortcut fires
+    only while the top-level window is focused. Addons get no OS-level
+    global key grab.
+    """
+    if entry is None:
+        return
+    if isinstance(entry, dict):
+        keys = str(entry.get("keys") or entry.get("sequence") or "").strip()
+        event = str(entry.get("event") or "shortcut")
+    else:
+        keys = str(entry or "").strip()
+        event = "shortcut"
+    if not keys:
+        return
+    held = getattr(widget, _shortcut_keys, None)
+    if held is None:
+        held = {}
+        setattr(widget, _shortcut_keys, held)
+    if keys in held:
+        return
+    try:
+        sequence = QKeySequence(keys)
+    except Exception:
+        return
+    if sequence.isEmpty():
+        return
+    hook = QShortcut(sequence, widget)
+    hook.setContext(Qt.ShortcutContext.WindowShortcut)
+    identifier = str(getattr(widget, "_addon_identifier", "") or "")
+    cb = getattr(widget, "_addon_events", None)
+
+    def _fire() -> None:
+        if callable(cb):
+            cb(identifier, event, {"keys": keys})
+
+    hook.activated.connect(_fire)
+    held[keys] = hook
+
+
 def _make_row(row: Any) -> tuple[QTreeWidgetItem, Any, bool]:
     """One ``rows`` entry as an item, with whatever is nested under it.
 
@@ -2580,6 +2930,14 @@ def _place_grid_tile(listing: QListWidget, row: Any) -> None:
     lines of detail. The cells ride on the item itself, so a pick or a tick
     comes back through the events with the whole row beside the name, and
     the addon needs no second round trip to know what was touched.
+
+    A tile that names ``pos`` (a two-list ``[x, y]``) is seated there after
+    it lands, which is how a desktop icon layer brings its saved layout back
+    on the next start. A tile that names ``name`` carries a stable key under
+    its cells, so an addon can rename what the person sees without losing
+    the position it remembered for the tile that started there. When the
+    listing was built ``renamable`` the tile is also ``ItemIsEditable`` so a
+    double-click or an F2 puts a cursor into its caption.
     """
     data = row if isinstance(row, dict) else {}
     cells = data.get("cells")
@@ -2601,7 +2959,15 @@ def _place_grid_tile(listing: QListWidget, row: Any) -> None:
     tip = data.get("tip") or data.get("tooltip")
     if tip:
         item.setToolTip(str(tip))
-    item.setData(Qt.ItemDataRole.UserRole, lines)
+    stable = data.get("name")
+    item.setData(Qt.ItemDataRole.UserRole, list(lines))
+    if stable is not None:
+        # The addon's persistent key for this tile - the caption it was
+        # shipped with, before anyone renamed it. Kept in its own role so
+        # reading ``cells`` back through an event still hands out exactly
+        # the words the tile shows, one per line, unchanged from the
+        # layout a plain grid produces.
+        item.setData(Qt.ItemDataRole.UserRole + 1, str(stable))
     if "check" in data:
         # Only a tile that says so wears a tick: the store switches the
         # addons it can act on and leaves the rest plain.
@@ -2610,7 +2976,24 @@ def _place_grid_tile(listing: QListWidget, row: Any) -> None:
         # alone - there is no column to name - unlike a table row's item.
         item.setCheckState(Qt.CheckState.Checked if data.get("check")
                            else Qt.CheckState.Unchecked)
+    grid = getattr(listing, "_addon_grid", None) or {}
+    if grid.get("renamable"):
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
     listing.addItem(item)
+    pos = data.get("pos")
+    if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+        try:
+            x = zoom_size(int(pos[0]))
+            y = zoom_size(int(pos[1]))
+        except (TypeError, ValueError):
+            return
+        # The seat is remembered on the item rather than asked of the
+        # view right here. ``setPositionForIndex`` only sticks once the
+        # batch is on screen and the layout has walked it, which is not
+        # true while a ``rows`` rebuild still holds updates disabled; the
+        # ``rows`` branch below picks the stash up and seats each tile
+        # after the batch lands.
+        item.setData(Qt.ItemDataRole.UserRole + 2, [int(x), int(y)])
 
 
 # --- a terminal's own connection, and sub-pages built after the fact ---
@@ -2984,8 +3367,19 @@ def _tabs_remove_page(widget: QWidget, value: Any) -> bool:
 #: so the id the addon gave a window when it opened it is the id that raises,
 #: moves, sizes or shuts it again - and, being in the tab's registry, the id that
 #: reaches the controls inside it like any other widget on the tab.
+#:
+#: Beyond the six the desktop started on: ``minimize_window`` hides the frame
+#: until the taskbar asks it back; ``maximize_window`` puts it at the canvas'
+#: full size (a second ``toggle_maximize`` puts it back where it came from);
+#: ``restore_window`` undoes either; ``attention_window`` marks the frame
+#: with a dynamic Qt property that a taskbar sheet can pick up so an addon
+#: can flash a button beside a backgrounded window. Each value may name the
+#: window by an id or by ``{"id": ..., ...}``; ``attention_window`` also
+#: reads ``{"on": bool}`` beside it.
 WINDOW_PROPS = ("open_window", "close_window", "raise_window",
-                "move_window", "resize_window", "lower_window")
+                "move_window", "resize_window", "lower_window",
+                "minimize_window", "maximize_window", "toggle_maximize",
+                "restore_window", "attention_window")
 
 
 def _windows_store(widget: QWidget) -> dict | None:
@@ -3080,14 +3474,21 @@ class _WindowCanvas(QWidget):
 
 
 class _WindowTitleBar(QFrame):
-    """The strip a window is dragged along by, wearing its title and a close
-    button. Everything under it is the addon's; this part the desktop draws."""
+    """The strip a window is dragged along by, wearing its title and a
+    minimize / maximize / close button. Everything under it is the addon's;
+    this part the desktop draws. Minimize and maximize hide only when the
+    frame is opened as unminimizable or unmaximizable - a chromeless
+    desktop layer has no bar at all, so its three buttons never show. A
+    double-click on the strip itself is the same action as the maximize
+    button, matching what a real desktop window does."""
 
-    def __init__(self, frame: "_WindowFrame", title: str, closable: bool) -> None:
+    def __init__(self, frame: "_WindowFrame", title: str, closable: bool,
+                 minimizable: bool = True, maximizable: bool = True) -> None:
         super().__init__(frame)
         self._frame = frame
         self._press: Any = None
         self._origin: Any = None
+        self._click_guard: Any = None
         self.setObjectName("addonWindowBar")
         self.setFixedHeight(zoom_size(WINDOW_TITLE))
         bar = QHBoxLayout(self)
@@ -3098,7 +3499,24 @@ class _WindowTitleBar(QFrame):
         label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         bar.addWidget(label, 1)
         self._label = label
+        self._min = QPushButton("\u2013", self)
+        self._min.setObjectName("btnMin")
+        self._min.setFixedSize(zoom_size(18), zoom_size(18))
+        self._min.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._min.setToolTip("Minimize this window")
+        self._min.setVisible(bool(minimizable))
+        self._min.clicked.connect(self._frame.request_minimize)
+        bar.addWidget(self._min, 0)
+        self._max = QPushButton("\u25a1", self)
+        self._max.setObjectName("btnMax")
+        self._max.setFixedSize(zoom_size(18), zoom_size(18))
+        self._max.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._max.setToolTip("Maximize this window")
+        self._max.setVisible(bool(maximizable))
+        self._max.clicked.connect(self._frame.request_toggle_maximize)
+        bar.addWidget(self._max, 0)
         self._close = QPushButton("\u00d7", self)
+        self._close.setObjectName("btnClose")
         self._close.setFixedSize(zoom_size(18), zoom_size(18))
         self._close.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close.setToolTip("Close this window")
@@ -3130,6 +3548,12 @@ class _WindowTitleBar(QFrame):
         self._press = None
         self._frame.finish_move()
         event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton \
+                and self._max.isVisible():
+            self._frame.request_toggle_maximize()
+            event.accept()
 
 
 class _WindowGrip(QWidget):
@@ -3174,18 +3598,37 @@ class _WindowFrame(QFrame):
 
     def __init__(self, canvas: "_WindowCanvas", win_id: str, title: str,
                  content: QWidget | None, closable: bool = True,
-                 resizable: bool = True, chrome: bool = True) -> None:
+                 resizable: bool = True, chrome: bool = True,
+                 minimizable: bool = True, maximizable: bool = True) -> None:
         super().__init__(canvas)
         self._canvas = canvas
         self._win_id = str(win_id)
         self._dragged = False
         self._resized_flag = False
+        # ``_prev_geom`` remembers where the frame was before it was
+        # maximized, so a second click on the square puts it back to the
+        # size and place the hand had left it. ``_minimized`` is the
+        # matching flag for a hidden frame: a taskbar uses it to know
+        # whether its button should hide or show the window on the next
+        # press.
+        self._prev_geom: tuple[int, int, int, int] | None = None
+        self._minimized = False
+        self._maximized = False
+        self._minimizable = bool(minimizable)
+        self._maximizable = bool(maximizable)
         self.setObjectName("addonWindow")
+        self.setProperty("attention", False)
         self.setFrameShape(QFrame.Shape.StyledPanel)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        self._bar = _WindowTitleBar(self, title, closable)
+        # A chromeless frame is the desktop's own floor: no buttons at all
+        # are shown for it, so the person cannot minimise an icon layer out
+        # of existence or stretch the desktop itself.
+        self._bar = _WindowTitleBar(
+            self, title, bool(closable) and bool(chrome),
+            bool(minimizable) and bool(chrome),
+            bool(maximizable) and bool(chrome))
         # A chromeless frame is the desktop's own floor: no title bar to
         # drag and no margins stealing the corner pixels from what sits
         # on it. An icon layer is opened this way and styled away.
@@ -3256,6 +3699,72 @@ class _WindowFrame(QFrame):
         self._canvas._report(self._win_id, "closed", {"by": "user"})
         _windows_close(self._canvas, self._win_id)
 
+    def request_minimize(self) -> None:
+        """Hide the frame under the taskbar, so a button next to it can bring
+        the same frame back without the addon having to build a second one.
+        Nothing on the frame is torn down: a shell inside keeps running, a
+        half-typed line waits for the hand to come back."""
+        if not self._minimizable or self._minimized:
+            return
+        self._minimized = True
+        self.setVisible(False)
+        self._canvas._report(self._win_id, "minimized", {})
+
+    def request_toggle_maximize(self) -> None:
+        """Fill the canvas or step back to where the frame was. The frame's
+        previous place and size ride in ``_prev_geom`` for exactly as long
+        as it is maximized; a second call restores them and lets the grip
+        back out so the person can size the window by hand again."""
+        if not self._maximizable:
+            return
+        room = self._canvas.size()
+        if self._maximized:
+            if self._prev_geom is not None:
+                px, py, pw, ph = self._prev_geom
+                self.resize(max(zoom_size(WINDOW_MIN), pw),
+                            max(zoom_size(WINDOW_MIN), ph))
+                self.move(px, py)
+            self._prev_geom = None
+            self._maximized = False
+            self._grip.setVisible(True)
+            self._canvas._report(self._win_id, "restored", {})
+            return
+        self._prev_geom = (self.x(), self.y(), self.width(), self.height())
+        self._maximized = True
+        self._grip.setVisible(False)
+        edge = zoom_size(2)
+        self.move(0, 0)
+        self.resize(max(zoom_size(WINDOW_MIN), room.width() - edge),
+                    max(zoom_size(WINDOW_MIN), room.height() - edge))
+        self._canvas._report(self._win_id, "maximized", {})
+
+    def request_restore(self) -> None:
+        """Undo whichever of minimize or maximize is set. The taskbar's own
+        click uses this after a minimise; a menu item uses it after a
+        maximize. Both paths read the same state, so one door does either."""
+        if self._minimized:
+            self._minimized = False
+            self.setVisible(True)
+            self.raise_()
+            self._canvas._report(self._win_id, "restored", {})
+        elif self._maximized:
+            self.request_toggle_maximize()
+
+    def set_attention(self, on: Any) -> None:
+        """Turn the frame's own ``attention`` property on or off.
+
+        The frame is not itself the thing that flashes - the addon paints
+        its taskbar button in a Luna orange - but a stylesheet rule on the
+        frame can pick the property up too and give a highlighted border.
+        Qt re-polishes when a dynamic property changes, so a repolish here
+        makes any such rule take effect immediately."""
+        value = bool(on)
+        if bool(self.property("attention")) == value:
+            return
+        self.setProperty("attention", value)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
 
 def _make_windows(spec: dict, registry: dict,
                   events: Callable[[str, str, dict], None] | None) -> QWidget:
@@ -3266,6 +3775,13 @@ def _make_windows(spec: dict, registry: dict,
     carries), put on the canvas through the same door an addon opens one later.
     """
     canvas = _WindowCanvas()
+    # The canvas paints its own background from the stylesheet. A bare
+    # QWidget subclass is skipped by Qt's stylesheet background fill unless
+    # it carries this attribute, and that is why a desktop addon's wallpaper
+    # came out black: the ``#berryDesktop { background: ... }`` rule matched
+    # the canvas by name but was never painted, so the transparent icon
+    # layer let the dark tab page show through instead of the wallpaper.
+    canvas.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
     wanted = spec.get("on")
     if isinstance(wanted, (list, tuple)):
         asked = {str(one) for one in wanted}
@@ -3278,11 +3794,16 @@ def _make_windows(spec: dict, registry: dict,
                              "asked": asked, "cascade": 0}
     canvas.setStyleSheet(scaled_sheet(
         "#addonWindow { background: #202020; border: 1px solid #3c3c3c; }"
+        "#addonWindow[attention=\"true\"] { border: 2px solid #ffb347; }"
         "#addonWindowBar { background: #2c2c2c; }"
         "#addonWindowBar QLabel { color: #e6e6e6; }"
-        "#addonWindowBar QPushButton { border: none; color: #ff6b6b;"
+        "#addonWindowBar QPushButton { border: none; color: #ffffff;"
         " font-weight: bold; }"
-        "#addonWindowBar QPushButton:hover { background: #c51a4a;"
+        "#addonWindowBar QPushButton#btnClose:hover { background: #c51a4a;"
+        " color: #ffffff; }"
+        "#addonWindowBar QPushButton#btnMin:hover { background: #3d7a3d;"
+        " color: #ffffff; }"
+        "#addonWindowBar QPushButton#btnMax:hover { background: #2a5ea8;"
         " color: #ffffff; }"))
     for child in (spec.get("children") or []):
         if isinstance(child, dict):
@@ -3323,7 +3844,9 @@ def _windows_open(canvas: "_WindowCanvas", entry: Any) -> str:
     frame = _WindowFrame(canvas, win_id, str(entry.get("title") or win_id),
                          content, bool(entry.get("closable", True)),
                          bool(entry.get("resizable", True)),
-                         bool(entry.get("chrome", True)))
+                         bool(entry.get("chrome", True)),
+                         bool(entry.get("minimizable", True)),
+                         bool(entry.get("maximizable", True)))
     _window_minimum(frame, entry)
     width = _window_size(entry.get("width"), 520)
     height = _window_size(entry.get("height"), 360)
@@ -3402,6 +3925,17 @@ def _window_command(canvas: QWidget, prop: str, value: Any) -> None:
         # Behind every other window: what lets an icon layer go back under
         # the frames it should sit behind, the way a desktop does.
         frame.lower()
+    elif prop == "minimize_window":
+        frame.request_minimize()
+    elif prop == "maximize_window":
+        if not frame._maximized:
+            frame.request_toggle_maximize()
+    elif prop == "toggle_maximize":
+        frame.request_toggle_maximize()
+    elif prop == "restore_window":
+        frame.request_restore()
+    elif prop == "attention_window":
+        frame.set_attention(entry.get("on", True))
 
 
 def _authorize_terminal(api: "AddonAPI", prop: str, widget: QWidget) -> None:
@@ -4993,6 +5527,17 @@ def app_icon_path(win: Any) -> str:
         return ""
 
 
+#: The marks already built, kept by the source they were read from. A taskbar
+#: or a store shelf re-lays the same pictures on every refresh, and decoding
+#: and scaling the same SVG each time is repaint work nobody asked for. The
+#: map is cleared whole once it outgrows the distinct marks one session is
+#: worth holding. A bare file path is trusted not to change its picture mid-
+#: session; anything that really moves - SVG text, base64 data, a favicon -
+#: is its own fresh key every time, so it can never go stale.
+_ICON_CACHE: dict[str, Any] = {}
+_ICON_CACHE_MAX = 128
+
+
 def build_icon(source: Any, home: Path | None = None) -> QIcon | None:
     """A tab's mark out of an SVG document (as text), a picture file (absolute, or beside the addon's folder), or a base64 data URI; anything unreadable returns None."""
     text = str("" if source is None else source).strip()
@@ -5005,12 +5550,22 @@ def build_icon(source: Any, home: Path | None = None) -> QIcon | None:
         if not path.is_absolute() and home is not None:
             path = Path(home) / text
         text = str(path)
+    if text in _ICON_CACHE:
+        # The cached answer goes out as it stands: a QIcon shares its pictures
+        # between the widgets that wear it, and a miss is remembered too, so
+        # one unreadable path is decoded once rather than every repaint.
+        return _ICON_CACHE[text]
     image = load_picture(text)
-    if image is None:
-        return None
-    image = image.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
-                         Qt.TransformationMode.SmoothTransformation)
-    return None if image.isNull() else QIcon(image)
+    if image is None or image.isNull():
+        mark = None
+    else:
+        image = image.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        mark = None if image.isNull() else QIcon(image)
+    if len(_ICON_CACHE) >= _ICON_CACHE_MAX:
+        _ICON_CACHE.clear()
+    _ICON_CACHE[text] = mark
+    return mark
 
 
 def _icon_data_uri(icon: Any) -> str:
@@ -5035,6 +5590,34 @@ def _icon_data_uri(icon: Any) -> str:
     pixmap.save(buffer, "PNG")
     buffer.close()
     return "data:image/png;base64," + base64.b64encode(bytes(buffer.data())).decode("ascii")
+
+
+def _write_control(api: "AddonAPI", widget: QWidget | None, prop: str,
+                   value: Any) -> bool:
+    """One control's property, gated and applied.
+
+    The tabs bar and the settings-page facade own different registries but
+    write a control in the same order - look it up, clear the SSH gate a
+    terminal's privileged properties pass, apply - so the order lives here.
+    """
+    if widget is None:
+        return False
+    prop = str(prop)
+    if prop in TERMINAL_PRIVILEGED and _is_terminal(widget):
+        # Opening a connection and typing down one are the app's business
+        # as much as ``device.run`` is, so they pass the same gates.
+        _authorize_terminal(api, prop, widget)
+    apply_widget_property(widget, prop, value)
+    return True
+
+
+def _read_control(name: str, identifier: str, widget: QWidget | None,
+                  what: str) -> Any:
+    """What one control holds; both facades answer the same way when the
+    tab has no such id."""
+    if widget is None:
+        raise AddonError(f"{name!r} has no widget with id {identifier!r}")
+    return jsonable(read_widget_value(widget, what))
 
 
 class TabsAPI:
@@ -5443,23 +6026,13 @@ class TabsAPI:
                    value: Any = None) -> bool:
         """Write one property of one control by its spec id - ``text``, ``value``,
         ``rows``, ``items``, ``enabled``, ...; ``False`` when the id is not there."""
-        widget = self.widget(name, identifier)
-        if widget is None:
-            return False
-        prop = str(prop)
-        if prop in TERMINAL_PRIVILEGED and _is_terminal(widget):
-            # Opening a connection and typing down one are the app's business
-            # as much as ``device.run`` is, so they pass the same gates.
-            _authorize_terminal(self._api, prop, widget)
-        apply_widget_property(widget, prop, value)
-        return True
+        return _write_control(self._api, self.widget(name, identifier),
+                              prop, value)
 
     def widget_value(self, name: str, identifier: str, what: str = "value") -> Any:
         """What one control holds now; raises when the tab has no such id."""
-        widget = self.widget(name, identifier)
-        if widget is None:
-            raise AddonError(f"{name!r} has no widget with id {identifier!r}")
-        return jsonable(read_widget_value(widget, what))
+        return _read_control(name, identifier,
+                             self.widget(name, identifier), what)
 
     def _resolve_view(self, name: str, identifier: str | None = None) -> Any:
         """The embedded page behind a tab, or one nested in its spec by id.
@@ -6157,22 +6730,14 @@ class SettingsPagesAPI:
     def set_widget(self, name: str, identifier: str, prop: str = "text",
                    value: Any = None) -> bool:
         """Write one property of one control, exactly as ``tabs.set_widget`` does."""
-        widget = self.widget(name, identifier)
-        if widget is None:
-            return False
-        prop = str(prop)
-        if prop in TERMINAL_PRIVILEGED and _is_terminal(widget):
-            _authorize_terminal(self._api, prop, widget)
-        apply_widget_property(widget, prop, value)
-        return True
+        return _write_control(self._api, self.widget(name, identifier),
+                              prop, value)
 
     def widget_value(self, name: str, identifier: str,
                      what: str = "value") -> Any:
         """What one control on the page holds right now."""
-        widget = self.widget(name, identifier)
-        if widget is None:
-            raise AddonError(f"{name!r} has no widget with id {identifier!r}")
-        return jsonable(read_widget_value(widget, what))
+        return _read_control(name, identifier,
+                             self.widget(name, identifier), what)
 
     def set_icon(self, name: str, icon: Any = None) -> bool:
         """No use here: a Settings page has no tab mark of its own to change.
@@ -6244,7 +6809,7 @@ class ConfigAPI:
         fields = getattr(self._addon, "config_fields", None)
         if fields:
             return jsonable(list(fields))
-        return jsonable(read_config_json(addon_schema_path(self._api.id)).get("fields") or [])
+        return jsonable(read_config_cached(addon_schema_path(self._api.id)).get("fields") or [])
 
     def defaults(self) -> dict:
         """The defaults handed to ``declare``, as the addon named them."""
@@ -6252,13 +6817,13 @@ class ConfigAPI:
         if stored:
             return jsonable(dict(stored))
         # Switched off: the side file is all the app has.
-        return jsonable(read_config_json(addon_schema_path(self._api.id)).get("defaults") or {})
+        return jsonable(read_config_cached(addon_schema_path(self._api.id)).get("defaults") or {})
 
     # --- the values ---
 
     def stored(self) -> dict:
         """Exactly what is in the file, with nothing filled in."""
-        return jsonable(read_config_json(self.file))
+        return read_config_cached(self.file)
 
     def all(self) -> dict:
         """The file over the declared defaults, read fresh from disk."""
@@ -6275,7 +6840,7 @@ class ConfigAPI:
     def update(self, values: dict) -> dict:
         """Write the given keys and return the whole merged view."""
         def apply() -> dict:
-            merged = merge_config(self.defaults(), read_config_json(self.file))
+            merged = merge_config(self.defaults(), read_config_cached(self.file))
             for key, value in (values or {}).items():
                 put_config_value(merged, str(key), value)
             write_config_json(self.file, merged)
@@ -6286,7 +6851,7 @@ class ConfigAPI:
     def pop(self, key: str, default: Any = None) -> Any:
         """Remove a key so the default applies again."""
         def apply() -> Any:
-            stored = read_config_json(self.file)
+            stored = read_config_cached(self.file)
             gone = take_config_value(stored, str(key))
             write_config_json(self.file, stored)
             return jsonable(default if gone is None else gone)

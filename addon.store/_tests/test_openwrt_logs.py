@@ -650,6 +650,9 @@ def fresh_addon(api: Api) -> None:
     api_module._single_entries = []
     api_module._multi_entries = []
     api_module._multi_failed = {}
+    api_module._single_raw = None
+    api_module._multi_raw = None
+    api_module._combo_items = {}
     api_module._poll = None
     api_module._refresh_timer = None
     api_module._conn_rows = []

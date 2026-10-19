@@ -152,7 +152,7 @@ from addon_common import (AddonError, ORIGIN_KEY, STORE_ORIGIN, addon_manifest_p
 
 ADDON = {
     "name": "Berry addon store",
-    "version": "4.1",
+    "version": "4.2",
     "author": "fligma",
     "description": "Lists the addons published in the repository's addon.store "
                    "folder, downloads a chosen one into a staging folder and "
@@ -986,9 +986,11 @@ def build_tab() -> None:
     store and the Addon manager - sit under a sub-bar inside it, so the bar the
     user arranged is never two tabs wide here.
     """
+    global _shown_list
     api.tabs.add_tab(TAB, spec=tab_spec(), style=TAB_STYLE,
                      pinned=True, icon_only=True)
     api.tabs.set_icon(TAB, tab_icon())
+    _shown_list = (None, None)   # a table just built has been told nothing
 
 
 # What a download worker keeps off the widgets. A store file is fetched on a
@@ -1829,6 +1831,14 @@ _MARKS = {"new": "  \u25cf new", "updated": "  \u21bb updated"}
 #: The filter line as it stands, and the rows it leaves showing.
 filter_text = ""
 
+#: What the shelf and its count line were last told to hold. The icon pump, a
+#: row's switch and the store's own status all repaint the whole table, and a
+#: table that already says exactly this does not need Qt to tear it down and
+#: build it again to say nothing new; anything changed still goes through as it
+#: always did. Forgotten whenever the tab is (re)built, because a fresh table
+#: has been told nothing yet.
+_shown_list: tuple = (None, None)
+
 
 def state_of(entry: dict) -> tuple[str, str, str]:
     """How one addon stands on this machine: the short words for its row, the long
@@ -1880,7 +1890,7 @@ def matches(entry: dict, needle: str) -> bool:
 def show_entries() -> None:
     """The catalog as rows: each addon's own picture and name, its version, and
     how it stands against what is installed here."""
-    global shown
+    global shown, _shown_list
     if api is None:
         return
     needle = filter_text.strip().lower()
@@ -1899,13 +1909,17 @@ def show_entries() -> None:
             row["icon"] = picture
         rows.append(row)
     total = len(entries)
+    count_text = (f"{len(shown)} of {total}" if needle
+                  else f"{total} listed")
+    if _shown_list == (rows, count_text):
+        return
     try:
         api.tabs.set_widget(TAB, "list", "rows", rows)
-        api.tabs.set_widget(TAB, "count", "text",
-                            f"{len(shown)} of {total}" if needle
-                            else f"{total} listed")
+        api.tabs.set_widget(TAB, "count", "text", count_text)
     except AddonError:
         pass
+    else:
+        _shown_list = (rows, count_text)
 
 
 def apply_filter(needle: Any = "") -> None:
@@ -4420,6 +4434,7 @@ def start() -> None:
 def shutdown() -> None:
     """Let go of everything this copy held: the connections, the job, the pane."""
     global api, working, job, shown, picked, filter_text, session_delete_config
+    global _shown_list
     global managed, manager_rows, manager_picked
     global manager_slugs, manager_order, manager_building
     _drop_http()
@@ -4437,6 +4452,7 @@ def shutdown() -> None:
     manager_building = False
     config_pages.clear()      # open settings pages went with the tab's own bar
     del icon_queue[:]
+    _shown_list = (None, None)
     api = None
 
 

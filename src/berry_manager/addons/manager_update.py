@@ -120,7 +120,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Berry Manager update",
-    "version": "1.7",
+    "version": "1.8",
     "author": "fligma",
     "description": "Groups the berry tags published on GitHub into their major "
                    "lines, newest first, each line opening to its own builds, and "
@@ -161,6 +161,10 @@ lines: list[dict] = []      # those versions, grouped into their major lines
 opened: list[str] = []      # which major line has its dropdown pulled out
 notes: dict[str, dict] = {}  # what a pick read about one tag, kept for later
 slot_names: dict[str, list] = {}   # the words each dropdown was last handed
+#: What each pane control was last told to wear, by ``id|property``. A repaint
+#: of an unchanged line should cost no trip to the widget at all, and a control
+#: whose words did change is written exactly as it was before this memo existed.
+slot_words: dict[str, Any] = {}
 filling = False             # a dropdown is being laid out, not chosen from
 
 #: What follows is far too small to be this program; a page or a stub.
@@ -317,6 +321,15 @@ def profile_token() -> str:
 
 # --- versions and tags ---
 
+#: Where the parsing below is kept, keyed by the version's own text. The same
+#: tags are read again on every repaint - the grouping, the stances, the major
+#: lines' headings - and parsing a tag is pure, so a list that has not changed
+#: should not cost a second parse of anything in it. Bounded by the number of
+#: versions a repository can ever publish; the clear is only a guard against a
+#: value typed into a settings field turning the memo into a leak.
+_VERSION_PARSED: dict[str, tuple] = {}
+
+
 def _version_parts(value: Any) -> tuple:
     """The bytes out of a dotted version, as a tuple that can be compared.
 
@@ -326,15 +339,26 @@ def _version_parts(value: Any) -> tuple:
     trimmed when it is there and a part may be left bare; a part that is not hex
     at all is passed over, and a version with no readable byte is only compared
     as text (see ``version_newer``).
+
+    The answer is a tuple and so is safely shared: whoever reads it makes their
+    own list before changing anything.
     """
+    key = str(value or "")
+    found = _VERSION_PARSED.get(key)
+    if found is not None:
+        return found
     parts: list[int] = []
-    for raw in str(value or "").split("."):
+    for raw in key.split("."):
         part = raw.strip()
         if part[:2].lower() == "0x":
             part = part[2:]
         if part and all(c in "0123456789abcdefABCDEF" for c in part):
             parts.append(int(part, 16))
-    return tuple(parts)
+    parsed = tuple(parts)
+    if len(_VERSION_PARSED) > 512:
+        _VERSION_PARSED.clear()
+    _VERSION_PARSED[key] = parsed
+    return parsed
 
 
 def version_newer(remote: Any, local: Any) -> bool:
@@ -1918,11 +1942,34 @@ def _fill(slot: int, line: dict) -> None:
 
 
 def _clear_slot(slot: int) -> None:
-    """Take one row of the pane off the page, and forget what its dropdown held."""
+    """Take one row of the pane off the page, and forget what its dropdown held.
+
+    The row's last-written words are forgotten with it, so a line that later
+    comes back to this row is painted fresh rather than told it already wore
+    what it is about to be shown.
+    """
     _set(f"major{slot}", "visible", False)
     for name in ("mhead", "mpick", "mopen"):
         _set(f"{name}{slot}", "visible", False)
     slot_names.pop(f"mpick{slot}", None)
+    for prop in ("text", "tooltip"):
+        slot_words.pop(f"mhead{slot}|{prop}", None)
+        slot_words.pop(f"mopen{slot}|{prop}", None)
+
+
+def _wear(identifier: str, prop: str, value: Any) -> None:
+    """Hand one control its words, unless it is already wearing exactly those.
+
+    The pane is repainted whole whenever anything about the versions moves, but
+    a row's heading and its button's words survive almost every one of those
+    repaints unchanged; writing them again is a trip through the api that says
+    nothing the widget does not already say. Words a control has never been
+    told, or told differently, go through exactly as they used to.
+    """
+    if slot_words.get(f"{identifier}|{prop}") == value:
+        return
+    slot_words[f"{identifier}|{prop}"] = value
+    _set(identifier, prop, value)
 
 
 def _paint_slot(slot: int, line: dict, have: str, floor: str) -> None:
@@ -1937,13 +1984,13 @@ def _paint_slot(slot: int, line: dict, have: str, floor: str) -> None:
     builds = len(line.get("entries") or [])
     _set(f"major{slot}", "visible", True)
     _set(f"mhead{slot}", "visible", open_it)
-    _set(f"mhead{slot}", "text", major_words(line, have, floor))
+    _wear(f"mhead{slot}", "text", major_words(line, have, floor))
     _set(f"mpick{slot}", "visible", open_it)
     _set(f"mopen{slot}", "visible", True)
-    _set(f"mopen{slot}", "text", f"{major}  {'less' if open_it else 'more'}")
-    _set(f"mopen{slot}", "tooltip",
-         f"{'Hide' if open_it else 'Show'} the {builds} version(s) published on "
-         f"the {major} line")
+    _wear(f"mopen{slot}", "text", f"{major}  {'less' if open_it else 'more'}")
+    _wear(f"mopen{slot}", "tooltip",
+          f"{'Hide' if open_it else 'Show'} the {builds} version(s) published on "
+          f"the {major} line")
     if open_it:
         _fill(slot, line)
 
@@ -3699,6 +3746,7 @@ def shutdown() -> None:
     opened.clear()
     notes.clear()
     slot_names.clear()
+    slot_words.clear()
     api = None
 
 

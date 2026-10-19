@@ -519,6 +519,39 @@ def read_config_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+#: path -> [mtime_ns, size, the file as read] for config-shaped files that
+#: are asked for several times a repaint. The same bargain ``_MARK_CACHE``
+#: makes for the build record: the file's own stamp is checked on every read,
+#: so a hand edit between calls still comes back fresh, and a write through
+#: :func:`write_config_json` drops the remembered reading at once - whatever
+#: the clock says about when the new file landed.
+_CONFIG_CACHE: dict[str, list] = {}
+_CONFIG_CACHE_MAX = 48
+
+
+def read_config_cached(path: Path) -> dict:
+    """``read_config_json``, parsed once per change of the file.
+
+    Each call hands back a copy of what was parsed, so a caller may merge
+    into it or keep it without the next reading - or the cache itself -
+    moving under it."""
+    path = Path(path)
+    key = str(path)
+    try:
+        stamp = path.stat()
+    except OSError:
+        _CONFIG_CACHE.pop(key, None)
+        return {}
+    held = _CONFIG_CACHE.get(key)
+    if held is not None and held[:2] == [stamp.st_mtime_ns, stamp.st_size]:
+        return jsonable(held[2])
+    data = read_config_json(path)
+    if len(_CONFIG_CACHE) >= _CONFIG_CACHE_MAX:
+        _CONFIG_CACHE.clear()
+    _CONFIG_CACHE[key] = [stamp.st_mtime_ns, stamp.st_size, data]
+    return jsonable(data)
+
+
 def write_config_json(path: Path, values: dict) -> None:
     """Save a config file: pretty, utf-8, and replaced in one step."""
     path = Path(path)
@@ -531,6 +564,7 @@ def write_config_json(path: Path, values: dict) -> None:
     # any more - and a clock too coarse to notice the change is not a reason to
     # keep answering from the last one.
     _MARK_CACHE.pop(str(path), None)
+    _CONFIG_CACHE.pop(str(path), None)
 
 
 def merge_config(defaults: dict | None, stored: dict | None) -> dict:

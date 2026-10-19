@@ -33,7 +33,7 @@ from addon_common import AddonError, config_get, find_addon_picture, merge_confi
 
 ADDON = {
     "name": "Certificate manager",
-    "version": "1.6",
+    "version": "1.7",
     "author": "fligma",
     "description": "Shows the certificate on the device as a tidy summary or the raw "
                    "openssl text, and reissues the .crt and .key over SSH, with the "
@@ -50,6 +50,10 @@ TAB = "Certificates"
 api = None                  # filled in by init()
 working = False             # one device job at a time
 follow_up = ""              # what to say once the next read has landed
+#: What :func:`show_form` last put in each control, by widget id; a form
+#: re-shown over the same values writes nothing. Cleared when the tab is
+#: built, so the first show always lands on the fresh controls.
+_shown_form: dict = {}
 
 # --- what can be configured, and its defaults ---
 
@@ -382,6 +386,7 @@ def build_tab() -> None:
     reached by its icon and never dragged about.
     """
     values = with_clean_subject(api.config.all())
+    _shown_form.clear()
     api.tabs.add_tab(TAB, spec=tab_spec(values), style=TAB_STYLE,
                      pinned=True, icon_only=True)
     api.tabs.set_icon(TAB, tab_icon())
@@ -430,10 +435,15 @@ def show_form(values: dict) -> None:
         if kind in ("list", "multiline"):
             items = clean_list(value) if kind == "list" else [one_line(line)
                                                              for line in (value or []) if one_line(line)]
-            text = ", ".join(items) if kind == "list" else "\n".join(items)
-            api.tabs.set_widget(TAB, widget_id(key), "value", text)
-        else:
-            api.tabs.set_widget(TAB, widget_id(key), "value", value)
+            value = ", ".join(items) if kind == "list" else "\n".join(items)
+        # A form re-shown over the values it already holds writes nothing:
+        # ``pull``, a Settings change and a rebuild all land here, and every
+        # untouched control would else be cleared and re-set for nothing.
+        identifier = widget_id(key)
+        if _shown_form.get(identifier) == value:
+            continue
+        _shown_form[identifier] = value
+        api.tabs.set_widget(TAB, identifier, "value", value)
 
 
 def say(text: str, bad: bool = False) -> None:

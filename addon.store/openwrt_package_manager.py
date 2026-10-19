@@ -21,7 +21,7 @@ SHQ = shlex.quote
 
 ADDON = {
     "name": "OpenWrt Package Manager",
-    "version": "1.6",
+    "version": "1.7",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh", "sftp"],
@@ -387,7 +387,6 @@ def _done_change(result: dict, verb: str, pkg_name: str) -> None:
     api.schedule.after(0.5, fetch_installed)
 
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
-    backend = _pm_backend()
     if identifier == "btn_refresh_inst" and event == "clicked":
         fetch_installed()
     elif identifier == "inst_search" and event in ("changed", "returned"):
@@ -400,6 +399,7 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     elif identifier == "browse_search" and event == "returned":
         search_online(payload.get("text", ""))
     elif identifier == "btn_remove" and event == "clicked":
+        backend = _pm_backend()   # only the two confirm dialogs name it
         selected = api.tabs.widget_value("Package Manager", "inst_table", "selected")
         if not selected:
             api.ui.notify("Select a package from the table first.")
@@ -410,6 +410,7 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
                    else f"opkg remove {SHQ(pkg_name)}")
             api.device.run_async(cmd, on_done=lambda r, name=pkg_name: _done_change(r, "Removal", name))
     elif identifier == "btn_install" and event == "clicked":
+        backend = _pm_backend()
         selected = api.tabs.widget_value("Package Manager", "browse_table", "selected")
         if not selected:
             api.ui.notify("Select an online package to install first.")

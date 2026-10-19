@@ -67,7 +67,7 @@ from addon_common import (AddonError, config_get, find_addon_picture, jsonable,
 
 ADDON = {
     "name": "Theme Manager",
-    "version": "1.5",
+    "version": "1.6",
     "author": "fligma",
     "description": "Makes, edits and downloads the .theme files the program is "
                    "drawn from: every look on disk with a live preview beside "
@@ -326,6 +326,15 @@ shown: list[dict] = []
 picked_store = ""
 filter_text = ""
 
+#: What each whole table and each dropdown was last told to hold, by tab, widget
+#: and property. Repainting a list the widget already holds is Qt's whole
+#: teardown and rebuild to say nothing new, so exactly-equal writes of those two
+#: properties are dropped where they sit; every other write goes through
+#: untouched, because a forced value or a fold is not a rebuild. The memo is
+#: forgotten whenever a page is built, since a fresh widget has been told
+#: nothing yet.
+_laid_out: dict[tuple, Any] = {}
+
 # --- small helpers over the api ---
 
 def theme_colors(name: str = "") -> dict:
@@ -370,10 +379,22 @@ def note(text: str) -> None:
 
 def put(identifier: str, value: Any, prop: str = "value") -> None:
     """Write one widget, on whichever of the two tabs owns it; ignore a pane
-    that is not built."""
+    that is not built.
+
+    Whole tables and dropdown lists - the ``rows`` and ``items`` properties -
+    are the exception: the widget rebuilds for every one of them, so a write of
+    exactly what the widget already holds is dropped before it is ever sent
+    (see ``_laid_out``). Anything changed, and every other property, goes
+    through exactly as it did.
+    """
     if api is None:
         return
     tab = MAKER if str(identifier) in MAKER_IDS else TAB
+    if prop in ("rows", "items"):
+        key = (tab, identifier, prop)
+        if _laid_out.get(key) == value:
+            return
+        _laid_out[key] = value
     try:
         api.tabs.set_widget(tab, identifier, prop, value)
     except (AddonError, TypeError):
@@ -1782,6 +1803,7 @@ def build_tab() -> None:
     The mark is the whole caption by design: the tab is furniture, not a page
     somebody arranged, and what it opens is decided by the theme in force.
     """
+    _laid_out.clear()      # nothing a freshly built page holds was ever told
     api.tabs.add_tab(TAB, spec=tab_spec(), style=page_style(),
                      pinned=True, icon_only=True)
     api.tabs.set_icon(TAB, tab_icon())
@@ -1840,6 +1862,7 @@ def ensure_maker() -> bool:
         api.tabs.add_tab(MAKER, spec=maker_spec(), style=page_style())
     except AddonError:
         return False
+    _laid_out.clear()      # the maker's widgets are new: none was told anything
     refresh_themes()
     show_draft()
     note_template()
@@ -3055,6 +3078,7 @@ def shutdown() -> None:
     shown = []
     picked_store = ""
     filter_text = ""
+    _laid_out.clear()
     _drop_http()
     api = None
 

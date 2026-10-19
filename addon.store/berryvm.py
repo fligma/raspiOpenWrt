@@ -58,7 +58,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "BerryVM",
-    "version": "2.0",
+    "version": "2.2",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh", "sftp"],
@@ -114,6 +114,7 @@ P_MAIN = "main_ssh"           # SSH to the profile's host
 P_MACHINES = "machines"       # the SSH bookmark window
 P_SETTINGS = "settings"       # Display Properties
 P_CALC = "calc"               # Calculator
+P_RECYCLE = "recycle"         # the desktop's Recycle Bin window
 
 #: What Start and the desktop know as the program list: an id, a caption, and
 #: the mark the tile wears. The caption is the one name the icon layer, the
@@ -127,6 +128,7 @@ PROGRAMS: list[tuple[str, str]] = [
     (P_MACHINES, "Machines"),
     (P_SETTINGS, "Display Properties"),
     (P_CALC, "Calculator"),
+    (P_RECYCLE, "Recycle Bin"),
 ]
 
 CAPTIONS: dict[str, str] = dict(PROGRAMS)
@@ -258,6 +260,19 @@ ICON_EXE = (
     '</svg>'
 )
 
+ICON_RECYCLE = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<path d="M8 6h16l-1.5 22H9.5z" fill="#c4dcee" stroke="#3c5e7e"'
+    ' stroke-width="1.2"/>'
+    '<path d="M6 5h20" stroke="#3c5e7e" stroke-width="1.6"/>'
+    '<path d="M13 3h6v2h-6z" fill="#c4dcee" stroke="#3c5e7e"/>'
+    '<path d="M12 10h1M15 10h1M18 10h1M12 14h1M15 14h1M18 14h1M12 18h1'
+    'M15 18h1M18 18h1M12 22h1M15 22h1M18 22h1" stroke="#3c5e7e"'
+    ' stroke-width="1.4" stroke-linecap="round"/>'
+    '<path d="M14.5 12.5l3 0-1.5 2z" fill="#3e8522" stroke="none"/>'
+    '</svg>'
+)
+
 #: Program id to the mark its desktop tile wears.
 TILE_ICONS = {
     P_EXPLORER: ICON_COMPUTER,
@@ -268,6 +283,7 @@ TILE_ICONS = {
     P_MACHINES: ICON_SSH,
     P_SETTINGS: ICON_GEAR,
     P_CALC: ICON_CALC,
+    P_RECYCLE: ICON_RECYCLE,
 }
 
 #: The mark a taskbar button wears, from the ``kind`` its opened record
@@ -283,6 +299,7 @@ KIND_ICONS = {
     "machine": ICON_SSH,
     "settings": ICON_GEAR,
     "calc": ICON_CALC,
+    "recycle": ICON_RECYCLE,
 }
 
 #: The taskbar's own shape, in unscaled pixels: one row of buttons tall, and
@@ -290,6 +307,15 @@ KIND_ICONS = {
 #: desktop scale, so a bigger desktop grows a bigger bar.
 TASKBAR_H = 30
 TASKBAR_ICON = 16
+
+#: What the bar and the clock were last told: the row the refresh wrote and
+#: the line the tick wrote. Dragging a window re-runs the refresh through
+#: the desktop's ``moved`` report a hundred times a second without changing
+#: one button, and the clock's text moves once a minute while its tick runs
+#: twice; both answers are written only when they differ. ``fresh`` in the
+#: test suite resets these alongside the rest of the module state.
+_taskbar_shown: tuple = ()
+_clock_shown = None
 
 # --- the look: wallpapers, and the two sheets that paint the desktop ---
 
@@ -299,8 +325,9 @@ TASKBAR_ICON = 16
 WALLPAPERS = {
     "Bliss": ("gradient",
               "qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-              " stop:0 #1a56c4, stop:0.42 #6fb7ef, stop:0.52 #3e8522,"
-              " stop:0.78 #62a83a, stop:1 #2f6b17)"),
+              " stop:0 #2f7fdc, stop:0.15 #64a9e8, stop:0.35 #a8d1f2,"
+              " stop:0.42 #b5d8f2, stop:0.50 #78a945,"
+              " stop:0.65 #4d8f2f, stop:0.85 #3e7a22, stop:1 #2b5b18)"),
     "Night": ("gradient",
               "qlineargradient(x1:0,y1:0,x2:0,y2:1,"
               " stop:0 #060a1c, stop:0.55 #16295c, stop:1 #2c4b8a)"),
@@ -502,7 +529,10 @@ TAB_SPEC = {
     "kind": "column",
     "children": [
         {"kind": "windows", "id": DESKTOP, "object_name": "berryDesktop",
-         "expand": True, "on": ["activated", "closed", "moved", "resized"],
+         "expand": True,
+         "on": ["activated", "closed", "moved", "resized",
+                 "minimized", "restored", "maximized", "shortcut"],
+         "shortcuts": [{"keys": "Alt+Tab", "event": "shortcut"}],
          "children": []},
         {"kind": "row", "id": TASKBAR, "object_name": "berryTaskbar",
          "children": [
@@ -516,6 +546,16 @@ TAB_SPEC = {
                          "and it comes forward."},
              {"kind": "row", "id": TRAY, "object_name": "berryTray",
               "children": [
+                  {"kind": "button", "id": "tray_net", "text": "\u25d1",
+                   "object_name": "berryTrayBtn", "on": ["clicked"],
+                   "tooltip": "Network - not wired; BerryVM has no OS "
+                              "handle to read"},
+                  {"kind": "button", "id": "tray_snd", "text": "\u266a",
+                   "object_name": "berryTrayBtn", "on": ["clicked"],
+                   "tooltip": "Sound - not wired"},
+                  {"kind": "button", "id": "tray_shd", "text": "\u26e8",
+                   "object_name": "berryTrayBtn", "on": ["clicked"],
+                   "tooltip": "Security - not wired"},
                   {"kind": "label", "id": CLOCK, "object_name": "berryClock",
                    "text": ""},
               ]},
@@ -543,6 +583,21 @@ pane_rows: dict = {}           # table id -> {display name: {"path", ...}}
 pane_path: dict = {}           # pane prefix -> the folder that side shows
 home_ready: bool = False       # ``_ensure_home()`` has run in this process
 
+#: The desktop's own layout memory. Positions are keyed by a tile's
+#: persistent name (the caption it shipped with, before any rename);
+#: renames maps that key to what the person typed. Recycled holds one
+#: record per file the desktop has stashed in the Recycle Bin folder.
+#: Attention is which window ids are currently flashing on the bar, with
+#: the second they stop at beside them. Minimized is what the desktop
+#: knows is hidden, so a taskbar row can look pressed even without a
+#: round trip to the canvas.
+_desk_positions: dict = {}
+_desk_renames: dict = {}
+_desk_recycled: list = []
+minimized: dict = {}
+attention: dict = {}
+_flash_on: bool = False
+
 
 def init(plugin_api: Any) -> None:
     """Declare the config, paint the desktop, stand up the icon layer.
@@ -555,6 +610,7 @@ def init(plugin_api: Any) -> None:
     api.config.declare(fields=FIELDS, defaults=DEFAULTS, title="BerryVM")
     _ensure_home()
     mirror_settings()
+    load_desk()
     api.tabs.add_tab(TAB, spec=TAB_SPEC)
     api.tabs.set_icon(TAB, tab_icon())
     apply_theme()
@@ -565,6 +621,7 @@ def init(plugin_api: Any) -> None:
         api.schedule.every(30, tick_clock)
         tick_clock()
     api.schedule.every(0.5, pump_consoles)
+    api.schedule.every(0.5, tick_flash)
     api.log("BerryVM ready: an XP-styled desktop in one tab.")
     _welcome()
 
@@ -573,6 +630,8 @@ def shutdown() -> None:
     """Close the tab; the app stops any shell inside on its way out, and any
     local console loses its process here - a child nobody owns is a zombie."""
     global home_ready, machine_seq, berry_seq, view_seq, console_seq, calc_expr
+    global _desk_positions, _desk_renames, _desk_recycled
+    global minimized, attention, _flash_on
     for record in list(consoles.values()):
         _stop_shell(record)
     opened.clear()
@@ -590,6 +649,12 @@ def shutdown() -> None:
     console_seq = 0
     calc_expr = ""
     home_ready = False
+    _desk_positions = {}
+    _desk_renames = {}
+    _desk_recycled = []
+    minimized = {}
+    attention = {}
+    _flash_on = False
     if api is not None:
         api.tabs.close(TAB)
 
@@ -1009,17 +1074,80 @@ def read_settings() -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
+#: Where the desktop remembers the icons' places, names and stashed files.
+#: Separate from ``settings.json`` on purpose: the person can wipe this one
+#: file to reset the layout without losing their wallpaper or terminal size.
+DESK_NAME = "desktop.json"
+
+
+def desk_file() -> Path:
+    """The layout mirror inside the VM's own config folder."""
+    return home_root() / "config" / DESK_NAME
+
+
+def read_desk() -> dict:
+    """The saved layout: positions, renames and the recycle list. Missing
+    file or bad JSON reads back as an empty dict rather than an exception,
+    so a fresh install and a broken file are the same starting point."""
+    try:
+        loaded = json.loads(desk_file().read_text() or "{}")
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    loaded.setdefault("positions", {})
+    loaded.setdefault("renames", {})
+    loaded.setdefault("recycled", [])
+    return loaded
+
+
+def mirror_desk() -> dict:
+    """Write the in-memory layout back to ``desktop.json`` and hand it over.
+
+    Called after every event that changes one of the three lists. The
+    module keeps ``_desk_positions`` and friends as its live view so a
+    drag-and-drop on the icon layer costs one write, not one per tile.
+    """
+    stored = {"positions": _desk_positions,
+              "renames": _desk_renames,
+              "recycled": _desk_recycled}
+    try:
+        target = desk_file()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(stored, indent=2, sort_keys=True))
+    except OSError as error:
+        if api is not None:
+            api.log(f"berryvm: {DESK_NAME} not written: {error}")
+    return stored
+
+
+def load_desk() -> None:
+    """Pull the saved layout into the module's state; a fresh start when no
+    file has been written yet."""
+    global _desk_positions, _desk_renames, _desk_recycled
+    loaded = read_desk()
+    _desk_positions = dict(loaded.get("positions") or {})
+    _desk_renames = dict(loaded.get("renames") or {})
+    _desk_recycled = list(loaded.get("recycled") or [])
+
+
 # --- the taskbar and the clock ---
 
 def tick_clock() -> None:
     """Put the current time on the tray; a clock turned off in the config
-    writes an empty string rather than hiding the label."""
+    writes an empty string rather than hiding the label. The label only
+    hears when the line actually moves - the tick runs every thirty seconds
+    and the text changes once a minute."""
+    global _clock_shown
     if api is None:
         return
     if not bool(config("clock_on", True)):
-        api.tabs.set_widget(TAB, CLOCK, "text", "")
-        return
-    api.tabs.set_widget(TAB, CLOCK, "text", datetime.now().strftime("%H:%M"))
+        text = ""
+    else:
+        text = datetime.now().strftime("%H:%M")
+    if text != _clock_shown:
+        _clock_shown = text
+        api.tabs.set_widget(TAB, CLOCK, "text", text)
 
 
 def open_window_ids() -> list:
@@ -1072,14 +1200,31 @@ def refresh_taskbar() -> None:
     does not fall back on Qt's tall default (192px) and swallow the desktop
     it sits on. The height and mark size ride the desktop scale, so a bigger
     desktop grows a bigger bar - and a scale change, which re-runs this
-    through :func:`relayout_desktop`, moves them with it."""
+    through :func:`relayout_desktop`, moves them with it.
+
+    A minimized window wears a pressed-shaped button so its difference
+    shows at a glance; the flag joins the memo tuple so the row is
+    rewritten the moment a frame hides or comes back.
+
+    Dragging or sizing a window re-runs this on every mouse move through
+    the desktop's report, and none of that changes a button, so the whole
+    rewrite is skipped when the bar has already been told this exact row.
+    """
+    global _taskbar_shown
     if api is None:
         return
-    api.tabs.set_widget(TAB, TASK_LIST, "height", scaled(TASKBAR_H))
-    api.tabs.set_widget(TAB, TASK_LIST, "icon_size", scaled(TASKBAR_ICON))
+    row = tuple((caption_for(win_id), icon_for(win_id),
+                 bool(minimized.get(win_id)))
+                for win_id in program_window_ids())
+    state = (scaled(TASKBAR_H), scaled(TASKBAR_ICON), row)
+    if state == _taskbar_shown:
+        return
+    _taskbar_shown = state
+    api.tabs.set_widget(TAB, TASK_LIST, "height", state[0])
+    api.tabs.set_widget(TAB, TASK_LIST, "icon_size", state[1])
     api.tabs.set_widget(TAB, TASK_LIST, "items",
-                        [{"text": caption_for(win_id), "icon": icon_for(win_id)}
-                         for win_id in program_window_ids()])
+                        [{"text": cap, "icon": mark, "pressed": is_min}
+                         for cap, mark, is_min in row])
 
 
 def picked_window() -> str:
@@ -1099,6 +1244,69 @@ def picked_window() -> str:
         if text in texts:
             return win_ids[texts.index(text)]
     return ""
+
+
+def flash(win_id: str, reason: str = "", secs: float = 6.0) -> None:
+    """Ask the taskbar button beside a window to blink for a while.
+
+    An entry in :data:`attention` holds the monotonic second the flash
+    stops at, so :func:`tick_flash` can drop it once the interest is stale
+    and the addon never has to remember to unhook anything. The reason is
+    kept for a tooltip a future pass may want to write on the button.
+    """
+    global _flash_on
+    if not win_id or api is None:
+        return
+    import time as _time
+    attention[str(win_id)] = {"until": _time.monotonic() + float(secs),
+                              "reason": str(reason or "")}
+    _flash_on = True
+    _write_attention(force=True)
+
+
+def clear_flash(win_id: str) -> None:
+    """End a window's flash now, because the person has come back to it."""
+    if attention.pop(str(win_id), None) is not None:
+        _write_attention(force=True)
+
+
+def tick_flash() -> None:
+    """Half-second heartbeat: drop any expired entry, flip the blink on
+    and off, and hand the visible row to the host's list ``attention``
+    prop. A no-op when nothing is flashing, so a quiet desktop pays
+    nothing for the timer running."""
+    global _flash_on
+    if api is None or not attention:
+        if _flash_on:
+            _flash_on = False
+            _write_attention(force=True)
+        return
+    import time as _time
+    now = _time.monotonic()
+    stale = [win_id for win_id, rec in attention.items()
+             if float(rec.get("until", 0)) <= now]
+    for win_id in stale:
+        attention.pop(win_id, None)
+    _flash_on = not _flash_on
+    _write_attention()
+
+
+def _write_attention(force: bool = False) -> None:
+    """Paint the current attention list onto the taskbar's own row.
+
+    A tick that would repeat the same visible state is skipped unless
+    ``force`` says otherwise, so an idle half-second costs no widget
+    write. The prop names each flashing window's caption rather than its
+    id, because that is what the row uses as its key.
+    """
+    if api is None:
+        return
+    if _flash_on or force:
+        names = [caption_for(win_id) for win_id in attention
+                 if win_id in opened or win_id in CAPTIONS]
+    else:
+        names = []
+    api.tabs.set_widget(TAB, TASK_LIST, "attention", names)
 
 
 # --- the desktop's own calls ---
@@ -1193,9 +1401,11 @@ def icon_layer_spec() -> dict:
              "object_name": "berryDeskGrid",
              "grid": True, "icon_size": scaled(48), "tile_width": scaled(92),
              "spacing": scaled(10), "expand": "both",
-             "on": ["selected", "activated", "context"],
+             "movement": "free", "renamable": True,
+             "on": ["selected", "activated", "context", "moved", "renamed"],
              "tooltip": "Double-click a program to open it; right-click for "
-                        "the desktop's menu."},
+                        "the desktop's menu. A tile can be dragged anywhere "
+                        "and renamed in place."},
         ],
     }
 
@@ -1227,13 +1437,285 @@ def open_icon_layer() -> None:
 
 def draw_desk_icons() -> None:
     """Lay the program tiles down, in the order ``PROGRAMS`` names them. A
-    scale change re-runs this against the rebuilt layer."""
+    scale change re-runs this against the rebuilt layer.
+
+    Each tile carries a persistent ``name`` - the caption it was shipped
+    with - beside the cells it shows, so a rename does not lose the position
+    the person put on the tile. ``pos`` comes from the layout mirror when
+    one was saved; a tile that has never been moved is left for Qt's own
+    cascade to seat.
+    """
     if api is None:
         return
-    tiles = [{"cells": [caption], "icon": TILE_ICONS.get(pid, ICON_FILE),
-              "tip": f"Double-click to open {caption}"}
-             for pid, caption in PROGRAMS]
+    tiles = []
+    for pid, caption in PROGRAMS:
+        shown = str(_desk_renames.get(caption) or caption)
+        row = {"cells": [shown], "name": caption,
+               "icon": TILE_ICONS.get(pid, ICON_FILE),
+               "tip": f"Double-click to open {shown}"}
+        saved = _desk_positions.get(caption)
+        if isinstance(saved, (list, tuple)) and len(saved) >= 2:
+            row["pos"] = [int(saved[0]), int(saved[1])]
+        tiles.append(row)
     api.tabs.set_widget(TAB, ICON_GRID, "rows", tiles)
+    if _desk_positions:
+        api.tabs.set_widget(TAB, ICON_GRID, "positions", _desk_positions)
+
+
+def _resolve_caption(text: str) -> str:
+    """Map a tile's display text back to the program id it names. A rename
+    maps the shown word to the original caption first, so a tile that used
+    to say ``Notepad`` and now says ``Scratch`` still opens the editor."""
+    key = str(text or "")
+    if key in BY_CAPTION:
+        return BY_CAPTION[key]
+    for original, renamed in _desk_renames.items():
+        if str(renamed) == key and original in BY_CAPTION:
+            return BY_CAPTION[original]
+    return ""
+
+
+def _unique_rename(wanted: str) -> str:
+    """A rename that would collide with another program's caption gets a
+    numeric tail, so a tile never becomes indistinguishable from another."""
+    base = str(wanted or "").strip()
+    if not base:
+        return base
+    taken = {cap for _pid, cap in PROGRAMS} | set(_desk_renames.values())
+    if base not in taken:
+        return base
+    counter = 2
+    while f"{base} ({counter})" in taken:
+        counter += 1
+    return f"{base} ({counter})"
+
+
+def _apply_rename(key: str, new_name: str, old: str) -> None:
+    """Commit one tile's inline rename: update the ``renames`` map keyed by
+    the tile's persistent name, and carry any saved position over from the
+    old display name so a rename after a move keeps the layout. A blank
+    line is a cancel; a name that collides gets a tail.
+
+    The rename is not a reprogram: a tile whose caption used to be
+    ``Notepad`` still opens Notepad, only under a different word. That is
+    what :func:`_resolve_caption` above undoes on the next double-click."""
+    global _desk_renames, _desk_positions
+    if not key:
+        return
+    wanted = str(new_name or "").strip()
+    if not wanted:
+        # An empty label is Qt's cancel signal; redraw so the old name is
+        # put back rather than leaving the tile blank.
+        draw_desk_icons()
+        return
+    if wanted == str(_desk_renames.get(key) or key):
+        return
+    wanted = _unique_rename(wanted)
+    _desk_renames[key] = wanted
+    if old and old != key and old in _desk_positions:
+        _desk_positions[key] = _desk_positions.pop(old)
+    mirror_desk()
+    draw_desk_icons()
+
+
+def switcher_menu() -> None:
+    """Alt+Tab: offer the person a pick of every program window on the
+    desktop, and raise whichever one they name. A hidden frame is restored
+    first, so a switch is also a way out of a minimize a moment ago; any
+    flash on the chosen window is cleared because the person has come back
+    to it deliberately.
+
+    The shortcut is a Qt ``WindowShortcut`` and fires only while Berry
+    Manager itself has keyboard focus; no OS-level grab is offered to
+    addons."""
+    if api is None:
+        return
+    win_ids = program_window_ids()
+    if not win_ids:
+        return
+    labels = [caption_for(win_id) for win_id in win_ids]
+    picked = api.ui.choose(labels)
+    if picked is None:
+        return
+    try:
+        index = labels.index(str(picked))
+    except ValueError:
+        return
+    win_id = win_ids[index]
+    if minimized.pop(win_id, None):
+        api.tabs.set_widget(TAB, DESKTOP, "restore_window",
+                            {"id": win_id})
+        refresh_taskbar()
+    raise_window(win_id)
+    clear_flash(win_id)
+
+
+# --- the Recycle Bin: a folder under the desktop's own tree ---
+
+#: The stash folder inside ``Desktop/`` - the leading dot hides it from the
+#: Explorer's local pane listing, and the record list keeps track of where
+#: each file came from so a restore can put it back.
+RECYCLE_DIR = ".Recycle"
+
+
+def recycle_root() -> Path:
+    """Where the stashed files live. The home folder is created on first
+    use so a Recycle Bin opened before any Explorer run still finds room."""
+    return _ensure_home() / "Desktop" / RECYCLE_DIR
+
+
+def recycle_file(path: Any, name: str = "") -> bool:
+    """Move one local file into ``.Recycle/`` and remember where it came
+    from. A clash on the target name grows a numeric tail, the same way a
+    download into the Desktop folder does. Returns True on success."""
+    import shutil as _shutil
+    source = Path(str(path or ""))
+    if not source.exists():
+        return False
+    target_dir = recycle_root()
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        landed = target_dir / source.name
+        counter = 2
+        while landed.exists():
+            landed = target_dir / f"{source.stem}_{counter}{source.suffix}"
+            counter += 1
+        _shutil.move(str(source), str(landed))
+    except (OSError, _shutil.Error) as error:
+        if api is not None:
+            api.ui.notify(f"berryvm: could not recycle {source.name}: {error}")
+        return False
+    _desk_recycled.append({
+        "name": landed.name,
+        "from": str(source),
+        "deleted": datetime.now().isoformat(timespec="seconds"),
+    })
+    mirror_desk()
+    if api is not None:
+        api.ui.popup("Recycle Bin",
+                     f"Moved {name or source.name} to Recycle Bin")
+    draw_recycle()
+    return True
+
+
+def restore_recycled(name: str) -> bool:
+    """Move one stashed file back to the folder it came from, or to
+    ``Desktop/`` when that folder is gone. The record is dropped either
+    way - a vanished file is not something to keep chasing."""
+    import shutil as _shutil
+    record = next((r for r in _desk_recycled
+                   if str(r.get("name") or "") == str(name or "")), None)
+    if not record:
+        return False
+    source = recycle_root() / str(record.get("name") or "")
+    if not source.is_file():
+        _desk_recycled.remove(record)
+        mirror_desk()
+        draw_recycle()
+        return False
+    original = Path(str(record.get("from") or ""))
+    target_dir = original.parent if original.parent.is_dir() else (
+        _ensure_home() / "Desktop")
+    target = target_dir / original.name
+    counter = 2
+    while target.exists():
+        target = target_dir / (f"{original.stem}_{counter}{original.suffix}")
+        counter += 1
+    try:
+        _shutil.move(str(source), str(target))
+    except (OSError, _shutil.Error) as error:
+        if api is not None:
+            api.ui.notify(f"berryvm: could not restore: {error}")
+        return False
+    _desk_recycled.remove(record)
+    mirror_desk()
+    if api is not None:
+        api.ui.popup("Recycle Bin",
+                     f"Restored {original.name} to {target_dir}")
+    draw_recycle()
+    return True
+
+
+def empty_recycle(force: bool = False) -> int:
+    """Delete every file ``.Recycle/`` holds; the person is asked first
+    unless ``force`` says otherwise. A folder inside the stash (from a
+    moved directory) is walked the same way. Returns how many entries
+    were cleared."""
+    import shutil as _shutil
+    if api is None:
+        return 0
+    if not force and not api.ui.question(
+            "Recycle Bin",
+            "Permanently delete everything in the Recycle Bin?"):
+        return 0
+    global _desk_recycled
+    root = recycle_root()
+    count = 0
+    if root.is_dir():
+        for entry in root.iterdir():
+            try:
+                if entry.is_dir():
+                    _shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+                count += 1
+            except OSError:
+                pass
+    _desk_recycled = []
+    mirror_desk()
+    if api is not None and count:
+        api.ui.popup("Recycle Bin", f"{count} item(s) deleted")
+    draw_recycle()
+    return count
+
+
+def recycle_spec(win_id: str) -> dict:
+    """The Recycle Bin window: a table of stashed files with the buttons
+    that act on the picked one. A double-click on a row is the shortcut
+    a person expects: restore."""
+    return {"kind": "column", "children": [
+        {"kind": "label", "id": f"{win_id}_hint",
+         "text": "Files you deleted from the desktop. Double-click one to "
+                 "put it back.", "word_wrap": True},
+        {"kind": "table", "id": f"{win_id}_table",
+         "columns": ["Name", "From", "Deleted"],
+         "on": ["activated", "selected"], "expand": "both"},
+        {"kind": "row", "children": [
+            {"kind": "button", "id": f"{win_id}_restore", "text": "Restore",
+             "on": ["clicked"], "expand": True},
+            {"kind": "button", "id": f"{win_id}_delete", "text": "Delete",
+             "on": ["clicked"], "expand": True},
+            {"kind": "button", "id": f"{win_id}_empty", "text": "Empty all",
+             "on": ["clicked"], "expand": True},
+        ]},
+        {"kind": "label", "id": f"{win_id}_note", "text": "",
+         "word_wrap": True},
+    ]}
+
+
+def draw_recycle() -> None:
+    """Refresh the Recycle Bin's table with what the record list holds.
+    Skipped silently when the window is not on the desktop."""
+    if api is None or P_RECYCLE not in opened:
+        return
+    rows = [{"cells": [str(r.get("name") or ""),
+                       str(r.get("from") or ""),
+                       str(r.get("deleted") or "")]} for r in _desk_recycled]
+    api.tabs.set_widget(TAB, f"{P_RECYCLE}_table", "rows", rows)
+
+
+def open_recycle() -> str:
+    """Bring the Recycle Bin window up, and fill its table from the record
+    list. A second click just re-reads what is already there."""
+    if api is None:
+        return ""
+    title = CAPTIONS[P_RECYCLE]
+    open_window(_program_entry(P_RECYCLE, title, recycle_spec(P_RECYCLE),
+                               scaled(520), scaled(320)))
+    opened[P_RECYCLE] = {"title": title, "kind": "recycle"}
+    refresh_taskbar()
+    draw_recycle()
+    return P_RECYCLE
 
 
 def relayout_desktop() -> None:
@@ -1249,20 +1731,42 @@ def relayout_desktop() -> None:
 
 
 def desktop_menu(text: str) -> None:
-    """The right-click on the icon layer. A tile's name opens its menu - just
-    ``Open``, which is what a tile's menu ever offered - and bare wallpaper
-    gets the desktop's own: explore, change the background, make a note,
+    """The right-click on the icon layer. A tile's name opens its menu -
+    just ``Open``, which is what a tile's menu ever offered - and bare
+    wallpaper gets the desktop's own: the New family, the two resets that
+    put the icon layer back to rights, the Recycle Bin, and the plain
     refresh."""
     if api is None:
         return
     if text:
-        picked = api.ui.choose(["Open"])
-        if picked == "Open" and text in BY_CAPTION:
-            start_program(BY_CAPTION[text])
+        picked = api.ui.choose(["Open", "Rename", "Delete"])
+        if picked == "Open":
+            pid = _resolve_caption(text)
+            if pid:
+                start_program(pid)
+        elif picked == "Rename":
+            fresh = api.ui.input("Rename", "New name", text)
+            fresh = str(fresh or "").strip()
+            if fresh and fresh != text:
+                key = next((orig for orig, renamed in _desk_renames.items()
+                            if str(renamed) == text), text)
+                if key in BY_CAPTION or text in BY_CAPTION:
+                    _apply_rename(key if key in BY_CAPTION else text,
+                                  fresh, text)
+        elif picked == "Delete":
+            # A tile is only a shortcut; deleting it drops a note rather
+            # than the Recycle Bin, so a stray right-click is undoable by
+            # the desktop's own Reset Icon Names.
+            _note(ICONS, f"{text} is a program tile; leave it on the "
+                         f"desktop or Reset Icon Names to bring back a "
+                         f"renamed one.")
         return
     picked = api.ui.choose([
         "Open My Computer", "Notepad", "Change Desktop Background...",
-        "New Text Document", "Refresh",
+        "New Text Document", "New Folder",
+        "Auto Arrange Icons", "Reset Icon Names",
+        "Open Recycle Bin", "Empty Recycle Bin",
+        "Refresh",
     ])
     if picked == "Open My Computer":
         start_program(P_EXPLORER)
@@ -1272,9 +1776,59 @@ def desktop_menu(text: str) -> None:
         start_program(P_SETTINGS)
     elif picked == "New Text Document":
         new_desk_note()
+    elif picked == "New Folder":
+        new_desk_folder()
+    elif picked == "Auto Arrange Icons":
+        _desk_positions.clear()
+        mirror_desk()
+        draw_desk_icons()
+    elif picked == "Reset Icon Names":
+        _desk_renames.clear()
+        mirror_desk()
+        draw_desk_icons()
+    elif picked == "Open Recycle Bin":
+        start_program(P_RECYCLE)
+    elif picked == "Empty Recycle Bin":
+        empty_recycle()
     elif picked == "Refresh":
         relayout_desktop()
         apply_theme()
+
+
+def _tray_stub(name: str) -> None:
+    """A tray icon was pressed. BerryVM has no OS handle for network, volume
+    or security centre, so the button is a visual affordance and says so.
+    The click still means something, which is more than a bare label does."""
+    if api is None:
+        return
+    labels = {"tray_net": "Network",
+              "tray_snd": "Volume",
+              "tray_shd": "Security"}
+    api.ui.popup("Not wired",
+                 f"BerryVM shows a {labels.get(name, name)} mark for shape "
+                 f"but cannot read the real state - no OS handle is exposed "
+                 f"to addons.")
+
+
+def new_desk_folder() -> str:
+    """A fresh ``New Folder`` (numbered when one exists) in the VM's
+    Desktop folder. Cheap and XP-shaped: it does not need a round trip
+    through the Explorer to sit next to the tiles."""
+    if api is None:
+        return ""
+    root = _ensure_home() / "Desktop"
+    target = root / "New Folder"
+    counter = 2
+    while target.exists():
+        target = root / f"New Folder {counter}"
+        counter += 1
+    try:
+        target.mkdir(parents=True, exist_ok=False)
+    except OSError as error:
+        api.ui.notify(f"berryvm: could not create folder: {error}")
+        return ""
+    _note(ICONS, f"created {target.name}")
+    return str(target)
 
 
 def new_desk_note() -> str:
@@ -1351,6 +1905,8 @@ def start_program(win_id: str) -> None:
         open_settings()
     elif win_id == P_CALC:
         open_calc()
+    elif win_id == P_RECYCLE:
+        open_recycle()
     else:
         api.ui.notify(f"BerryVM has no program {win_id!r}.")
 
@@ -1722,6 +2278,12 @@ def pane_delete(pane: str) -> None:
         _note(P_EXPLORER, "Select an item to delete.")
         return
     kind = "folder" if meta.get("directory") else "file"
+    if pane == PANE_LOCAL and not meta.get("directory"):
+        # A local file is stashed in the Recycle Bin rather than shredded,
+        # so the person can fish it out from the desktop's own icon.
+        if recycle_file(str(meta["path"]), name):
+            pane_list(pane, pane_path[pane])
+        return
     if not api.ui.question("Delete",
                            f"Delete the {kind} {name!r} for good?"):
         return
@@ -2311,8 +2873,9 @@ def _console_reader(con: dict) -> None:
 
 def pump_consoles() -> None:
     """Move whatever the shells have said since last time onto their
-    screens. Runs on the tab's own timer; an empty tray writes nothing."""
-    if api is None:
+    screens. Runs on the tab's own timer; with no console window open there
+    is nothing to pump, and an empty tray writes nothing."""
+    if api is None or not consoles:
         return
     for win_id, con in list(consoles.items()):
         lines = []
@@ -2996,7 +3559,31 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         if event == "closed":
             forget_window(body)
         refresh_taskbar()
-        keep_icons_behind()
+        if event in ("activated", "closed"):
+            # Only a change of who is on top can push the icon layer up;
+            # a drag or a sizing move never re-stacks the frames, so the
+            # bar's busiest events skip the extra desktop read entirely.
+            keep_icons_behind()
+        return
+    # 1b. A frame's own minimize / maximize / restore report. The taskbar
+    # row follows the flag; a raised or restored window also clears any
+    # flash it was wearing, since the person has come back to it.
+    if body in opened and event in ("minimized", "maximized", "restored"):
+        if event == "minimized":
+            minimized[body] = True
+        elif event == "maximized":
+            minimized.pop(body, None)
+        else:                                # restored
+            minimized.pop(body, None)
+            clear_flash(body)
+        refresh_taskbar()
+        return
+    # 1c. The desktop's own shortcut: Alt+Tab cycles the windows through
+    # a choose prompt. A global grab is not offered to addons, so the
+    # chord fires only while the Berry Manager window has focus.
+    if body == DESKTOP and event == "shortcut":
+        if str(payload.get("keys") or "").lower() == "alt+tab":
+            switcher_menu()
         return
     # 2. Start and the taskbar.
     if body == START_BTN and event == "clicked":
@@ -3012,10 +3599,26 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     if body == ICON_GRID:
         if event == "activated":
             text = str(payload.get("text") or "")
-            if text in BY_CAPTION:
-                start_program(BY_CAPTION[text])
+            pid = _resolve_caption(text)
+            if pid:
+                start_program(pid)
         elif event == "context":
             desktop_menu(str(payload.get("text") or ""))
+        elif event == "moved":
+            # Every tile's position arrives on each drop; the whole map is
+            # written to the layout file in one pass, so a fast drag of
+            # several tiles costs only the writes it really needs.
+            for one in (payload.get("all") or []):
+                key = str(one.get("key") or "")
+                if not key:
+                    continue
+                _desk_positions[key] = [int(one.get("x", 0)),
+                                        int(one.get("y", 0))]
+            mirror_desk()
+        elif event == "renamed":
+            _apply_rename(str(payload.get("key") or ""),
+                          str(payload.get("name") or ""),
+                          str(payload.get("old") or ""))
         return
     # 4. A terminal's news, whether the Terminal's or a machine window's.
     if is_terminal_id(body):
@@ -3099,6 +3702,48 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     # 9. The calculator's keys.
     if event == "clicked" and body in CALC_IDS:
         calc_press(CALC_IDS[body])
+        return
+    if event == "clicked" and body in ("tray_net", "tray_snd", "tray_shd"):
+        _tray_stub(body)
+        return
+    # 9b. The Recycle Bin window: a row's double-click restores it, and
+    # the three buttons below the table do the same thing plus a wipe.
+    if body == f"{P_RECYCLE}_table":
+        row = str(payload.get("text") or "")
+        if event == "activated" and row:
+            restore_recycled(row)
+        elif event == "selected":
+            pane_pick[body] = row
+        return
+    if event == "clicked" and body == f"{P_RECYCLE}_restore":
+        target = pane_pick.get(f"{P_RECYCLE}_table") or ""
+        if target:
+            restore_recycled(target)
+        else:
+            _note(P_RECYCLE, "Select a file to restore.")
+        return
+    if event == "clicked" and body == f"{P_RECYCLE}_delete":
+        target = pane_pick.get(f"{P_RECYCLE}_table") or ""
+        if not target:
+            _note(P_RECYCLE, "Select a file to delete.")
+            return
+        if not api.ui.question("Recycle Bin",
+                               f"Delete {target!r} for good?"):
+            return
+        try:
+            (recycle_root() / target).unlink()
+        except OSError as error:
+            _note(P_RECYCLE, f"could not delete: {error}")
+            return
+        _desk_recycled[:] = [r for r in _desk_recycled
+                             if str(r.get("name") or "") != target]
+        mirror_desk()
+        draw_recycle()
+        return
+    if event == "clicked" and body == f"{P_RECYCLE}_empty":
+        gone = empty_recycle()
+        _note(P_RECYCLE, f"{gone} item(s) deleted" if gone
+                          else "Nothing was in the bin.")
         return
     # 10. Display Properties.
     if event == "clicked" and body == "set_apply":

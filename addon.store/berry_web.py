@@ -89,7 +89,7 @@ ADDON = {
     # offers the machine's browser. The page is put up by itself when the device
     # answers as the dashboard and again after an install that worked, while the
     # switch on the uhttpd page is on.
-    "version": "1.7",
+    "version": "1.8",
     "author": "fligma",
     "description": "Looks for the Berry dashboard on the connected host and, when "
                    "it is not there, installs src/www_rasconf from GitHub over "
@@ -116,6 +116,11 @@ api = None                  # filled in by init()
 working = False             # one job at a time
 job: dict | None = None     # the job in progress, or nothing
 last_check: dict = {}       # what the device last said about itself
+#: What the repaint helpers last put on each control, by ``(id, property)``;
+#: a chip re-lit with the same words, or a form re-shown over the same
+#: values, writes nothing. Cleared when the tab is built, so the first show
+#: of every control always lands on the fresh widgets.
+shown_widgets: dict = {}
 # The tab has two bodies in the same room: its own notebook of forms, and the
 # page the device serves shown over it. Which is up, and which page of the
 # notebook was last asked for, are the two things the side bar has to say.
@@ -1060,8 +1065,12 @@ def paint_steps(stages: list[str], cutoff: int, active: str | None = None) -> No
 def _chip(identifier: str, text: str, tone: str) -> None:
     """One of the three count badges, with the words and the colour to match."""
     try:
-        api.tabs.set_widget(TAB, identifier, "text", text)
-        api.tabs.set_widget(TAB, identifier, "style", _CHIP_STYLES[tone])
+        if shown_widgets.get((identifier, "text")) != text:
+            shown_widgets[(identifier, "text")] = text
+            api.tabs.set_widget(TAB, identifier, "text", text)
+        if shown_widgets.get((identifier, "style")) != _CHIP_STYLES[tone]:
+            shown_widgets[(identifier, "style")] = _CHIP_STYLES[tone]
+            api.tabs.set_widget(TAB, identifier, "style", _CHIP_STYLES[tone])
     except (AddonError, AttributeError, TypeError):
         pass
 
@@ -1352,6 +1361,7 @@ def tab_icon() -> str:
 
 def build_tab() -> None:
     """The tab as a spec, and its buttons as reports; nothing holds a widget."""
+    shown_widgets.clear()
     api.tabs.add_tab(TAB, spec=tab_spec(merge_config(DEFAULTS, _stored_config())),
                      style=TAB_STYLE)
     api.tabs.set_icon(TAB, tab_icon())
@@ -1367,10 +1377,11 @@ def show_form(values: dict) -> None:
         if kind in ("list", "multiline"):
             items = clean_list(value) if kind == "list" else [
                 one_line(line) for line in (value or []) if one_line(line)]
-            text = ", ".join(items) if kind == "list" else "\n".join(items)
-            api.tabs.set_widget(TAB, key, "value", text)
-        else:
-            api.tabs.set_widget(TAB, key, "value", value)
+            value = ", ".join(items) if kind == "list" else "\n".join(items)
+        if shown_widgets.get((key, "value")) == value:
+            continue        # the box already holds exactly this
+        shown_widgets[(key, "value")] = value
+        api.tabs.set_widget(TAB, key, "value", value)
     show_target(values)
 
 
@@ -1449,10 +1460,13 @@ def show_target(values: dict) -> None:
     except (AddonError, AttributeError, TypeError):
         pass
     whole = job_paths(values)["home"]
-    try:
-        api.tabs.set_widget(TAB, "target", "text", f"{describe(values)}  \u2192  {whole}")
-    except (AddonError, AttributeError, TypeError):
-        pass
+    line = f"{describe(values)}  \u2192  {whole}"
+    if shown_widgets.get(("target", "text")) != line:
+        shown_widgets[("target", "text")] = line
+        try:
+            api.tabs.set_widget(TAB, "target", "text", line)
+        except (AddonError, AttributeError, TypeError):
+            pass
     host = one_line(str(status.get("host") or ""))
     # Ask what *this addon* may reach, not just whether the app's session is
     # up: the SSH and SFTP switches on its own Settings row count too.
@@ -1465,10 +1479,14 @@ def show_target(values: dict) -> None:
     words += ("  \u00b7  SFTP up" if ready else
               "  \u00b7  " + ("SFTP is switched off for this addon" if up
                               else "not connected"))
+    style = _CHIP_STYLES["green" if ready else "gray"]
     try:
-        api.tabs.set_widget(TAB, "state", "text", words)
-        api.tabs.set_widget(TAB, "state", "style",
-                            _CHIP_STYLES["green" if ready else "gray"])
+        if shown_widgets.get(("state", "text")) != words:
+            shown_widgets[("state", "text")] = words
+            api.tabs.set_widget(TAB, "state", "text", words)
+        if shown_widgets.get(("state", "style")) != style:
+            shown_widgets[("state", "style")] = style
+            api.tabs.set_widget(TAB, "state", "style", style)
     except (AddonError, AttributeError, TypeError):
         pass
 
