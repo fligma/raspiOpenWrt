@@ -1987,16 +1987,31 @@ def main() -> int:
     icon = find_icon()
     if icon is not None:
         app.setWindowIcon(QIcon(str(icon)))
+    code = 1
     try:
         card = InstallerCard()
         card.show()
-        return app.exec()
+        code = app.exec()
     except Exception:                       # noqa: BLE001 - die saying so
         _crash_report(*sys.exc_info())
-        return 1
+        code = 1
     finally:
         sys.excepthook = sys.__excepthook__
+    # Walk away without running the interpreter's shutdown. A windowed build
+    # has been seen to abort (SIGABRT) *after* the window closed cleanly, when
+    # the collector tore down a still-live network probe or the terminal widget
+    # in an order Qt did not expect - which reads to the user as "it closed
+    # fine, then a crash message." The verdict is already written to
+    # settings.json and the answer is already in hand; flushing the streams and
+    # exiting hard skips that teardown, so there is nothing left to abort. It
+    # is the same exit the test harnesses use for the same reason.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
+    os._exit(int(code))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

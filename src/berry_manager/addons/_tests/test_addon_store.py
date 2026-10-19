@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """A test for addons/addon_store.py.
 
-The store's whole job is to read a catalog from GitHub and turn one entry of it
-into a compiled program in the addons folder. None of that needs a device, and
-none of it is looked at here by reaching the network or running PyInstaller: this
-drives the Qt-free half directly - how ``index.json`` is read, how an id and a
-raw address are cleaned, how the table is filled, and how a button click is
-routed - and checks the install guard rails that fire before any real work.
+The store's whole job is to read a catalog from GitHub and place one entry of it
+in the addons folder as a module that runs inside the app. None of that needs a
+device, and none of it is looked at here by reaching the network: this drives
+the Qt-free half directly - how ``index.json`` is read, how an id and a raw
+address are cleaned, how the table is filled, and how a button click is routed -
+and checks the install guard rails that fire before any real work.
 
 Three things get looked at:
 
@@ -31,13 +31,12 @@ Three things get looked at:
   installed addon on and off, the stop-and-switch-off every job starts with and
   the switch an update puts back, the live notice that counts the whole batch
   in percent, and the queue that keeps going addon after addon;
-* the catalog generator that rebuilds ``index.json`` from the store folder, the
-  store's rule that an addon's test is run before it is compiled, which Python
-  it is allowed to build with, and how a refused pip install is retried;
-* where the two modules an addon imports come from - the app's own folder, a
-  copy the build carries, or GitHub - and what happens to an install when a test
-  stops because this machine lacks them rather than because the addon failed;
-* what an install leaves where: the build staged and then cleared inside the
+* the catalog generator that rebuilds ``index.json`` from the store folder;
+* how a placement writes an addon's downloaded ``.py`` into ``addons/<id>/``
+  beside its assets and its manifest, clearing any older compiled install of
+  the same id so its space comes back - and that a job starts this download with
+  no interpreter and no PyInstaller looked for at all;
+* what an install leaves where: the downloads staged and then cleared inside the
   store's own ``_data`` folder, the new addon written into the profile as
   switched off, and the rescan that shuts the store down done last of all;
 * the environment a built app hands to anything it starts: a restarted copy of
@@ -669,8 +668,7 @@ def test_the_updates(store: Any) -> None:
     api = fresh(store)
     real_dir = store.addons_dir
     real_entries, real_updates = store.entries, store.updates
-    real_begin, real_python = store._begin_job, store._ensure_python
-    real_dev, real_download = store._dev, store._download_all
+    real_begin, real_download = store._begin_job, store._download_all
     try:
         with tempfile.TemporaryDirectory() as where:
             folder = Path(where)
@@ -759,7 +757,8 @@ def test_the_updates(store: Any) -> None:
                   f"a refused update still went ahead: {last_status(api)!r}")
 
             # say yes, and the job that starts is an update remembering its
-            # versions, opening on the phase that downloads the whole batch
+            # versions, opening straight on the phase that downloads the whole
+            # batch - nothing is compiled, so no interpreter is looked for first
             api.answer("ui.question", True)
             began: list = []
 
@@ -767,13 +766,6 @@ def test_the_updates(store: Any) -> None:
                 began.append((verb, (items[0] or {}).get("id")))
                 return real_begin(verb, items)
             store._begin_job = fake_begin
-            store._ensure_python = lambda: "python"
-
-            class _Ready:
-                @staticmethod
-                def pyinstaller_ready():
-                    return True, ""
-            store._dev = lambda: _Ready()
             downloaded: list = []
             store._download_all = lambda: downloaded.append(
                 [entry["id"] for entry in (store.job or {}).get("queue") or []])
@@ -795,8 +787,7 @@ def test_the_updates(store: Any) -> None:
     finally:
         store.addons_dir = real_dir
         store.entries, store.updates = real_entries, real_updates
-        store._begin_job, store._ensure_python = real_begin, real_python
-        store._dev, store._download_all = real_dev, real_download
+        store._begin_job, store._download_all = real_begin, real_download
         store.job = None
         store.working = False
         store.shutdown()
@@ -817,8 +808,7 @@ def test_the_switches(store: Any) -> None:
     api = fresh(store)
     real_dir = store.addons_dir
     real_entries, real_updates = store.entries, store.updates
-    real_begin_job, real_python = store._begin_job, store._ensure_python
-    real_dev, real_download = store._dev, store._download_all
+    real_begin_job, real_download = store._begin_job, store._download_all
     real_tidy, real_reload = store._tidy, store._reload
     real_start, real_show = store._start_job, store.show_entries
     try:
@@ -988,13 +978,6 @@ def test_the_switches(store: Any) -> None:
                        ["Hello from the store  \u25cf new", "Odd"])
             api.answer("ui.question", True)
             phases: list = []
-            store._ensure_python = lambda: "python"
-
-            class _Ready:
-                @staticmethod
-                def pyinstaller_ready():
-                    return True, ""
-            store._dev = lambda: _Ready()
             store._download_all = lambda: phases.append(
                 [entry["id"] for entry in (store.job or {}).get("queue") or []])
             api.calls.clear()
@@ -1015,34 +998,30 @@ def test_the_switches(store: Any) -> None:
                   str([a for _w, a, _n in api.calls if _w == "ui.question"][-1][1]),
                   "a two-addon install asked per addon, or not at all")
 
-            # and the batch lands addon by addon as its builds finish: each
-            # install step places one program on its own, and only the batch's
-            # own ending closes the job and asks for the rescan
+            # and the batch places addon by addon: each placement step writes
+            # one module on its own, and only the batch's own ending closes the
+            # job and asks for the rescan
             reloads: list = []
             store._tidy = lambda ident: None
             store._reload = lambda: reloads.append("reload")
-
-            class _Step:
-                def staged_name(self, ident, onefile, root=None):
-                    made = folder / f"{ident}.staged.exe"
-                    made.write_text("x", encoding="utf-8")
-                    return made
-
-                def install_build(self, staged, ident, onefile):
-                    target = folder / ident / f"{ident}.exe"
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text("x", encoding="utf-8")
-                    return target
-            store._dev = lambda: _Step()
+            for ident in ("hello_store", "odd_id"):
+                made = store.staged_folder(ident) / f"{ident}.py"
+                made.parent.mkdir(parents=True, exist_ok=True)
+                made.write_text("ADDON = {}\n", encoding="utf-8")
+                store.job["staged"][ident] = {
+                    "entry": store.entry_for(ident), "source": made,
+                    "details": {}, "values": {}}
             api.calls.clear()
-            store._install_step("hello_store")
+            store._place_python("hello_store")
             check(store.job is not None and store.job["done"] == 1
                   and store.job["did"] == ["hello_store"],
                   f"the batch's first addon did not land on its own step: "
                   f"{store.job}")
+            check((folder / "hello_store" / "addon.py").is_file(),
+                  "the placement did not write the module to addons/<id>/addon.py")
             check(not reloads,
                   "the rescan came before the batch's last addon")
-            store._install_step("odd_id")
+            store._place_python("odd_id")
             check(store.job is not None
                   and store.job["did"] == ["hello_store", "odd_id"],
                   f"the batch's last addon did not land on its own step: "
@@ -1086,8 +1065,7 @@ def test_the_switches(store: Any) -> None:
     finally:
         store.addons_dir = real_dir
         store.entries, store.updates = real_entries, real_updates
-        store._begin_job, store._ensure_python = real_begin_job, real_python
-        store._dev, store._download_all = real_dev, real_download
+        store._begin_job, store._download_all = real_begin_job, real_download
         store._tidy, store._reload = real_tidy, real_reload
         store._start_job, store.show_entries = real_start, real_show
         store.job = None
@@ -1101,16 +1079,15 @@ def test_a_start_that_dies(store: Any) -> None:
     A wedged ``working`` flag is indistinguishable from a button that does
     nothing: once a job is promised, every later press answers the guard at
     the top of the handler, so an exception loose in the synchronous part of
-    the start - an ``import core.addon`` that a compiled store cannot reach,
-    say - keeps every button dead for the rest of the session. Both buttons,
-    and the step a finished process hands the job on to, must end the promised
-    job with the reason on the screen instead.
+    the start - a place that cannot be written, say - keeps every button dead
+    for the rest of the session. Both buttons must end the promised job with
+    the reason on the screen instead.
     """
     print("\n5i. a start that cannot start ends as a failure it says")
     api = fresh(store)
     real_dir = store.addons_dir
     real_entries, real_updates = store.entries, store.updates
-    real_start, real_dev = store._start_job, store._dev
+    real_start = store._start_job
     try:
         with tempfile.TemporaryDirectory() as where:
             folder = Path(where)
@@ -1153,141 +1130,80 @@ def test_a_start_that_dies(store: Any) -> None:
                   "a start of an update that raised wedged the tab")
             check("update could not start" in last_status(api),
                   f"a failed update did not say why: {last_status(api)!r}")
-
-            # and a step that raises on the tick after a finished process is
-            # a failed job too - not a dead program, and not a held button
-            class _DoneStream:
-                finished = True
-                code = 0
-
-                def drain(self, _n: int) -> list:
-                    return []
-            store.job = {"verb": "install", "total": 1, "done": 0,
-                         "pane": False, "stream": _DoneStream(),
-                         "on_ok": explode, "on_bad": None, "fail": "",
-                         "building": {}, "waiting": [], "restore": {}}
-            store.working = True
-            api.calls.clear()
-            store._poll_stream()
-            check(not store.working and store.job is None,
-                  "an on_ok that raised left the job holding the buttons")
-            check("could not go on" in last_status(api),
-                  f"a failed continuation did not say why: {last_status(api)!r}")
     finally:
         store.addons_dir = real_dir
         store.entries, store.updates = real_entries, real_updates
-        store._start_job, store._dev = real_start, real_dev
+        store._start_job = real_start
         store.job = None
         store.working = False
         store.shutdown()
 
 
 def test_the_batch_order(store: Any) -> None:
-    """The batch's own order: every download, then the gates, then threes.
+    """The batch's own order: every download first, then each addon is placed.
 
     The install used to walk the picked addons one at a time - one addon's
-    whole download, test and compile before the next was even fetched. This
-    drives the phases themselves: the whole queue staged to disk before the
-    first gate opens, the builds kept to three at a time with a finished one
-    handing its slot to the next waiting addon, and a build that dies taking
-    its siblings down rather than leaving them printing to nobody.
+    whole download and compile before the next was even fetched. Nothing is
+    compiled now, so this drives the phases themselves: the whole queue staged
+    to disk before a single module is placed, the addons placed one after
+    another in the order they were picked, and a placement that cannot find its
+    source ending the batch there rather than leaving a neighbour half-written.
     """
-    print("\n5h. the batch's phases: every download, then gates, then threes")
+    print("\n5h. the batch's phases: every download, then each placement")
     api = fresh(store)
-    real = (store.job, store._stage_entry, store._start_tests,
-            store._begin_build, store._install_step, store._finish_all,
-            store.harness_folder, store._reset_staging)
-    slots: dict = {}
+    real = (store.job, store.working, store._stage_entry, store._place_python,
+            store._finish_all, store._reset_staging, store._point_job_at,
+            store._prep_one, store._tidy)
+    real_place = store._place_python
+    staged: list = []
     try:
         hello = {"id": "hello_store", "name": "Hello"}
         odd = {"id": "odd_id", "name": "Odd"}
 
-        class _SlotStream:
-            """A build process the test finishes by hand, slot by slot."""
-
-            def __init__(self, ident: str) -> None:
-                self.ident = ident
-                self.finished = False
-                self.code = 0
-                self.killed = False
-
-            def start(self) -> None:
-                pass
-
-            def drain(self, limit: int = 400) -> list:
-                return []
-
-            def kill(self) -> None:
-                self.killed = True
-
         def batch(items: list) -> dict:
             """A job dict whole enough for every phase to walk over."""
             return {"verb": "install", "values": {}, "source": "",
-                    "stream": None, "on_ok": None, "fail": "", "lines": [],
-                    "harness": None, "widened": False, "details": {},
                     "console": False, "id": "", "queue": list(items),
-                    "phase": "", "staged": {}, "waiting": [], "building": {},
-                    "test_ids": [], "test_at": 0, "from_versions": {},
+                    "phase": "", "staged": {}, "from_versions": {},
                     "total": len(items), "done": 0, "restore": {},
                     "did": [], "pane": False}
 
-        # one: every file of the whole batch lands before the first gate opens
-        staged: list = []
-        gates: list = []
         store._reset_staging = lambda id_value="": None
-        store.harness_folder = lambda values: ROOT
+        store._point_job_at = lambda entry: None
         store._stage_entry = lambda entry: (staged.append(entry["id"]), "")[1]
-        store._start_tests = lambda: gates.append(list(staged))
+
+        # one: every file of the whole batch lands before any module is placed,
+        # and the addons are then placed one after another in the order picked
+        placed: list = []
+        store._place_python = lambda ident: placed.append(ident)
+        store._finish_all = lambda: placed.append("end")
         store.job = batch([hello, odd])
         store._download_all()
         check(staged == ["hello_store", "odd_id"],
               f"the download phase did not take the whole queue first: {staged}")
-        check(gates == [["hello_store", "odd_id"]],
-              f"the gates did not open after every download: {gates}")
+        check(placed == ["hello_store", "odd_id", "end"],
+              f"the placements did not follow every download, in order: {placed}")
 
-        # two: the builds keep to three at a time, and a finished one hands
-        # its slot to the next waiting addon rather than ending the batch
-        started: list = []
-
-        def fake_begin(ident: str) -> None:
-            made = _SlotStream(ident)
-            slots[ident] = made
-            store.job["building"][ident] = {"stream": made, "lines": [],
-                                            "fail": f"{ident} failed"}
-            started.append(ident)
-        landed: list = []
-        store._begin_build = fake_begin
-        store._install_step = lambda ident: landed.append(ident)
-        store._finish_all = lambda: landed.append("end")
-        ids = [f"a{n}" for n in range(5)]
-        store.job = batch([{"id": one} for one in ids])
-        store.job["test_ids"] = list(ids)
-        store._start_builds()
-        check(started == ["a0", "a1", "a2"],
-              f"the batch did not open exactly three builds: {started}")
-        slots["a0"].finished = True
-        store._poll_builds()
-        check(landed == ["a0"] and started == ["a0", "a1", "a2", "a3"],
-              f"a finished build did not hand its slot on: {landed} / {started}")
-        check(store.job is not None and "a4" in store.job["waiting"],
-              "the batch ended while a build and a waiting addon remained")
-
-        # three: a build that dies ends the whole job and takes its siblings
-        # down with it - nobody is left to read what they go on printing
-        slots["a1"].finished = True
-        slots["a1"].code = 1
+        # two: a placement whose source is not there ends the batch on the spot,
+        # so the addon after it is never tried by a job already stopped
+        staged = []
+        store._place_python = real_place       # the store's own placement now
+        store._tidy = lambda ident: None
+        store._prep_one = lambda ident: None
+        store.job = batch([{"id": "no_source"}, {"id": "later"}])
+        store.job["staged"] = {}                # nothing staged for either
+        store.working = True
         api.calls.clear()
-        store._poll_builds()
+        store._download_all()
         check(store.job is None and not store.working,
-              "a failed build left the batch running")
-        check(slots["a2"].killed and slots["a3"].killed,
-              "a failed build left its siblings compiling")
-        check("a1 failed" in last_status(api),
-              f"the failed build did not say so: {last_status(api)!r}")
+              "a placement with no source left the job running")
+        check("no_source" in last_status(api),
+              f"a failed placement did not say which addon: "
+              f"{last_status(api)!r}")
     finally:
-        (store.job, store._stage_entry, store._start_tests,
-         store._begin_build, store._install_step, store._finish_all,
-         store.harness_folder, store._reset_staging) = real
+        (store.job, store.working, store._stage_entry, store._place_python,
+         store._finish_all, store._reset_staging, store._point_job_at,
+         store._prep_one, store._tidy) = real
         store.job = None
         store.working = False
         store.shutdown()
@@ -1657,783 +1573,153 @@ def test_the_generator(store: Any) -> None:
               f"a store addon brought no test into the catalog: {by_id}")
 
 
-# --- six: the compile gate: an addon's test runs before its build ---
+# --- six: a placement writes the module, and the job needs no compiler ---
 
-class _FakeDev:
-    """Just enough of core.addon for the gate, with no real interpreter."""
+def test_the_placement(store: Any) -> None:
+    """Placing an addon writes addons/<id>/addon.py and clears an old build.
 
-    BASE_DIR = ROOT
-
-    @staticmethod
-    def build_interpreter() -> tuple[str, str]:
-        return str(sys.executable), ""
-
-    @staticmethod
-    def harness_dir() -> Path:
-        """A checkout: what an addon imports lies in the app's own folder."""
-        return ROOT
-
-
-class _FrozenDev(_FakeDev):
-    """A program that kept those modules inside its archive and none on disk."""
-
-    @staticmethod
-    def harness_dir():
-        return None
-
-
-def test_the_gate(store: Any) -> None:
-    """The store runs an addon's test before compiling, and only compiles a pass."""
-    print("\n8. an addon's test is run before it is compiled")
-    fresh(store)                        # stands up the stub api the gate talks to
-    real_build, real_finish = store._build, store._finish
-    real_stream = store._stream
-    real_dev = store._dev
-    real_job = store.job
-    built: list = []
-    ended: list = []
-    streamed: dict = {}
-    try:
-        store._dev = lambda: _FakeDev()
-        store.job = {"values": {}, "harness": ROOT}
-        store._build = lambda id_value, source: built.append((id_value, str(source)))
-        store._finish = lambda text, bad=False: ended.append((str(text), bool(bad)))
-
-        with tempfile.TemporaryDirectory() as box:
-            src = Path(box) / "widget.py"
-            src.write_text("x", encoding="utf-8")
-            test = Path(box) / "test_widget.py"
-            test.write_text("x", encoding="utf-8")
-
-            # no test published: straight to the compile, nothing streamed
-            built.clear()
-            store._maybe_test("widget", src, None)
-            check(built == [("widget", str(src))],
-                  f"with no test the addon did not compile straight away: {built}")
-
-            # a test exists: it is run first, handed the source and the modules an
-            # addon imports to reach the app; when it passes the build goes ahead
-            def passing(command, cwd, on_ok, env=None, fail="", on_bad=None):
-                streamed["command"] = command
-                streamed["cwd"] = cwd
-                streamed["env"] = env or {}
-                streamed["fail"] = fail
-                on_ok()                     # pretend the test came back clean
-            store._stream = passing
-            built.clear()
-            streamed.clear()
-            store._maybe_test("widget", src, test)
-            check(streamed.get("command", [None, None])[1] == str(test),
-                  f"the thing run was not the test: {streamed.get('command')}")
-            check(streamed["env"].get("RASCONF_ADDON_SOURCE") == str(src),
-                  "the downloaded addon was not handed to the test")
-            check(str(ROOT) in streamed["env"].get("PYTHONPATH", ""),
-                  f"the modules an addon imports were not on the test's path: "
-                  f"{streamed['env'].get('PYTHONPATH')!r}")
-            check(str(streamed.get("cwd")) == str(ROOT),
-                  f"the test did not run beside the modules it imports: "
-                  f"{streamed.get('cwd')!r}")
-            check("test" in streamed["fail"].lower(),
-                  f"a failed test would not have said so: {streamed['fail']!r}")
-            check(built == [("widget", str(src))],
-                  f"a passing test did not go on to compile: {built}")
-
-            # a test that does not pass never reaches the compile
-            def failing(command, cwd, on_ok, env=None, fail="", on_bad=None):
-                pass                        # the real one would _finish; on_ok unused
-            store._stream = failing
-            built.clear()
-            store._maybe_test("widget", src, test)
-            check(not built, "a test that did not pass still compiled the addon")
-
-            # with nothing to run it against, the install is not held up for it
-            store.job = {"values": {}, "harness": None}
-            built.clear()
-            streamed.clear()
-            store._maybe_test("widget", src, test)
-            check(built == [("widget", str(src))],
-                  f"a test that cannot be run here stopped the install: {built}")
-            check(not streamed, f"something was run with no harness: {streamed}")
-
-            # a run that stops is sorted by what it stopped on: this machine's
-            # missing modules prove nothing about the addon, and must not refuse
-            # an install; everything else, including a real FAIL, does
-            def stopping(command, cwd, on_ok, env=None, fail="", on_bad=None):
-                if callable(on_bad):
-                    on_bad()
-            store._stream = stopping
-            for label, tail, may_build in (
-                    ("a missing Qt", ["Traceback (most recent call last):",
-                                      "ModuleNotFoundError: No module named 'PyQt6'"],
-                     True),
-                    ("a missing app module",
-                     ["ModuleNotFoundError: No module named 'addon_client'"], True),
-                    # a fetched harness is the contract's Qt-free half, so a test
-                    # that wants the app's widgets never gets to the addon either
-                    ("the app's Qt half",
-                     ["ModuleNotFoundError: No module named 'addon_api'"], True),
-                    ("a missing module of its own",
-                     ["ModuleNotFoundError: No module named 'widget_thing'"], False),
-                    ("a failing check", ["FAIL: the tab did not appear"], False),
-                    ("a crash", ["ZeroDivisionError: division by zero"], False)):
-                built.clear()
-                ended.clear()
-                store.job = {"values": {}, "harness": ROOT, "lines": list(tail)}
-                store._maybe_test("widget", src, test)
-                check(bool(built) == may_build,
-                      f"a test that stopped for {label} should have "
-                      f"{'compiled anyway' if may_build else 'been refused'}: "
-                      f"built={built} ended={ended}")
-                check(may_build or (ended and ended[-1][1]),
-                      f"a test that stopped for {label} was not reported as a stop: "
-                      f"{ended}")
-
-            # the reading of a traceback's tail, on its own
-            for lines, want in ((["nothing here"], ""),
-                                (["ModuleNotFoundError: No module named 'paramiko'"],
-                                 "paramiko"),
-                                (["ModuleNotFoundError: No module named 'PyQt6.QtWidgets'"],
-                                 "PyQt6"),
-                                # a module of the app's package is named whole, and
-                                # is fetched whole - not collapsed onto its folder
-                                (["ModuleNotFoundError: No module named 'core.ui'"],
-                                 "core.ui"),
-                                (["ModuleNotFoundError: "
-                                  "No module named 'core.ui.things'"], "core"),
-                                (["ModuleNotFoundError: No module named 'widget'"], ""),
-                                (["ModuleNotFoundError: "
-                                  "No module named 'requests.packages'"], "")):
-                store.job = {"values": {}, "lines": list(lines)}
-                check(store._machine_missing() == want,
-                      f"{lines} was read as {store._machine_missing()!r}, not {want!r}")
-            # what the harness folder holds counts too, whatever it is called
-            other = Path(box) / "harnesscopy"
-            other.mkdir()
-            (other / "myappthing.py").write_text("x", encoding="utf-8")
-            for harness, name, want in ((other, "myappthing", "myappthing"),
-                                        (other, "requests", ""),
-                                        (Path(box) / "nowhere", "myappthing", "")):
-                store.job = {"values": {}, "harness": harness,
-                             "lines": [f"ModuleNotFoundError: No module named '{name}'"]}
-                check(store._machine_missing() == want,
-                      f"{name} was read as {store._machine_missing()!r} with "
-                      f"{harness.name} as the harness, not {want!r}")
-            store.job = None
-            check(store._machine_missing() == "",
-                  "a missing module was named with no job in hand")
-    finally:
-        store._build = real_build
-        store._finish = real_finish
-        store._stream = real_stream
-        store._dev = real_dev
-        store.job = real_job
-
-
-def test_the_harness(store: Any) -> None:
-    """Where the two modules an addon imports come from, and what is built with them.
-
-    A test and a compiled launcher both ``import addon_client``, and the Python
-    doing that work only reads what lies on disk: a checkout has the two in its
-    own folder, a build made by the current workflow carries a copy, and a program
-    built before that has to fetch them from the repository the addons come from -
-    from above the store folder, where the app's own files sit. Those two are all
-    a build needs and less than a test wants, so a run that stops on the app's
-    other modules asks for them and tries the test once more.
+    The store no longer compiles: the very ``.py`` it downloads is placed into
+    the addons folder to run inside the app, beside the assets it came with and
+    the manifest the app reads before the addon first runs. An addon compiled by
+    an older store - the loose ``<id>.exe`` and the ``_internal`` next to a
+    folder build - is taken out first, so its space comes back. A fresh install
+    is left switched off; an update puts the switch back where it stood before
+    the job stopped the addon.
     """
-    print("\n8b. the modules an addon imports are found, or fetched")
-    fresh(store)
-    real_dev, real_fetch = store._dev, store._fetch_file
-    real_job, real_finish = store.job, store._finish
-    real_build, real_stream = store._build, store._stream
-    saved_data = os.environ.get("RASCONF_ADDON_DATA")
-    fetched: list = []
-    try:
-        with tempfile.TemporaryDirectory() as box:
-            os.environ["RASCONF_ADDON_DATA"] = str(Path(box) / "data")
-            main = store.source_values(store.MAIN_SOURCE)
-            store.job = {"values": dict(main)}
-
-            def write(values: dict, remote: str, target: Path,
-                      folder: str | None = None) -> str:
-                fetched.append((remote, folder))
-                Path(target).parent.mkdir(parents=True, exist_ok=True)
-                Path(target).write_text("# fetched\n", encoding="utf-8")
-                return ""
-            store._fetch_file = write
-
-            check(store.app_folder(dict(main)) == "src/berry_manager",
-                  f"the app's folder was not read off the store path: "
-                  f"{store.app_folder(dict(main))!r}")
-            check(store.app_folder({"store_path": "deep/er/store"}) == "deep/er",
-                  "a store folder with a parent above it did not name that parent")
-            check(store.raw_address(dict(main), "addon_client.py",
-                                    store.app_folder(dict(main)))
-                  == "/fligma/raspiOpenWrt/main/src/berry_manager/addon_client.py",
-                  f"the app's own folder did not survive the address: "
-                  f"{store.raw_address(dict(main), 'addon_client.py', 'src/berry_manager')!r}")
-
-            # a checkout answers with its own folder and downloads nothing
-            store._dev = lambda: _FakeDev()
-            check(store.harness_folder(dict(main)) == ROOT,
-                  "a checkout's own folder was not taken for the modules an addon "
-                  "imports")
-            check(not fetched, f"a checkout still fetched: {fetched}")
-
-            # a program with nothing on disk asks for both, from the app's folder
-            store._dev = lambda: _FrozenDev()
-            found = store.harness_folder(dict(main))
-            # Both are asked for at once, so which lands first is the network's
-            # business; what matters is that neither was left out.
-            check({name for name, _folder in fetched} == set(store.HARNESS_FILES)
-                  and len(fetched) == len(store.HARNESS_FILES),
-                  f"both modules were not fetched: {fetched}")
-            check({folder for _name, folder in fetched} == {store.app_folder(main)},
-                  f"the modules were looked for in the store folder, not the app's: "
-                  f"{fetched}")
-            check(found == store.staging() / "harness",
-                  f"the fetched modules were put somewhere odd: {found!r}")
-
-            # and when the fetch stops, so does the answer: nothing is half-there
-            fetched.clear()
-            store._fetch_file = lambda values, remote, target, folder=None: (
-                "GitHub answered 404" if remote == store.HARNESS_FILES[1] else "")
-            check(store.harness_folder(dict(main)) is None,
-                  "a harness that could not be fetched was still handed to a build")
-
-            # a fetched pair is what a build needs, not what a test wants: a run
-            # that stops on one of the app's other modules gets the rest fetched
-            # and is run again over the wider folder
-            narrow = store.staging() / "harness"
-            narrow.mkdir(parents=True, exist_ok=True)
-            src = Path(box) / "widget.py"
-            src.write_text("x", encoding="utf-8")
-            test = Path(box) / "test_widget.py"
-            test.write_text("x", encoding="utf-8")
-            runs: list = []
-            built: list = []
-            stopped: list = []
-
-            def twice(command, cwd, on_ok, env=None, fail="", on_bad=None):
-                runs.append(str((env or {}).get("PYTHONPATH", "")))
-                if len(runs) == 1:
-                    store.job["lines"] = ["ModuleNotFoundError: "
-                                          "No module named 'addon_api'"]
-                    if callable(on_bad):
-                        on_bad()
-                else:
-                    on_ok()
-            store._fetch_file = write
-            store._stream = twice
-            store._build = lambda id_value, source: built.append(str(source))
-            store._finish = lambda text, bad=False: stopped.append((str(text), bad))
-            fetched.clear()
-            store.job = {"values": dict(main), "harness": narrow,
-                         "lines": [], "widened": False}
-            store._maybe_test("widget", src, test)
-            check(len(runs) == 2, f"the test was not run a second time: {runs}")
-            check(all(run == str(narrow) for run in runs),
-                  f"a retry did not use the fetched harness: {runs}")
-            check("addon_api.py" in [name for name, _folder in fetched],
-                  f"the app's other modules were not asked for: "
-                  f"{[name for name, _f in fetched]}")
-            check((narrow / "addon_api.py").is_file(),
-                  "the widened harness holds no addon_api")
-            # a module of a package is the file under that package's folder: the
-            # widening asks for the path, and GitHub hands it back the same way
-            check("core/ui.py" in [name for name, _folder in fetched],
-                  f"a module of the app's package was not asked for by its path: "
-                  f"{[name for name, _f in fetched]}")
-            check((narrow / "core" / "ui.py").is_file(),
-                  "the widened harness holds no core/ui.py in a core folder")
-            check(not (narrow / "core.py").exists(),
-                  "a package was fetched as one file of its own name")
-            check(built == [str(src)] and not stopped,
-                  f"a test that passed after the widening did not compile: "
-                  f"{built} {stopped}")
-
-            # a repository with nothing more to give is asked once: the install
-            # then goes ahead on what the run could not disprove
-            runs.clear()
-            built.clear()
-            stopped.clear()
-            store._fetch_file = lambda values, remote, target, folder=None: "404"
-
-            def again_bad(command, cwd, on_ok, env=None, fail="", on_bad=None):
-                runs.append(1)
-                store.job["lines"] = ["ModuleNotFoundError: "
-                                      "No module named 'addon_api'"]
-                if callable(on_bad):
-                    on_bad()
-            store._stream = again_bad
-            store.job = {"values": dict(main), "harness": narrow,
-                         "lines": [], "widened": False}
-            store._maybe_test("widget", src, test)
-            check(len(runs) == 1,
-                  f"a widening that fetched nothing ran the test again: {runs}")
-            check(built == [str(src)] and not stopped,
-                  f"a test that cannot be run stopped the install: {built} {stopped}")
-
-            # a build is only worth starting when those modules can be read: with
-            # no harness in the job it is refused before PyInstaller is asked
-            def no_build(command, cwd, on_ok, env=None, fail="", on_bad=None):
-                raise AssertionError("a build was started with nothing to import")
-            store._stream = no_build
-            store._build = real_build            # the store's own refusal, not a fake
-            store._fetch_file = real_fetch
-            store._dev = lambda: _FakeDev()
-            ended: list = []
-            store._finish = lambda text, bad=False: ended.append((str(text), bool(bad)))
-            store.job = {"values": {}, "harness": None}
-            store._build("widget", Path(box) / "widget.py")
-            check(ended and ended[-1][1] and "talk to the app" in ended[-1][0],
-                  f"a build with no modules to import was started anyway: {ended}")
-    finally:
-        store._dev = real_dev
-        store._fetch_file = real_fetch
-        store._finish = real_finish
-        store._build = real_build
-        store._stream = real_stream
-        store.job = real_job
-        if saved_data is not None:
-            os.environ["RASCONF_ADDON_DATA"] = saved_data
-        else:
-            os.environ.pop("RASCONF_ADDON_DATA", None)
-
-    try:
-        import core.addon as dev
-    except Exception as error:                      # noqa: BLE001 - app modules
-        look(f"core.addon is not importable here: {error}")
-        return
-    ready = dev.harness_dir()
-    check(ready is not None and all((ready / name).is_file()
-                                    for name in store.HARNESS_FILES),
-          f"this checkout's own modules were not found on disk: {ready!r}")
-    ok, why = dev.app_modules_ready()
-    check(ok and not why, f"a checkout was told it cannot build an addon: {why!r}")
-    saved_harness = dev.harness_dir
-    try:
-        dev.harness_dir = lambda: None
-        with tempfile.TemporaryDirectory() as box:
-            other = Path(box) / "fetched"
-            command = dev.build_command(Path(box) / "launcher.py", "widget",
-                                        {"onefile": True, "console": True,
-                                         "icon": False, "hidden": ""},
-                                        root=Path(box), paths=[other])
-            paths = [command[index + 1] for index, part in enumerate(command)
-                     if part == "--paths"]
-            check(paths and not (set(paths) & {str(Path(box))}),
-                  f"the modules an addon imports are not on the build's path: {paths}")
-            check(str(other) in paths and str(dev.BASE_DIR) in paths,
-                  f"neither the fetched folder nor the app's own is on the path: {paths}")
-            twice = dev.build_command(Path(box) / "launcher.py", "widget",
-                                      {"onefile": True, "console": True,
-                                       "icon": False, "hidden": ""},
-                                      root=Path(box),
-                                      paths=[other, other, dev.BASE_DIR])
-            counts = [twice[index + 1] for index, part in enumerate(twice)
-                      if part == "--paths"]
-            check(len(counts) == len(set(counts)),
-                  f"a folder named twice went on the path twice: {counts}")
-    finally:
-        dev.harness_dir = saved_harness
-
-
-# --- seven: the interpreter it builds with, and the pip that fills it ---
-
-def test_the_interpreter(store: Any) -> None:
-    """A python3 that is the Windows Store stand-in is passed over for a real one.
-
-    The store asks :mod:`core.addon` which Python to build with, and on
-    Windows the first name on the path is often a zero-length alias that answers
-    "Python was not found" and stops with code 9009 - which reads as a broken
-    build unless the search refuses it. Needs the app's own modules, so it is
-    quiet when they are not there.
-    """
-    print("\n9. the interpreter search takes a Python that actually starts")
-    try:
-        import core.addon as dev
-    except Exception as error:                      # noqa: BLE001 - app modules
-        look(f"core.addon is not importable here: {error}")
-        return
-    check("python3" in dev.PYTHON_NAMES and "python" in dev.PYTHON_NAMES,
-          f"both usual names are not tried: {dev.PYTHON_NAMES}")
-    check(dev._not_a_python(str(sys.executable)) == "",
-          f"this interpreter was not taken for a Python: "
-          f"{dev._not_a_python(str(sys.executable))!r}")
-    saved = (dev.shutil.which, dev.IS_COMPILED, dev._INTERPRETER)
-    try:
-        with tempfile.TemporaryDirectory() as where:
-            stub = Path(where) / ("python3.exe" if os.name == "nt" else "python3")
-            stub.write_bytes(b"")            # exactly what the alias is: nothing
-            reason = dev._not_a_python(str(stub))
-            check("alias" in reason.lower() or "empty" in reason.lower(),
-                  f"a zero-length stand-in was not refused: {reason!r}")
-
-            dev.shutil.which = lambda name: str(stub) if name == "python3" else None
-            dev.IS_COMPILED, dev._INTERPRETER = True, None
-            gone, why = dev.build_interpreter()
-            check(gone is None and "python" in why.lower(),
-                  f"a path with only a stand-in produced {gone!r}: {why!r}")
-
-            dev._INTERPRETER = None
-            dev.shutil.which = lambda name: (
-                str(stub) if name == "python3"
-                else str(sys.executable) if name == "python" else None)
-            picked, why = dev.build_interpreter()
-            check(picked == str(sys.executable),
-                  f"the stand-in was not passed over for the python behind it: "
-                  f"{picked!r} / {why!r}")
-
-            # the answer is kept, and forgetting asks the path again
-            dev.shutil.which = lambda name: None
-            check(dev.build_interpreter()[0] == str(sys.executable),
-                  "the second ask did not use the kept answer")
-            dev.forget_interpreter()
-            check(dev.build_interpreter()[0] is None,
-                  "forgetting the answer did not put the path back to asking")
-    finally:
-        dev.shutil.which, dev.IS_COMPILED, dev._INTERPRETER = saved
-
-
-def test_the_pip_fallback(store: Any) -> None:
-    """A refused pip install is tried again for this user, then reported."""
-    print("\n10. PyInstaller is installed for this user when the plain way fails")
-    real_stream, real_finish, real_job = store._stream, store._finish, store.job
-    asked: list[dict] = []
-    try:
-        store.job = {"values": {}}
-        store._finish = lambda text, bad=False: asked.append({"ended": text})
-
-        def refused(command, cwd, on_ok, env=None, fail="", on_bad=None):
-            asked.append({"command": command, "fail": fail, "on_bad": on_bad})
-            if callable(on_bad):
-                on_bad()                     # pretend pip said no
-        store._stream = refused
-        store._pip_install("python")
-        check(len(asked) == 3, f"the two tries and the ending are not there: {asked}")
-        first, second = asked[0], asked[1]
-        check("--user" not in first["command"],
-              f"the first try was not the plain one: {first['command']}")
-        check("--user" in second["command"],
-              f"the second try did not go for this user: {second['command']}")
-        check(first["command"][:2] == ["python", "-m"],
-              f"pip was not run through the interpreter that builds: {first['command']}")
-        check("ended" in asked[-1] and "pip" in asked[-1]["ended"].lower(),
-              f"giving up said nothing about pip: {asked[-1]}")
-
-        # a pip that goes through simply carries on to the batch downloads
-        asked.clear()
-        def clean(command, cwd, on_ok, env=None, fail="", on_bad=None):
-            asked.append({"command": command})
-            on_ok()
-        class Ready:
-            """A dev module whose interpreter now has PyInstaller in it."""
-
-            @staticmethod
-            def pyinstaller_ready() -> tuple[bool, str]:
-                return True, ""
-
-            @staticmethod
-            def forget_interpreter() -> None:
-                pass
-        real_dev = store._dev
-        real_download = store._download_all
-        store._stream = clean
-        store._dev = lambda: Ready
-        store._download_all = lambda: asked.append({"downloaded": True})
-        try:
-            store.job["id"] = "widget"
-            store._pip_install("python")
-            check(any("downloaded" in item for item in asked),
-                  f"a clean pip did not carry on to the batch downloads: {asked}")
-        finally:
-            store._download_all = real_download
-            store._dev = real_dev
-    finally:
-        store._stream = real_stream
-        store._finish = real_finish
-        store.job = real_job
-
-
-# --- eight: where an install leaves its work, and what it must not touch after ---
-
-class _IdleStream:
-    """A build process stood in for: it prints nothing and ends clean."""
-
-    finished = True
-    code = 0
-
-    def start(self) -> None:
-        pass
-
-    def drain(self, limit: int = 400) -> list:
-        return []
-
-    def kill(self) -> None:
-        pass
-
-
-class _BuildDev:
-    """The dev machinery as the store sees it, with nothing really compiled."""
-
-    BASE_DIR = ROOT
-
-    class _Launcher:
-        @staticmethod
-        def substitute(**values: Any) -> str:
-            return " ".join(f"{key}={value}" for key, value in values.items())
-
-    _LAUNCHER = _Launcher()
-
-    def __init__(self, dist: Path, installs: Path | None = None) -> None:
-        self.dist = dist                # where the finished program is said to be
-        self.installs = Path(installs) if installs is not None \
-            else dist / "installed"    # where it is said to be put
-        self.seen: dict = {}
-
-    @staticmethod
-    def build_interpreter() -> tuple[str, str]:
-        return str(sys.executable), ""
-
-    @staticmethod
-    def harness_dir() -> Path:
-        return ROOT
-
-    @staticmethod
-    def module_name(source: Path) -> str:
-        return source.stem
-
-    @staticmethod
-    def _write_text(target: Path, text: str) -> None:
-        Path(target).write_text(text, encoding="utf-8")
-
-    def build_command(self, launcher: Path, addon_id: str, options: dict,
-                      source: Path | None = None,
-                      root: Path | None = None,
-                      paths: list | tuple = ()) -> list[str]:
-        self.seen["root"] = root
-        self.seen["launcher"] = Path(launcher)
-        self.seen["paths"] = [str(Path(folder)) for folder in paths]
-        return ["py", "-m", "PyInstaller", str(launcher)]
-
-    def staged_name(self, addon_id: str, onefile: bool,
-                    root: Path | None = None) -> Path:
-        self.seen["staged root"] = root
-        if onefile:
-            return self.dist / f"{addon_id}.exe"
-        return self.dist / addon_id / f"{addon_id}.exe"
-
-    def install_build(self, staged: Path, addon_id: str, onefile: bool) -> Path:
-        """Pretend the program was copied, and say where it now sits.
-
-        The real one writes into ``addons``, and the store speaks about that copy
-        afterwards - so the stand-in puts its pretend file in the folder the test
-        is using, never somewhere relative to whoever runs it. A one-file build
-        lands loose in that folder; a folder build lands inside a folder of the
-        addon's own name, the way the store installs programs now.
-        """
-        self.seen["copied"] = Path(staged)
-        self.installs.mkdir(parents=True, exist_ok=True)
-        if onefile:
-            target = self.installs / f"{addon_id}.exe"
-        else:
-            target = self.installs / addon_id / staged.name
-            target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("x", encoding="utf-8")
-        return target
-
-    def _Stream(self, command, cwd=None, env=None):
-        """The process a build is started as: watched, never really run."""
-        self.seen["command"] = list(command)
-        self.seen["cwd"] = cwd
-        return _IdleStream()
-
-
-class _FakeApp:
-    """The two app calls an install ends with, recorded instead of carried out.
-
-    ``session`` is the one namespace both kinds of addon reach the app through,
-    so the store's last two moves are watched here rather than on a manager it
-    no longer touches directly.
-    """
-
-    def __init__(self, on_rescan: Any = None) -> None:
-        self.on_rescan = on_rescan
-        self.written: list = []
-        self.rescans = 0
-
-    def set_addon_enabled(self, addon_id: str, enabled: bool) -> dict:
-        self.written.append((str(addon_id), bool(enabled)))
-        return {"enabled": bool(enabled)}
-
-    def rescan_addons(self) -> bool:
-        self.rescans += 1
-        if callable(self.on_rescan):
-            self.on_rescan()
-        return True
-
-
-def test_the_install(store: Any) -> None:
-    """The build stays in the store's own folder, and the rescan comes last.
-
-    A rescan shuts the store down and starts it again from disk, which takes the
-    api out from under the code that asked for it - the crash this guards against
-    - so the install has to finish everything that speaks to the tab first.
-    """
-    print("\n11. an install stages its work at home, clears it, and reloads last")
+    print("\n8. placing an install writes addons/<id>/addon.py, clears a build")
     api = fresh(store)
     saved_env = os.environ.pop("RASCONF_ADDON_DATA", None)
-    real_dev, real_stream = store._dev, store._stream
-    real_job, real_addons = store.job, store.addons_dir
+    real_addons, real_job = store.addons_dir, store.job
+    real_entries, real_reload = store.entries, store._reload
     try:
         with tempfile.TemporaryDirectory() as where:
             data = Path(where)
             os.environ["RASCONF_ADDON_DATA"] = str(data)
-            build = data / "build"
-            stage = data / "staging"
             addons = data / "addons"
             store.addons_dir = lambda: addons
+            store.entries = store.parse_catalog(CATALOG)
+            store._reload = lambda: None
+            hello = store.entry_for("hello_store")
 
-            # the build is asked for inside the store's own data folder, and
-            # taken up as a slot of its own - a batch may have three in flight
-            dist = build / "widget" / "dist"
-            dev = _BuildDev(dist, addons)
-            store._dev = lambda: dev
-            store.job = {"values": {}, "harness": ROOT, "building": {},
-                         "total": 1, "done": 0}
-            source = data / "widget.py"
-            source.write_text("x", encoding="utf-8")
-            store._build("widget", source)
-            check(dev.seen.get("root") == build,
-                  f"the build was not staged in the store's own folder: "
-                  f"{dev.seen.get('root')!r} != {build}")
-            check(dev.seen.get("launcher") == build / "widget" / "launcher.py",
-                  f"the launcher was written somewhere else: {dev.seen.get('launcher')!r}")
-            check(dev.seen.get("paths") == [str(ROOT)],
-                  f"the build was not told where the modules a launcher imports are: "
-                  f"{dev.seen.get('paths')!r}")
-            check(Path(dev.seen.get("cwd", "/")) == build / "widget",
-                  f"PyInstaller ran from elsewhere: {dev.seen.get('cwd')!r}")
-            slot = store.job["building"].get("widget") or {}
-            check(slot.get("stream") is not None,
-                  f"the build was not taken up as a slot the batch can drain: "
-                  f"{store.job['building']}")
+            # an older compiled install of this id, in every shape, is in the way
+            old = addons / "hello_store"
+            (old / "_internal").mkdir(parents=True)
+            (old / "addon.py").write_text("OLD", encoding="utf-8")
+            (old / "_internal" / "base_library.zip").write_text("x",
+                                                                encoding="utf-8")
+            (addons / "hello_store.exe").write_text("x", encoding="utf-8")
+            (addons / "hello_store.json").write_text(
+                json.dumps({store.ORIGIN_KEY: store.STORE_ORIGIN}),
+                encoding="utf-8")
 
-            # the finished program: copied, cleared, marked off, and only then
-            # the rescan, which takes the api away from the running code
-            dist.mkdir(parents=True)
-            (stage / "widget" / "assets").mkdir(parents=True)
-            (stage / "widget" / "assets" / "pic.png").write_text(
-                "x", encoding="utf-8")
-            (dist / "widget").mkdir()
-            (dist / "widget" / "widget.exe").write_text("x", encoding="utf-8")
-            order: list[str] = []
-            seen_calls: dict = {}
+            # the download, staged exactly as _stage_entry would leave it
+            source = store.staged_folder("hello_store") / "hello_store.py"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text('ADDON = {"name": "Hello", "version": "2.0"}\n',
+                              encoding="utf-8")
+            pics = store.staged_folder("hello_store") / "assets"
+            pics.mkdir(parents=True, exist_ok=True)
+            (pics / "helloicon.png").write_bytes(b"P")
+            details = {"manifest": {"name": "Hello", "version": "2.0",
+                                    "requires": ["sftp"]},
+                       "fields": [{"key": "size", "label": "Size"}],
+                       "defaults": {"size": 10}}
 
-            def reload():
-                seen_calls["calls"] = len(api.calls)
-                order.append("reload")
-                store.shutdown()            # exactly what the app does to us here
+            def job(verb: str, restore: dict) -> dict:
+                return {"verb": verb, "values": {}, "source": "",
+                        "console": False, "id": "", "queue": [hello],
+                        "phase": "place",
+                        "staged": {"hello_store": {
+                            "entry": hello, "source": source,
+                            "details": details, "values": {}}},
+                        "from_versions": {"hello_store": "1.0"},
+                        "total": 1, "done": 0, "restore": restore,
+                        "did": [], "pane": False}
 
-            manager = _FakeApp(reload)
-            api.session = manager
-            store._dev = lambda: dev
-            store.job = {"values": {}, "id": "widget", "harness": ROOT,
-                         "details": {"manifest": {"name": "Widget",
-                                                  "requires": ["ssh", "serial"]},
-                                     "fields": [{"key": "size", "label": "Size"},
-                                                {"label": "keyless"}, "junk"],
-                                     "defaults": {"size": 10}}}
+            # a fresh install: placed as a module, old build gone, left switched off
+            store.job = job("install", {})
+            api.answer("session.addon_state", {"installed": False,
+                                               "enabled": False,
+                                               "running": False})
             api.calls.clear()
-            broken: list[str] = []
-            try:
-                # the build ended clean: the step places this addon's program,
-                # and the batch's own ending closes the job and asks for the
-                # rescan
-                store._install_step("widget")
-                store._finish_all()
-            except Exception as error:                  # noqa: BLE001 - the crash itself
-                broken.append(f"{type(error).__name__}: {error}")
-            check(not broken, f"the install could not finish itself: {broken}")
-            check(dev.seen.get("staged root") == build
-                  and dev.seen.get("copied") == dist / "widget" / "widget.exe",
-                  f"the program was looked for outside the store's build: {dev.seen}")
-            check(order == ["reload"] and manager.rescans == 1,
-                  f"the app was not asked to rescan, or was twice: {order} / "
-                  f"{manager.rescans}")
-            paints = [index for index, entry in enumerate(api.calls)
-                      if entry[0] == "tabs.set_widget" and len(entry[1]) >= 4
-                      and entry[1][1] == "list" and entry[1][2] == "rows"]
-            check(paints and paints[0] < seen_calls.get("calls", 0),
-                  f"the table was not repainted before the rescan: {paints} of "
-                  f"{seen_calls.get('calls')}")
-            check(any(entry[0] == "tabs.set_widget" and len(entry[1]) >= 4
-                      and entry[1][1] == "status" and "off" in str(entry[1][3])
-                      for entry in api.calls),
-                  "the status line never said the addon is switched off")
-            check(manager.written == [("widget", False)],
-                  f"the profile was not told to keep it off: {manager.written}")
-            check(not (build / "widget").exists(),
-                  "the build folder was left behind next to the installed program")
-            left = sorted(p.name for p in (stage / "widget").iterdir())
-            check(stage.is_dir() and not left,
-                  f"the addon's downloads were left in its staging folder: {left}")
+            store._place_python("hello_store")
+            made = addons / "hello_store"
+            check((made / "addon.py").is_file(),
+                  "the placement did not write addons/<id>/addon.py")
+            check((made / "addon.py").read_text(encoding="utf-8").startswith(
+                  "ADDON = {"),
+                  "the module placed is not the source that was downloaded")
+            check((made / "assets" / "helloicon.png").is_file(),
+                  "the addon's assets were not copied beside its module")
+            check((made / "hello_store.json").is_file(),
+                  "the manifest beside the module was not written")
+            check(not (addons / "hello_store.exe").exists()
+                  and not (addons / "hello_store.json").exists(),
+                  "an old loose install of this id was left in the way")
+            check(not (made / "_internal").exists(),
+                  "the old compiled _internal was left beside the new module")
+            check(store.job["did"] == ["hello_store"]
+                  and store.job["done"] == 1,
+                  f"the placement did not mark the addon landed: {store.job}")
+            check(api.asked("session.set_addon_enabled", "addon_id")
+                  == "hello_store"
+                  and api.asked("session.set_addon_enabled", "enabled") is False,
+                  "a fresh install was not left switched off")
 
-            # and it said what it had installed, in the two places the app looks
-            keeps = store.addon_data_folder("widget")
-            check(keeps == addons / "_data" / "widget",
-                  f"the settings were not prepared in the addon's own folder: "
-                  f"{keeps}")
-            sidecar = json.loads((addons / "widget" / "widget.json")
-                                 .read_text(encoding="utf-8"))
-            check(sidecar.get(store.ORIGIN_KEY) == store.STORE_ORIGIN,
-                  f"the manifest did not say where the addon came from: {sidecar}")
-            check(sidecar.get("requires") == ["ssh"],
-                  f"the transports were not kept to the ones the app knows: "
-                  f"{sidecar.get('requires')}")
-            check(sidecar.get("name") == "Widget" and sidecar.get("id") == "widget"
-                  and sidecar.get("api") == 1,
-                  f"the addon did not describe itself as its source does: {sidecar}")
-            schema = json.loads((keeps / "fields.json").read_text(encoding="utf-8"))
-            check(schema.get("fields") == [{"key": "size", "label": "Size"}],
-                  f"the settings form kept more or less than the addon declared: "
-                  f"{schema.get('fields')}")
-            check(schema.get("defaults") == {"size": 10},
-                  f"the form came without the values to start from: {schema}")
-            check(str(schema.get("title", "")).endswith(
-                  "addons/_data/widget/config.json"),
-                  f"the form's heading does not name the file it writes: {schema}")
-            check(json.loads((keeps / "config.json").read_text(encoding="utf-8"))
-                  == {"size": 10},
-                  "the addon's config file was not started from its defaults")
-            gone = sorted(path.relative_to(addons).as_posix()
-                          for path in store._delete_paths("widget"))
-            check(gone == ["_data/widget", "widget"],
-                  f"delete does not take an install back whole: {gone}")
-            store.session_delete_config = False     # the box at the top, this session
-            check(sorted(path.relative_to(addons).as_posix()
-                         for path in store._delete_paths("widget"))
-                  == ["widget"],
-                  "the session's check box did not leave the settings where they are")
-            store.session_delete_config = None
-            (addons / "hand.exe").write_text("x", encoding="utf-8")
-            (addons / "hand.json").write_text('{"name": "Hand"}', encoding="utf-8")
-            check([path.name for path in store._delete_paths("hand")] == ["hand.exe"],
-                  "a manifest the store never wrote was taken back with it")
-
-        # a compiled store asks the same two things over its own pipe
-        check("session.rescan_addons" in addon_client.ProcessAPI._POSITIONAL
-              and "session.set_addon_enabled" in addon_client.ProcessAPI._POSITIONAL,
-              "the app calls an install ends with are not passable by a process addon")
+            # an update: the same placement, and the switch goes back up.
+            # A real update is its own job with its own download, so restage
+            # the source the install's tidy cleared away.
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text('ADDON = {"name": "Hello", "version": "2.0"}\n',
+                              encoding="utf-8")
+            store.job = job("update", {"hello_store": True})
+            api.answer("session.addon_state", {"installed": True,
+                                               "enabled": True,
+                                               "running": True})
+            api.calls.clear()
+            store._place_python("hello_store")
+            check(api.asked("session.set_addon_enabled", "enabled") is True,
+                  "the update did not put the switch back where it stood")
     finally:
         if saved_env is not None:
             os.environ["RASCONF_ADDON_DATA"] = saved_env
         else:
             os.environ.pop("RASCONF_ADDON_DATA", None)
-        store._dev = real_dev
-        store._stream = real_stream
-        store.job = real_job
         store.addons_dir = real_addons
+        store.entries, store._reload = real_entries, real_reload
+        store.job = None
+        store.working = False
+        store.shutdown()
+
+
+def test_a_start_needs_no_compiler(store: Any) -> None:
+    """An install that runs in-process downloads with nothing compiled.
+
+    The old store refused to begin until it had found a Python and PyInstaller;
+    now a downloaded addon is placed as a module sharing the app's own
+    interpreter, so the start must go straight to the download even where the
+    build machinery cannot be reached at all - no interpreter search, no pip.
+    """
+    print("\n8s. a job starts its download with no compiler to be found")
+    fresh(store)
+    real_download, real_dev, real_job = (store._download_all, store._dev,
+                                         store.job)
+    try:
+        def no_compiler() -> Any:
+            raise ImportError("core.addon is not here")
+
+        began: list = []
+        store._dev = no_compiler            # any build lookup would explode
+        store._download_all = lambda: began.append("download")
+        store.job = {"verb": "install", "queue": [], "total": 0}
+        store._start_job()                  # must not touch _dev, only download
+        check(began == ["download"],
+              f"the start did not go straight to the download: {began}")
+    finally:
+        store._download_all, store._dev = real_download, real_dev
+        store.job = real_job
+        store.job = None
+        store.working = False
 
 
 def test_the_parallel_download(store: Any) -> None:
@@ -2784,12 +2070,12 @@ def test_the_pictures(store: Any) -> None:
     print("\n14. an asset that will not arrive, and an icon a build can use")
     fresh(store)
     real_fetch, real_job, real_entries = store._fetch_file, store.job, store.entries
-    real_maybe, real_finish = store._maybe_test, store._finish
+    real_place, real_finish = store._place_all, store._finish
     real_say, real_note = store.say, store.note
     saved_data = os.environ.get("RASCONF_ADDON_DATA")
     words: list = []
     ended: list = []
-    reached: list = []
+    placed: list = []
     try:
         with tempfile.TemporaryDirectory() as box:
             data = Path(box) / "data"
@@ -2801,9 +2087,9 @@ def test_the_pictures(store: Any) -> None:
             store.say = lambda text, bad=False: words.append((str(text), bool(bad)))
             store.note = lambda text: words.append((str(text), False))
             store._finish = lambda text, bad=False: ended.append((str(text), bool(bad)))
-            store._maybe_test = lambda id_value, source, test_path, then=None: (
-                reached.append(
-                    (id_value, str(test_path) if test_path else None)))
+            # nothing is compiled now, so the phase after the download is the
+            # placement; stand it in to see only that the batch reached it
+            store._place_all = lambda: placed.append(list(store.job["staged"]))
 
             def only_the_source(values: dict, remote: str, target: Path,
                                 folder: str | None = None) -> str:
@@ -2813,19 +2099,17 @@ def test_the_pictures(store: Any) -> None:
                 Path(target).write_text("# addon\n", encoding="utf-8")
                 return ""
             store._fetch_file = only_the_source
-            store.job = {"verb": "install", "id": "", "source": "",
+            store.job = {"verb": "install", "id": "", "source": "", "console": False,
                          "values": store.source_values(store.MAIN_SOURCE),
-                         "queue": [hello], "total": 1, "done": 0, "did": [],
-                         "restore": {}, "staged": {}, "waiting": [],
-                         "building": {}, "test_ids": [], "test_at": 0,
-                         "from_versions": {}, "harness": None, "lines": [],
-                         "widened": False, "details": {}}
+                         "queue": [hello], "phase": "", "staged": {},
+                         "total": 1, "done": 0, "did": [],
+                         "restore": {}, "from_versions": {}}
             store._download_all()
             check(not [pair for pair in ended if pair[1]],
                   f"a picture that would not download refused the install: {ended}")
-            check(len(reached) == 1 and reached[0][0] == "hello_store"
-                  and str(reached[0][1] or "").endswith("test_hello_store.py"),
-                  f"the download phase stopped before the addon's gate: {reached}")
+            check(placed == [["hello_store"]],
+                  f"the download phase did not hand the staged addon to the "
+                  f"placement: {placed}")
             check((data / "staging" / "hello_store" / "hello_store.py").is_file(),
                   "the addon's own file did not make it into its staging folder")
             check(not (data / "staging" / "hello_store" / "assets").exists(),
@@ -2843,7 +2127,7 @@ def test_the_pictures(store: Any) -> None:
     finally:
         store._fetch_file = real_fetch
         store._finish = real_finish
-        store._maybe_test = real_maybe
+        store._place_all = real_place
         store.say, store.note = real_say, real_note
         store.job, store.entries = real_job, real_entries
         if saved_data is not None:
@@ -3250,11 +2534,8 @@ def main() -> int:
     test_the_sources(store)
     test_bundled_assets(store)
     test_the_generator(store)
-    test_the_gate(store)
-    test_the_harness(store)
-    test_the_interpreter(store)
-    test_the_pip_fallback(store)
-    test_the_install(store)
+    test_the_placement(store)
+    test_a_start_needs_no_compiler(store)
     test_the_parallel_download(store)
     test_delete_toggle(store)
     test_the_manifest(store)

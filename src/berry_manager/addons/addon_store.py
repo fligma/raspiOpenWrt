@@ -21,16 +21,16 @@ it, and is what the download, the assets, the test and the modules an addon
 imports are all fetched from, so an addon arrives with exactly what sat beside
 the catalog entry naming it.
 
-Installing one mirrors what the web installer does with its files: the addon's
+Installing one is the plainest thing the store can do with its files: the addon's
 ``.py`` and any assets it ships are fetched over HTTPS into the addon's own
-staging folder under ``addons/_data/addon_store``, then compiled into a program
-of its own by PyInstaller - the assets packed into the executable's ``assets``
-folder so ``api.paths.assets`` finds them - and dropped into ``addons/`` exactly
-where the runtime looks, the same result the Addon Dev tab's Compile button
-produces. The build is staged in a folder of the store's own beside the
-downloads, under ``addons/_data/addon_store/build``, and both the downloads and
-the build are thrown away as soon as the program is in ``addons/``: only the
-installed file and the addon's own settings are left behind.
+staging folder under ``addons/_data/addon_store``, then placed whole into
+``addons/<id>/`` - the source copied in as ``addon.py``, its assets beside it -
+exactly where the runtime looks for a python addon. It runs inside the app's own
+process, on the app's interpreter, so it shares the one ``_internal`` the program
+ships with and grows no bundle of its own; the store's footprint per addon is one
+``.py``, its assets and its manifest. The downloads are thrown away as soon as
+the module is in ``addons/``: only the installed files and the addon's own
+settings are left behind.
 
 Before a program is replaced, the addon it is being written for is stopped and
 switched off: its running process is killed, so the file is not held open, and
@@ -40,7 +40,7 @@ nothing of it runs until it is turned on - and an update puts its switch back
 where it stood before the job, so an addon that was on comes back on when the
 app has rescanned the folder. Every job is answered on the tab it was started
 on: the card over the job's console names the addon in hand and counts the
-batch's share, and the log underneath holds every line the build said.
+batch's share, and the log underneath holds every line the job said.
 
 A program only says what it is once it runs, and the app needs some of that
 before then, so what the addon's source declared is written down as it is
@@ -52,28 +52,17 @@ installed - listed on the Addon manager page, with its own settings and its own
 connection gates like any other drop-in - instead of among the addons that came
 inside the program, which keep a page of their own in Settings.
 
-Before the compile, when the store ships a ``test_<id>.py`` for the addon, it is
-fetched too and run against the freshly downloaded ``.py``: a test that does not
-pass stops the install there, so a broken addon is never built. An addon with no
-test published is compiled as it is, and so is one whose test cannot start on
-this machine - a run that never got past importing Qt, or the app's own modules,
-says nothing about the addon, and only what the addon itself failed is held
-against it.
-
-Both the test and the program built from an addon import two of the app's own
-modules, and a program that came out of PyInstaller keeps them inside itself,
-where the Python doing the building cannot read them. So the store finds them on
-disk - in the app's folder in a checkout, in the copy a build packs beside the
-addons - and, when neither is there, fetches those two files from the same
-repository and ref as the addon. Without them nothing could be built: a program
-that cannot talk to the app is not an addon. A fetched pair is only what a build
-needs, not what a test needs, so when a test stops on one of the app's other
-modules the rest of them are fetched too and the test is run again.
+An addon is placed as the very ``.py`` the app already runs in-process as a
+shipped python addon, so nothing is compiled and no test gate stands in front of
+an install. The app's modules an addon imports - ``addon_common`` and
+``addon_client`` - are already bundled with the running program, so no harness is
+fetched to build or test against either: an in-process addon reaches the app over
+the same modules the shipped ones do.
 
 Loading the catalog also checks what is already installed against it: the version
 written down beside a program as it was installed is compared with the one the
 catalog names now, and where the repository is ahead the row says *update
-available*. Update then runs the same download, test and build as a fresh install
+available*. Update then runs the same download and place as a fresh install
 and puts the result where the old program was, replacing it - what the addon
 saved for itself under ``addons/_data/<id>`` is never part of an install and is
 left exactly as it is - and the addon's on/off switch is returned to the state
@@ -86,7 +75,8 @@ box that switches it on or off where it stands, and the rescan an install ends
 with keeps the tab it was started from showing, so a job never moves the person
 away from the store.
 
-Deleting one takes that compiled program (or folder) back out of ``addons/`` and
+Deleting one takes that addon's folder (``addon.py``, its assets and its
+manifest) back out of ``addons/`` and
 rescans. By default it takes the addon's own ``_data`` settings with it, since
 those are what an install prepared; the switch on the store's Settings page
 leaves them in place for every start, and the check box beside the source at the
@@ -94,19 +84,15 @@ top of the tab leaves them, or takes them, for this one. Either way the settings
 of an addon the store did not install are never touched, and this store's own
 folder - its sources - is not up for deletion by itself.
 
-Compiling needs a Python on this machine and PyInstaller within it. The
-interpreter is looked for as ``python3``, then ``python``, then the Windows ``py``
-launcher, and a name that turns out to be the Microsoft Store's stand-in rather
-than a Python is passed over. When PyInstaller is missing the store installs it
-itself with ``pip`` - for this user alone when the plain install is refused -
-and the user is not asked to. The store holds no token of its own: every request
-carries whatever ``api.session.git_token()`` answers with, which is the profile's
-one git token while the switch on this addon's tab in the Addon manager is
-on, and
-nothing at all while it is off. The sources are editable in
-``addons/_data/addon_store/config.json``, in that file's
-``sources`` list - a list of records rather than the one value per line the
-Settings form can hold, which is why they get their own button on the tab.
+An install has no build prerequisite: nothing is compiled here and no ``pip``
+run is asked for, since a store addon is a module that runs inside the app.
+The store holds no token of its own: every request carries whatever
+``api.session.git_token()`` answers with, which is the profile's one git token
+while the switch on this addon's tab in the Addon manager is on, and nothing
+at all while it is off. The sources are editable in
+``addons/_data/addon_store/config.json``, in that file's ``sources`` list - a
+list of records rather than the one value per line the Settings form can hold,
+which is why they get their own button on the tab.
 
 The tab is laid out like the app store on a phone: a filter line over a list of
 what is on offer, each row wearing the addon's own picture, and a detail pane
@@ -114,7 +100,7 @@ beside it that fills in when a row is picked - the description, who wrote it,
 which repository published it, which commit the file came out of, what it needs
 on the device and how it reaches that device, with the job log underneath the
 pair. While a job runs, that pair gives way to the job's own view: a terminal for
-a background, printing every step of the build as it arrives, with a card in the
+a background, printing every step of the job as it arrives, with a card in the
 middle naming the addon being installed and counting its share of the batch. The
 job holds the tab bar and this tab's own sub-bar so neither can be switched away
 from until it ends, and the pane goes back to the browsing when it does. The bar
@@ -170,13 +156,13 @@ ADDON = {
     "author": "fligma",
     "description": "Lists the addons published in the repository's addon.store "
                    "folder, downloads a chosen one into a staging folder and "
-                   "compiles it for this machine with PyInstaller, then installs "
-                   "or removes it from the addons folder. Installs PyInstaller "
-                   "itself when it is not already present. A job is shown as a "
-                   "terminal behind a card that names the addon in hand and "
-                   "counts the batch's progress, and the tab is held on that "
-                   "view until the job ends. The tab's second page is the Addon "
-                   "manager: every addon the program did not ship with, one "
+                   "installs it as a module that runs inside Berry Manager, or "
+                   "removes it from the addons folder. Installs leave no bundle "
+                   "of their own, so an addon shares the app's runtime. A job is "
+                   "shown as a terminal behind a card that names the addon in "
+                   "hand and counts the batch's progress, and the tab is held on "
+                   "that view until the job ends. The tab's second page is the "
+                   "Addon manager: every addon the program did not ship with, one "
                    "sub-tab apiece, each showing that addon's switches for it - "
                    "run it, force its tabs into a window of their own, let it "
                    "read the profile's git token - beside its own gates over SSH "
@@ -232,27 +218,6 @@ config_pages: dict[str, dict] = {}
 
 #: A module name PyInstaller can import: anything else becomes an underscore.
 _SAFE = re.compile(r"[^A-Za-z0-9_]")
-
-#: What an addon's launcher, and a published test, import from the app.
-HARNESS_FILES = ("addon_common.py", "addon_client.py")
-
-#: The app's other modules, by the name a test imports them under. A published
-#: test reaches for the Qt half of them to build real widgets, and only a
-#: checkout, or a build that packed its source, can answer for these. The
-#: package these names start with needs no file fetched of its own: a folder of
-#: modules beside the harness is a package to Python already, and this one's
-#: ``__init__`` holds nothing but words about the layers inside it.
-_APP = ("addon_api", "berry_manager", "core.addon", "core.const", "core.net",
-        "core.ui", "core.views", "core.window")
-
-#: A test that cannot import one of these got nowhere, and that is this
-#: machine's doing rather than the addon's: the harness above, the app's own
-#: modules beside it, and what those need in turn.
-_MACHINE = ("addon_client", "addon_common", "PyQt6", "paramiko", "keyring",
-            "secretstorage", "jeepney")
-
-#: How a Python says an import failed, out of a traceback's last line.
-_MISSING = re.compile(r"No module named ['\"]([^'\"]+)['\"]")
 
 # --- what can be configured, and what it starts out as ---
 
@@ -1036,12 +1001,6 @@ def build_tab() -> None:
 _LOCAL = threading.local()
 MAX_DOWNLOAD_WORKERS = 4
 
-# How many PyInstaller builds a batch may have running at once. Each build
-# stages in its own ``<work>/<id>`` folder, so two in flight never touch the
-# same spec, the same build folder or the same dist path; the limit is about
-# not pinching CPU and memory from the app while its own addon compiles.
-MAX_COMPILE_WORKERS = 3
-
 
 def say(text: str, bad: bool = False) -> None:
     """One line on the tab's status, and nothing once this copy has been reloaded."""
@@ -1557,91 +1516,12 @@ def work_dir() -> Path:
     return folder
 
 
-def harness_folder(values: dict) -> Path | None:
-    """A folder holding the modules an addon imports, or nothing.
-
-    ``addon_common`` and ``addon_client`` are what the launcher written for a
-    compiled addon, and every published test, import in order to reach the app.
-    In a source checkout they lie in the app's own folder, and a build made by
-    the current workflow carries a copy inside it. A program built before that
-    keeps them only in its archive, where the Python doing the building cannot
-    read them, so for that one case the two files are fetched from the same
-    repository and ref as the addon, into the staging folder they are cleared
-    from afterwards.
-    """
-    try:
-        ready = _dev().harness_dir()
-    except Exception as error:                 # a dev module that will not import
-        note(f"the app's own modules could not be looked for: {error}")
-        ready = None
-    if ready is not None:
-        return Path(ready)
-    folder = staging() / "harness"
-    specs = [(name, folder / name) for name in HARNESS_FILES]
-    # Overlapped rather than in turn: each is one GitHub round-trip, and an
-    # install that fetches them one after the other pays the sum of both.
-    for why in _fetch_many(values, specs, app_folder(values)):
-        if why:
-            note(f"the modules an addon imports could not be fetched: {why}")
-            return None
-    return folder
-
-
-def _harness_was_fetched() -> bool:
-    """Whether the harness in hand came out of the download folder.
-
-    That is the one case where it holds only the two files an addon needs for a
-    build, because they were fetched: a harness found on disk is the app's own
-    folder and already holds everything a test could import.
-    """
-    if job is None or job.get("harness") is None:
-        return False
-    try:
-        return Path(str(job["harness"])).is_relative_to(staging())
-    except (OSError, ValueError):
-        return False
-
-
-def _widen_harness(values: dict) -> bool:
-    """Fetch the app's other modules into a fetched harness; whether any arrived.
-
-    A published test imports the app's Qt half to build real widgets, and the two
-    files an addon needs to talk to the app are only its Qt-free half. What the
-    repository does not have is said and left out: a harness of one module more is
-    still worth running the test over. A dotted module name is the file under the
-    folder of the package it belongs to, which is made on the way there.
-    """
-    if job is None or job.get("harness") is None:
-        return False
-    folder = Path(str(job["harness"]))
-    specs: list[tuple[str, Path]] = []
-    for name in _APP:
-        relative = name.replace(".", "/") + ".py"
-        target = folder / relative
-        if not target.is_file():
-            specs.append((relative, target))
-    if not specs:
-        return False
-    # Every one of the app's modules is asked for at once: eight round-trips in
-    # turn is eight times the wait, and this is the retry path of a test that has
-    # already spent a run finding out it could not import them (see _fetch_many).
-    reasons = _fetch_many(values, specs, app_folder(values))
-    got = False
-    for (relative, _target), why in zip(specs, reasons):
-        if why:
-            note(f"{relative} was not there to fetch")
-        else:
-            got = True
-    return got
-
-
 def _reset_staging(id_value: str = "") -> None:
     """Clear the staging folder: one addon's share of it, or the whole of it.
 
     With an id, only that addon's staged files go; with none, everything does,
-    which is what a job does once at its start. The shared harness folder sits
-    under the same roof and is only cleared by the whole-fold wipe, so a batch
-    that fetched it for its first test still has it for the rest of them.
+    which is what a job does once at its start, so a download never reads a
+    neighbour's leftover.
     """
     folder = staged_folder(id_value) if id_value else staging()
     for child in folder.iterdir():
@@ -1655,19 +1535,14 @@ def _reset_staging(id_value: str = "") -> None:
 
 
 def _tidy(id_value: str) -> None:
-    """Throw this addon's downloads and build away once its program landed.
+    """Throw this addon's downloads away once its module landed.
 
-    The source, its assets, its test and everything PyInstaller made on the way
-    were only a means to the program that got installed, so they are cleared -
-    for this addon alone, since the batch may still be downloading or building
-    over its neighbours' files. What the addon itself keeps in its ``_data``
-    folder is left alone, and so is the shared harness, which the next addon's
-    test may still import; the job's start wipes the whole staging fold anyway.
+    The source and its assets were only a means to the ``addon.py`` that got
+    placed, so they are cleared - for this addon alone, since the batch may
+    still be downloading over its neighbours' files. What the addon itself
+    keeps in its ``_data`` folder is left alone; the job's start wipes the
+    whole staging fold anyway.
     """
-    try:
-        shutil.rmtree(work_dir() / id_value, ignore_errors=True)
-    except OSError as error:
-        note(f"the build folder could not be cleared: {error}")
     _reset_staging(id_value)
 
 
@@ -3625,11 +3500,8 @@ def _begin(verb: str, entry: dict | None = None) -> dict:
     """
     global working, job
     working = True
-    job = {"verb": verb, "values": {}, "source": "", "stream": None,
-           "on_ok": None, "fail": "", "lines": [], "harness": None,
-           "widened": False, "details": {}, "console": False, "id": "",
-           "queue": [], "phase": "", "staged": {}, "waiting": [],
-           "building": {}, "test_ids": [], "test_at": 0,
+    job = {"verb": verb, "values": {}, "source": "", "console": False,
+           "id": "", "queue": [], "phase": "", "staged": {},
            "from_versions": {},
            "total": 1, "done": 0, "restore": {}, "did": [], "pane": False}
     _point_job_at(entry)
@@ -3663,13 +3535,12 @@ def _begin(verb: str, entry: dict | None = None) -> dict:
 
 
 def _begin_job(verb: str, items: list[dict]) -> dict:
-    """Start a job over a batch: everything downloads first, then it builds.
+    """Start a job over a batch: everything downloads first, then it is placed.
 
     One job covers the whole of what was picked. Its queue is the batch in
-    order: every file of every addon lands first, the published tests are run
-    over them one at a time, and the builds then run side by side, up to a
-    few at once. The card's bar counts over all of them, so ten installs
-    read as one job at one pace.
+    order: every file of every addon lands first, and each addon's module is
+    then placed in turn. The card's bar counts over all of them, so ten
+    installs read as one job at one pace.
 
     An update remembers each installed version before anything is touched,
     since the installs that follow overwrite the manifest the number is read
@@ -3696,7 +3567,6 @@ def _finish(text: str, bad: bool = False) -> None:
     """
     global working, job
     if job is not None:
-        _kill_builds()       # a job that ended has no use for builds in flight
         total = int(job.get("total") or 1)
         done = int(job.get("done") or 0)
         if bad and total > 1:
@@ -3748,10 +3618,10 @@ def _progress(text: str, frac: float) -> None:
 def _phase(text: str, frac: float | None = None) -> None:
     """One line on the card, for a phase the whole batch shares.
 
-    The batch works in phases - every download, then the tests, then the
-    builds side by side - so the bar reads over the whole job at once rather
-    than over one addon's share of it: ``frac`` is the absolute share wanted,
-    and leaving it out changes the line without moving the bar.
+    The batch works in phases - every download, then the placing of each
+    module - so the bar can read over the whole job at once rather than over
+    one addon's share of it: ``frac`` is the absolute share wanted, and
+    leaving it out changes the line without moving the bar.
     """
     if api is None or job is None:
         return
@@ -3763,37 +3633,14 @@ def _phase(text: str, frac: float | None = None) -> None:
 
 
 def _batch_frac() -> float:
-    """Where the bar stands while builds are in flight: 45% up to 95%.
+    """Where the bar stands while modules are being placed: 45% up to 95%.
 
-    Downloads own the job's first stretch and the tests the next, but the
-    builds overlap each other, so their share moves by finished addon rather
-    than by the one in hand.
+    Downloads own the job's first stretch; placing is quick file work, so its
+    share moves by finished addon rather than by the one in hand.
     """
     total = max(1, int((job or {}).get("total") or 1))
     done = int((job or {}).get("done") or 0)
     return 0.45 + 0.50 * done / total
-
-
-def _kill_builds() -> None:
-    """Stop every build still running: nobody is left to read their lines.
-
-    A batch that ended - in failure or in the middle - must not leave two or
-    three PyInstaller processes burning CPU behind it; each slot's stream is
-    asked to take its whole process tree down, and a slot that refuses to
-    die is said and left, the job being over either way.
-    """
-    if job is None:
-        return
-    for ident, slot in list((job.get("building") or {}).items()):
-        stream = slot.get("stream")
-        if stream is None:
-            continue
-        try:
-            stream.kill()
-        except Exception as error:
-            note(f"{ident}'s build could not be stopped: {error}")
-    job["building"] = {}
-    job["waiting"] = []
 
 
 def _prep_one(id_value: str) -> None:
@@ -3848,31 +3695,25 @@ def _restore_enabled(id_value: str) -> None:
 
 
 def _start_job() -> None:
-    """Set the batch off: the interpreter first, then the download phase.
+    """Set the batch off: an addon installs as a module, so it only downloads.
 
-    One check of the Python and of PyInstaller covers the whole of the
-    batch: nothing about a build depends on which addon comes next, and a
-    pip that had to run answers for all of them.
+    Nothing is compiled here, so no interpreter and no PyInstaller is looked
+    for before the first file comes down: an addon placed by the store runs
+    inside the app's own process, and the download is the only work that can
+    fail before a single file is written.
     """
     if job is None:
-        return
-    where = _ensure_python()
-    if not where:
-        return
-    ready, _hint = _dev().pyinstaller_ready()
-    if not ready:
-        _pip_install(where)
         return
     _download_all()
 
 
 def _download_all() -> None:
-    """The batch's first phase: every file of every addon lands, then tests.
+    """The batch's first phase: every file of every addon lands, then it is placed.
 
-    Downloading is the slow part of a job when the network is, and
-    compiling the slow part when the machine is; paying the whole of the
-    first up front means a store being offline stops the job before any
-    build is spent, and the builds that follow never wait on a fetch.
+    Downloading is the slow part of a job, all of it the network's; placing is
+    quick file work done once every file is down. Paying the whole of the
+    download up front means a store being offline stops the job before any
+    addon is written, and the placements that follow never wait on a fetch.
     """
     if job is None:
         return
@@ -3895,96 +3736,47 @@ def _download_all() -> None:
         if why:
             _finish(why, bad=True)
             return
-    # The harness is the app's own half, not any addon's: one fetched copy
-    # stands for the whole batch, wherever its addons were published.
-    if job.get("harness") is None:
-        job["harness"] = harness_folder(job["values"])
-    for record in job["staged"].values():
-        record["harness"] = job["harness"]
     _phase("every file of every addon is down", 0.30)
-    _start_tests()
+    _place_all()
 
 
-def _start_tests() -> None:
-    """The batch's second phase: each addon's published gate, run in turn.
+def _place_all() -> None:
+    """The batch's last phase: place each addon's module in turn, then finish.
 
-    The gates share the machine's Python and the one console, and a test the
-    addon itself failed ends the job before any build is spent - so they
-    answer one after another, and nothing compiled is wasted on an addon
-    whose neighbour has already refused.
+    Placing is file work rather than compiling, so the batch walks its addons
+    one after another; an addon is stopped only as its own placement begins, so
+    its neighbour stays up until it really has to move out of the way. A
+    placement that fails ends the batch there, since nobody is left to place the
+    addons after it.
     """
     if job is None:
         return
-    job["phase"] = "test"
-    job["test_ids"] = [one_line(entry.get("id"))
-                       for entry in (job.get("queue") or [])]
-    job["test_at"] = 0
-    _next_test()
-
-
-def _next_test() -> None:
-    """Run the next addon's test; when the last has answered, start the builds."""
-    if job is None:
-        return
-    ids = job.get("test_ids") or []
-    at = int(job.get("test_at") or 0)
-    if at >= len(ids):
-        _start_builds()
-        return
-    job["test_at"] = at + 1
-    id_value = ids[at]
-    record = (job.get("staged") or {}).get(id_value) or {}
-    job["id"] = id_value
-    _point_job_at(record.get("entry") or {})
-    job["widened"] = False
-    job["lines"] = []
-    job["harness"] = record.get("harness")
-    total = max(1, len(ids))
-    _phase(f"checking {id_value} ({at + 1} of {total})...",
-           0.30 + 0.15 * (at + 1) / total)
-    _maybe_test(id_value, record.get("source"), record.get("test"),
-                then=_next_test)
-
-
-def _start_builds() -> None:
-    """The batch's last phase: compile up to MAX_COMPILE_WORKERS at a time.
-
-    Every gate has spoken and every file is down, so what is left is the
-    machine's work alone. Each build stages in its own folder under the
-    work root and writes its dist paths there, so two PyInstaller processes
-    in flight never touch the same files; the limit is only about leaving
-    the computer usable while the batch runs.
-    """
-    if job is None:
-        return
-    job["phase"] = "build"
-    job["waiting"] = list(job.get("test_ids") or [])
-    job["building"] = {}
-    if not job["waiting"]:
-        _finish_all()
-        return
-    _fill_build_slots()
-    if job is not None and job.get("building"):
-        _poll_builds()
-
-
-def _fill_build_slots() -> None:
-    """Start waiting builds until every slot the batch may use is taken."""
-    if job is None:
-        return
-    while (job.get("waiting")
-           and len(job.get("building") or {}) < MAX_COMPILE_WORKERS):
-        _begin_build(job["waiting"].pop(0))
-        if job is None:              # that build ended the job on the way in
+    job["phase"] = "place"
+    ids = [one_line(entry.get("id")) for entry in (job.get("queue") or [])]
+    for id_value in ids:
+        if job is None:
             return
+        _place_python(id_value)
+        if job is None:                 # that addon ended the batch
+            return
+    _finish_all()
 
 
-def _begin_build(id_value: str) -> None:
-    """Stop one addon and hand its staged source to the compiler.
+def _place_python(id_value: str) -> None:
+    """Put one addon's downloaded source in ``addons/<id>/addon.py`` and record it.
 
-    The addon is only stopped when its own build starts, so an addon that
-    waits its slot stays up - and running - until the job really needs its
-    file out of the way.
+    The store's addon is the very ``.py`` the app already runs in-process as a
+    shipped python addon, so it is placed whole rather than compiled: the folder
+    holds ``addon.py``, its assets and its manifest, and the addon shares the
+    app's own interpreter and bundled modules - no ``_internal`` of its own.
+    Any earlier install of this id is taken out first, so an addon compiled by
+    an older store, or by an earlier update, is replaced and the space its
+    ``_internal`` took is given back.
+
+    A fresh install is left switched off; an update puts the switch back where
+    it stood before the job stopped the addon. The rescan that ends the job is
+    what lets the app see the new files, so everything still needing the api -
+    the switch, the table and the tidy - is done here, in each addon's own step.
     """
     if job is None:
         return
@@ -3992,140 +3784,44 @@ def _begin_build(id_value: str) -> None:
     entry = record.get("entry") or {}
     job["id"] = id_value
     _point_job_at(entry)
-    job["harness"] = record.get("harness")
     if int(job.get("total") or 1) > 1:
         _job_card(_job_name(entry), picture=_job_picture(entry))
-    if job.get("verb") == "update":
-        job["from_version"] = str(
-            (job.get("from_versions") or {}).get(id_value, ""))
     _prep_one(id_value)
-    _phase(f"compiling {id_value}...", _batch_frac())
-    _build(id_value, record.get("source"))
-
-
-def _poll_builds() -> None:
-    """Drain every build in flight; install what finished, top the slots up.
-
-    One tick walks the whole batch: each slot's lines come out under its
-    addon's name, a build that ended clean is installed at once and its
-    slot given to the next waiting addon, and a build that ended dirty ends
-    the job - taking the siblings down with it, since nobody is left to
-    read what they go on printing.
-    """
-    if job is None:
+    _phase(f"installing {id_value}...", _batch_frac())
+    source = record.get("source")
+    if source is None or not Path(source).is_file():
+        _tidy(id_value)
+        _finish(f"{id_value}'s downloaded source is not here to install",
+                bad=True)
         return
-    batched = int(job.get("total") or 1) > 1
-    for ident, slot in list((job.get("building") or {}).items()):
-        stream = slot.get("stream")
-        if stream is None:
-            continue
-        for line in stream.drain(300):
-            if line is not None:
-                note(f"[{ident}] {line}" if batched else line)
-        if not stream.finished:
-            continue
-        code = int(stream.code or 0)
-        job["building"].pop(ident, None)
-        if code != 0:
-            _finish(slot.get("fail")
-                    or f"{ident}'s build stopped with code {code}", bad=True)
-            return
-        _install_step(ident)
-        if job is None:
-            return
-        _fill_build_slots()
-        if job is None:
-            return
-    if job.get("building"):
-        if api is not None:
-            api.schedule.after(0.2, _poll_builds)
-        return
-    if not job.get("waiting"):
-        _finish_all()
-
-
-def _stream(command: list[str], cwd: Path | None, on_ok: Any,
-            env: dict | None = None, fail: str = "",
-            on_bad: Any = None) -> None:
-    """Run one child process and call ``on_ok`` when it ends clean.
-
-    ``env`` is the environment for this one process (``None`` keeps the app's),
-    and ``fail`` the line left up when it stops non-zero, in place of the plain
-    exit-code message, so a failed test says what it was. ``on_bad``, when given,
-    is called instead of ending the job, so a step can try another way first.
-    """
-    dev = _dev()
-    stream = dev._Stream(command, cwd=cwd, env=env)
-    stream.start()
-    if job is not None:
-        job["stream"] = stream
-        job["on_ok"] = on_ok
-        job["fail"] = fail
-        job["on_bad"] = on_bad
-        job["lines"] = []
-    _poll_stream()
-
-
-def _poll_stream() -> None:
-    """Drain the running job's process; come back on the next tick until it ends."""
-    if job is None:
-        return
-    stream = job.get("stream")
-    if stream is None:
-        return
-    for line in stream.drain(400):
-        if line is not None:
-            note(line)
-            job.setdefault("lines", []).append(line)
-    if len(job.get("lines") or ()) > 120:
-        del job["lines"][:-120]        # a step only ever reads back its own tail
-    if not stream.finished:
-        if api is None:
-            return
-        api.schedule.after(0.2, _poll_stream)
-        return
-    code = int(stream.code or 0)
-    job["stream"] = None
-    if code != 0:
-        on_bad = job.pop("on_bad", None)
-        if callable(on_bad):
-            try:
-                on_bad()
-            except Exception as error:       # noqa: BLE001 - never wedge 'working'
-                _finish(f"the job could not try again: "
-                        f"{type(error).__name__}: {error}", bad=True)
-            return
-        _finish(job.get("fail") or f"the job stopped with code {code}", bad=True)
-        return
-    job.pop("on_bad", None)
-    on_ok = job.pop("on_ok", None)
-    if callable(on_ok):
-        # The step after a finished process runs on the app's own tick, where a
-        # raise would kill the program as silently as it wedges this tab; the
-        # job ends saying what broke instead.
-        try:
-            on_ok()
-        except Exception as error:           # noqa: BLE001 - never wedge 'working'
-            _finish(f"the job could not go on: "
-                    f"{type(error).__name__}: {error}", bad=True)
-
-
-def _clear_ready() -> None:
-    """Put away what the dev machinery remembered: the interpreter and PyInstaller."""
+    folder = addons_dir() / clean_id(id_value)
+    program = folder / "addon.py"
     try:
-        _dev().forget_interpreter()
-    except Exception:
-        pass
-
-
-def _ensure_python() -> str:
-    """The interpreter that would build, or empty with the reason already shown."""
-    where, why = _dev().build_interpreter()
-    if where is None:
-        _finish(why, bad=True)
-        return ""
-    note(f"building with {where}")
-    return str(where)
+        _clear_old_flat(id_value)
+        if folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, program)
+        assets = staged_folder(id_value) / "assets"
+        if assets.is_dir() and any(assets.iterdir()):
+            shutil.copytree(assets, folder / "assets", dirs_exist_ok=True)
+    except OSError as error:
+        _tidy(id_value)
+        _finish(f"{id_value} could not be installed: {error}", bad=True)
+        return
+    _describe(id_value, program, record.get("details") or {},
+              entry_for(id_value) or {})
+    _tidy(id_value)
+    if job.get("verb") == "update":
+        note(f"{id_value}'s own settings under addons/_data/{id_value}/ were "
+             "left as they are")
+        updates.pop(id_value, None)     # it now matches the catalog, so it is current
+        _restore_enabled(id_value)
+    else:
+        _stay_off(id_value)
+    job.setdefault("did", []).append(id_value)
+    job["done"] = int(job.get("done") or 0) + 1
+    show_entries()
 
 
 def _fetch_file(values: dict, remote: str, target: Path,
@@ -4201,20 +3897,17 @@ def _fetch_many(values: dict, specs: list[tuple[str, Path]],
 
 
 def _stage_entry(entry: dict) -> str:
-    """Fetch one addon's program, pictures and test into its own staging folder.
+    """Fetch one addon's program and pictures into its own staging folder.
 
-    The program, its assets and its test are unrelated files, so each is
-    asked for side by side rather than waiting on the last (see
-    _fetch_many). A picture that will not arrive is said and skipped rather
-    than refused: the assets are decoration, and every addon can draw its
-    own tab mark, so losing one is worth a line in the log and nothing more.
-    The source is not - without it there is no addon to build - and neither
-    is a test that was named but could not land, since the check that guards
-    the build would then have nothing to run.
+    The program and its assets are unrelated files, so each is asked for side
+    by side rather than waiting on the last (see _fetch_many). A picture that
+    will not arrive is said and skipped rather than refused: the assets are
+    decoration, and every addon can draw its own tab mark, so losing one is
+    worth a line in the log and nothing more. The source is not - without it
+    there is no addon to install.
 
-    Everything staged is written down against the addon's id for the test
-    and build phases to pick up; the answer is the reason the batch must
-    stop, or nothing.
+    Everything staged is written down against the addon's id for the placing
+    step to pick up; the answer is the reason the batch must stop, or nothing.
     """
     if job is None:
         return "the job ended before the download could start"
@@ -4226,15 +3919,12 @@ def _stage_entry(entry: dict) -> str:
     if entry.get("icon") and entry["icon"] not in names:
         names.append(entry["icon"])
     assets = folder / "assets"
-    test_name = entry.get("test") or ""
     specs: list[tuple[str, Path]] = [(entry["filename"], source)]
     specs += [(f"assets/{id_value}/{name}", assets / name) for name in names]
-    if test_name:
-        specs.append((f"_tests/{test_name}", folder / test_name))
     reasons = _fetch_many(values, specs)
     if reasons[0]:
         return reasons[0]
-    # Read before the build, since the source is gone by the time it is installed
+    # Read before the source is tidied away, since it is gone by install time
     details = _details(source)
     left = []
     for index, name in enumerate(names, 1):        # reasons[0] is the source
@@ -4242,213 +3932,11 @@ def _stage_entry(entry: dict) -> str:
             note(f"{name} could not be fetched: {reasons[index]}")
             left.append(name)
     if left:
-        say(f"{len(left)} asset(s) are not packed with it; the addon still builds "
-            "and wears the mark it draws itself")
-    test_path = None
-    if test_name:
-        why = reasons[-1]                            # the test is the last spec
-        if why:
-            return f"the addon's test could not be fetched: {why}"
-        test_path = folder / test_name
+        say(f"{len(left)} asset(s) are not packed with it; the addon still "
+            "installs and wears the mark it draws itself")
     job["staged"][id_value] = {"entry": entry, "source": source,
-                               "test": test_path, "details": details,
-                               "values": dict(values), "harness": None}
+                               "details": details, "values": dict(values)}
     return ""
-
-
-def _maybe_test(id_value: str, source: Path, test_path: Path | None,
-                then: Any = None) -> None:
-    """Run the addon's own test before spending a build on it; skip it when none.
-
-    The test is handed the downloaded ``.py`` through ``RASCONF_ADDON_SOURCE``
-    and the modules it imports through ``PYTHONPATH``, so it runs against the
-    very copy that is about to be compiled. A result the addon itself failed
-    ends the job; a run that never got as far as the addon is only said out loud,
-    because it proved nothing either way. The build goes ahead when there is no
-    test published, no way to run one, or a test that passed.
-
-    ``then``, when given, is what the batch wants onward in place of the build:
-    the gates run one after another over the addons, and answering one only
-    moves that queue along - the builds themselves wait until every test has
-    spoken.
-    """
-    if job is None:
-        return
-
-    def onward() -> None:
-        if callable(then):
-            then()
-        else:
-            _build(id_value, source)
-
-    if test_path is None or not test_path.is_file():
-        _progress("no test is published for this addon; compiling as it is", 0.45)
-        onward()
-        return
-    harness = job.get("harness")
-    if harness is None:
-        _progress("the addon's test cannot be run here; compiling as it is", 0.45)
-        onward()
-        return
-    dev = _dev()
-    where, why = dev.build_interpreter()
-    if where is None:
-        _finish(why, bad=True)
-        return
-    env = dict(os.environ)
-    had = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(harness) + (os.pathsep + had if had else "")
-    env["RASCONF_ADDON_SOURCE"] = str(source)      # the copy just downloaded
-    env["QT_QPA_PLATFORM"] = "offscreen"           # a test may build real widgets
-    _progress(f"running {test_path.name} before compiling...", 0.55)
-    _stream([str(where), str(test_path)], Path(harness),
-            onward, env=env,
-            fail="the addon's own test did not pass, so it was not compiled",
-            on_bad=lambda: _test_said_nothing(id_value, source, test_path,
-                                              then=then))
-
-
-def _test_said_nothing(id_value: str, source: Path,
-                       test_path: Path | None, then: Any = None) -> None:
-    """Sort a test that stopped into the addon's fault and this machine's.
-
-    A published test imports the app's protocol and, for its widget checks, Qt,
-    and the machine's own Python is not obliged to have either. A run that died
-    on one of those imports never reached the addon, so it is no reason to refuse
-    an install. Anything else it stopped for is, and is ended on.
-
-    Dying on one of the app's own modules is worth one retry, because it may be
-    the harness that is short rather than the Python: when the modules were
-    fetched rather than found, the rest of the app is asked for and the test is
-    run again against a harness that can hold the whole thing up. The batch's
-    own ``then`` rides the retry, so a widening answers the gate queue and not
-    a build.
-    """
-    missing = _machine_missing()
-    if not missing:
-        _finish("the addon's own test did not pass, so it was not compiled",
-                bad=True)
-        return
-    if (_is_app(missing) and test_path is not None
-            and not job.get("widened") and _harness_was_fetched()):
-        note(f"the test wants {missing}, which a fetched harness does not hold: "
-             "asking for the app's other modules and running it again")
-        job["widened"] = True
-        say(f"fetching the app's other modules to run {test_path.name} properly...")
-        if _widen_harness(job.get("values") or {}):
-            _maybe_test(id_value, source, test_path, then=then)
-            return
-    note(f"the test could not start: this Python has no {missing}, so nothing "
-         "was proved about the addon either way")
-    _progress("the addon's test cannot be run here; compiling as it is", 0.45)
-    if callable(then):
-        then()
-    else:
-        _build(id_value, source)
-
-
-def _is_app(name: str) -> bool:
-    """Whether a module name is the app's own - a module of it, or a package.
-
-    ``core.ui`` is a module here and ``core`` is the folder it sits in, and a
-    run that could not reach either one stopped on the app rather than on the
-    addon, which is what the widening below is for.
-    """
-    return name in _APP or any(whole == name or whole.startswith(name + ".")
-                               for whole in _APP)
-
-
-def _machine_missing() -> str:
-    """The module a run could not import, when its own tail says it was one of
-    the test's rather than the addon's; nothing when it says something else.
-
-    What counts as the test's own is the app and its dependencies: the names
-    above, and every module the harness folder holds - a checkout's answer is
-    the whole app, a fetched folder is only the two files an addon imports.
-    A whole dotted name is answered with when the app holds it, since that is
-    the file a widening has to fetch; otherwise the package or third-party name
-    it starts with is the one that is really missing.
-    """
-    if job is None:
-        return ""
-    packages = {whole.split(".")[0] for whole in _APP}
-    own = set(_MACHINE) | set(_APP) | packages
-    harness = job.get("harness")
-    if harness is not None:
-        try:
-            folder = Path(str(harness))
-            own |= {path.stem for path in folder.glob("*.py")}
-            for package in packages:
-                own |= {f"{package}.{path.stem}"
-                        for path in (folder / package).glob("*.py")}
-        except OSError as error:                  # a folder that cannot be read
-            note(f"the harness folder could not be listed: {error}")
-    for line in reversed(list(job.get("lines") or [])):
-        found = _MISSING.search(str(line))
-        if not found:
-            continue
-        whole = found.group(1)
-        for name in (whole, whole.split(".")[0]):
-            if name in own:
-                return name
-        return ""
-    return ""
-
-
-def _build(id_value: str, source: Path) -> None:
-    """Write a launcher and start PyInstaller over the addon's staged source.
-
-    The launcher imports the app's two modules, so the build is only worth
-    starting when they can be read from disk: the folder that holds them is
-    put on the search path with the addon's own. The process is not run
-    through the job's single stream: a batch has up to ``MAX_COMPILE_WORKERS``
-    builds in flight and :func:`_poll_builds` drains every slot each tick.
-    """
-    if job is None:
-        return
-    dev = _dev()
-    if source is None or not Path(source).is_file():
-        _finish(f"{id_value}'s downloaded source is not here to compile",
-                bad=True)
-        return
-    harness = job.get("harness")
-    if harness is None:
-        _finish("the modules an addon imports could not be reached, so a program "
-                "built here could not talk to the app", bad=True)
-        return
-    root = work_dir()
-    work = root / id_value
-    try:
-        shutil.rmtree(work, ignore_errors=True)
-        work.mkdir(parents=True, exist_ok=True)
-        launcher = work / "launcher.py"
-        dev._write_text(launcher, dev._LAUNCHER.substitute(
-            id=id_value, module=dev.module_name(source)))
-    except OSError as error:
-        _finish(f"the build folder could not be made: {error}", bad=True)
-        return
-    entry = entry_for(id_value) or {}
-    assets = staged_folder(id_value) / "assets"
-    # A folder program, deliberately, not a one-file: a one-file carries its
-    # whole runtime inside one archive and unpacks all of it to a temp folder
-    # on every single start - twenty seconds and 200 MB on Windows - and the
-    # second bootloader it spawns can outlive being killed. A folder boots
-    # straight off disk, compiles faster, and is one process to manage.
-    options = {"onefile": False, "console": True, "icon": True, "hidden": ""}
-    if assets.is_dir() and any(assets.iterdir()):
-        options["add_data"] = [(assets, "assets")]       # packed to the program's assets folder
-        icon_name = entry.get("icon") or ""
-        icon = assets / icon_name if icon_name else None
-        options["icon"] = str(icon) if (icon is not None and icon.is_file()) else True
-    command = dev.build_command(launcher, id_value, options, source, root=root,
-                                paths=[Path(harness)])
-    _phase(f"compiling {id_value} with PyInstaller...")
-    note("$ " + " ".join(command))
-    stream = dev._Stream(command, cwd=work)
-    stream.start()
-    job.setdefault("building", {})[id_value] = {
-        "stream": stream, "lines": [],
-        "fail": f"{id_value} could not be compiled; the lines above say why"}
 
 
 def _stay_off(id_value: str) -> None:
@@ -4610,59 +4098,11 @@ def _clear_old_flat(id_value: str) -> None:
             note(f"the old {stale.name} could not be cleared: {error}")
 
 
-def _install_step(id_value: str) -> None:
-    """Move the fresh program into ``addons/<id>/``, then tidy after it.
-
-    A fresh install is left switched off; an update puts the switch back where
-    it stood before the job stopped the addon. Builds run side by side, so
-    this places one program and its records and leaves the batch's ending to
-    :func:`_finish_all`, once the last slot has emptied.
-
-    The rescan that lets the app see the new files re-loads this addon as
-    well, which takes the module this code runs in out of the app: the api is
-    gone the moment ``_reload()`` starts. So everything that still needs it -
-    clearing the build away, the switch, the table and the status line - is
-    done first, in every addon's own step, and only the batch's last one
-    calls for the rescan.
-    """
-    if job is None:
-        return
-    _phase(f"installing {id_value}...", _batch_frac())
-    dev = _dev()
-    staged = dev.staged_name(id_value, False, root=work_dir())
-    if not staged.is_file():
-        _tidy(id_value)
-        _finish("no program was produced; see the log above", bad=True)
-        return
-    _clear_old_flat(id_value)
-    try:
-        target = dev.install_build(staged, id_value, False)
-    except OSError as error:
-        _tidy(id_value)
-        _finish(f"it could not be put in the addons folder: {error}", bad=True)
-        return
-    record = (job.get("staged") or {}).get(id_value) or {}
-    _describe(id_value, target, record.get("details") or job.get("details")
-              or {}, entry_for(id_value) or {})
-    _tidy(id_value)
-    updating = job.get("verb") == "update"
-    if updating:
-        note(f"{id_value}'s own settings under addons/_data/{id_value}/ were left "
-             "as they are")
-        updates.pop(id_value, None)     # it now matches the catalog, so it is current
-        _restore_enabled(id_value)
-    else:
-        _stay_off(id_value)
-    job.setdefault("did", []).append(id_value)
-    job["done"] = int(job.get("done") or 0) + 1
-    show_entries()
-
-
 def _finish_all() -> None:
     """End the batch in one line, then ask the app to look again.
 
     Every addon that landed says so here rather than in its own install
-    step: the steps run in whatever order their builds finish, and one
+    step: the steps run in the order the addons were picked, and one
     summary keeps the switches, the table and the rescan in the order the
     person left them in the list.
     """
@@ -4693,59 +4133,18 @@ def _finish_all() -> None:
                     "turn it on in the Addon manager")
     else:
         # Nothing landed and nothing failed loudly either: the batch had
-        # no addon left to build, which is worth saying as a stopping.
-        text = "no addon reached the build"
+        # no addon left to install, which is worth saying as a stopping.
+        text = "no addon was installed"
     _finish(text, bad=not did)
     _reload()
 
 
-def _pip_install(where: str, user: bool = False) -> None:
-    """Install PyInstaller into the interpreter that would do the building.
-
-    Plain first and ``--user`` second: a machine-wide Python on Windows refuses
-    a normal install without elevation, and a distribution's Python on Linux
-    refuses it altogether unless the packages are for this user alone.
-    """
-    if job is None:
-        return
-    who = " for this user" if user else ""
-    _progress(f"getting PyInstaller ready (pip install{who})...", 0.05)
-    command = [where, "-m", "pip", "install", "--disable-pip-version-check"]
-    if user:
-        command.append("--user")
-    command.append("pyinstaller")
-    _stream(command, None, lambda: _after_pip(where),
-            on_bad=lambda: _pip_again(where, user),
-            fail="pip could not install PyInstaller; the lines above say why")
-
-
-def _pip_again(where: str, user: bool) -> None:
-    """The pip that failed: once more for this user, and then it is reported."""
-    if user or job is None:
-        _finish("PyInstaller could not be installed with pip, for this user "
-                "either; the lines above say why. A distribution's Python on "
-                "Linux may need a virtualenv instead", bad=True)
-        return
-    note("that install did not go through; trying again for this user alone")
-    _pip_install(where, user=True)
-
-
-def _after_pip(where: str) -> None:
-    _clear_ready()
-    ready, hint = _dev().pyinstaller_ready()
-    if not ready:
-        _finish(f"PyInstaller still cannot be found: {hint}", bad=True)
-        return
-    _download_all()
-
-
 def install_selected(_checked: bool = False) -> None:
-    """Download the chosen addons, then compile them a few at a time.
+    """Download the chosen addons, then install each as a module of the app.
 
     One row or several: ctrl-click takes the whole selection as a batch.
-    Every file of every addon lands first, the published tests answer in
-    turn, and the builds then run side by side - up to three at a time - so
-    a long batch pays for the network once and for the machine once. Every
+    Every file of every addon lands first, then each is placed in turn, so a
+    long batch pays for the network once and for the disk once. Every
     install ends switched off. Anything in the selection that is already
     installed is left out of it with a line in the log, since installing
     over a live addon is Update's work.
@@ -4772,8 +4171,8 @@ def install_selected(_checked: bool = False) -> None:
         if not api.ui.question(
                 "Install addons",
                 f"Install {len(fresh)} addons from the store?\n\n{names}\n\n"
-                "Each is compiled here and left switched off until you turn "
-                "it on in the Addon manager."):
+                "Each is installed as a module that runs inside Berry Manager, "
+                "switched off until you turn it on in the Addon manager."):
             say("the install was declined")
             return
     # Everything from here on is a job the tab has promised to finish: the
@@ -4795,16 +4194,15 @@ def install_selected(_checked: bool = False) -> None:
 
 
 def update_selected(_checked: bool = False) -> None:
-    """Rebuild every chosen addon that is behind, keeping its settings.
+    """Replace every chosen addon that is behind, keeping its settings.
 
     An update is an install over the top of what is already there: the same
-    downloads up front, the same tests in turn and the same builds a few at a
-    time as a fresh install, and the program already in ``addons`` is replaced
-    as the new one is copied in. What the addon saved for itself under
-    ``addons/_data/<id>`` is never part of what an install clears, so its
-    config keeps the answers already given to it. Each addon is stopped and
-    switched off only when its own build starts, and its switch in Settings >
-    Addons is put back exactly where it was once the new one lands.
+    downloads up front as a fresh install, and the addon already in ``addons``
+    is replaced as its downloaded source is placed in. What the addon saved for
+    itself under ``addons/_data/<id>`` is never part of what an install clears,
+    so its config keeps the answers already given to it. Each addon is stopped
+    only when its own install starts, and its switch in Settings > Addons is
+    put back exactly where it was once the new one lands.
     """
     if api is None or working:
         return
@@ -4839,7 +4237,7 @@ def update_selected(_checked: bool = False) -> None:
                 f"Update {one_line(entry.get('name')) or id_value} from "
                 f"{have} to {one_line(entry.get('version'))}?\n\nIts settings "
                 f"in addons/_data/{id_value}/ are kept. It is switched off "
-                "while its program is rebuilt, and switched back the way it "
+                "while it is replaced, and switched back the way it "
                 "was after."):
             say("the update was declined")
             return
@@ -4851,7 +4249,7 @@ def update_selected(_checked: bool = False) -> None:
         if not api.ui.question(
                 "Update addons",
                 f"Update {len(behind)} addons?\n\n{lines}\n\nEach keeps its "
-                "settings, is switched off while its program is rebuilt, and "
+                "settings, is switched off while it is replaced, and "
                 "is switched back the way it was after."):
             say("the update was declined")
             return
