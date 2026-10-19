@@ -50,8 +50,6 @@ import os
 import shutil
 import sys
 import tempfile
-import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -330,8 +328,8 @@ def test_manifest(addon: Any, api: Api) -> None:
     print("\n1. what the addon says it is")
     check(str(addon.ADDON.get("name")) == "BerryVM",
           f"the name the store shows: {addon.ADDON.get('name')!r}")
-    check(str(addon.ADDON.get("version")) == "2.3",
-          f"the shipped version is 2.3: {addon.ADDON.get('version')!r}")
+    check(str(addon.ADDON.get("version")) == "2.5",
+          f"the shipped version is 2.5: {addon.ADDON.get('version')!r}")
     check(str(addon.ADDON.get("api")) == "1", "the api version is 1")
     check(sorted(addon.ADDON.get("requires") or []) == ["sftp", "ssh"],
           f"both transports are declared: {addon.ADDON.get('requires')!r}")
@@ -353,8 +351,8 @@ def test_manifest(addon: Any, api: Api) -> None:
                   addon.P_CONSOLE, addon.P_BROWSER, addon.P_MAIN,
                   addon.P_MACHINES, addon.P_SETTINGS, addon.P_CALC,
                   addon.P_PAINT, addon.P_MINE, addon.P_MEDIA,
-                  addon.P_RECYCLE],
-          f"the desktop ships thirteen programs in order: {ids}")
+                  addon.P_PROFILE, addon.P_CATALOG, addon.P_RECYCLE],
+          f"the desktop ships fifteen programs in order: {ids}")
     check("Paint" in addon.CAPTIONS.values()
           and "Minesweeper" in addon.CAPTIONS.values()
           and "Media Player" in addon.CAPTIONS.values(),
@@ -852,97 +850,51 @@ def test_viewer(addon: Any, api: Api) -> None:
 
 
 def test_console(addon: Any, api: Api) -> None:
-    print("\n10. Command Prompt: a real shell in a window")
-
-    class FakeStdin:
-        def __init__(self) -> None:
-            self.typed: list[str] = []
-
-        def write(self, text: str) -> None:
-            self.typed.append(str(text))
-
-        def flush(self) -> None:
-            pass
-
-    class FakeStdout:
-        """Yields the queued lines, then waits at a gate: the reader
-        thread stays alive - so the shell has not 'ended' - while the
-        test's answers never depend on timing."""
-
-        def __init__(self, lines: list[str], gate: threading.Event) -> None:
-            self._lines = list(lines)
-            self._gate = gate
-
-        def __iter__(self) -> Any:
-            return self
-
-        def __next__(self) -> str:
-            if self._lines:
-                return self._lines.pop(0)
-            self._gate.wait(5.0)
-            if self._lines:
-                return self._lines.pop(0)
-            raise StopIteration
-
-    class FakeProc:
-        def __init__(self, lines: list[str]) -> None:
-            self.stdin = FakeStdin()
-            self.gate = threading.Event()
-            self.stdout = FakeStdout(lines, self.gate)
-            self.terminated = False
-
-        def poll(self) -> int | None:
-            return None
-
-        def terminate(self) -> None:
-            self.terminated = True
-
+    print("\n10. Command Prompt: a real terminal, driven by spawn")
+    # The console no longer runs a child of its own: it points a terminal
+    # screen at ``spawn`` and the app's worker owns the shell. So the test
+    # reads what the addon asked the widget to do, not a fake process.
     fresh(api)
     addon.init(api)
+    # A profile alias, so the spawn carries the expansion table with it.
+    addon.write_profile({"aliases": {"ll": "dir /al"},
+                         "path_extra": [str(Path(api.paths.data) / "bin")],
+                         "prompt": "u@berryvm:~$ "})
     api.run_clear()
-    real_shell = addon._start_shell
-    spawned: list[Any] = []
-
-    def fake_shell(cwd: str) -> Any:
-        proc = FakeProc([f"hello from {Path(cwd).name}\n", "one more\n"])
-        spawned.append(proc)
-        return proc
-
-    addon._start_shell = fake_shell
-    try:
-        win_id = addon.open_console(str(Path(api.paths.data)))
-        check(win_id in api.windows, f"a console window stands up: {win_id}")
-        check(spawned and spawned[0].stdin is not None,
-              "a real shell process was asked for (here, a fake)")
-        con = addon.consoles.get(win_id) or {}
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and not any(
-                "hello" in line for line in list(con.get("pending", ()))):
-            time.sleep(0.02)
-        addon.pump_consoles()
-        drawn = str(api.last_set(f"{win_id}_out", "append") or "")
-        check("hello from" in drawn, "the shell's words reach the screen")
-        # A typed line goes into the shell's keys, echoed on the screen.
-        api.form[f"{win_id}_in:value"] = "echo hi"
-        addon.on_widget(addon.TAB, f"{win_id}_in", "returned", {})
-        check(spawned[0].stdin.typed == ["echo hi\n"],
-              "the typed line is written and flushed to the shell")
-        addon.pump_consoles()
-        drawn = str(api.last_set(f"{win_id}_out", "append") or "")
-        check("> echo hi" in drawn, "the window echoes what was typed")
-        # An empty pump writes nothing at all - no spurious clears.
-        api.run_clear()
-        addon.pump_consoles()
-        check(api.last_set(f"{win_id}_out", "append") is None,
-              "an empty tray writes nothing")
-        # Closing the window lets go of the child.
-        addon.on_widget(addon.TAB, win_id, "closed", {})
-        check(spawned[0].terminated, "shutting the window terminates it")
-        check(win_id not in addon.consoles, "and the addon forgets the shell")
-    finally:
-        for proc in spawned:
-            proc.gate.set()
-        addon._start_shell = real_shell
+    win_id = addon.open_console()
+    check(win_id in api.windows, f"a console window stands up: {win_id}")
+    leaf = find_kind(api.open_entry(win_id).get("spec"), "terminal")
+    check(leaf is not None and leaf.get("id") == f"{win_id}_term",
+          "the window carries a terminal leaf, not a read-only log")
+    spawn = api.last_set(f"{win_id}_term", "spawn") or {}
+    check(bool(spawn.get("cmd")), "the shell to run is named")
+    check(spawn.get("cwd") == str(addon.vm_home()),
+          "the shell is spawned in the Linux-shaped home")
+    check(spawn.get("aliases") == {"ll": "dir /al"},
+          "and the profile's aliases ride into the worker")
+    env = spawn.get("env") or {}
+    check(env.get("HOME") == str(addon.vm_home()),
+          "the shell environment names that same home")
+    check(str(Path(api.paths.data) / "bin") in env.get("PATH", ""),
+          "and the profile's extra PATH is in front")
+    check(api.last_set(f"{win_id}_term", "write") is not None,
+          "the banner is printed on the terminal")
+    check(addon.terminals.get(f"{win_id}_term") == win_id,
+          "the terminal is filed under its window")
+    # The worker's news lands on the window's path line, not a state label.
+    addon.on_widget(addon.TAB, f"{win_id}_term", "closed", {})
+    check(api.last_set(f"{win_id}_path", "text") is not None,
+          "a closed shell reports on the window's path line")
+    # Closing the frame forgets the terminal id (the app stopped the worker).
+    addon.on_widget(addon.TAB, win_id, "closed", {})
+    check(f"{win_id}_term" not in addon.terminals,
+          "and the addon drops the shell's terminal id")
+    # The home tree is the Linux shape, not just a Desktop folder.
+    root = Path(api.paths.data)
+    check(all((root / name).is_dir() for name in addon.LINUX_DIRS),
+          "the home root was built as a Linux tree")
+    check(addon.vm_home().is_dir(),
+          "and the per-user home sits inside it")
 
 
 def test_main_ssh(addon: Any, api: Api) -> None:
@@ -1171,6 +1123,12 @@ def fresh(api: Api) -> None:
     addon_module.minimized = {}
     addon_module.attention = {}
     addon_module._flash_on = False
+    # The XP cosplay keeps a boot-progress counter, a Konami key buffer and a
+    # dict of live timers on module globals too; a fresh section must not start
+    # with a half-filled buffer or a lingering timer from the last one.
+    addon_module._splash_step = 0
+    addon_module._konami = []
+    addon_module._SCHED.clear()
     api.windows = []
     api.titles = {}
     api.form = {}
@@ -1452,6 +1410,200 @@ def test_window_management(addon: Any, api: Api) -> None:
           "closing a taskbar button takes its window off the desktop")
 
 
+def test_upgrade_cosplay(addon: Any, api: Api) -> None:
+    """The app bumps (Explorer, Notepad, Media, Machines), the catalog, the
+    theme card, and the XP cosplay, all read through the same fake desktop.
+
+    Every check reads the commands the addon hands its widgets and the pure
+    helpers it factors out, so none of it needs Qt: the seek slider, the
+    dirty ``*`` title, the four-column listing, ``Open terminal here``, the
+    install/remove hide, a theme repaint, the boot/logon no-ops on a headless
+    run and the Konami code that flips the wallpaper."""
+    print("\n18. the app bumps, the catalog, the theme and the cosplay")
+
+    # --- Media Player: reorder the playlist, drive and seat the seek ---
+    fresh(api)
+    addon.init(api)
+    addon.start_program(addon.P_MEDIA)
+    track_a = str(Path(api.paths.data) / "a.mp3")
+    track_b = str(Path(api.paths.data) / "b.mp3")
+    addon.media_add(track_a)
+    addon.media_add(track_b)
+    addon.media_play_index(0)
+    state = addon._media_state()
+    check(state["tracks"] == [track_a, track_b] and state["index"] == 0,
+          "two tracks queued, the first loaded")
+    # Highlight the second row and slide it up past the first.
+    addon.on_widget(addon.TAB, f"{addon.P_MEDIA}_list", "selected",
+                    {"row": 1})
+    api.run_clear()
+    addon.on_widget(addon.TAB, f"{addon.P_MEDIA}_up", "clicked", {})
+    state = addon._media_state()
+    check(state["tracks"] == [track_b, track_a],
+          f"the selected row moved up the playlist: {state['tracks']}")
+    check(state["index"] == 1,
+          "and the play-mark rode with the track it was on")
+    # Dragging the seek slider reaches the player's ``seek`` prop.
+    addon.on_widget(addon.TAB, f"{addon.P_MEDIA}_seek", "changed",
+                    {"value": 42000})
+    check(api.last_set(f"{addon.P_MEDIA}_player", "seek") == 42000,
+          "the seek slider drives the leaf")
+    # A state change seats the slider at the loaded track's length + clock.
+    api.form[f"{addon.P_MEDIA}_player:duration"] = 60000
+    api.form[f"{addon.P_MEDIA}_player:position"] = 30000
+    addon.on_widget(addon.TAB, f"{addon.P_MEDIA}_player", "state",
+                    {"state": "playing"})
+    check(api.last_set(f"{addon.P_MEDIA}_seek", "maximum") == 60000,
+          "the seek slider's reach follows the track length")
+    check(api.last_set(f"{addon.P_MEDIA}_seek", "value") == 30000,
+          "and its handle sits at the current position")
+    check(api.last_set(f"{addon.P_MEDIA}_seeklabel", "text") == "0:30",
+          "the clock reads the position as m:ss")
+    check(addon._media_time(65000) == "1:05"
+          and addon._media_time(0) == "0:00",
+          "the clock formats milliseconds, and zero is 0:00")
+
+    # --- Notepad: a dirty ``*`` title, Find, and the Recent shelf ---
+    fresh(api)
+    addon.init(api)
+    note = Path(api.paths.data) / "Desktop" / "kp.txt"
+    note.write_text("echo hi there\n")
+    win = addon.open_berrypad(str(note), "local", "kp.txt")
+    check(win in api.windows, "a text file opens in the editor")
+    # Typing words the file has not been given puts a ``*`` on the caption.
+    addon.on_widget(addon.TAB, f"{win}_edit", "changed",
+                    {"text": "echo hi there, edited\n"})
+    check("*" in api.titles.get(win, ""),
+          f"a dirty buffer wears a * : {api.titles.get(win)!r}")
+    # Find says how many matches and where the first is.
+    api.answers.append("there")
+    addon.on_widget(addon.TAB, f"{win}_find", "clicked", {})
+    found_note = str(api.last_set(f"{win}_note", "text") or "")
+    check("match" in found_note and "line 1" in found_note,
+          f"Find reports the count and first line: {found_note!r}")
+    # Opening a local file pushes it onto the persisted Recent shelf.
+    check(str(note) in (api.written.get("recent") or []),
+          "the opened file reached the Recent list in the config")
+
+    # --- Explorer: the mode/stamp helpers and the four-column listing ---
+    check(addon._mode_text(0o755, False) == "-rwxr-xr-x",
+          "a 0755 file reads as -rwxr-xr-x")
+    check(addon._mode_text(0o644, True) == "drw-r--r--",
+          "a directory leads with d")
+    check(addon._mode_text(0, True) == "d---------",
+          "an unreadable mode is dashes, not a lie")
+    check(addon._file_stamp(0) == "" and addon._file_stamp(-1) == "",
+          "no mtime is a blank cell")
+    check(bool(addon._file_stamp(1_700_000_000)),
+          "a real mtime reads as a date")
+    fresh(api)
+    addon.init(api)
+    addon.start_program(addon.P_EXPLORER)
+    desk = Path(api.paths.data) / "Desktop"
+    (desk / "listing.txt").write_text("one\n")
+    addon.pane_list(addon.PANE_LOCAL, str(desk))
+    rows = api.last_set(f"{addon.PANE_LOCAL}_table", "rows") or []
+    check(rows and all(len(r.get("cells") or []) == 4 for r in rows),
+          "each local row is Name, Size, Mode, Modified")
+    check(any(r["cells"][0] == "listing.txt" for r in rows),
+          "and the file we wrote is listed")
+    # Enter on the address bar walks the pane there; Root jumps to the top.
+    addon.on_widget(addon.TAB, f"{addon.PANE_LOCAL}_path", "returned",
+                    {"text": str(desk)})
+    check(addon.pane_path.get(addon.PANE_LOCAL) == str(desk),
+          "typing an address and Enter walks the pane")
+    addon.pane_root(addon.PANE_LOCAL)
+    check(addon.pane_path.get(addon.PANE_LOCAL) == str(addon.home_root()),
+          "Root jumps to the top of the Linux tree")
+
+    # --- Machines: Open terminal here seeds the single Terminal ---
+    fresh(api)
+    addon.init(api)
+    api.config_values["machines"] = [
+        {"name": "Router", "host": "192.168.1.1", "port": 22,
+         "username": "root"}]
+    addon.reload_machines()
+    addon.machine_row = 0
+    api.answers.append("pw")
+    opened_id = addon.machine_term_here()
+    check(opened_id == addon.P_MAIN and addon.P_MAIN in api.windows,
+          "Open terminal here stands the Terminal up on this host")
+    check(addon.terminals.get(f"{addon.P_MAIN}_term") == addon.P_MAIN,
+          "and files its terminal under that window")
+    conn = api.last_set(f"{addon.P_MAIN}_term", "connect") or {}
+    check(conn.get("host") == "192.168.1.1",
+          "the terminal was handed the row's host")
+
+    # --- The catalog: a removal hides the tile, an install brings it back ---
+    fresh(api)
+    addon.init(api)
+    keep = [pid for pid, _cap in addon.PROGRAMS if pid != addon.P_CALC]
+    addon.write_installed(keep)
+    check(not addon.is_installed(addon.P_CALC),
+          "the catalog's Remove took Calculator off the installed set")
+    check(addon.is_installed(addon.P_CATALOG),
+          "but Add/Remove Programs can never remove itself")
+    tiles = api.last_set(addon.ICON_GRID, "rows") or []
+    captions = [r["cells"][0] for r in tiles]
+    check(addon.CAPTIONS[addon.P_CALC] not in captions,
+          "the removed program lost its desktop tile")
+    check(addon.CAPTIONS[addon.P_EXPLORER] in captions,
+          "and one still installed keeps its mark")
+    addon.write_installed([pid for pid, _cap in addon.PROGRAMS])
+    check(addon.is_installed(addon.P_CALC),
+          "Install put it back on the set")
+    tiles = api.last_set(addon.ICON_GRID, "rows") or []
+    check(addon.CAPTIONS[addon.P_CALC] in [r["cells"][0] for r in tiles],
+          "and the tile came back")
+
+    # --- Display Properties: the Themes card repaints from the palette ---
+    fresh(api)
+    addon.init(api)
+    api.form["set_theme:value"] = "Silver"
+    addon.settings_apply()
+    check(api.written.get("theme") == "Silver",
+          "the theme pick reached the config")
+    sheet = str(api.last_set(addon.DESKTOP, "style") or "")
+    check("#6a6a72" in sheet,
+          "Silver's frame colour repainted the desktop sheet")
+
+    # --- The cosplay: splash, logon and chime all no-op with no window ---
+    fresh(api)
+    addon.init(api)
+    for ghost in (addon.SPLASH, addon.LOGON, "sfx"):
+        check(ghost not in api.windows,
+              f"{ghost!r} is never left on a headless desktop")
+    # Driving them directly still finds nothing to host them, so nothing lands.
+    addon.boot_splash()
+    addon.logon_screen()
+    addon.startup_sound()
+    check(addon.SPLASH not in api.windows
+          and addon.LOGON not in api.windows
+          and "sfx" not in api.windows,
+          "the cosplay is a no-op when there is no real window to show it on")
+
+    # --- Konami code flips the wallpaper; Alt+Tab raises a window ---
+    fresh(api)
+    addon.init(api)
+    for key in addon.KONAMI:
+        addon.on_widget(addon.TAB, addon.DESKTOP, "shortcut",
+                        {"keys": key})
+    check(api.written.get("wallpaper") == "Night",
+          "the Konami code switched the wallpaper to Night")
+    addon._konami = []
+    addon.konami_seen("left")
+    addon.konami_seen("up")          # off the tail: the buffer resets
+    addon.konami_seen("zzz")         # a stray key clears it outright
+    check(addon._konami == [],
+          "a key off the sequence drops the buffer rather than stacking a hit")
+    addon.start_program(addon.P_CALC)
+    api.picks.append(addon.caption_for(addon.P_CALC))
+    addon.on_widget(addon.TAB, addon.DESKTOP, "shortcut",
+                    {"keys": "Alt+Tab"})
+    check(api.last_set(addon.DESKTOP, "raise_window") == addon.P_CALC,
+          "Alt+Tab raises the window named in the switcher")
+
+
 def main() -> int:
     global addon_module
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
@@ -1496,6 +1648,7 @@ def main() -> int:
     test_net_and_wallpaper(addon, api)
     test_paint_mine_media(addon, api)
     test_window_management(addon, api)
+    test_upgrade_cosplay(addon, api)
 
     shutil.rmtree(WORK, ignore_errors=True)
     if FAILURES:

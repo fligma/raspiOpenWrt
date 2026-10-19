@@ -2691,13 +2691,16 @@ def apply_widget_property(widget: QWidget, prop: str, value: Any) -> None:
         # Berry Manager window itself is focused - a global key grab is
         # not offered to addons.
         _install_shortcut(widget, value)
-    elif prop in ("connect", "disconnect", "send", "command", "write"):
+    elif prop in ("connect", "spawn", "disconnect", "send", "command", "write"):
         # A terminal's own connection, and the note an addon prints on it. The
-        # first three reach the device, so they pass the gates of
+        # SSH ones reach the device, so they pass the gates of
         # :func:`_authorize_terminal`, called by the two ``set_widget``
-        # implementations - the only places that hold an api.
+        # implementations - the only places that hold an api. ``spawn`` starts
+        # the machine's own shell, not a device, so it is not gated at all.
         if prop == "connect":
             _terminal_connect(widget, value)
+        elif prop == "spawn":
+            _terminal_spawn(widget, value)
         elif prop == "disconnect":
             _terminal_disconnect(widget)
         elif prop == "write":
@@ -3146,6 +3149,44 @@ def _terminal_connect(widget: QWidget, value: Any) -> None:
     where = f"{shell.state['host']}:{shell.state['port']}"
     widget.write_local(f"Connecting to {who}@{where}\n" if who
                        else f"Connecting to {where}\n")
+    shell.received.connect(widget.feed)
+    shell.connected.connect(lambda: _terminal_connected(widget))
+    shell.failed.connect(lambda message: _terminal_failed(widget, message))
+    shell.disconnected.connect(lambda: _terminal_closed(widget))
+    widget.send_data.connect(shell.send)
+    widget.resized.connect(shell.resize)
+    shell.start()
+    widget.setFocus()
+
+
+def _terminal_spawn(widget: QWidget, value: Any) -> None:
+    """Bring a local shell up on this terminal screen: the machine's own
+    ``cmd`` or ``sh`` run as a child process, its keys and words piped through.
+
+    The same wiring :func:`_terminal_connect` gives a far SSH shell, drawn from
+    :class:`core.net.LocalShellWorker` instead of :class:`OwnShellWorker`. The
+    two workers answer one another's every signal, so nothing downstream can
+    tell them apart. Unlike an SSH connect this names no host and asks no SSH
+    permission - the process runs on the addon's own machine, which an addon
+    could reach through ``subprocess`` in the first place. ``value`` is a dict
+    naming ``cmd`` (a path, or empty for the OS default), ``cwd``, an ``env``
+    dict merged over the process environment, and an ``aliases`` table the
+    worker expands each line's first word through before it reaches the shell."""
+    state = getattr(widget, "_addon_terminal", None)
+    if state is None:
+        raise AddonError("that widget is not a terminal")
+    shell = state.get("shell")
+    if shell is not None and shell.isRunning():
+        return                     # already up: a second call would drop the screen
+    from core.net import LocalShellWorker
+    settings = value if isinstance(value, dict) else {}
+    cols, rows = widget.grid_size()
+    shell = LocalShellWorker(settings, cols=cols, rows=rows, parent=widget)
+    state["shell"] = shell
+    state["last"] = dict(shell.state)
+    where = str(settings.get("cwd") or "")
+    widget.write_local("Starting local shell"
+                       + (f" in {where}\n" if where else "\n"))
     shell.received.connect(widget.feed)
     shell.connected.connect(lambda: _terminal_connected(widget))
     shell.failed.connect(lambda message: _terminal_failed(widget, message))
@@ -6350,8 +6391,12 @@ def _write_control(api: "AddonAPI", widget: QWidget | None, prop: str,
     prop = str(prop)
     if prop in TERMINAL_PRIVILEGED and _is_terminal(widget):
         # Opening a connection and typing down one are the app's business
-        # as much as ``device.run`` is, so they pass the same gates.
-        _authorize_terminal(api, prop, widget)
+        # as much as ``device.run`` is, so they pass the same gates - unless
+        # this terminal is driven by a local process, which reaches no device
+        # at all and so asks for no SSH permission.
+        state = getattr(widget, "_addon_terminal", None) or {}
+        if not getattr(state.get("shell"), "is_local", False):
+            _authorize_terminal(api, prop, widget)
     apply_widget_property(widget, prop, value)
     return True
 

@@ -5743,6 +5743,19 @@ and answers ``None`` when the box is cancelled - and asking each time, rather th
 keeping one in a config file that gets shared and backed up, is the design an
 addon with several machines should reach for.
 
+The very same leaf can drive the machine this program runs on instead of a far
+one: ``set_widget(tab, id, "spawn", {"cmd": "", "cwd": "/some/dir",
+"env": {"HOME": "/some/dir"}, "aliases": {"ll": "ls -al"}})`` starts a local
+shell (``cmd.exe`` or ``sh`` - an empty ``cmd`` takes the OS's own) as a child
+process and pipes its keys and words through the screen. Because a plain pipe is
+not a teletype, the shell keeps its own line editing: what is typed echoes
+straight back, backspace erases, and only a finished line is written - after its
+first word is expanded through ``aliases``, so an addon can hand a box of shell
+aliases over a stock shell. It reaches no device and asks for no SSH permission;
+``"disconnect"``, ``"command"``, ``"send"``, ``"write"``, ``"state"`` and the
+``ready`` / ``closed`` / ``failed`` news all mean exactly what they do for an SSH
+terminal, so one piece of code can watch a far box and the local machine alike.
+
 ## Pages on the device
 
 [add_web_tab](api:tabs.add_web_tab) embeds an address; from there

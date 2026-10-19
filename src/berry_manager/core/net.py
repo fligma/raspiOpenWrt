@@ -473,6 +473,220 @@ class OwnShellWorker(QThread):
             self.disconnected.emit()
 
 
+# --- a shell on the machine this app runs on ---
+
+def expand_alias(line: str, aliases: dict) -> str:
+    """Replace the first word of a command line with its alias, chained.
+
+    Only the leading token is touched, the way a shell expands an alias: the
+    arguments ride along unchanged. A replacement that is itself an alias is
+    expanded again, up to a small cap, so ``ll`` can point at ``l`` which
+    points at ``ls -al``. An unknown word, an empty line, or no alias table at
+    all is handed back exactly as it came."""
+    if not aliases:
+        return line
+    parts = str(line).split(" ")
+    token = parts[0]
+    steps = 0
+    while token in aliases and steps < 8:
+        parts = str(aliases[token]).split(" ") + parts[1:]
+        token = parts[0]
+        steps += 1
+    return " " .join(parts)
+
+
+class LocalShellWorker(QThread):
+    """One of the machine's own shells, driven from a terminal screen.
+
+    This is the sibling of :class:`OwnShellWorker`, answering to exactly the
+    same four signals and the same ``send`` / ``send_line`` / ``resize`` /
+    ``stop`` / ``state`` surface, so the addon terminal wiring cannot tell the
+    two apart. Where that one opens a paramiko channel to a far machine, this
+    one runs the local ``cmd.exe`` or ``sh`` as a child process and pipes its
+    keys and words through - the process lives on this box, in a directory and
+    environment the caller chooses.
+
+    A pipe is not a teletype: with no PTY behind it the shell does no line
+    editing and, on some platforms, echoes nothing back. So the worker keeps
+    the editing itself - it holds the characters typed since the last Enter,
+    echoes them to the screen, honours backspace, and only writes a finished
+    line to the child when Enter is pressed. On the way out it expands the
+    line's first word through ``aliases`` (see :func:`expand_alias`), which is
+    what lets an addon offer shell aliases over a plain shell. ``resize`` is
+    accepted and ignored: a pipe has no window to resize.
+
+    ``settings`` names the ``cmd`` to run (a path; defaults to the OS's own
+    shell), the ``cwd`` to start it in, an ``env`` dict merged over the
+    process environment, and the ``aliases`` table. ``state`` says where it is;
+    it never carries a secret, because there is none to carry."""
+
+    connected = pyqtSignal()
+    received = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    disconnected = pyqtSignal()
+
+    #: Read by the ``set_widget`` gate so a local shell is not asked for the
+    #: SSH permission a far connection needs.
+    is_local = True
+
+    def __init__(self, settings: dict, cols: int = 80, rows: int = 24,
+                 parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        settings = dict(settings or {})
+        self.cmd = settings.get("cmd") or ""
+        self.cwd = str(settings.get("cwd") or "")
+        self.env = dict(settings.get("env") or {})
+        self.aliases = dict(settings.get("aliases") or {})
+        # cols/rows are kept only so the caller can pass them uniformly;
+        # a pipe ignores them.
+        self.cols, self.rows = max(2, int(cols)), max(2, int(rows))
+        self.outgoing: queue.Queue = queue.Queue()
+        self.stop_requested = threading.Event()
+        self.proc = None
+        self._line: list = []
+        self.state: dict = {"connected": False,
+                            "host": "localhost",
+                            "port": 0,
+                            "username": str(self.env.get("USER") or ""),
+                            "cwd": self.cwd}
+
+    # --- the caller's surface, shaped like OwnShellWorker ---
+
+    def send(self, text: str) -> None:
+        """Queue raw key bytes; they run through the worker's line editor."""
+        self.outgoing.put(text)
+
+    def send_line(self, text: str) -> None:
+        """Queue a whole command line; the Enter that submits it is added."""
+        self.outgoing.put(text + "\r")
+
+    def resize(self, cols: int, rows: int) -> None:
+        """Accept a new shape and drop it - a pipe has no window size."""
+        self.outgoing.put(("resize", int(cols), int(rows)))
+
+    def stop(self) -> None:
+        """Ask for the shell to end, and unblock the read by closing its pipes."""
+        self.stop_requested.set()
+        self._close_proc()
+
+    # --- the machinery ---
+
+    def _spawn(self):
+        """Start the child process the way a console would, keys and words
+        piped through. Read late rather than imported at the top so this
+        module still loads where a shell is never asked for."""
+        import os
+        import subprocess
+        argv = self.cmd or (os.environ.get("COMSPEC", "cmd.exe")
+                            if os.name == "nt" else os.environ.get("SHELL",
+                                                                   "/bin/sh"))
+        env = dict(os.environ)
+        env.update(self.env)
+        kwargs: dict = {"cwd": self.cwd or None, "env": env,
+                        "stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
+                        "stderr": subprocess.STDOUT, "text": True,
+                        "errors": "replace", "bufsize": 1}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return subprocess.Popen([argv], **kwargs)
+
+    def _close_proc(self) -> None:
+        """Let the child go: close its stdin so a blocked read unwinds, then
+        terminate it if it still means to run."""
+        proc = self.proc
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+        except OSError:
+            pass
+
+    def _read_out(self) -> None:
+        """Carry every line the shell says onto the screen; runs on its own
+        daemon thread so a command that never returns cannot freeze the loop
+        that reads the keys."""
+        try:
+            for line in self.proc.stdout:
+                self.received.emit(str(line))
+        except (OSError, ValueError):
+            pass
+
+    def _type(self, chunk: str) -> None:
+        """Run a piece of typed input through the line editor. A chunk that
+        carries an escape byte (an arrow key, a paste of control codes) is
+        dropped whole - there is no cursor movement to offer over a pipe, and
+        letting the bytes into the buffer would only corrupt the command."""
+        if "\x1b" in chunk:
+            return
+        for ch in chunk:
+            if ch in ("\r", "\n"):
+                line = "".join(self._line)
+                self._line = []
+                self.received.emit("\r\n")
+                self._submit(line)
+            elif ch in ("\x7f", "\x08"):
+                if self._line:
+                    self._line.pop()
+                    self.received.emit("\b \b")
+            elif ch == "\t" or ord(ch) >= 32:
+                self._line.append(ch)
+                self.received.emit(ch)
+
+    def _submit(self, line: str) -> None:
+        """Expand the line's aliases and type it into the shell. An empty
+        line is still sent, so the shell prints its prompt as usual."""
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        text = expand_alias(line, self.aliases)
+        try:
+            self.proc.stdin.write(text + "\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError):
+            pass
+
+    def run(self) -> None:
+        """Bring the shell up, echo and edit what is typed, and stream what
+        the process says onto the screen until it is stopped or it ends."""
+        try:
+            if self.stop_requested.is_set():
+                return
+            self.proc = self._spawn()
+        except (OSError, ValueError) as error:
+            self.failed.emit(str(error) or type(error).__name__)
+            return
+        self.state["connected"] = True
+        try:
+            self.state["cwd"] = str(self.proc.cwd)
+        except (AttributeError, OSError):
+            pass
+        self.connected.emit()
+        threading.Thread(target=self._read_out, daemon=True).start()
+        try:
+            while not self.stop_requested.is_set():
+                try:
+                    item = self.outgoing.get(timeout=0.05)
+                except queue.Empty:
+                    if self.proc.poll() is not None:
+                        break
+                    continue
+                if isinstance(item, tuple):
+                    continue                     # a queued resize: nothing to do
+                self._type(str(item))
+        except Exception as error:
+            if not self.stop_requested.is_set():
+                self.failed.emit(str(error) or type(error).__name__)
+        finally:
+            self.state["connected"] = False
+            self._close_proc()
+            self.disconnected.emit()
+
+
 # --- reboot wait (the SSH tab's Reboot button) ---
 
 class RebootWaitWorker(QThread):

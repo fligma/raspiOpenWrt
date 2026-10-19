@@ -57,9 +57,6 @@ from __future__ import annotations
 import json
 import os
 import posixpath
-import subprocess
-import threading
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -68,7 +65,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "BerryVM",
-    "version": "2.3",
+    "version": "2.5",
     "author": "fligma",
     "api": 1,
     "requires": ["ssh", "sftp"],
@@ -77,12 +74,16 @@ ADDON = {
     "connection": "both",
     "description": "A Windows XP-styled desktop in one tab: wallpaper, Start "
                    "menu, taskbar and desktop icons, with a two-paned local + "
-                   "device file manager, Notepad for local and remote files, "
-                   "a picture viewer, a local command prompt, SSH terminals, "
-                   "a calculator, Paint, Minesweeper, a Media Player and "
-                   "Display Properties for the look. Windows snap to half, "
+                   "device file manager, Notepad, a picture viewer, a real "
+                   "terminal Command Prompt wired to the machine's own shell, "
+                   "a Linux-shaped home with alias and profile support, an "
+                   "Add/Remove Programs catalog, SSH terminals, a calculator, "
+                   "Paint, Minesweeper, a Media Player and multi-tab Display "
+                   "Properties with selectable themes. Windows snap to half, "
                    "quarter or full by their title bar, and the taskbar "
-                   "right-clicks into cascade, tile and Show desktop.",
+                   "right-clicks into cascade, tile and Show desktop - all "
+                   "dressed up with a boot splash, a logon picker and a few "
+                   "XP easter eggs.",
 }
 
 #: The tab's mark when the assets folder carries no picture: a monitor wearing
@@ -132,6 +133,25 @@ P_BROWSER = "browser"         # the Web Browser window (single instance)
 P_PAINT = "paint"             # Paint: the canvas drawing program
 P_MINE = "mine"               # Minesweeper
 P_MEDIA = "media"             # Media Player: QtMultimedia audio
+P_PROFILE = "profile"         # Shell Profile: the alias and prompt editor
+P_CATALOG = "catalog"         # Add/Remove Programs: the app catalog
+
+#: The Start flyout itself. It is a launcher, not a launch-able program, so
+#: it rides in none of ``PROGRAMS``/``CAPTIONS``/``BY_CAPTION`` - it never
+#: gets a desktop tile or a catalog row. The taskbar's Start button raises
+#: this two-pane window; ``start_menu`` stays as the flat ``ui.choose`` menu
+#: it falls back to when a flyout cannot be stood up.
+P_START = "start_flyout"
+
+#: The boot splash and the logon picker. Like the Start flyout they are part
+#: of the shell's own cosplay, not launch-able programs, so they ride in no
+#: ``PROGRAMS``/``CAPTIONS``/``BY_CAPTION`` and get no tile or catalog row.
+SPLASH = "boot_splash"
+LOGON = "logon"
+
+#: The Konami sequence, matched against the desktop's lone-key shortcuts.
+KONAMI = ("up", "up", "down", "down", "left", "right",
+          "left", "right", "b", "a")
 
 #: What Start and the desktop know as the program list: an id, a caption, and
 #: the mark the tile wears. The caption is the one name the icon layer, the
@@ -149,6 +169,8 @@ PROGRAMS: list[tuple[str, str]] = [
     (P_PAINT, "Paint"),
     (P_MINE, "Minesweeper"),
     (P_MEDIA, "Media Player"),
+    (P_PROFILE, "Shell Profile"),
+    (P_CATALOG, "Add/Remove Programs"),
     (P_RECYCLE, "Recycle Bin"),
 ]
 
@@ -434,6 +456,113 @@ WALLPAPERS = {
 #: rather than the theme's grey.
 WALL_FALLBACK = "#1e56a8"
 
+# --- the themes: the accent palette every frame and the bar are painted from ---
+
+#: The XP look is three colour schemes wearing the same shape - the blue
+#: Luna, an olive parody and a steel Silver. Each theme is one flat palette,
+#: so :func:`desktop_sheet` and :func:`taskbar_sheet` read their colours from
+#: here and a theme swap recolours the whole desktop with no second sheet.
+#: The literal gradients keep the shapes they were drawn with; only the tints
+#: move.
+THEMES = {
+    "Luna Blue": {
+        "frame": "#0855dd",
+        "bar": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #2b84f0,"
+               " stop:0.10 #1260e8, stop:0.55 #0b4fd6, stop:1 #1866e8)",
+        "task": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #3a8cf7,"
+                " stop:0.08 #2574e8, stop:0.5 #1c5ed6, stop:0.92 #1448b4,"
+                " stop:1 #1043a8)",
+        "task_edge": "#5b9bf8",
+        "start": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #4aaa4a,"
+                 " stop:0.5 #2f8a2f, stop:1 #1e6b1e)",
+        "start_border": "#1d5e1d",
+        "start_hover": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #5ec05e,"
+                       " stop:1 #2c7c2c)",
+        "start_press": "#1e5c1e",
+        "item": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #5e9ef5,"
+                " stop:1 #2a6ada)",
+        "item_border": "#1c4fb4",
+        "item_sel": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #1c54b7,"
+                    " stop:1 #0d3a94)",
+        "item_sel_border": "#0a2c74",
+        "tray": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #1e68d8,"
+                " stop:1 #0d47b0)",
+        "tray_edge": "#6ba1e8",
+        "select": "#316ac5",
+        "edge": "#7f9db9",
+    },
+    "Olive Gold": {
+        "frame": "#4a5a1e",
+        "bar": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #8a9a3e,"
+               " stop:0.10 #6b7c2c, stop:0.55 #556322, stop:1 #6f8230)",
+        "task": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #7a8a3e,"
+                " stop:0.08 #5f6f2c, stop:0.5 #4d5a22, stop:0.92 #3e4a1c,"
+                " stop:1 #35401a)",
+        "task_edge": "#9aa85a",
+        "start": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #d8b24a,"
+                 " stop:0.5 #b8912f, stop:1 #96751e)",
+        "start_border": "#6b5614",
+        "start_hover": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #e8c25a,"
+                       " stop:1 #a8862c)",
+        "start_press": "#8a6b18",
+        "item": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #9aa85a,"
+                " stop:1 #6b7c2c)",
+        "item_border": "#4d5a22",
+        "item_sel": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #556322,"
+                    " stop:1 #3e4a1c)",
+        "item_sel_border": "#2f3814",
+        "tray": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #6b7c2c,"
+                " stop:1 #4d5a22)",
+        "tray_edge": "#9aa85a",
+        "select": "#6b7c2c",
+        "edge": "#8a9a6a",
+    },
+    "Silver": {
+        "frame": "#6a6a72",
+        "bar": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #c0c0c8,"
+               " stop:0.10 #a8a8b2, stop:0.55 #8f8f9a, stop:1 #a0a0aa)",
+        "task": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #b8b8c0,"
+                " stop:0.08 #9a9aa4, stop:0.5 #82828c, stop:0.92 #6e6e78,"
+                " stop:1 #64646e)",
+        "task_edge": "#d0d0d8",
+        "start": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #9aa0ac,"
+                 " stop:0.5 #7a828f, stop:1 #5f6672)",
+        "start_border": "#4a505a",
+        "start_hover": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #aab0bc,"
+                       " stop:1 #7f8794)",
+        "start_press": "#565c66",
+        "item": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #c4c4cc,"
+                " stop:1 #9a9aa4)",
+        "item_border": "#7a7a84",
+        "item_sel": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #82828c,"
+                    " stop:1 #6e6e78)",
+        "item_sel_border": "#56565e",
+        "tray": "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #9a9aa4,"
+                " stop:1 #7a7a84)",
+        "tray_edge": "#c4c4cc",
+        "select": "#6a6a72",
+        "edge": "#a0a0a8",
+    },
+}
+
+#: The scheme a fresh install and an unknown name both fall back to.
+DEFAULT_THEME = "Luna Blue"
+
+
+def theme() -> str:
+    """The theme's name as configured, always one that exists in
+    :data:`THEMES` - an unknown value is Luna Blue, the way a blank wallpaper
+    is Bliss."""
+    name = str(config("theme", DEFAULT_THEME) or DEFAULT_THEME)
+    return name if name in THEMES else DEFAULT_THEME
+
+
+def palette() -> dict:
+    """The colour set the two sheets are painted from, keyed as in
+    :data:`THEMES`. A theme that names no entry still paints, because the
+    default palette answers for it."""
+    return THEMES.get(theme(), THEMES[DEFAULT_THEME])
+
 
 def wall_css() -> str:
     """The canvas's ``background:`` value, from what the settings name."""
@@ -465,14 +594,14 @@ def desktop_sheet() -> str:
     itself is only ever reached by its object name, so the wallpaper cannot
     wash over the frames.
     """
+    p = palette()
     return (
         "QWidget#berryDesktop { background: " + wall_css() + "; }"
-        # The frame: a grey client area under a blue 2px border, the way
+        # The frame: a grey client area under a themed 2px border, the way
         # every XP window is drawn.
-        "#addonWindow { background: #ece9d8; border: 2px solid #0855dd; }"
-        "#addonWindowBar { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 #2b84f0, stop:0.10 #1260e8, stop:0.55 #0b4fd6,"
-        " stop:1 #1866e8); }"
+        "#addonWindow { background: #ece9d8; border: 2px solid "
+        + p["frame"] + "; }"
+        "#addonWindowBar { background: " + p["bar"] + "; }"
         "#addonWindowBar QLabel { color: #ffffff; font-weight: bold; }"
         "#addonWindowBar QPushButton { border: 1px solid #ffffff;"
         " border-radius: 2px; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
@@ -483,7 +612,8 @@ def desktop_sheet() -> str:
         # The client-area furniture, so any program looks XP without trying.
         "#addonWindow QPushButton { background: qlineargradient(x1:0,y1:0,"
         " x2:0,y2:1, stop:0 #ffffff, stop:0.45 #f2f4f8, stop:0.55 #dfe4ee,"
-        " stop:1 #cdd8ea); border: 1px solid #7f9db9; border-radius: 3px;"
+        " stop:1 #cdd8ea); border: 1px solid " + p["edge"] + ";"
+        " border-radius: 3px;"
         " padding: 3px 10px; color: #000000; }"
         "#addonWindow QPushButton:hover { border: 1px solid #e9a900;"
         " background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ffffff,"
@@ -495,40 +625,40 @@ def desktop_sheet() -> str:
         "#addonWindow QLineEdit, #addonWindow QPlainTextEdit,"
         "#addonWindow QListWidget, #addonWindow QTreeWidget,"
         "#addonWindow QComboBox { background: #ffffff; color: #000000;"
-        " border: 1px solid #7f9db9; selection-background-color: #316ac5;"
+        " border: 1px solid " + p["edge"] + ";"
+        " selection-background-color: " + p["select"] + ";"
         " selection-color: #ffffff; }"
         "#addonWindow QGroupBox { border: 1px solid #d4d0c8;"
         " border-radius: 3px; margin-top: 6px; }"
-        "#addonWindow QProgressBar { border: 1px solid #7f9db9;"
+        "#addonWindow QProgressBar { border: 1px solid " + p["edge"] + ";"
         " border-radius: 2px; text-align: center; background: #ffffff; }"
-        "#addonWindow QProgressBar::chunk { background: #316ac5; }"
+        "#addonWindow QProgressBar::chunk { background: " + p["select"]
+        + "; }"
     )
 
 
 def taskbar_sheet() -> str:
-    """The blue bar, the green Start button and the tray - the strip that is
+    """The themed bar, the Start button and the tray - the strip that is
     outside the canvas gets its own sheet for the same reason."""
+    p = palette()
     return (
-        "#berryTaskbar { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 #3a8cf7, stop:0.08 #2574e8, stop:0.5 #1c5ed6,"
-        " stop:0.92 #1448b4, stop:1 #1043a8); border-top: 2px solid #5b9bf8; }"
-        "#berryStart { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 #4aaa4a, stop:0.5 #2f8a2f, stop:1 #1e6b1e);"
-        " border: 1px solid #1d5e1d; border-radius: 0px 10px 10px 0px;"
+        "#berryTaskbar { background: " + p["task"]
+        + "; border-top: 2px solid " + p["task_edge"] + "; }"
+        "#berryStart { background: " + p["start"]
+        + "; border: 1px solid " + p["start_border"]
+        + "; border-radius: 0px 10px 10px 0px;"
         " color: #ffffff; font-weight: bold; padding: 5px 16px; }"
-        "#berryStart:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 #5ec05e, stop:1 #2c7c2c); }"
-        "#berryStart:pressed { background: #1e5c1e; }"
+        "#berryStart:hover { background: " + p["start_hover"] + "; }"
+        "#berryStart:pressed { background: " + p["start_press"] + "; }"
         "#berryTasks { background: transparent; border: none; }"
-        "#berryTasks::item { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 #5e9ef5, stop:1 #2a6ada); border: 1px solid #1c4fb4;"
-        " border-radius: 3px; color: #ffffff; padding: 3px 8px;"
+        "#berryTasks::item { background: " + p["item"]
+        + "; border: 1px solid " + p["item_border"]
+        + "; border-radius: 3px; color: #ffffff; padding: 3px 8px;"
         " margin-right: 3px; }"
-        "#berryTasks::item:selected { background: qlineargradient(x1:0,"
-        " y1:0,x2:0,y2:1, stop:0 #1c54b7, stop:1 #0d3a94);"
-        " border: 1px solid #0a2c74; }"
-        "#berryTray { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 #1e68d8, stop:1 #0d47b0); border-left: 1px solid #6ba1e8; }"
+        "#berryTasks::item:selected { background: " + p["item_sel"]
+        + "; border: 1px solid " + p["item_sel_border"] + "; }"
+        "#berryTray { background: " + p["tray"]
+        + "; border-left: 1px solid " + p["tray_edge"] + "; }"
         "#berryClock { color: #ffffff; font-weight: bold; background:"
         " transparent; padding: 0px 10px; }"
     )
@@ -606,11 +736,47 @@ DEFAULTS = {
     "wallpaper": "Bliss",
     "wallpaper_color": "#2356b7",
     "wallpaper_file": "",
+    # Named in no field, so the app's form leaves it be and Display
+    # Properties writes it whole: the colour scheme both sheets are painted
+    # from, one of the names in :data:`THEMES`.
+    "theme": DEFAULT_THEME,
     "clock_on": True,
     "default_user": "root",
     "default_port": 22,
     "trust_unknown_host": True,
     "machines": [],
+    # Named in no field, so the app's form leaves them be and the programs
+    # that own them write them whole - the same bargain ``machines`` runs on.
+    # ``profile`` is the shell's alias table, its PATH additions and its
+    # prompt; ``installed`` is the set of program ids the catalog leaves on
+    # the desktop, seeded to every shipped program.
+    "profile": {
+        "aliases": {},
+        "path_extra": [],
+        "prompt": "user@berryvm:\\w$ ",
+    },
+    "installed": [pid for pid, _cap in PROGRAMS],
+    # Minesweeper's best clear time per difficulty, in seconds. Named in no
+    # field, so the form leaves it be and the game writes it on a win.
+    "mine_best": {},
+    # The Web Browser's shelf of favourite pages: name over address, picked
+    # from a combo. Named in no field, so the app's form never shows it and
+    # the browser owns the whole key.
+    "bookmarks": [
+        {"name": "Wikipedia", "url": "https://www.wikipedia.org"},
+        {"name": "Example", "url": "https://example.com"},
+    ],
+    # Notepad's shelf of recently opened files: full paths, newest first.
+    # Named in no field, so the app's form never shows it and the editor
+    # owns the whole key.
+    "recent": [],
+    # The XP cosplay: a boot splash, a logon pick and a startup chime, each
+    # shown only when a real window is up (they degrade to nothing on a
+    # headless run). Named in no field, so the app's form leaves them be and
+    # a person edits them straight in the config file.
+    "boot_splash": True,
+    "logon": True,
+    "startup_sound": True,
 }
 
 # --- the tab's spec ---
@@ -625,7 +791,13 @@ TAB_SPEC = {
          "expand": True,
          "on": ["activated", "closed", "moved", "resized",
                  "minimized", "restored", "maximized", "shortcut"],
-         "shortcuts": [{"keys": "Alt+Tab", "event": "shortcut"}],
+         "shortcuts": [{"keys": "Alt+Tab", "event": "shortcut"},
+                       {"keys": "Up", "event": "shortcut"},
+                       {"keys": "Down", "event": "shortcut"},
+                       {"keys": "Left", "event": "shortcut"},
+                       {"keys": "Right", "event": "shortcut"},
+                       {"keys": "B", "event": "shortcut"},
+                       {"keys": "A", "event": "shortcut"}],
          "children": []},
         {"kind": "row", "id": TASKBAR, "object_name": "berryTaskbar",
          "children": [
@@ -663,15 +835,19 @@ TAB_SPEC = {
 api = None                     # filled in by init()
 machines: list = []            # the Machines quickstart list, normalised
 machine_row: int = -1          # the row the Machines list has under the cursor
+profile_row: int = -1          # the alias the Shell Profile editor is on
+catalog_row: int = -1          # the program the catalog has under the cursor
+always_on_top: set = set()     # window ids kept above the rest
 machine_seq: int = 0           # ``msh<seq>`` ids, so they cannot be reused
 berry_seq: int = 0             # ``bp<seq>`` ids, one editor per file
 view_seq: int = 0              # ``pv<seq>`` ids, one viewer per picture
 console_seq: int = 0           # ``cs<seq>`` ids, one local shell per window
 calc_expr: str = ""            # the expression the calculator is building
+calc_mem: float = 0.0          # the calculator's memory register
+calc_hist: str = ""            # the last sum the calculator worked out
 opened: dict = {}              # win_id -> {"title", "kind", extra}
 berrypads: dict = {}           # win_id -> {"path", "origin", "title"}
 viewers: dict = {}             # win_id -> {"path", "origin", "size"}
-consoles: dict = {}            # win_id -> {"proc", "pending", "cwd", "alive"}
 terminals: dict = {}           # terminal id -> win_id it lives inside
 paint_state: dict = {}         # win_id -> {"color", "width", "tool"} for Paint
 media_state: dict = {}         # win_id -> {"tracks", "index"} for Media Player
@@ -693,8 +869,12 @@ _desk_positions: dict = {}
 _desk_renames: dict = {}
 _desk_recycled: list = []
 minimized: dict = {}
+maximized: set = set()          # window ids the desktop reports grown full
 attention: dict = {}
 _flash_on: bool = False
+_splash_step: int = 0           # how far the boot splash's bar has come
+_konami: list = []              # the lone keys seen, waiting for the sequence
+_SCHED: dict = {}               # cosplay timers by name, so they can be stopped
 
 
 def init(plugin_api: Any) -> None:
@@ -729,27 +909,42 @@ def init(plugin_api: Any) -> None:
     if bool(config("clock_on", True)):
         api.schedule.every(30, tick_clock)
         tick_clock()
-    api.schedule.every(0.5, pump_consoles)
     api.schedule.every(0.5, tick_flash)
     # Minesweeper's clock: a no-op unless a board is being played, so it
     # costs nothing on a desktop with no game open.
     api.schedule.every(1, tick_mine_timer)
     api.log("BerryVM ready: an XP-styled desktop in one tab.")
     _welcome()
+    _xp_cosplay()
+
+
+def _xp_cosplay() -> None:
+    """Run the boot splash, the startup chime and the logon picker, each of
+    which makes itself scarce unless a real window is up. Wrapped whole so a
+    hiccup in one never stops the desktop from coming up."""
+    for step in (boot_splash, startup_sound, logon_screen):
+        try:
+            step()
+        except Exception as error:
+            if api is not None:
+                api.log(f"berryvm: {step.__name__} skipped: {error}")
 
 
 def shutdown() -> None:
     """Close the tab; the app stops any shell inside on its way out, and any
     local console loses its process here - a child nobody owns is a zombie."""
     global home_ready, machine_seq, berry_seq, view_seq, console_seq, calc_expr
+    global calc_mem, calc_hist
+    global profile_row, catalog_row
     global _desk_positions, _desk_renames, _desk_recycled
     global minimized, attention, _flash_on
-    for record in list(consoles.values()):
-        _stop_shell(record)
+    global _splash_step, _konami
+    # A running local shell is owned by the terminal widget's worker thread;
+    # closing the tab below has the app stop every terminal inside it, so the
+    # addon only drops its own bookkeeping here.
     opened.clear()
     berrypads.clear()
     viewers.clear()
-    consoles.clear()
     terminals.clear()
     paint_state.clear()
     media_state.clear()
@@ -763,13 +958,25 @@ def shutdown() -> None:
     view_seq = 0
     console_seq = 0
     calc_expr = ""
+    calc_mem = 0.0
+    calc_hist = ""
+    profile_row = -1
+    catalog_row = -1
+    always_on_top.clear()
     home_ready = False
     _desk_positions = {}
     _desk_renames = {}
     _desk_recycled = []
     minimized = {}
+    maximized.clear()
     attention = {}
     _flash_on = False
+    # The cosplay: stop its timers and drop its bookkeeping, so a restart
+    # shows a fresh splash rather than resuming a bar that was left mid-fill.
+    for _name in list(_SCHED):
+        _stop_sched(_name)
+    _splash_step = 0
+    _konami = []
     if api is not None:
         api.tabs.close(TAB)
 
@@ -803,6 +1010,282 @@ def _welcome() -> None:
                          "file panes will say so until it is.")
     except Exception:                        # a toast is never worth a stack
         api.log("berryvm: welcome popup skipped")
+
+
+# --- the XP cosplay: boot splash, logon, startup chime, easter eggs ---
+
+#: Gag tips that cycle under the boot bar, and the parody version the About
+#: box hangs on each running program.
+SPLASH_TIPS = [
+    "Tip: double-click an icon, or press Start.",
+    "Tip: your files live in a home that looks like Linux's.",
+    "Tip: ll is an alias. So is dir. Neither is better.",
+    "Tip: this blue screen is the friendly kind.",
+    "Tip: the Recycle Bin remembers what you forgot to mean.",
+    "Almost there...",
+]
+PARODY_VERSIONS = {
+    P_EXPLORER: "6.0.2900 (My Computer, SP3)",
+    P_NOTEPAD: "5.1 (notepad.exe, uncompromised)",
+    P_CONSOLE: "5.1 (cmd.exe, wearing a penguin)",
+    P_BROWSER: "6.0 (definitely not Internet Explorer)",
+    P_MEDIA: "9.0 (Windows Media Rip-off)",
+    P_CALC: "5.1 (shows its work now)",
+    P_PAINT: "5.1 (bucket included)",
+    P_MINE: "5.1 (mines are 100% virtual)",
+}
+
+
+def _gui_live() -> bool:
+    """Whether a real window is up to host the cosplay.
+
+    The splash, the logon picker and the chime are pure presentation: on a
+    headless run - an off-screen test, or a build with no window - there is
+    nothing to show them on, so they make themselves scarce rather than leave
+    a frame stranded on the desktop. ``ui.window()`` is the tell: the app
+    answers with its main window, a test answers with nothing."""
+    if api is None:
+        return False
+    try:
+        return api.ui.window() is not None
+    except Exception:
+        return False
+
+
+def _splash_spec() -> dict:
+    """The boot bar: the brand line, a progress meter, a rotating tip, held
+    apart by springs so it sits in the middle of a bare black frame."""
+    return {"kind": "column", "children": [
+        {"kind": "spacer"},
+        {"kind": "label", "id": f"{SPLASH}_brand",
+         "text": f"BerryVM {ADDON.get('version')}",
+         "align": "center"},
+        {"kind": "label", "id": f"{SPLASH}_load",
+         "text": "Loading...", "align": "center"},
+        {"kind": "progress", "id": f"{SPLASH}_bar", "maximum": 100,
+         "value": 0},
+        {"kind": "label", "id": f"{SPLASH}_tip", "text": SPLASH_TIPS[0],
+         "align": "center", "word_wrap": True},
+        {"kind": "spacer"},
+    ]}
+
+
+def boot_splash() -> None:
+    """Stand the loading frame up and let a timer fill its bar, then fold it
+    away to reveal the desktop. Non-blocking: it is a window, not a modal, so
+    nothing waits on it, and it only ever shows when a real window can hold
+    it."""
+    global _splash_step
+    if api is None or not _gui_live() or not config("boot_splash", True):
+        return
+    _splash_step = 0
+    wide, tall = _screen_geometry()
+    try:
+        open_window({
+            "id": SPLASH, "title": "BerryVM", "chrome": False,
+            "closable": False, "resizable": False,
+            "x": int(wide * 0.3), "y": int(tall * 0.34),
+            "width": scaled(360), "height": scaled(170),
+            "spec": _splash_spec(),
+        })
+        raise_window(SPLASH)
+        _SCHED["splash"] = api.schedule.every(0.15, _splash_tick)
+    except Exception as error:
+        api.log(f"berryvm: boot splash skipped: {error}")
+
+
+def _splash_tick() -> None:
+    """Advance one notch of the bar and change the tip; fold the splash away
+    once the bar fills. A no-op the moment the frame is gone, so a lingering
+    timer never reaches a window that has closed."""
+    global _splash_step
+    if api is None:
+        return
+    if SPLASH not in open_window_ids():
+        _stop_sched("splash")
+        return
+    _splash_step += 1
+    shown = min(100, _splash_step * 7)
+    try:
+        api.tabs.set_widget(TAB, f"{SPLASH}_bar", "value", shown)
+        api.tabs.set_widget(TAB, f"{SPLASH}_tip", "text",
+                            SPLASH_TIPS[_splash_step % len(SPLASH_TIPS)])
+    except Exception:
+        pass
+    if shown >= 100:
+        close_window(SPLASH)
+        _stop_sched("splash")
+
+
+def _logon_users() -> list:
+    """The names the logon picker offers: the default user first, then every
+    machine's user, then whoever is running the app - the accounts a person
+    might mean, without asking them to type one."""
+    users: list = []
+    for entry in machines:
+        name = str(entry.get("username") or "").strip()
+        if name and name not in users:
+            users.append(name)
+    default = str(config("default_user", "root") or "").strip()
+    if default and default not in users:
+        users.insert(0, default)
+    try:
+        import getpass
+        os_user = str(getpass.getuser() or "").strip()
+        if os_user and os_user not in users:
+            users.append(os_user)
+    except Exception:
+        pass
+    return users or [default or "user"]
+
+
+def logon_spec() -> dict:
+    """The XP-style welcome screen: a list of faces and the two ways in."""
+    return {"kind": "column", "children": [
+        {"kind": "label", "id": f"{LOGON}_head",
+         "text": "To begin, choose your name"},
+        {"kind": "list", "id": f"{LOGON}_who", "items": _logon_users(),
+         "on": ["selected", "activated"], "expand": True,
+         "tooltip": "Double-click a name to log on, or pick one and press "
+                    "Log On."},
+        {"kind": "row", "children": [
+            {"kind": "button", "id": f"{LOGON}_ok", "text": "Log On",
+             "on": ["clicked"], "expand": True},
+            {"kind": "button", "id": f"{LOGON}_skip", "text": "Skip",
+             "on": ["clicked"], "expand": True,
+             "tooltip": "Leave the desktop's user exactly as it is"},
+        ]},
+    ]}
+
+
+def logon_screen() -> None:
+    """Show the welcome picker once per session, skippable. It is a plain
+    frame so its person can also close it; picking a name feeds the config's
+    ``default_user`` and folds it away."""
+    if api is None or not _gui_live() or not config("logon", True):
+        return
+    try:
+        wide, tall = _screen_geometry()
+        open_window({
+            "id": LOGON, "title": "Welcome to BerryVM",
+            "closable": True,
+            "x": int(wide * 0.32), "y": int(tall * 0.2),
+            "width": scaled(320), "height": scaled(360),
+            "spec": logon_spec(),
+        })
+        raise_window(LOGON)
+    except Exception as error:
+        api.log(f"berryvm: logon screen skipped: {error}")
+
+
+def logon_picked(name: str) -> None:
+    """One name chosen on the welcome screen: make it the user the desktop
+    offers, then put the picker away."""
+    if api is None:
+        return
+    name = str(name or "").strip()
+    if not name:
+        return
+    try:
+        api.config.set("default_user", name)
+    except Exception:
+        pass
+    close_window(LOGON)
+    api.ui.notify(f"BerryVM: welcome, {name}.")
+
+
+def startup_sound() -> None:
+    """Play the startup chime through the same QtMultimedia leaf Media Player
+    uses, off a hidden one-pixel frame that folds itself when the sound ends.
+    Silent no-op when there is no window, no file or no multimedia."""
+    if api is None or not _gui_live() or not config("startup_sound", True):
+        return
+    wav = home_root() / "etc" / "welcome.wav"
+    if not wav.is_file():
+        return
+    try:
+        open_window({
+            "id": "sfx", "title": "", "chrome": False, "closable": False,
+            "resizable": False, "lower": True, "x": 0, "y": 0,
+            "width": 1, "height": 1,
+            "spec": {"kind": "player", "id": "sfx_player", "volume": 60,
+                     "on": ["done", "error"]},
+        })
+        api.tabs.set_widget(TAB, "sfx_player", "open", str(wav))
+        api.tabs.set_widget(TAB, "sfx_player", "play", True)
+    except Exception as error:
+        api.log(f"berryvm: startup chime skipped: {error}")
+
+
+def blue_screen_of_fun() -> None:
+    """The friendly blue screen: a parody of the crash box, all joke and no
+    crash, reached from About. An information dialog, so it can only ever be
+    read and dismissed."""
+    if api is None:
+        return
+    api.ui.information(
+        "BerryVM",
+        "A problem has been detected and BerryVM has been shut down to "
+        "prevent damage to your desk plant.\n\n"
+        "CRAPPY_DESKTOP_ERROR\n\n"
+        "If this is the first time you have seen this screen, try turning "
+        "the tab off and on again. BerryVM will continue to pretend nothing "
+        "happened.\n\n"
+        "Press any key to continue (there is no any key).")
+
+
+def konami_seen(key: str) -> None:
+    """Collect one lone-key shortcut toward the Konami code; when the six
+    match, flip the wallpaper to Night (and back). Keys outside the sequence
+    drop the buffer, so an errant arrow never stacks a false hit."""
+    global _konami
+    key = str(key or "").lower()
+    if key not in KONAMI:
+        _konami = []
+        return
+    _konami.append(key)
+    _konami = _konami[-len(KONAMI):]
+    if tuple(_konami) == KONAMI:
+        _konami = []
+        toggle_night()
+
+
+def toggle_night() -> None:
+    """The Konami payoff: swap the wallpaper between Bliss and Night."""
+    if api is None:
+        return
+    current = str(config("wallpaper", "Bliss") or "Bliss")
+    new = "Bliss" if current == "Night" else "Night"
+    try:
+        api.config.set("wallpaper", new)
+    except Exception:
+        return
+    apply_theme()
+    api.ui.notify(f"BerryVM: up, up, down, down... wallpaper is now {new}.")
+
+
+def _running_programs() -> list:
+    """The programs on the desktop right now, as ``caption (parody version)``
+    lines, for the About box to read out."""
+    lines = []
+    for win_id in program_window_ids():
+        caption = CAPTIONS.get(win_id) or (opened.get(win_id) or {}).get(
+            "title") or win_id
+        version = PARODY_VERSIONS.get(win_id)
+        lines.append(f"{caption}" + (f" ({version})" if version else ""))
+    return lines
+
+
+def _stop_sched(name: str) -> None:
+    """Stop a saved cosplay timer, if one is still standing."""
+    timer = _SCHED.pop(name, None)
+    if timer is None:
+        return
+    try:
+        timer.stop()
+    except Exception:
+        pass
+
 
 
 def _screen_geometry() -> tuple[int, int]:
@@ -1180,6 +1663,14 @@ def calc_eval(expr: Any) -> float:
 #: the shape a home directory is expected to have, kept small and readable.
 HOME_DIRS = ("Desktop", "bin", "tmp", "config")
 
+#: The top-level folders of the Linux-shaped tree the VM models, made under
+#: the root beside :data:`HOME_DIRS` so a shell started here reads like it is
+#: on a Linux box: ``bin etc home tmp usr var``.
+LINUX_DIRS = ("bin", "etc", "home", "tmp", "usr", "var")
+
+#: Folders made inside the VM user's own home, the desktop-per-user shape.
+USER_SUBDIRS = ("Desktop", "Documents", "Downloads", "Pictures", "Music")
+
 #: The settings file that mirrors the addon's own config into the ``config``
 #: folder, so the editor can open it like any other file.
 SETTINGS_NAME = "settings.json"
@@ -1198,21 +1689,95 @@ def _ensure_home() -> Path:
     """Create the VM's home layout once, and only once, per running addon.
 
     ``api.paths.data`` has already made the folder itself; what is added here
-    is the shape inside it - ``Desktop``, ``bin``, ``tmp``, ``config`` - so
-    the console has somewhere to start and the settings mirror has a place to
+    is the shape inside it - a Linux tree (``bin etc home tmp usr var`` with a
+    ``home/<user>`` full of the usual per-user folders) beside the ``Desktop``
+    and ``config`` the desktop itself keeps. So the console has somewhere to
+    start that looks like a real home, and the settings mirror has a place to
     sit. A second call is a no-op rather than a repeat mkdir.
     """
     global home_ready
     root = home_root()
     if home_ready:
         return root
-    for name in HOME_DIRS:
+    targets = [root / name for name in HOME_DIRS]
+    targets += [root / name for name in LINUX_DIRS]
+    user_home = vm_home()
+    targets += [user_home / name for name in USER_SUBDIRS]
+    for folder in targets:
         try:
-            (root / name).mkdir(parents=True, exist_ok=True)
+            folder.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
+    _seed_fs_files(root, user_home)
     home_ready = True
     return root
+
+
+def vm_user() -> str:
+    """The name the VM's Linux home is filed under: the user the profile
+    offers, or this machine's own login, cleaned to a single safe word."""
+    raw = (str(config("default_user", "") or "").strip()
+           or os.environ.get("USERNAME") or os.environ.get("USER") or "user")
+    cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in ("-", "_"))
+    return cleaned or "user"
+
+
+def vm_home() -> Path:
+    """``addons/_data/berryvm/home/<user>`` - the shell's real starting point
+    and the ``~`` the prompt shows."""
+    return home_root() / "home" / vm_user()
+
+
+def shell_env() -> dict:
+    """The environment handed to a local shell: a set ``HOME`` in the Linux
+    tree, ``bin`` on the ``PATH``, a friendly prompt and the OS's temp pointed
+    at the VM's own ``tmp``, so the machine's shell behaves like it lives here.
+
+    Everything is merged over the real process environment by the worker (the
+    ``env`` value on ``spawn``), so only these few keys are overridden and the
+    shell still finds its own system tools."""
+    root = home_root()
+    home = vm_home()
+    sep = ";" if os.name == "nt" else ":"
+    entries = [str(root / "bin"), str(home / "bin"), os.environ.get("PATH", "")]
+    for extra in (read_profile().get("path_extra") or []):
+        entries.insert(1, str(extra))
+    who = vm_user()
+    prompt = read_profile().get("prompt") or f"{who}@berryvm:\\w$ "
+    return {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "PATH": sep.join(p for p in entries if p),
+        "USER": who,
+        "USERNAME": who,
+        "LOGNAME": who,
+        "TERM": "xterm-256color",
+        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+        "TMPDIR": str(root / "tmp"),
+        "TMP": str(root / "tmp"),
+        "TEMP": str(root / "tmp"),
+        "PS1": prompt,
+    }
+
+
+def _seed_fs_files(root: Path, home: Path) -> None:
+    """Write the couple of plain files that make the tree read like Linux: an
+    ``/etc`` password and login-banner gag, and the user's ``.bashrc`` from
+    the profile. Every one is best-effort - a folder this OS will not let the
+    addon write is skipped, not fatal."""
+    who = vm_user()
+    try:
+        (root / "etc" / "passwd").write_text(
+            f"{who}:x:1000:1000:BerryVM user:{home}:/bin/sh\n")
+    except OSError:
+        pass
+    try:
+        (root / "etc" / "issue").write_text(
+            "BerryVM - a Windows XP desktop with a Linux-shaped home.\n"
+            "Type 'help' for the commands this shell knows.\n")
+    except OSError:
+        pass
+    mirror_bashrc(home)
 
 
 def settings_file() -> Path:
@@ -1257,6 +1822,122 @@ def read_settings() -> dict:
     except (OSError, ValueError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+# --- the shell profile: aliases, extra PATH and the prompt ---
+
+#: The mirror of the profile into the VM's ``config`` folder, so the editor
+#: can open it like any other file and a hand-edit survives a reload.
+PROFILE_NAME = "profile.json"
+
+
+def profile_file() -> Path:
+    """Where the profile mirror lives inside the VM's own config folder."""
+    return home_root() / "config" / PROFILE_NAME
+
+
+def _clean_profile(raw: Any) -> dict:
+    """One profile dict in the shape the addon uses: a string-keyed alias
+    table with string values, a list of PATH additions, and one prompt line.
+    Anything malformed in a saved file is dropped rather than raised, so a
+    hand-edit cannot strand the shell."""
+    raw = raw if isinstance(raw, dict) else {}
+    aliases: dict[str, str] = {}
+    given = raw.get("aliases")
+    if isinstance(given, dict):
+        for name, target in given.items():
+            key = str(name).strip()
+            value = " ".join(str(target).split())
+            if key and value:
+                aliases[key] = value
+    extra = raw.get("path_extra")
+    path_extra = [str(one).strip() for one in (extra or [])
+                  if str(one or "").strip()]
+    prompt = str(raw.get("prompt") or DEFAULTS["profile"]["prompt"])
+    return {"aliases": aliases, "path_extra": path_extra, "prompt": prompt}
+
+
+def read_profile() -> dict:
+    """The addon's shell profile: the alias table, the PATH additions and the
+    prompt the console is handed on spawn.
+
+    The config store is the source of truth (``profile`` rides in ``DEFAULTS``
+    but names no form field, exactly as ``machines`` does); the ``profile.json``
+    mirror is read only when nothing is stored yet, so a file written by hand
+    on a fresh install is picked up. Either way the dict is cleaned on the
+    way out, so a caller never has to second-guess its shape."""
+    stored = config("profile", None)
+    if isinstance(stored, dict) and stored:
+        return _clean_profile(stored)
+    try:
+        loaded = json.loads(profile_file().read_text() or "{}")
+    except (OSError, ValueError):
+        loaded = {}
+    if isinstance(loaded, dict) and loaded:
+        return _clean_profile(loaded)
+    return _clean_profile(DEFAULTS["profile"])
+
+
+def alias_map() -> dict:
+    """The profile's alias table, ready to hand a spawned shell: every name
+    mapped to the command it stands for, blank pairs already dropped."""
+    return dict(read_profile().get("aliases") or {})
+
+
+def mirror_bashrc(home: Path) -> None:
+    """Write the profile into the home as files a real shell would source.
+
+    ``.bashrc`` carries the POSIX ``alias`` lines, an ``export PS1`` and the
+    PATH additions, so a ``sh``/``bash`` started here honours the same table
+    the terminal worker expands. Alongside it a ``bin/aliases.doskey`` macro
+    file spells the aliases out in ``doskey`` form for ``cmd.exe``, which has
+    no rc file of its own. Both are best-effort and neither is fatal: the
+    generic worker expands aliases whatever the shell underneath does."""
+    prof = read_profile()
+    aliases = prof.get("aliases") or {}
+    lines = ["# written by BerryVM's Shell Profile; edit it there."]
+    for name, target in aliases.items():
+        lines.append(f"alias {name}={target!r}")
+    lines.append(f"export PS1={prof.get('prompt')!r}")
+    for extra in prof.get("path_extra") or []:
+        lines.append(f'export PATH="{extra}:$PATH"')
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        (home / ".bashrc").write_text("\n".join(lines) + "\n")
+    except OSError:
+        pass
+    macro = [f"doskey {name}={target} $*"
+             for name, target in aliases.items()]
+    try:
+        (home / "bin").mkdir(parents=True, exist_ok=True)
+        (home / "bin" / "aliases.doskey").write_text("\n".join(macro) + "\n")
+    except OSError:
+        pass
+
+
+def mirror_profile(prof: dict | None = None) -> None:
+    """Write the profile to its ``config`` mirror and refresh the sourced
+    shell files, so the folder and the config always say the same thing."""
+    prof = _clean_profile(prof if isinstance(prof, dict) else read_profile())
+    target = profile_file()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(prof, indent=2, sort_keys=True))
+    except OSError as error:
+        if api is not None:
+            api.log(f"berryvm: profile.json not written: {error}")
+    mirror_bashrc(vm_home())
+
+
+def write_profile(prof: dict) -> dict:
+    """Commit a profile: clean it, store it as the addon's config (so a form
+    that never shows the key leaves it be), then re-mirror the file and the
+    rc files. Hands back the cleaned dict that landed."""
+    clean = _clean_profile(prof)
+    if api is not None:
+        api.config.set("profile", clean)
+    mirror_profile(clean)
+    return clean
 
 
 #: Where the desktop remembers the icons' places, names and stashed files.
@@ -1355,9 +2036,12 @@ def open_window_ids() -> list:
 
 
 def program_window_ids() -> list:
-    """The desktop's windows with the icon layer left out: the rows a person
-    is offered, and the windows a Log Off shuts."""
-    return [win_id for win_id in open_window_ids() if win_id != ICONS]
+    """The desktop's windows with the icon layer and the Start flyout left
+    out: the rows a person is offered, and the windows a Log Off shuts. The
+    flyout is a menu, not a program, so it never takes a taskbar button or a
+    place in the Alt+Tab ring."""
+    return [win_id for win_id in open_window_ids()
+            if win_id not in (ICONS, P_START)]
 
 
 def caption_for(win_id: str) -> str:
@@ -1406,7 +2090,7 @@ def refresh_taskbar() -> None:
     if api is None:
         return
     row = tuple((caption_for(win_id), icon_for(win_id),
-                 bool(minimized.get(win_id)))
+                 bool(minimized.get(win_id)) or win_id in maximized)
                 for win_id in program_window_ids())
     state = (scaled(TASKBAR_H), scaled(TASKBAR_ICON), row)
     if state == _taskbar_shown:
@@ -1519,11 +2203,47 @@ def close_window(win_id: str) -> None:
 def raise_window(win_id: str) -> None:
     """Bring one window to the front and show it if it had been hidden. The
     icon layer is kept back down afterwards, because raising anything means
-    the person wants to look at the other thing."""
+    the person wants to look at the other thing. Any window marked always-on-
+    top is raised again behind it, so a pin survives being under a raise."""
     if win_id:
         api.tabs.set_widget(TAB, DESKTOP, "raise_window", str(win_id))
         if win_id != ICONS:
             keep_icons_behind()
+        _restack_top(skip=str(win_id))
+
+
+def _restack_top(skip: str = "") -> None:
+    """Re-raise every always-on-top window still on the desktop, so a pin
+    stays above the frames after any other raise. ``skip`` is the window just
+    raised - if it is itself pinned, it is already on top and needs no second
+    call."""
+    if api is None or not always_on_top:
+        return
+    live = open_window_ids()
+    for top_id in list(always_on_top):
+        if top_id in live and top_id != skip and top_id != ICONS:
+            api.tabs.set_widget(TAB, DESKTOP, "raise_window", str(top_id))
+
+
+def is_pinned(win_id: str) -> bool:
+    """Whether one window is currently kept above the rest."""
+    return str(win_id) in always_on_top
+
+
+def toggle_top(win_id: str) -> bool:
+    """Pin a window above the others, or let it go. Hands back the pin's new
+    state. A pinned window is raised the moment it is pinned and re-raised
+    after every future raise (:func:`_restack_top`), the only way a drawn
+    frame can be kept forward without native window-level support."""
+    if api is None or not win_id:
+        return False
+    win_id = str(win_id)
+    if win_id in always_on_top:
+        always_on_top.discard(win_id)
+        return False
+    always_on_top.add(win_id)
+    raise_window(win_id)
+    return True
 
 
 def lower_window(win_id: str) -> None:
@@ -1549,18 +2269,20 @@ def hide_window(win_id: str) -> None:
 
 
 def forget_window(win_id: str) -> None:
-    """Drop every bit of addon-side state that a closed window owned."""
+    """Drop every bit of addon-side state that a closed window owned. A local
+    shell is stopped by the app when the frame is taken down, so the console's
+    only trace here is the terminal id it registered."""
     win_id = str(win_id)
     opened.pop(win_id, None)
     berrypads.pop(win_id, None)
     viewers.pop(win_id, None)
     paint_state.pop(win_id, None)
     media_state.pop(win_id, None)
+    always_on_top.discard(win_id)
+    maximized.discard(win_id)
+    minimized.pop(win_id, None)
     if win_id == P_MINE:
         minesweeper.clear()
-    record = consoles.pop(win_id, None)
-    if record is not None:
-        _stop_shell(record)
     for term_id in [tid for tid, owner in terminals.items()
                     if str(owner) == win_id]:
         terminals.pop(term_id, None)
@@ -1645,6 +2367,8 @@ def draw_desk_icons() -> None:
         return
     tiles = []
     for pid, caption in PROGRAMS:
+        if not is_installed(pid):
+            continue
         shown = str(_desk_renames.get(caption) or caption)
         row = {"cells": [shown], "name": caption,
                "icon": TILE_ICONS.get(pid, ICON_FILE),
@@ -2163,11 +2887,133 @@ def start_choice(picked: Any) -> None:
         log_off()
 
 
+# --- the Start flyout: the XP two-pane menu ---
+
+#: The right-hand column of the flyout: the folders a person reaches for and
+#: the two ways out. ``My *`` walk Explorer to that folder under the home.
+START_SIDE = ["My Documents", "My Pictures", "My Music", "",
+              "Log Off", "Turn Off Computer"]
+
+
+def start_flyout_spec() -> dict:
+    """The flyout's own spec: a two-pane split of every installed program on
+    the left and the folders/errands on the right. Rebuilt each time it is
+    raised, so a program installed or removed since last open is reflected."""
+    apps = [CAPTIONS[pid] for pid, _cap in PROGRAMS if is_installed(pid)]
+    return {"kind": "column", "children": [
+        {"kind": "label", "id": f"{P_START}_head",
+         "text": "BerryVM"},
+        {"kind": "splitter", "sizes": [3, 2], "children": [
+            {"kind": "list", "id": f"{P_START}_apps", "items": apps,
+             "on": ["activated"], "expand": True,
+             "tooltip": "Double-click a program to start it"},
+            {"kind": "list", "id": f"{P_START}_side", "items": START_SIDE,
+             "on": ["activated"],
+             "tooltip": "A folder to browse, or the ways out"},
+        ]},
+        {"kind": "label", "id": f"{P_START}_note", "text": "",
+         "word_wrap": True},
+    ]}
+
+
+def close_start() -> None:
+    """Take the flyout back down, if it is up. Every launch from it ends
+    here, the way an XP menu collapses once a pick lands."""
+    if api is not None and P_START in open_window_ids():
+        close_window(P_START)
+        forget_window(P_START)
+
+
+def open_start() -> str:
+    """Stand the flyout up in the desktop's lower-left, over the Start
+    button. Already open, it is simply raised again; the window is a plain
+    frame so a person can also shut it with its close box."""
+    if api is None:
+        return ""
+    if P_START in open_window_ids():
+        raise_window(P_START)
+        return P_START
+    _ensure_home()
+    wide = scaled(380)
+    tall = scaled(440)
+    open_window({
+        "id": P_START, "title": "Start", "closable": True,
+        "width": wide, "height": tall,
+        "spec": start_flyout_spec(),
+    })
+    opened[P_START] = {"title": "Start", "kind": "start"}
+    raise_window(P_START)
+    return P_START
+
+
+def start_pressed() -> None:
+    """The taskbar's Start button: toggle the flyout. If a flyout cannot be
+    stood up for any reason, fall back to the flat :func:`start_menu` so a
+    person always has a way to launch something."""
+    if api is None:
+        return
+    if P_START in open_window_ids():
+        close_start()
+        return
+    try:
+        if not open_start():
+            start_menu()
+    except Exception as error:
+        if api is not None:
+            api.log(f"berryvm: Start flyout fell back to the menu: {error}")
+        start_menu()
+
+
+def start_flyout_picked(list_id: str, text: str) -> None:
+    """One flyout row doubled: launch it and fold the menu away. A program
+    caption and the two errands run through the shared :func:`start_choice`;
+    the three folders open Explorer parked on that folder."""
+    text = str(text or "")
+    if not text:
+        return
+    if list_id == f"{P_START}_apps" or text in BY_CAPTION:
+        close_start()
+        start_choice(text)
+        return
+    if text.startswith("My "):
+        close_start()
+        start_folder(text[3:].strip())
+        return
+    if text == "Turn Off Computer":
+        close_start()
+        log_off()
+        api.ui.information("Turn Off Computer",
+                           "It's a joke, un mate. Berry Manager stays put - "
+                           "this is a desktop in a tab, not the machine.")
+        return
+    close_start()
+    start_choice(text)               # Log Off and any other errand
+
+
+def start_folder(which: str) -> None:
+    """Open Explorer on one of the home's folders (Documents, Pictures,
+    Music), walking the local pane there."""
+    if api is None or not which:
+        return
+    target = vm_home() / which
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    pane_path[PANE_LOCAL] = str(target)
+    open_explorer()
+    pane_list(PANE_LOCAL, str(target))
+
+
 def start_program(win_id: str) -> None:
     """Dispatch on the id a Start-menu row or a desktop tile named; each
     program is the same single call, so a raised window and a fresh one look
     the same to the taskbar."""
     if api is None:
+        return
+    if not is_installed(win_id):
+        api.ui.notify(f"{CAPTIONS.get(win_id, win_id)} has been removed - "
+                      "reinstall it from Add/Remove Programs.")
         return
     if win_id == P_EXPLORER:
         open_explorer()
@@ -2191,6 +3037,10 @@ def start_program(win_id: str) -> None:
         open_mine()
     elif win_id == P_MEDIA:
         open_media()
+    elif win_id == P_PROFILE:
+        open_profile()
+    elif win_id == P_CATALOG:
+        open_catalog()
     elif win_id == P_RECYCLE:
         open_recycle()
     elif win_id == P_BROWSER:
@@ -2200,16 +3050,23 @@ def start_program(win_id: str) -> None:
 
 
 def about_box() -> None:
-    """Start > About: what this desktop is and what is on it."""
+    """Start > About: what this desktop is, what is on it, and - for the
+    patient - the way to the Blue Screen of Fun."""
     if api is None:
         return
     names = ", ".join(cap for _pid, cap in PROGRAMS)
-    api.ui.information(
-        "About BerryVM",
-        f"BerryVM {ADDON.get('version')} - a Windows XP-styled desktop in "
-        f"one tab of Berry Manager. Programs: {names}. File panes and "
-        "pictures ride the app's main connection; every terminal brings "
-        "its own socket.")
+    running = _running_programs()
+    text = (f"BerryVM {ADDON.get('version')} - a Windows XP-styled desktop "
+            f"in one tab of Berry Manager. Programs: {names}. File panes and "
+            "pictures ride the app's main connection; every terminal brings "
+            "its own socket.")
+    if running:
+        text += "\n\nRunning now:\n  " + "\n  ".join(running)
+    api.ui.information("About BerryVM", text)
+    # The easter egg, reachable from About: a joke blue screen.
+    picked = api.ui.choose(["Blue Screen of Fun", "Close"])
+    if picked == "Blue Screen of Fun":
+        blue_screen_of_fun()
 
 
 def log_off() -> None:
@@ -2288,6 +3145,11 @@ def _restore_first(win_id: str) -> None:
     """Bring a window down from minimize or maximize before it is laid into
     a cascade or a tile, so the target rect actually takes it."""
     if minimized.pop(win_id, None):
+        api.tabs.set_widget(TAB, DESKTOP, "restore_window", {"id": win_id})
+    if win_id in maximized:
+        # A window being laid out fresh is un-maximized first, or a tile's
+        # rect would only reach the part of it the grown frame leaves free.
+        maximized.discard(win_id)
         api.tabs.set_widget(TAB, DESKTOP, "restore_window", {"id": win_id})
 
 
@@ -2375,15 +3237,28 @@ def taskbar_menu(row_text: str) -> None:
         return
     win_id = _window_row_for(row_text)
     if win_id:
-        picked = api.ui.choose(["Restore", "Minimize", "Close"])
+        pinned = is_pinned(win_id)
+        picked = api.ui.choose(
+            ["Restore", "Maximize", "Minimize",
+             ("Unpin from top" if pinned else "Always on top"), "Close"])
         if picked == "Restore":
             _restore_first(win_id)
             raise_window(win_id)
+        elif picked == "Maximize":
+            if minimized.pop(win_id, None):
+                api.tabs.set_widget(TAB, DESKTOP, "restore_window",
+                                    {"id": win_id})
+            api.tabs.set_widget(TAB, DESKTOP, "maximize_window", win_id)
         elif picked == "Minimize":
             if not minimized.get(win_id):
                 api.tabs.set_widget(TAB, DESKTOP, "minimize_window", win_id)
                 minimized[win_id] = True
             refresh_taskbar()
+        elif picked in ("Always on top", "Unpin from top"):
+            now_pinned = toggle_top(win_id)
+            api.ui.notify(f"{caption_for(win_id)}: "
+                          + ("kept on top" if now_pinned
+                             else "no longer kept on top"))
         elif picked == "Close":
             close_window(win_id)
             forget_window(win_id)
@@ -2487,18 +3362,21 @@ def _pane_column(pane: str, heading: str) -> dict:
              "word_wrap": True},
         ]},
         {"kind": "row", "children": [
-            {"kind": "label", "id": f"{pane}_path", "text": "",
-             "expand": True, "word_wrap": True},
+            {"kind": "line", "id": f"{pane}_path", "text": "",
+             "placeholder": "Type a path (~ or the Linux tree) and Enter",
+             "on": ["returned"], "expand": True},
             {"kind": "button", "id": f"{pane}_up", "text": "Up",
              "on": ["clicked"]},
+            {"kind": "button", "id": f"{pane}_root", "text": "Root",
+             "on": ["clicked"], "tooltip": "Jump to the top of this side"},
             {"kind": "button", "id": f"{pane}_home", "text": "Home",
              "on": ["clicked"]},
             {"kind": "button", "id": f"{pane}_refresh", "text": "Refresh",
              "on": ["clicked"]},
         ]},
         {"kind": "table", "id": f"{pane}_table",
-         "columns": ["Name", "Size"], "on": ["selected", "activated",
-                                             "context"],
+         "columns": ["Name", "Size", "Mode", "Modified"],
+         "on": ["selected", "activated", "context"],
          "expand": "both",
          "tooltip": "Double-click a folder to walk in or a file to open it; "
                     "right-click for the item's menu."},
@@ -2533,7 +3411,7 @@ def open_explorer() -> str:
     refresh_taskbar()
     # Where each side stands between openings: home here, the device's root
     # there, unless a listing earlier in this session said otherwise.
-    pane_path.setdefault(PANE_LOCAL, str(Path.home()))
+    pane_path.setdefault(PANE_LOCAL, str(vm_home()))
     pane_path.setdefault(PANE_REMOTE, "")
     pane_list(PANE_LOCAL, pane_path[PANE_LOCAL])
     pane_list(PANE_REMOTE, pane_path[PANE_REMOTE])
@@ -2551,6 +3429,41 @@ def pane_picked(pane: str) -> str:
     return str(pane_pick.get(f"{pane}_table") or "")
 
 
+def _mode_text(mode: int, is_dir: bool) -> str:
+    """A stat mode drawn the way ``ls -l`` draws it: ``d`` or ``-`` for a
+    directory, then the nine rwx marks. A zero mode (a file that could not be
+    read) is a row of dashes rather than a lie about its permissions."""
+    try:
+        mode = int(mode or 0)
+    except (TypeError, ValueError):
+        mode = 0
+    lead = "d" if is_dir else "-"
+    if not mode:
+        return lead + "---------"
+    marks = ""
+    for shift in (6, 3, 0):
+        bits = (mode >> shift) & 0o7
+        marks += ("r" if bits & 4 else "-")
+        marks += ("w" if bits & 2 else "-")
+        marks += ("x" if bits & 1 else "-")
+    return lead + marks
+
+
+def _file_stamp(seconds: Any) -> str:
+    """A modification time as a short date, or ``""`` when there is nothing
+    sensible to show - a folder the machine would not stat, a zero mtime."""
+    try:
+        stamp = float(seconds or 0)
+    except (TypeError, ValueError):
+        return ""
+    if stamp <= 0:
+        return ""
+    try:
+        return datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M")
+    except (OSError, ValueError, OverflowError):
+        return ""
+
+
 def pane_list(pane: str, where: str) -> None:
     """Read one folder into one pane; the local side walks this machine and
     the remote side the main connection, and the two disagree loudly rather
@@ -2558,7 +3471,7 @@ def pane_list(pane: str, where: str) -> None:
     if api is None:
         return
     if pane == PANE_LOCAL:
-        _pane_list_local(where or str(Path.home()))
+        _pane_list_local(where or str(vm_home()))
     else:
         _pane_list_remote(where)
 
@@ -2580,13 +3493,16 @@ def _pane_list_local(where: str) -> None:
         child = target / name
         try:
             is_dir = child.is_dir()
-            size = child.stat().st_size if child.is_file() else 0
-            mode = child.stat().st_mode if child.exists() else 0
+            stat = child.stat()
+            size = stat.st_size if child.is_file() else 0
+            mode = stat.st_mode
+            mtime = stat.st_mtime
         except OSError:
-            is_dir, size, mode = False, 0, 0
+            is_dir, size, mode, mtime = False, 0, 0, 0
         rows[name] = {"path": str(child), "directory": bool(is_dir),
-                      "size": size, "mode": mode}
-        laid.append({"cells": [name, "" if is_dir else describe_size(size)],
+                      "size": size, "mode": mode, "mtime": mtime}
+        laid.append({"cells": [name, "" if is_dir else describe_size(size),
+                               _mode_text(mode, is_dir), _file_stamp(mtime)],
                      "icon": file_icon(name, is_dir)})
     pane_rows[f"{PANE_LOCAL}_table"] = rows
     api.tabs.set_widget(TAB, f"{PANE_LOCAL}_table", "rows", laid)
@@ -2618,10 +3534,14 @@ def _pane_list_remote(where: str) -> None:
             continue
         is_dir = bool(entry.get("directory"))
         rows[name] = {"path": str(entry.get("path") or name),
-                      "directory": is_dir, "size": entry.get("size", 0)}
+                      "directory": is_dir, "size": entry.get("size", 0),
+                      "mode": entry.get("mode", 0),
+                      "mtime": entry.get("mtime", 0)}
         laid.append({"cells": [name,
                                "" if is_dir else describe_size(
-                                   entry.get("size", 0))],
+                                   entry.get("size", 0)),
+                               _mode_text(entry.get("mode", 0), is_dir),
+                               _file_stamp(entry.get("mtime", 0))],
                      "icon": file_icon(name, is_dir)})
     pane_rows[f"{PANE_REMOTE}_table"] = rows
     api.tabs.set_widget(TAB, f"{PANE_REMOTE}_table", "rows", laid)
@@ -2651,7 +3571,24 @@ def pane_up(pane: str) -> None:
 
 
 def pane_home(pane: str) -> None:
-    pane_list(pane, str(Path.home()) if pane == PANE_LOCAL else "")
+    pane_list(pane, str(vm_home()) if pane == PANE_LOCAL else "")
+
+
+def pane_root(pane: str) -> None:
+    """Up to the very top of one side: the Linux tree's root here, the
+    device's own root there - the way XP's My Computer sat above every
+    drive."""
+    pane_list(pane, str(home_root()) if pane == PANE_LOCAL else "")
+
+
+def pane_goto(pane: str, text: str) -> None:
+    """Type an address into the bar and Enter walks the pane there. ``~`` and
+    the Linux tree both reach the local side; a device path is read inside
+    the remote root."""
+    wanted = str(text or "").strip()
+    if not wanted:
+        return
+    pane_list(pane, wanted)
 
 
 def pane_open_picked(pane: str) -> None:
@@ -2910,13 +3847,18 @@ def berry_spec(win_id: str, path: str, origin: str) -> dict:
             {"kind": "label", "id": f"{win_id}_path",
              "text": path or "unsaved buffer", "expand": True,
              "word_wrap": True},
+            {"kind": "button", "id": f"{win_id}_find", "text": "Find",
+             "on": ["clicked"], "tooltip": "Search the text below"},
+            {"kind": "button", "id": f"{win_id}_recent", "text": "Recent",
+             "on": ["clicked"], "tooltip": "Open a file from this list"},
             {"kind": "button", "id": f"{win_id}_save", "text": "Save",
              "on": ["clicked"]},
             {"kind": "button", "id": f"{win_id}_saveas", "text": "Save As",
              "on": ["clicked"]},
         ]},
         {"kind": "multi", "id": f"{win_id}_edit",
-         "highlight": language_for(path), "expand": "both"},
+         "highlight": language_for(path), "expand": "both",
+         "on": ["changed"]},
         {"kind": "label", "id": f"{win_id}_note", "text": "",
          "word_wrap": True},
     ]}
@@ -2944,6 +3886,8 @@ def open_berrypad(path: str, origin: str, show_title: str = "") -> str:
         berrypads[win_id] = {"path": "", "origin": "scratch", "title": title}
         opened[win_id] = {"title": f"Notepad - {title}", "kind": "berrypad",
                           "path": "", "origin": "scratch"}
+        berrypads[win_id]["saved_text"] = ""
+        berrypads[win_id]["dirty"] = False
         refresh_taskbar()
         return win_id
     for win_id, record in berrypads.items():
@@ -2973,6 +3917,10 @@ def open_berrypad(path: str, origin: str, show_title: str = "") -> str:
                       "path": wanted, "origin": origin}
     refresh_taskbar()
     _berry_load(win_id, wanted, origin)
+    berrypads[win_id]["saved_text"] = _berry_text(win_id)
+    berrypads[win_id]["dirty"] = False
+    if origin == "local":
+        _recent_remember(wanted)
     return win_id
 
 
@@ -3014,6 +3962,106 @@ def _berry_text(win_id: str) -> str:
         return ""
 
 
+def _berry_title(win_id: str) -> None:
+    """Re-caption the window: the file's name, wearing a trailing ``*`` while
+    there are words the file has not been given yet. Opening the id that is
+    already on the desktop only moves the caption, so the editor keeps running.
+    """
+    record = berrypads.get(win_id)
+    if record is None or api is None:
+        return
+    title = str(record.get("title") or "Untitled")
+    star = " *" if record.get("dirty") else ""
+    caption = f"Notepad - {title}{star}"
+    opener = opened.get(win_id)
+    if opener is not None:
+        opener["title"] = caption
+    open_window({"id": win_id, "title": caption, "current": False})
+
+
+def _berry_changed(win_id: str, text: str) -> None:
+    """A keystroke: the buffer is dirty the moment its words differ from what
+    was last read or written, and the caption says so."""
+    record = berrypads.get(win_id)
+    if record is None:
+        return
+    dirty = str(text or "") != str(record.get("saved_text") or "")
+    if dirty != bool(record.get("dirty")):
+        record["dirty"] = dirty
+        _berry_title(win_id)
+
+
+def _berry_settled(win_id: str) -> None:
+    """After a save: the file and the buffer agree, so the ``*`` comes off."""
+    record = berrypads.get(win_id)
+    if record is None:
+        return
+    record["saved_text"] = _berry_text(win_id)
+    if record.get("dirty"):
+        record["dirty"] = False
+        _berry_title(win_id)
+
+
+def _recent_list() -> list:
+    """The editor's shelf of recently opened files, newest first."""
+    raw = config("recent", DEFAULTS["recent"]) or []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(item) for item in raw if str(item or "").strip()]
+
+
+def _recent_remember(path: str) -> None:
+    """Push a freshly opened file to the front of the shelf, dropping any
+    older copy, and keep it to a sensible length."""
+    path = str(path or "").strip()
+    if not path:
+        return
+    shelf = [path] + [one for one in _recent_list() if one != path]
+    api.config.set("recent", shelf[:10])
+
+
+def berry_recent(win_id: str) -> None:
+    """The Recent button: choose a file the editor has opened before and show
+    it here - a scratch buffer takes it on, a named file opens afresh."""
+    if api is None:
+        return
+    shelf = _recent_list()
+    if not shelf:
+        _note(win_id, "No files have been opened yet.")
+        return
+    picked = api.ui.choose([short_name(one) for one in shelf])
+    if not picked:
+        return
+    for one in shelf:
+        if short_name(one) == picked:
+            open_berrypad(one, "local", short_name(one))
+            return
+
+
+def berry_find(win_id: str) -> None:
+    """Find: ask for a word and say how often the text carries it. The editor
+    leaf has no cursor to move, so the count and the first line are reported
+    on the window's own note rather than jumped to."""
+    if api is None:
+        return
+    wanted = api.ui.input("Find", "Search for")
+    wanted = str(wanted or "")
+    if not wanted:
+        return
+    text = _berry_text(win_id)
+    lowered = text.lower()
+    count = lowered.count(wanted.lower())
+    if not count:
+        _note(win_id, f"{wanted!r} is not in this text.")
+        return
+    line = 1
+    for index, row in enumerate(text.splitlines()):
+        if wanted.lower() in row.lower():
+            line = index + 1
+            break
+    _note(win_id, f"{wanted!r}: {count} match(es), first on line {line}.")
+
+
 def _berry_save(win_id: str) -> None:
     """Write the editor's contents back where they came from. A local file
     keeps the same path; a remote one goes over the main connection; a
@@ -3043,6 +4091,10 @@ def _berry_save(win_id: str) -> None:
         except Exception as error:
             _note(win_id, f"could not write: {error}")
             return
+    record["saved_text"] = text
+    if record.get("dirty"):
+        record["dirty"] = False
+        _berry_title(win_id)
     stamp = datetime.now().strftime("%H:%M:%S")
     _note(win_id, f"saved {stamp}")
 
@@ -3079,6 +4131,11 @@ def _berry_save_as(win_id: str) -> None:
             opener["origin"] = "local"
         _set_path(win_id, target)
         refresh_taskbar()
+    record["saved_text"] = text
+    if record.get("dirty"):
+        record["dirty"] = False
+    _berry_title(win_id)
+    _recent_remember(target)
     _note(win_id, f"saved a copy to {target}")
 
 
@@ -3102,6 +4159,14 @@ def viewer_spec(win_id: str, size: int) -> dict:
              "on": ["clicked"]},
             {"kind": "button", "id": f"{win_id}_zout", "text": "Zoom -",
              "on": ["clicked"]},
+            {"kind": "button", "id": f"{win_id}_fit", "text": "Fit",
+             "on": ["clicked"], "tooltip": "Back to the default size"},
+            {"kind": "button", "id": f"{win_id}_prev", "text": "\u25c0 Prev",
+             "on": ["clicked"],
+             "tooltip": "The picture before this one in its folder"},
+            {"kind": "button", "id": f"{win_id}_next", "text": "Next \u25b6",
+             "on": ["clicked"],
+             "tooltip": "The picture after this one in its folder"},
         ]},
         {"kind": "image", "id": f"{win_id}_pic", "size": size,
          "expand": "both"},
@@ -3237,6 +4302,63 @@ def viewer_zoom(win_id: str, factor: float) -> None:
              wanted)
 
 
+def viewer_fit(win_id: str) -> None:
+    """Snap the leaf back to the size a fresh viewer is built at - the
+    "whole picture, no zoom" default, whatever zooming has since done."""
+    record = viewers.get(win_id)
+    if record is None:
+        return
+    wanted = str(record.get("path") or "")
+    if not wanted:
+        _note(win_id, "Nothing is shown yet, so there is nothing to fit.")
+        return
+    base = scaled(512)
+    local = wanted
+    if record.get("origin") == "remote":
+        local = _viewer_pull(wanted) or wanted
+    _show_in(win_id, local, base, str(record.get("origin") or "local"),
+             wanted)
+
+
+def _viewer_siblings(path: str) -> list:
+    """Every picture in ``path``'s folder, in name order - the reel Prev and
+    Next step along. An unreadable folder is simply an empty reel."""
+    try:
+        folder = Path(path).parent
+        found = [str(item) for item in folder.iterdir()
+                 if item.suffix.lower() in IMAGE_SUFFIXES]
+    except OSError:
+        return []
+    return sorted(found, key=lambda name: name.lower())
+
+
+def viewer_step(win_id: str, delta: int) -> None:
+    """Move to the next or previous picture in this one's folder, keeping the
+    current size. At either end of the reel it says so rather than looping -
+    the way the XP viewer stopped rather than wrapped."""
+    record = viewers.get(win_id)
+    if record is None:
+        return
+    wanted = str(record.get("path") or "")
+    if not wanted:
+        _note(win_id, "Open a picture first, then step through its folder.")
+        return
+    reel = _viewer_siblings(wanted)
+    if not reel:
+        _note(win_id, "This folder holds no other pictures.")
+        return
+    try:
+        here = reel.index(wanted)
+    except ValueError:
+        here = 0
+    there = here + delta
+    if there < 0 or there >= len(reel):
+        _note(win_id, "No picture that way.")
+        return
+    _show_in(win_id, reel[there],
+             int(record.get("size") or scaled(512)), "local", reel[there])
+
+
 # --- 4. Command Prompt: a local shell in a window ---
 
 #: The first words on every console screen, so the person knows whose keys
@@ -3246,145 +4368,72 @@ CONSOLE_BANNER = ("BerryVM local shell - this machine, this user. "
 
 
 def console_spec(win_id: str, cwd: str) -> dict:
-    """A read-only screen, a prompt line, and a note under them. The screen
-    is a ``multi`` rather than a ``terminal`` because a terminal's screen
-    belongs to an SSH socket; this one belongs to a child process."""
+    """A path line over a real terminal screen. The screen is a ``terminal``
+    leaf that ``spawn`` points at the machine's own shell: the process' bytes
+    are fed into the widget's VT parser and its keystrokes come back out, so
+    the window is a terminal emulator rather than a read-only log with a box
+    typed into it."""
     return {"kind": "column", "children": [
         {"kind": "label", "id": f"{win_id}_path", "text": cwd,
          "expand": True, "word_wrap": True},
-        {"kind": "multi", "id": f"{win_id}_out", "readonly": True,
-         "expand": "both", "word_wrap": False},
-        {"kind": "line", "id": f"{win_id}_in",
-         "placeholder": "Type a command and press Enter",
-         "on": ["returned"], "expand": True},
-        {"kind": "label", "id": f"{win_id}_note", "text": "",
-         "word_wrap": True},
+        {"kind": "terminal", "id": f"{win_id}_term",
+         "font_size": term_font(), "on": ["ready", "closed", "failed"]},
     ]}
 
 
+def _local_shell() -> str:
+    """The machine's own interactive shell, by path: ``COMSPEC``/``cmd.exe``
+    on Windows, ``SHELL``/``sh`` elsewhere. The worker actually runs it; this
+    only names what to run."""
+    if os.name == "nt":
+        return os.environ.get("COMSPEC", "cmd.exe")
+    return os.environ.get("SHELL", "/bin/sh")
+
+
 def open_console(start: str = "") -> str:
-    """Stand a command prompt up and hand its window to a live shell. Each
-    window gets a process of its own, so two prompts can sit in two
-    directories at once - exactly the desktop habit this copies."""
+    """Stand a command prompt up and point its terminal at a live shell.
+    Each window spawns a process of its own - in the VM's Linux-shaped home,
+    wearing the shell environment and the profile's aliases - so two prompts
+    can sit in two directories at once, exactly the desktop habit this copies.
+    The worker owns the child process and its line editing; closing the window
+    has the app stop it."""
     global console_seq
     if api is None:
         return ""
+    _ensure_home()
     console_seq += 1
     win_id = f"{CONSOLE_PREFIX}{console_seq}"
-    cwd = str(start or Path.home())
+    term_id = f"{win_id}_term"
+    cwd = str(start or vm_home())
     open_window(_program_entry(win_id, "Command Prompt",
                                console_spec(win_id, cwd)))
     opened[win_id] = {"title": "Command Prompt", "kind": "console",
                       "cwd": cwd}
-    consoles[win_id] = {"proc": None, "pending": deque([CONSOLE_BANNER]),
-                        "cwd": cwd, "alive": False, "ended": False}
+    terminals[term_id] = win_id
     refresh_taskbar()
-    _start_console(win_id)
+    api.tabs.set_widget(TAB, term_id, "spawn", {
+        "cmd": _local_shell(), "cwd": cwd, "env": shell_env(),
+        "aliases": alias_map(),
+    })
+    api.tabs.set_widget(TAB, term_id, "write", CONSOLE_BANNER)
     return win_id
 
 
-def _start_shell(cwd: str) -> Any:
-    """Spawn the machine's own interactive shell with its keys and words
-    piped through. Kept whole in one call so a test can hand back a fake."""
-    if os.name == "nt":
-        exe = os.environ.get("COMSPEC", "cmd.exe")
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        return subprocess.Popen([exe], cwd=cwd,
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True,
-                                errors="replace", bufsize=1,
-                                creationflags=flags)
-    exe = os.environ.get("SHELL", "/bin/sh")
-    return subprocess.Popen([exe], cwd=cwd,
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True,
-                            errors="replace", bufsize=1)
-
-
-def _start_console(win_id: str) -> None:
-    con = consoles.get(win_id)
-    if con is None:
+def console_news(win_id: str, event: str, payload: dict) -> None:
+    """One console's shell reporting itself onto its window's path line. The
+    real shell prints its own prompt, so the addon only marks the moments the
+    process itself ends - and never has to keep a working directory."""
+    if api is None:
         return
-    try:
-        proc = _start_shell(str(con["cwd"]))
-    except OSError as error:
-        con["pending"].append(f"could not start a shell here: {error}\n")
-        return
-    con["proc"] = proc
-    con["alive"] = True
-    worker = threading.Thread(target=_console_reader, args=(con,),
-                              daemon=True)
-    worker.start()
-
-
-def _console_reader(con: dict) -> None:
-    """Carry every line the shell says into the window's pending tray; the
-    tab's own poll drains it onto the screen. Reading happens here, on a
-    thread of its own, because a command that never returns - a ``ping`` to
-    a dead host, an editor that waits for keys - must be allowed to sit
-    without freezing the desktop next to it."""
-    proc = con.get("proc")
-    try:
-        for line in proc.stdout:
-            con["pending"].append(str(line))
-    except (OSError, ValueError):
-        con["pending"].append("(the shell's words stopped arriving)\n")
-    con["alive"] = False
-    con["ended"] = True
-    con["pending"].append("[process ended]\n")
-
-
-def pump_consoles() -> None:
-    """Move whatever the shells have said since last time onto their
-    screens. Runs on the tab's own timer; with no console window open there
-    is nothing to pump, and an empty tray writes nothing."""
-    if api is None or not consoles:
-        return
-    for win_id, con in list(consoles.items()):
-        lines = []
-        while con["pending"]:
-            try:
-                lines.append(con["pending"].popleft())
-            except IndexError:
-                break
-        if lines:
-            api.tabs.set_widget(TAB, f"{win_id}_out", "append", "".join(lines))
-
-
-def _console_submit(win_id: str) -> None:
-    """Type the prompt line into the shell, echo it on the screen first so
-    the window reads like one."""
-    con = consoles.get(win_id)
-    if con is None or api is None:
-        return
-    text = str(api.tabs.widget_value(TAB, f"{win_id}_in", "value") or "")
-    api.tabs.set_widget(TAB, f"{win_id}_in", "value", "")
-    proc = con.get("proc")
-    if proc is None or not con.get("alive"):
-        _note(win_id, "this shell has ended - close the window and open "
-                      "another")
-        return
-    con["pending"].append(f"> {text}\n")
-    try:
-        proc.stdin.write(text + "\n")
-        proc.stdin.flush()
-    except (OSError, ValueError) as error:
-        con["pending"].append(f"(could not reach the shell: {error})\n")
-
-
-def _stop_shell(record: dict) -> None:
-    """Let go of a console's process: ask politely first, and do not wait on
-    a shell that means to finish its last command anyway."""
-    proc = record.get("proc")
-    record["proc"] = None
-    record["alive"] = False
-    if proc is None:
-        return
-    try:
-        if proc.poll() is None:
-            proc.terminate()
-    except OSError:
-        pass
+    if event == "ready":
+        api.tabs.set_widget(TAB, f"{win_id}_path", "text",
+                            str((opened.get(win_id) or {}).get("cwd") or ""))
+    elif event == "failed":
+        api.tabs.set_widget(TAB, f"{win_id}_path", "text",
+                            f"shell error: {payload.get('error') or 'failed'}")
+    elif event == "closed":
+        api.tabs.set_widget(TAB, f"{win_id}_path", "text",
+                            "shell ended - close the window, open another")
 
 
 # --- 5. Terminal: SSH to the profile's host ---
@@ -3499,6 +4548,10 @@ def machines_spec() -> dict:
             {"kind": "button", "id": f"{P_MACHINES}_new", "text": "Reach once",
              "on": ["clicked"],
              "tooltip": "Connect to a machine that is not on the list, once"},
+            {"kind": "button", "id": f"{P_MACHINES}_term",
+             "text": "Open terminal here", "on": ["clicked"],
+             "tooltip": "Seed the Terminal with this machine's host and "
+                        "open one window onto it"},
         ]},
         {"kind": "row", "children": [
             {"kind": "button", "id": f"{P_MACHINES}_add", "text": "Add",
@@ -3693,6 +4746,32 @@ def machine_connect(entry: dict) -> str:
     return win_id
 
 
+def machine_term_here() -> str:
+    """Seed the single Terminal (not a new machine window) with the row the
+    launcher has under its cursor: the same window the profile's host opens,
+    but pointed at this machine. A second press moves the Terminal to the new
+    host rather than stacking a window."""
+    if api is None or not (0 <= machine_row < len(machines)):
+        _note(P_MACHINES, "Select a machine first.")
+        return ""
+    entry = machines[machine_row]
+    host = str(entry.get("host") or "").strip()
+    if not host:
+        _note(P_MACHINES, "That entry has no address.")
+        return ""
+    user = str(entry.get("username") or config("default_user", "root"))
+    port = port_of(entry.get("port"), config("default_port", 22))
+    title = f"Terminal - {host}"
+    open_window(_program_entry(P_MAIN, title, main_ssh_spec()))
+    opened[P_MAIN] = {"title": title, "kind": "main_ssh", "host": host,
+                      "port": port, "username": user,
+                      "key_file": str(entry.get("key_file") or "")}
+    terminals[f"{P_MAIN}_term"] = P_MAIN
+    refresh_taskbar()
+    _connect_main_ssh()
+    return P_MAIN
+
+
 def machine_news(win_id: str, event: str, payload: dict) -> None:
     """One machine's shell reporting itself onto its window's state line."""
     if api is None:
@@ -3706,76 +4785,431 @@ def machine_news(win_id: str, event: str, payload: dict) -> None:
         api.tabs.set_widget(TAB, f"{win_id}_state", "text", "disconnected")
 
 
+# --- 6b. The shell profile editor and the app catalog ---
+
+def installed_set() -> set:
+    """The program ids the desktop shows tiles for. ``installed`` rides in
+    ``DEFAULTS`` as every shipped id but names no form field, so it persists
+    the way ``machines`` does; a stored list is what the catalog edits."""
+    raw = config("installed", DEFAULTS["installed"])
+    if not isinstance(raw, (list, tuple)):
+        raw = DEFAULTS["installed"]
+    return {str(pid) for pid in raw}
+
+
+def is_installed(pid: str) -> bool:
+    """Whether one program is on. The catalog is always installed: taking it
+    away would be the one removal nobody could undo."""
+    pid = str(pid)
+    if pid == P_CATALOG:
+        return True
+    return pid in installed_set()
+
+
+def write_installed(items: list | None) -> None:
+    """Persist the installed set in ``PROGRAMS`` order, then lay the desktop
+    out again so a removed tile goes and a restored one comes back."""
+    keep = {str(pid) for pid in (items or [])}
+    keep.add(P_CATALOG)
+    ordered = [pid for pid, _cap in PROGRAMS if pid in keep]
+    if api is not None:
+        api.config.set("installed", ordered)
+    draw_desk_icons()
+    if P_CATALOG in opened:
+        draw_catalog()
+
+
+# --- Shell Profile ---
+
+def profile_spec() -> dict:
+    """The Shell Profile window: the alias list on top, the buttons that edit
+    it, and the prompt the console starts each shell with."""
+    return {"kind": "column", "children": [
+        {"kind": "label", "text": "Aliases expand the first word of a "
+                                  "command. They reach the local shell here "
+                                  "and the .bashrc / doskey file in the home.",
+         "word_wrap": True},
+        {"kind": "list", "id": f"{P_PROFILE}_list", "on": ["selected"],
+         "expand": "both"},
+        {"kind": "row", "children": [
+            {"kind": "button", "id": f"{P_PROFILE}_add", "text": "Add",
+             "on": ["clicked"]},
+            {"kind": "button", "id": f"{P_PROFILE}_edit", "text": "Edit",
+             "on": ["clicked"]},
+            {"kind": "button", "id": f"{P_PROFILE}_del", "text": "Delete",
+             "on": ["clicked"]},
+        ]},
+        {"kind": "form", "children": [
+            {"label": "Prompt", "kind": "line", "id": f"{P_PROFILE}_prompt",
+             "value": str(read_profile().get("prompt") or ""),
+             "placeholder": "user@berryvm:\\w$ "},
+        ]},
+        {"kind": "button", "id": f"{P_PROFILE}_apply", "text": "Apply",
+         "on": ["clicked"], "expand": True},
+        {"kind": "label", "id": f"{P_PROFILE}_note", "text": "",
+         "word_wrap": True},
+    ]}
+
+
+def open_profile() -> str:
+    """Bring the Shell Profile editor up and fill it from the stored one."""
+    global profile_row
+    if api is None:
+        return ""
+    profile_row = -1
+    title = CAPTIONS[P_PROFILE]
+    open_window(_program_entry(P_PROFILE, title, profile_spec()))
+    opened[P_PROFILE] = {"title": title, "kind": "profile"}
+    refresh_taskbar()
+    draw_profile()
+    return P_PROFILE
+
+
+def _alias_rows() -> list:
+    """The alias table as ``name = command`` rows, sorted, kept beside the
+    names so a selection maps back to one."""
+    aliases = alias_map()
+    return [(name, aliases[name]) for name in sorted(aliases)]
+
+
+def draw_profile() -> None:
+    if api is None:
+        return
+    pairs = _alias_rows()
+    api.tabs.set_widget(TAB, f"{P_PROFILE}_list", "items",
+                        [{"text": f"{name} = {cmd}"}
+                         for name, cmd in pairs])
+    api.tabs.set_widget(TAB, f"{P_PROFILE}_prompt", "value",
+                        str(read_profile().get("prompt") or ""))
+
+
+def profile_select(text: str) -> None:
+    """Point the editor at the alias a caption names."""
+    global profile_row
+    for index, (name, cmd) in enumerate(_alias_rows()):
+        if f"{name} = {cmd}" == text:
+            profile_row = index
+            return
+    profile_row = -1
+
+
+def _alias_dialog(existing: str = "") -> None:
+    """Add or change one alias through a small form."""
+    pairs = _alias_rows()
+    record = {}
+    if existing:
+        for name, cmd in pairs:
+            if name == existing:
+                record = {"name": name, "command": cmd}
+                break
+    values = api.ui.dialog({"kind": "form", "children": [
+        {"label": "Name", "kind": "line", "id": "name",
+         "value": str(record.get("name") or existing), "placeholder": "ll"},
+        {"label": "Command", "kind": "line", "id": "command",
+         "value": str(record.get("command") or ""),
+         "placeholder": "dir /al"},
+    ]}, title="Change alias" if existing else "New alias")
+    if values is None:
+        return
+    prof = read_profile()
+    aliases = dict(prof.get("aliases") or {})
+    name = " ".join(str(values.get("name") or "").split())
+    command = " ".join(str(values.get("command") or "").split())
+    if not name or not command:
+        _note(P_PROFILE, "An alias needs a name and a command.")
+        return
+    if existing and existing != name:
+        aliases.pop(existing, None)
+    aliases[name] = command
+    prof["aliases"] = aliases
+    write_profile(prof)
+    draw_profile()
+    _note(P_PROFILE, f"{name} = {command} saved.")
+
+
+def profile_add() -> None:
+    _alias_dialog("")
+
+
+def profile_edit() -> None:
+    pairs = _alias_rows()
+    if not (0 <= profile_row < len(pairs)):
+        _note(P_PROFILE, "Select an alias to change.")
+        return
+    _alias_dialog(pairs[profile_row][0])
+
+
+def profile_delete() -> None:
+    global profile_row
+    pairs = _alias_rows()
+    if not (0 <= profile_row < len(pairs)):
+        _note(P_PROFILE, "Select an alias to delete.")
+        return
+    name = pairs[profile_row][0]
+    prof = read_profile()
+    aliases = dict(prof.get("aliases") or {})
+    aliases.pop(name, None)
+    prof["aliases"] = aliases
+    write_profile(prof)
+    profile_row = -1
+    draw_profile()
+    _note(P_PROFILE, f"{name} removed.")
+
+
+def profile_apply() -> None:
+    """Write the prompt line back into the profile; the aliases were committed
+    as they were edited, so this only lands the prompt and reminds a live
+    shell it can reopen to pick the changes up."""
+    if api is None:
+        return
+    try:
+        prompt = str(api.tabs.widget_value(TAB, f"{P_PROFILE}_prompt",
+                                            "value") or "")
+    except Exception:
+        prompt = str(read_profile().get("prompt") or "")
+    prof = read_profile()
+    prof["prompt"] = prompt or DEFAULTS["profile"]["prompt"]
+    write_profile(prof)
+    _note(P_PROFILE, "Profile saved - open a new Command Prompt to use it.")
+
+
+# --- Add/Remove Programs (the app catalog) ---
+
+def catalog_programs() -> list:
+    """The programs the catalog lists: every shipped id but the catalog
+    itself, which has no business offering to remove itself."""
+    return [(pid, cap) for pid, cap in PROGRAMS if pid != P_CATALOG]
+
+
+def catalog_spec() -> dict:
+    """The XP 'Add/Remove Programs' parody: the program list with its current
+    state, and the three verbs a component answers to."""
+    return {"kind": "column", "children": [
+        {"kind": "label", "text": "BerryVM Components - install, change or "
+                                  "remove a program. A removed one loses its "
+                                  "desktop tile.", "word_wrap": True},
+        {"kind": "list", "id": f"{P_CATALOG}_list", "on": ["selected"],
+         "expand": "both"},
+        {"kind": "row", "children": [
+            {"kind": "button", "id": f"{P_CATALOG}_install", "text": "Install",
+             "on": ["clicked"], "expand": True},
+            {"kind": "button", "id": f"{P_CATALOG}_modify", "text": "Modify",
+             "on": ["clicked"], "expand": True},
+            {"kind": "button", "id": f"{P_CATALOG}_remove", "text": "Remove",
+             "on": ["clicked"], "expand": True},
+        ]},
+        {"kind": "label", "id": f"{P_CATALOG}_note", "text": "",
+         "word_wrap": True},
+    ]}
+
+
+def open_catalog() -> str:
+    global catalog_row
+    if api is None:
+        return ""
+    catalog_row = -1
+    title = CAPTIONS[P_CATALOG]
+    open_window(_program_entry(P_CATALOG, title, catalog_spec()))
+    opened[P_CATALOG] = {"title": title, "kind": "catalog"}
+    refresh_taskbar()
+    draw_catalog()
+    return P_CATALOG
+
+
+def _catalog_rows() -> list:
+    out = []
+    for pid, cap in catalog_programs():
+        state = "Installed" if is_installed(pid) else "Not installed"
+        out.append((pid, f"{cap} - {state}"))
+    return out
+
+
+def draw_catalog() -> None:
+    if api is None:
+        return
+    api.tabs.set_widget(TAB, f"{P_CATALOG}_list", "items",
+                        [{"text": text} for _pid, text in _catalog_rows()])
+
+
+def catalog_select(text: str) -> None:
+    global catalog_row
+    for index, (pid, cap) in enumerate(catalog_programs()):
+        if f"{cap} - Installed" == text or f"{cap} - Not installed" == text:
+            catalog_row = index
+            return
+    catalog_row = -1
+
+
+def _catalog_picked() -> str:
+    rows = _catalog_rows()
+    if 0 <= catalog_row < len(rows):
+        return rows[catalog_row][0]
+    return ""
+
+
+def catalog_install() -> None:
+    pid = _catalog_picked()
+    if not pid:
+        _note(P_CATALOG, "Select a component first.")
+        return
+    keep = installed_set() | {pid}
+    write_installed([p for p, _c in PROGRAMS if p in keep])
+    _note(P_CATALOG, f"{CAPTIONS[pid]} installed.")
+
+
+def catalog_remove() -> None:
+    pid = _catalog_picked()
+    if not pid:
+        _note(P_CATALOG, "Select a component first.")
+        return
+    if pid == P_CATALOG:
+        return
+    if not api.ui.question("Remove component",
+                           f"Take {CAPTIONS[pid]} off the desktop?"):
+        return
+    keep = installed_set() - {pid}
+    write_installed([p for p, _c in PROGRAMS if p in keep])
+    _note(P_CATALOG, f"{CAPTIONS[pid]} removed - its tile is gone.")
+
+
+def catalog_modify() -> None:
+    """'Modify' opens the one thing that has settings worth changing: the
+    shell for the prompt, the desktop for the look; anything else has no "
+    options to offer."""
+    pid = _catalog_picked()
+    if not pid:
+        _note(P_CATALOG, "Select a component first.")
+        return
+    if pid == P_CONSOLE:
+        start_program(P_PROFILE)
+    elif pid in (P_EXPLORER, P_SETTINGS):
+        start_program(P_SETTINGS)
+    else:
+        _note(P_CATALOG, f"{CAPTIONS[pid]} has no options to change.")
+
+
 # --- 7. Display Properties: the settings window ---
 
 def settings_spec() -> dict:
     """The wallpaper, the sizes and the habits - the same keys the app's own
-    form writes, offered here in the XP control-panel shape."""
-    return {"kind": "column", "children": [
-        {"kind": "group", "text": "Wallpaper (Desktop tab)", "children": [
-            {"kind": "form", "children": [
-                {"label": "Background", "kind": "combo", "id": "set_wall",
-                 "items": list(WALLPAPERS),
-                 "value": str(config("wallpaper", DEFAULTS["wallpaper"])),
-                 "on": ["changed"]},
-                {"label": "Picture file", "kind": "line", "id": "set_file",
-                 "value": str(config("wallpaper_file", "")),
-                 "placeholder": "a file on this machine"},
+    form writes, offered here in the XP control-panel shape: one ``tabs``
+    container wearing the four Display Properties cards (Themes, Desktop,
+    Appearance, Settings). Every control keeps the id it always had, so
+    :func:`settings_apply` reads them the same way however the pages are
+    arranged - a tab only moves a widget on screen, never out of the
+    registry."""
+    return {"kind": "tabs", "id": "set_tabs", "children": [
+        {"label": "Themes", "kind": "column", "children": [
+            {"kind": "group", "text": "Color scheme", "children": [
+                {"kind": "form", "children": [
+                    {"label": "Theme", "kind": "combo", "id": "set_theme",
+                     "items": list(THEMES), "value": theme(),
+                     "on": ["changed"],
+                     "tooltip": "Repaints the window frames, the Start "
+                                "button and the selection colour"},
+                ]},
+                {"kind": "label", "id": "set_theme_note",
+                 "text": "Luna Blue is the shipped look; Olive Gold and "
+                         "Silver are the other two XP themes.",
+                 "word_wrap": True},
+            ]},
+        ]},
+        {"label": "Desktop", "kind": "column", "children": [
+            {"kind": "group", "text": "Background", "children": [
+                {"kind": "form", "children": [
+                    {"label": "Wallpaper", "kind": "combo", "id": "set_wall",
+                     "items": list(WALLPAPERS),
+                     "value": str(config("wallpaper", DEFAULTS["wallpaper"])),
+                     "on": ["changed"]},
+                    {"label": "Picture file", "kind": "line", "id": "set_file",
+                     "value": str(config("wallpaper_file", "")),
+                     "placeholder": "a file on this machine"},
+                ]},
+                {"kind": "row", "children": [
+                    {"kind": "button", "id": "set_picture",
+                     "text": "Browse for a Picture...", "on": ["clicked"],
+                     "tooltip": "Picks the Picture wallpaper and its file"},
+                    {"kind": "button", "id": "set_colour",
+                     "text": "Pick a Solid Colour...", "on": ["clicked"],
+                     "tooltip": "Picks the Solid wallpaper and its colour"},
+                ]},
+            ]},
+            {"kind": "group", "text": "Screen saver", "children": [
+                {"kind": "form", "children": [
+                    {"label": "Saver", "kind": "combo", "id": "set_saver",
+                     "items": ["(None)", "Beastro", "Mystify", "Starfield",
+                               "3D Pipes"],
+                     "value": str(config("saver", "(None)") or "(None)"),
+                     "tooltip": "A nod to the shelf of screensavers; BerryVM "
+                                "does not actually run one"},
+                ]},
+            ]},
+        ]},
+        {"label": "Appearance", "kind": "column", "children": [
+            {"kind": "group", "text": "Effects", "children": [
+                {"kind": "form", "children": [
+                    {"label": "Desktop scale %", "kind": "spin", "id": "set_scale",
+                     "value": scale(), "minimum": 80, "maximum": 160,
+                     "tooltip": "BerryVM's own scale for window sizes and "
+                                "desktop icons"},
+                    {"label": "Terminal text", "kind": "spin", "id": "set_font",
+                     "value": term_font(), "minimum": 8, "maximum": 28},
+                ]},
+                {"kind": "check", "id": "set_bigicons",
+                 "text": "Use classic large icons",
+                 "checked": bool(config("big_icons", False)),
+                 "tooltip": "A flavour toggle; the desktop scale above is "
+                            "what actually sizes the tiles"},
+                {"kind": "form", "children": [
+                    {"label": "Font smoothing", "kind": "combo",
+                     "id": "set_clear", "items": ["Standard", "ClearType"],
+                     "value": str(config("clear_type", "ClearType")
+                                  or "ClearType"),
+                     "tooltip": "Cosmetic; the app draws text its own way"},
+                ]},
+            ]},
+        ]},
+        {"label": "Settings", "kind": "column", "children": [
+            {"kind": "group", "text": "Sizes", "children": [
+                {"kind": "form", "children": [
+                    {"label": "Window width", "kind": "spin", "id": "set_width",
+                     "value": int(config("window_width",
+                                         DEFAULTS["window_width"])),
+                     "minimum": 240, "maximum": 2400},
+                    {"label": "Window height", "kind": "spin", "id": "set_height",
+                     "value": int(config("window_height",
+                                         DEFAULTS["window_height"])),
+                     "minimum": 180, "maximum": 1600},
+                ]},
+            ]},
+            {"kind": "group", "text": "Taskbar and shells", "children": [
+                {"kind": "check", "id": "set_clock", "text": "Show the clock",
+                 "checked": bool(config("clock_on", True))},
+                {"kind": "form", "children": [
+                    {"label": "Username to offer", "kind": "line",
+                     "id": "set_user",
+                     "value": str(config("default_user", "root"))},
+                    {"label": "Port to offer", "kind": "spin", "id": "set_port",
+                     "value": port_of(config("default_port", 22), 22),
+                     "minimum": 1, "maximum": 65535},
+                ]},
+                {"kind": "check", "id": "set_trust",
+                 "text": "Accept a host key nobody has seen",
+                 "checked": bool(config("trust_unknown_host", True))},
             ]},
             {"kind": "row", "children": [
-                {"kind": "button", "id": "set_picture",
-                 "text": "Browse for a Picture...", "on": ["clicked"],
-                 "tooltip": "Picks the Picture wallpaper and its file"},
-                {"kind": "button", "id": "set_colour",
-                 "text": "Pick a Solid Colour...", "on": ["clicked"],
-                 "tooltip": "Picks the Solid wallpaper and its colour"},
+                {"kind": "button", "id": "set_apply", "text": "Apply",
+                 "on": ["clicked"], "expand": True},
+                {"kind": "button", "id": "set_use", "text": "OK",
+                 "on": ["clicked"], "expand": True,
+                 "tooltip": "Apply and shut this window"},
+                {"kind": "button", "id": "set_defaults", "text": "Defaults",
+                 "on": ["clicked"],
+                 "tooltip": "Put every key back the way the addon shipped it"},
             ]},
+            {"kind": "label", "id": f"{P_SETTINGS}_note", "text": "",
+             "word_wrap": True},
         ]},
-        {"kind": "group", "text": "Sizes (Settings tab)", "children": [
-            {"kind": "form", "children": [
-                {"label": "Desktop scale %", "kind": "spin", "id": "set_scale",
-                 "value": scale(), "minimum": 80, "maximum": 160,
-                 "tooltip": "BerryVM's own scale for window sizes and "
-                            "desktop icons"},
-                {"label": "Terminal text", "kind": "spin", "id": "set_font",
-                 "value": term_font(), "minimum": 8, "maximum": 28},
-                {"label": "Window width", "kind": "spin", "id": "set_width",
-                 "value": int(config("window_width",
-                                     DEFAULTS["window_width"])),
-                 "minimum": 240, "maximum": 2400},
-                {"label": "Window height", "kind": "spin", "id": "set_height",
-                 "value": int(config("window_height",
-                                     DEFAULTS["window_height"])),
-                 "minimum": 180, "maximum": 1600},
-            ]},
-        ]},
-        {"kind": "group", "text": "Taskbar and shells", "children": [
-            {"kind": "check", "id": "set_clock", "text": "Show the clock",
-             "checked": bool(config("clock_on", True))},
-            {"kind": "form", "children": [
-                {"label": "Username to offer", "kind": "line",
-                 "id": "set_user",
-                 "value": str(config("default_user", "root"))},
-                {"label": "Port to offer", "kind": "spin", "id": "set_port",
-                 "value": port_of(config("default_port", 22), 22),
-                 "minimum": 1, "maximum": 65535},
-            ]},
-            {"kind": "check", "id": "set_trust",
-             "text": "Accept a host key nobody has seen",
-             "checked": bool(config("trust_unknown_host", True))},
-        ]},
-        {"kind": "row", "children": [
-            {"kind": "button", "id": "set_apply", "text": "Apply",
-             "on": ["clicked"], "expand": True},
-            {"kind": "button", "id": "set_use", "text": "OK",
-             "on": ["clicked"], "expand": True,
-             "tooltip": "Apply and shut this window"},
-            {"kind": "button", "id": "set_defaults", "text": "Defaults",
-             "on": ["clicked"],
-             "tooltip": "Put every key back the way the addon shipped it"},
-        ]},
-        {"kind": "label", "id": f"{P_SETTINGS}_note", "text": "",
-         "word_wrap": True},
     ]}
 
 
@@ -3809,6 +5243,7 @@ def settings_apply(close_after: bool = False) -> None:
     if api is None:
         return
     was = scale()
+    api.config.set("theme", str(_read_one("set_theme", DEFAULT_THEME)))
     api.config.set("wallpaper", str(_read_one("set_wall", "Bliss")))
     api.config.set("wallpaper_file",
                    str(_read_one("set_file", "")).strip())
@@ -3834,6 +5269,18 @@ def settings_apply(close_after: bool = False) -> None:
     except Exception:
         trust = True
     api.config.set("trust_unknown_host", trust)
+    # The cosmetic cards: a screensaver name, a large-icons flavour and a
+    # font-smoothing pick. None of them changes a pixel BerryVM draws - the
+    # sheets and the app own that - but they round the control panel out and
+    # are remembered like any other preference.
+    api.config.set("saver", str(_read_one("set_saver", "(None)")))
+    api.config.set("clear_type",
+                   str(_read_one("set_clear", "ClearType")))
+    try:
+        big = bool(api.tabs.widget_value(TAB, "set_bigicons", "value"))
+    except Exception:
+        big = bool(config("big_icons", False))
+    api.config.set("big_icons", big)
     mirror_settings()
     apply_theme()
     if scale() != was:
@@ -3903,6 +5350,11 @@ def settings_defaults() -> None:
             continue           # a person's bookmarks are not a default
         api.config.set(key, value)
     mirror_settings()
+    # ``installed`` went back to every shipped program, so the tiles are
+    # redrawn; the shell profile is reset and re-mirrored so a fresh
+    # ``.bashrc`` reflects it too.
+    draw_desk_icons()
+    mirror_profile(DEFAULTS["profile"])
     apply_theme()
     if scale() != was:
         relayout_desktop()
@@ -3914,13 +5366,16 @@ def settings_defaults() -> None:
 # --- 8. Calculator ---
 
 #: The keys, left to right, top to bottom; the grid they are laid in is four
-#: across, so the row of digits falls where a calculator's does.
+#: across, so the row of digits falls where a calculator's does. The last row
+#: is the memory register: add to it (``M+``), recall it (``MR``), clear it
+#: (``MC``) and flip the sign of the line (``\u00b1``).
 CALC_KEYS = ["C", "\u2190", "%", "/",
              "7", "8", "9", "*",
              "4", "5", "6", "-",
              "1", "2", "3", "+",
              "0", ".", "(", ")",
-             "=", "", "", ""]
+             "=", "", "", "",
+             "M+", "MR", "MC", "\u00b1"]
 
 #: One id per key, so the dispatcher reads the button's name rather than the
 #: glyph on it.
@@ -3940,6 +5395,7 @@ def calc_spec() -> dict:
                         "on": ["clicked"]})
     return {"kind": "column", "children": [
         {"kind": "line", "id": "calc_disp", "text": "0", "readonly": True},
+        {"kind": "label", "id": "calc_hist", "text": "", "word_wrap": True},
         {"kind": "grid", "children": buttons},
         {"kind": "label", "id": "calc_note", "text": "", "word_wrap": True},
     ]}
@@ -3964,10 +5420,12 @@ BROWSER_HOME = "https://www.wikipedia.org"
 
 
 def browser_spec(start_url: str = BROWSER_HOME) -> dict:
-    """One row of furniture over a web leaf: an address field, a Go button
-    beside it, and the QtWebEngine view underneath. The leaf is named
-    ``browser_view`` so a later ``set_widget`` can push a new address into
-    it without rebuilding the whole window."""
+    """One row of address furniture and one row of navigation over a web
+    leaf: a field, Go and Home, then Back / Forward / Reload and a bookmark
+    shelf. The leaf is named ``browser_view`` so a later ``set_widget`` can
+    push a new address into it without rebuilding the whole window."""
+    marks = [str(one.get("name") or "")
+             for one in bookmarks_list() if one.get("name")]
     return {"kind": "column", "children": [
         {"kind": "row", "children": [
             {"kind": "line", "id": f"{P_BROWSER}_url",
@@ -3979,11 +5437,46 @@ def browser_spec(start_url: str = BROWSER_HOME) -> dict:
             {"kind": "button", "id": f"{P_BROWSER}_home", "text": "Home",
              "on": ["clicked"]},
         ]},
+        {"kind": "row", "children": [
+            {"kind": "button", "id": f"{P_BROWSER}_back", "text": "\u2190",
+             "on": ["clicked"], "tooltip": "Back one page"},
+            {"kind": "button", "id": f"{P_BROWSER}_forward", "text": "\u2192",
+             "on": ["clicked"], "tooltip": "Forward one page"},
+            {"kind": "button", "id": f"{P_BROWSER}_reload", "text": "Reload",
+             "on": ["clicked"]},
+            {"kind": "combo", "id": f"{P_BROWSER}_mark", "items": marks,
+             "value": "", "placeholder": "Bookmarks",
+             "on": ["activated"], "expand": True,
+             "tooltip": "A saved page; pick it to go there"},
+        ]},
         {"kind": "web", "id": f"{P_BROWSER}_view", "url": start_url,
          "expand": "both"},
         {"kind": "label", "id": f"{P_BROWSER}_note", "text": "",
          "word_wrap": True},
     ]}
+
+
+def bookmarks_list() -> list:
+    """The browser's saved pages, each a ``{name, url}`` pair, cleaned of
+    anything malformed so a hand-edited config cannot strand the shelf."""
+    raw = config("bookmarks", DEFAULTS["bookmarks"]) or []
+    out: list[dict] = []
+    if isinstance(raw, list):
+        for one in raw:
+            if isinstance(one, dict) and one.get("url"):
+                out.append({"name": str(one.get("name") or one["url"]),
+                            "url": str(one["url"])})
+    return out
+
+
+def browser_bookmark(name: str) -> None:
+    """Follow one bookmark by its shelf name, filling the address bar and
+    pointing the leaf at it. An unknown name is a no-op."""
+    for one in bookmarks_list():
+        if one["name"] == str(name or ""):
+            api.tabs.set_widget(TAB, f"{P_BROWSER}_url", "value", one["url"])
+            api.tabs.set_widget(TAB, f"{P_BROWSER}_view", "url", one["url"])
+            return
 
 
 def open_browser(url: str = "") -> str:
@@ -4033,15 +5526,33 @@ def browser_go() -> None:
 def calc_press(key: str) -> None:
     """One key's arithmetic. ``calc_expr`` is the line as it stands; ``=``
     asks :func:`calc_eval`, which knows only numbers and the four marks, and
-    a bad line shows ``Error`` rather than a traceback."""
-    global calc_expr
+    a bad line shows ``Error`` rather than a traceback. The bottom row drives
+    the memory register (``M+`` add, ``MR`` recall, ``MC`` clear) and flips
+    the sign of the current number (``\u00b1``)."""
+    global calc_expr, calc_mem, calc_hist
     if key == "C":
         calc_expr = ""
     elif key == "\u2190":
         calc_expr = calc_expr[:-1]
-    elif key == "=":
+    elif key == "\u00b1":
+        calc_expr = _calc_negate(calc_expr)
+    elif key == "M+":
         try:
-            calc_expr = _calc_show_value(calc_eval(calc_expr))
+            calc_mem += calc_eval(calc_expr)
+            _note(P_CALC, f"memory: {_calc_show_value(calc_mem)}")
+        except (ValueError, ZeroDivisionError):
+            _note(P_CALC, "memory add needs a number")
+    elif key == "MR":
+        calc_expr = _calc_show_value(calc_mem)
+    elif key == "MC":
+        calc_mem = 0.0
+        _note(P_CALC, "memory cleared")
+    elif key == "=":
+        prev = calc_expr
+        try:
+            value = calc_eval(calc_expr)
+            calc_expr = _calc_show_value(value)
+            calc_hist = f"{prev} = {calc_expr}"
         except (ValueError, ZeroDivisionError):
             calc_expr = ""
             _note(P_CALC, "Error - check the line")
@@ -4050,6 +5561,21 @@ def calc_press(key: str) -> None:
     else:
         calc_expr = (calc_expr + key) if calc_expr != "0" else key
     _calc_show()
+
+
+def _calc_negate(expr: str) -> str:
+    """Flip the sign of a line that is a plain number; anything more involved
+    is left alone rather than tangled into a half-written expression."""
+    text = str(expr or "").strip()
+    if not text:
+        return text
+    if text.startswith("-"):
+        return text[1:]
+    try:
+        calc_eval(text)
+    except (ValueError, ZeroDivisionError):
+        return text
+    return "-" + text
 
 
 def _calc_show_value(value: float) -> str:
@@ -4063,6 +5589,7 @@ def _calc_show() -> None:
     if api is None:
         return
     api.tabs.set_widget(TAB, "calc_disp", "value", calc_expr or "0")
+    api.tabs.set_widget(TAB, "calc_hist", "text", calc_hist)
 
 
 # --- 10. Paint: a canvas drawing program ---
@@ -4382,6 +5909,7 @@ def mine_spec(win_id: str, rows: int, cols: int, level: str) -> dict:
                         "square"},
             {"kind": "label", "id": "mine_count", "text": ""},
             {"kind": "label", "id": "mine_timer", "text": "Time: 0"},
+            {"kind": "label", "id": "mine_best", "text": ""},
         ]},
         {"kind": "grid", "children": cells},
         {"kind": "label", "id": f"{win_id}_note", "text": "",
@@ -4481,6 +6009,7 @@ def draw_mine_board(board: dict) -> None:
                         f"Mines: {max(0, board['mines'] - board['flags'])}")
     api.tabs.set_widget(TAB, "mine_timer", "text",
                         f"Time: {board.get('elapsed', 0)}")
+    api.tabs.set_widget(TAB, "mine_best", "text", _mine_best_text())
 
 
 def mine_press(r: int, c: int) -> None:
@@ -4500,11 +6029,48 @@ def mine_press(r: int, c: int) -> None:
             _note(P_MINE, "Boom - you hit a mine. Press New to try again.")
         elif board["state"] == "won":
             _note(P_MINE, "Cleared! Every safe square is open.")
+            _mine_record_best(board)
     draw_mine_board(board)
 
 
 def mine_flagmode(on: bool) -> None:
     minesweeper["flagmode"] = bool(on)
+
+
+def _mine_best_map() -> dict:
+    """The stored best times as a name -> seconds dict, tolerating a config
+    that has never held one or holds something that is not a mapping."""
+    raw = config("mine_best", DEFAULTS["mine_best"]) or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _mine_best_text() -> str:
+    """The toolbar's best-time line for the level being played, or a saying
+    that none is on record yet."""
+    level = str(minesweeper.get("level") or "")
+    best = _mine_best_map().get(level)
+    if isinstance(best, (int, float)) and best > 0:
+        return f"Best: {int(best)}s"
+    return "Best: -"
+
+
+def _mine_record_best(board: dict) -> None:
+    """A cleared board: keep the elapsed time if it beats the level's record.
+    The write goes to the addon's own ``mine_best`` config, remembered across
+    sessions the way the shipped game kept a hall-of-fame."""
+    level = str(minesweeper.get("level") or "")
+    if not level:
+        return
+    elapsed = int(board.get("elapsed", 0) or 0)
+    if elapsed <= 0:
+        return
+    best = _mine_best_map()
+    current = best.get(level)
+    if not isinstance(current, (int, float)) or elapsed < current:
+        best[level] = elapsed
+        if api is not None:
+            api.config.set("mine_best", best)
+        _note(P_MINE, f"Cleared! New best for {level}: {elapsed}s")
 
 
 def _mine_parse(ident: str):
@@ -4573,7 +6139,22 @@ def media_spec(win_id: str) -> dict:
             {"kind": "slider", "id": f"{win_id}_volume", "minimum": 0,
              "maximum": 100, "value": 80, "on": ["changed"], "expand": True},
         ]},
-        {"kind": "list", "id": f"{win_id}_list", "on": ["activated"],
+        {"kind": "row", "children": [
+            {"kind": "label", "id": f"{win_id}_seeklabel", "text": "0:00"},
+            {"kind": "slider", "id": f"{win_id}_seek", "minimum": 0,
+             "maximum": 0, "value": 0, "on": ["changed"], "expand": True,
+             "tooltip": "Drag to seek through the loaded track"},
+        ]},
+        {"kind": "row", "children": [
+            {"kind": "label", "id": f"{win_id}_movelabel",
+             "text": "Reorder"},
+            {"kind": "button", "id": f"{win_id}_up", "text": "\u25b2 Up",
+             "on": ["clicked"], "tooltip": "Move the selected track up"},
+            {"kind": "button", "id": f"{win_id}_down", "text": "\u25bc Down",
+             "on": ["clicked"], "tooltip": "Move the selected track down"},
+        ]},
+        {"kind": "list", "id": f"{win_id}_list",
+         "on": ["activated", "selected"],
          "expand": "both", "tooltip": "Double-click a track to play it"},
         {"kind": "player", "id": f"{win_id}_player", "volume": 80,
          "on": ["state", "done", "error"]},
@@ -4595,13 +6176,14 @@ def open_media() -> str:
     title = CAPTIONS[P_MEDIA]
     open_window(_program_entry(P_MEDIA, title, media_spec(P_MEDIA)))
     opened[P_MEDIA] = {"title": title, "kind": "media"}
-    media_state[P_MEDIA] = {"tracks": [], "index": -1}
+    media_state[P_MEDIA] = {"tracks": [], "index": -1, "selected": -1}
     refresh_taskbar()
     return P_MEDIA
 
 
 def _media_state() -> dict:
-    return media_state.setdefault(P_MEDIA, {"tracks": [], "index": -1})
+    return media_state.setdefault(
+        P_MEDIA, {"tracks": [], "index": -1, "selected": -1})
 
 
 def _media_draw_list() -> None:
@@ -4702,6 +6284,10 @@ def media_button(tail: str) -> None:
         api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "pause", True)
     elif tail == "stop":
         api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "stop", True)
+    elif tail == "up":
+        media_move(-1)
+    elif tail == "down":
+        media_move(1)
 
 
 def media_pick(payload: dict) -> None:
@@ -4711,7 +6297,42 @@ def media_pick(payload: dict) -> None:
     except (TypeError, ValueError):
         index = -1
     if index >= 0:
+        state = _media_state()
+        state["selected"] = index
         media_play_index(index)
+
+
+def media_select(payload: dict) -> None:
+    """A row is highlighted but not played: remember it so the Reorder
+    buttons know which track to move."""
+    try:
+        index = int((payload or {}).get("row"))
+    except (TypeError, ValueError):
+        return
+    _media_state()["selected"] = index
+
+
+def media_move(delta: int) -> None:
+    """Slide the highlighted (or, failing that, the loaded) row up or down
+    the playlist, carrying the play-mark with it so the track still sounds
+    like the one it was."""
+    if api is None:
+        return
+    state = _media_state()
+    tracks = state.get("tracks") or []
+    src = state.get("selected", -1)
+    if src < 0:
+        src = state.get("index", -1)
+    dst = src + delta
+    if src < 0 or dst < 0 or dst >= len(tracks):
+        return
+    tracks[src], tracks[dst] = tracks[dst], tracks[src]
+    if state.get("index") == src:
+        state["index"] = dst
+    elif state.get("index") == dst:
+        state["index"] = src
+    state["selected"] = dst
+    _media_draw_list()
 
 
 def media_volume(value: Any) -> None:
@@ -4732,6 +6353,41 @@ def media_seek(value: Any) -> None:
     except (TypeError, ValueError):
         return
     api.tabs.set_widget(TAB, f"{P_MEDIA}_player", "seek", point)
+
+
+def _media_clock() -> None:
+    """Seat the seek slider at the loaded track's length and print the clock.
+    The leaf holds its own position and duration; a state change is when they
+    are worth reading, so the slider's reach and the mm:ss label follow it.
+    Without QtMultimedia the reads come back blank and the row stays at zero,
+    which is the honest thing to show when nothing can play."""
+    if api is None:
+        return
+    try:
+        duration = int(api.tabs.widget_value(TAB, f"{P_MEDIA}_player",
+                                             "duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    try:
+        position = int(api.tabs.widget_value(TAB, f"{P_MEDIA}_player",
+                                             "position") or 0)
+    except (TypeError, ValueError):
+        position = 0
+    if duration > 0:
+        api.tabs.set_widget(TAB, f"{P_MEDIA}_seek", "maximum", duration)
+    api.tabs.set_widget(TAB, f"{P_MEDIA}_seek", "value",
+                        min(position, duration) if duration else 0)
+    api.tabs.set_widget(TAB, f"{P_MEDIA}_seeklabel", "text",
+                        _media_time(position))
+
+
+def _media_time(ms: int) -> str:
+    """Milliseconds as ``m:ss`` - the shape a transport's clock wears."""
+    try:
+        total = max(0, int(ms or 0)) // 1000
+    except (TypeError, ValueError):
+        total = 0
+    return f"{total // 60}:{total % 60:02d}"
 
 
 def _media_next() -> None:
@@ -4765,6 +6421,7 @@ def media_news(event: str, payload: dict) -> None:
                      "stopped": "Stopped"}.get(word, word or "Idle")
             api.tabs.set_widget(TAB, f"{P_MEDIA}_now", "text",
                                 f"{label}: {short_name(tracks[index])}")
+        _media_clock()
     elif event == "done":
         _media_next()
     elif event == "error":
@@ -4794,8 +6451,10 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     body = str(identifier or "")
     # 1. The desktop itself: window events. ``body`` is the window's id when
     # the primitive reported a change inside a frame, or ``DESKTOP`` when the
-    # canvas has something of its own to say.
-    if body == DESKTOP:
+    # canvas has something of its own to say. A ``shortcut`` event is left for
+    # the 1c branch below, so Alt+Tab and the Konami keys are not swallowed
+    # with the plain window news.
+    if body == DESKTOP and event != "shortcut":
         refresh_taskbar()
         return
     if body in opened and event in ("activated", "moved", "resized", "closed"):
@@ -4814,23 +6473,33 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     if body in opened and event in ("minimized", "maximized", "restored"):
         if event == "minimized":
             minimized[body] = True
+            maximized.discard(body)
         elif event == "maximized":
             minimized.pop(body, None)
+            maximized.add(body)
         else:                                # restored
             minimized.pop(body, None)
+            maximized.discard(body)
             clear_flash(body)
         refresh_taskbar()
         return
     # 1c. The desktop's own shortcut: Alt+Tab cycles the windows through
-    # a choose prompt. A global grab is not offered to addons, so the
-    # chord fires only while the Berry Manager window has focus.
+    # a choose prompt, and the lone arrow/B/A keys feed the Konami buffer.
+    # A global grab is not offered to addons, so a chord fires only while
+    # the Berry Manager window has focus.
     if body == DESKTOP and event == "shortcut":
-        if str(payload.get("keys") or "").lower() == "alt+tab":
+        keys = str(payload.get("keys") or "").lower()
+        if keys == "alt+tab":
             switcher_menu()
+        elif keys in KONAMI:
+            konami_seen(keys)
         return
     # 2. Start and the taskbar.
     if body == START_BTN and event == "clicked":
-        start_menu()
+        start_pressed()
+        return
+    if body in (f"{P_START}_apps", f"{P_START}_side") and event == "activated":
+        start_flyout_picked(body, str(payload.get("text") or ""))
         return
     if body == TASK_LIST and event == "selected":
         win_id = picked_window()
@@ -4866,11 +6535,15 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
                           str(payload.get("name") or ""),
                           str(payload.get("old") or ""))
         return
-    # 4. A terminal's news, whether the Terminal's or a machine window's.
+    # 4. A terminal's news, whether the Terminal's, a machine window's or a
+    # local console's. Each owner kind says what it wants on its own screen.
     if is_terminal_id(body):
         owner = terminals[body]
+        record = opened.get(owner) or {}
         if owner == P_MAIN:
             main_ssh_news(event, payload)
+        elif record.get("kind") == "console":
+            console_news(owner, event, payload)
         else:
             machine_news(owner, event, payload)
         return
@@ -4919,11 +6592,33 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     if event == "activated" and body == f"{P_MEDIA}_list":
         media_pick(payload)
         return
+    if event == "selected" and body == f"{P_MEDIA}_list":
+        media_select(payload)
+        return
     if body == f"{P_MEDIA}_player" and event in ("state", "done", "error"):
         media_news(event, payload)
         return
     if event == "clicked" and body.startswith(f"{P_MEDIA}_"):
         media_button(body[len(P_MEDIA) + 1:])
+        return
+    # 4c. The cosplay: the logon picker's faces and the startup chime's
+    # player. Both only ever exist when a real window hosted them, so these
+    # rows are dead weight on a headless run and never reached in a test.
+    if body == f"{LOGON}_who":
+        name = str(payload.get("text") or "")
+        if event == "selected":
+            pane_pick[LOGON] = name
+        elif event == "activated" and name:
+            logon_picked(name)
+        return
+    if event == "clicked" and body == f"{LOGON}_ok":
+        logon_picked(pane_pick.get(LOGON) or "")
+        return
+    if event == "clicked" and body == f"{LOGON}_skip":
+        close_window(LOGON)
+        return
+    if body == "sfx_player" and event in ("done", "error"):
+        close_window("sfx")
         return
     # 5. The Explorer: its two tables and their buttons.
     if body.endswith("_table") and body[:3] in PANE_KINDS:
@@ -4938,6 +6633,17 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         elif event == "context":
             pane_menu(pane, name)
         return
+    if event == "returned" and body.endswith("_path") \
+            and body[:3] in PANE_KINDS:
+        # Enter on the address bar walks that pane to the typed path.
+        wanted = str(payload.get("text") or "")
+        if not wanted:
+            try:
+                wanted = str(api.tabs.widget_value(TAB, body, "value") or "")
+            except Exception:
+                wanted = ""
+        pane_goto(body[:3], wanted)
+        return
     if event == "clicked" and body[:3] in PANE_KINDS \
             and body.rsplit("_", 1)[-1] in PANE_ACTIONS:
         pane, action = body[:3], body.rsplit("_", 1)[-1]
@@ -4945,6 +6651,8 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
             pane_up(pane)
         elif action == "home":
             pane_home(pane)
+        elif action == "root":
+            pane_root(pane)
         elif action == "refresh":
             pane_list(pane, pane_path.get(pane) or "")
         elif action == "open":
@@ -4962,7 +6670,8 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         return
     # 6. A viewer's buttons.
     if event == "clicked" and body.endswith(("_local", "_remote", "_zin",
-                                             "_zout")):
+                                             "_zout", "_fit", "_prev",
+                                             "_next")):
         win_id = body.rsplit("_", 1)[0]
         if win_id not in viewers:
             return
@@ -4975,14 +6684,14 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
             viewer_zoom(win_id, 1.5)
         elif tail == "zout":
             viewer_zoom(win_id, 2.0 / 3.0)
+        elif tail == "fit":
+            viewer_fit(win_id)
+        elif tail == "prev":
+            viewer_step(win_id, -1)
+        elif tail == "next":
+            viewer_step(win_id, 1)
         return
-    # 7. A command prompt's typed line: read it, clear the box, feed it.
-    if body.endswith("_in") and event == "returned":
-        win_id = body[:-3]
-        if win_id in consoles:
-            _console_submit(win_id)
-        return
-    # 8. Notepad's Save and Save As. The rest of that window is the editor
+    # 7. Notepad's Save and Save As. The rest of that window is the editor
     # and two labels, none of which have an event that means anything here.
     # ``_saveas`` is tried first: it does not end in ``_save``, and a plain
     # suffix test would hand the copy button to the wrong door.
@@ -4995,6 +6704,23 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         win_id = body[: -len("_save")]
         if win_id in berrypads:
             _berry_save(win_id)
+        return
+    # Notepad's Find and Recent, and the dirty ``*`` that rides every
+    # keystroke the editor reports back.
+    if event == "clicked" and body.endswith("_find"):
+        win_id = body[: -len("_find")]
+        if win_id in berrypads:
+            berry_find(win_id)
+        return
+    if event == "clicked" and body.endswith("_recent"):
+        win_id = body[: -len("_recent")]
+        if win_id in berrypads:
+            berry_recent(win_id)
+        return
+    if event == "changed" and body.endswith("_edit"):
+        win_id = body[: -len("_edit")]
+        if win_id in berrypads:
+            _berry_changed(win_id, str(payload.get("text") or ""))
         return
     # 9. The calculator's keys.
     if event == "clicked" and body in CALC_IDS:
@@ -5016,6 +6742,18 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         return
     if body == f"{P_BROWSER}_url" and event == "activated":
         browser_go()
+        return
+    if body == f"{P_BROWSER}_back" and event == "clicked":
+        api.tabs.set_widget(TAB, f"{P_BROWSER}_view", "back", None)
+        return
+    if body == f"{P_BROWSER}_forward" and event == "clicked":
+        api.tabs.set_widget(TAB, f"{P_BROWSER}_view", "forward", None)
+        return
+    if body == f"{P_BROWSER}_reload" and event == "clicked":
+        api.tabs.set_widget(TAB, f"{P_BROWSER}_view", "reload", None)
+        return
+    if body == f"{P_BROWSER}_mark" and event == "activated":
+        browser_bookmark(str(payload.get("text") or ""))
         return
     # 9b. The Recycle Bin window: a row's double-click restores it, and
     # the three buttons below the table do the same thing plus a wipe.
@@ -5079,6 +6817,13 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         mirror_settings()
         apply_theme()
         return
+    if event == "changed" and body == "set_theme":
+        # A named scheme repaints both sheets the moment it is picked, the
+        # same live-preview bargain the wallpaper combo strikes.
+        api.config.set("theme", str(payload.get("text") or DEFAULT_THEME))
+        mirror_settings()
+        apply_theme()
+        return
     # 11. The Terminal's own buttons.
     if event == "clicked" and body == f"{P_MAIN}_conn":
         _connect_main_ssh()
@@ -5102,6 +6847,9 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         if entry:
             machine_connect(entry)
         return
+    if event == "clicked" and body == f"{P_MACHINES}_term":
+        machine_term_here()
+        return
     if event == "clicked" and body == f"{P_MACHINES}_add":
         machine_add()
         return
@@ -5116,9 +6864,38 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         draw_machines()
         _note(P_MACHINES, "Reloaded from the config.")
         return
+    # 13. The Shell Profile editor.
+    if body == f"{P_PROFILE}_list" and event == "selected":
+        profile_select(_selected_text(f"{P_PROFILE}_list"))
+        return
+    if event == "clicked" and body == f"{P_PROFILE}_add":
+        profile_add()
+        return
+    if event == "clicked" and body == f"{P_PROFILE}_edit":
+        profile_edit()
+        return
+    if event == "clicked" and body == f"{P_PROFILE}_del":
+        profile_delete()
+        return
+    if event == "clicked" and body == f"{P_PROFILE}_apply":
+        profile_apply()
+        return
+    # 14. Add/Remove Programs (the app catalog).
+    if body == f"{P_CATALOG}_list" and event == "selected":
+        catalog_select(_selected_text(f"{P_CATALOG}_list"))
+        return
+    if event == "clicked" and body == f"{P_CATALOG}_install":
+        catalog_install()
+        return
+    if event == "clicked" and body == f"{P_CATALOG}_modify":
+        catalog_modify()
+        return
+    if event == "clicked" and body == f"{P_CATALOG}_remove":
+        catalog_remove()
+        return
 
 
 #: The Explorer buttons that share one dispatch: everything a pane prefix +
 #: an underscore + one of these words means the same action on either side.
-PANE_ACTIONS = ("up", "home", "refresh", "open", "new", "rename", "delete",
-                "send", "run")
+PANE_ACTIONS = ("up", "home", "root", "refresh", "open", "new", "rename",
+                "delete", "send", "run")

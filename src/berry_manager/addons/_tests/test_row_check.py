@@ -984,6 +984,224 @@ def test_app_restart_deferred(app: Any, api: Any) -> None:
           "a close turned down withdraws the restart")
 
 
+# --- twenty-two: a local shell spawned on a terminal, no SSH in sight ---
+
+def test_local_shell(api: Any) -> None:
+    """``spawn`` points a terminal screen at the machine's own shell.
+
+    Stage A gives an addon a real OS process behind a ``terminal`` leaf without
+    an SSH connection. Two things have to hold and neither can lean on a live
+    ``cmd``/``sh`` child (flaky, and absent on a headless run), so they are
+    driven from the outside:
+
+    * the real :class:`core.net.LocalShellWorker`'s line editor - what it echoes,
+      how it honours backspace, and the first-word alias expansion it runs on the
+      way out - is exercised by feeding bytes straight to ``_type`` with a fake
+      ``proc``, so no subprocess is started;
+    * :func:`addon_api._terminal_spawn` wires a worker to the screen exactly the
+      way a far shell is wired (``connected``->ready, ``received``->the screen,
+      ``disconnected``->closed), seen through a fake worker factory; and the
+      local/SSH gate split means ``spawn`` never asks the device, and a local
+      shell's ``send`` bypasses ``_authorize_terminal`` where an SSH shell's
+      would not."""
+    print("\n22. spawn: a local shell on a terminal, and the SSH gate split")
+    import core.net as net
+    from PyQt6.QtCore import QObject, pyqtSignal
+
+    # --- one: the worker's line editor, driven by hand, no child process ---
+
+    class _Stdin:
+        def __init__(self) -> None:
+            self.written: list = []
+
+        def write(self, text: str) -> None:
+            self.written.append(text)
+
+        def flush(self) -> None:
+            pass
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.stdin = _Stdin()
+
+        def poll(self) -> None:
+            return None                 # still running: _submit writes through
+
+    worker = net.LocalShellWorker({"cmd": "shell", "cwd": "/tmp",
+                                   "aliases": {"l": "ll", "ll": "ls -al"}})
+    check(getattr(worker, "is_local", False) is True,
+          "a LocalShellWorker is tagged local, so the gate can tell it apart")
+    echoed: list = []
+    worker.received.connect(lambda chunk: echoed.append(chunk))
+    worker.proc = _Proc()
+    # "ll" reaches the shell fully expanded, chained l -> ll -> ls -al.
+    worker._type("l -x\r")
+    check(worker.proc.stdin.written == ["ls -al -x\n"],
+          f"the alias expands the first word once, args ride along: "
+          f"{worker.proc.stdin.written}")
+    check(echoed == ["l", " ", "-", "x", "\r\n"],
+          f"every typed key is echoed, then a newline on Enter: {echoed}")
+    # Backspace eats the last character and tells the screen to rub it out.
+    echoed.clear()
+    worker.proc = _Proc()
+    worker._type("abc\x7f\x7f\r")
+    check(worker.proc.stdin.written == ["a\n"],
+          f"two backspaces leave only 'a' to submit: "
+          f"{worker.proc.stdin.written}")
+    check(echoed.count("\b \b") == 2,
+          f"each backspace rubs one character off the screen: {echoed}")
+    # A lone Enter still goes through, so the shell prints its own prompt.
+    worker.proc = _Proc()
+    worker._type("\r")
+    check(worker.proc.stdin.written == ["\n"],
+          "an empty line is still submitted, not swallowed")
+
+    # --- two: a fake worker factory, so spawn's wiring can be watched ---
+
+    class FakeWorker(QObject):
+        connected = pyqtSignal()
+        received = pyqtSignal(str)
+        failed = pyqtSignal(str)
+        disconnected = pyqtSignal()
+        is_local = True
+
+        def __init__(self, settings, cols=80, rows=24, parent=None) -> None:
+            super().__init__(parent)
+            self.settings = dict(settings or {})
+            self.state = {"connected": False, "host": "localhost",
+                          "port": 0, "username": "",
+                          "cwd": str(self.settings.get("cwd") or "")}
+            self.started = False
+            self.sent: list = []
+
+        def isRunning(self) -> bool:            # noqa: N802 - Qt's own name
+            return self.started
+
+        def start(self) -> None:
+            self.started = True
+
+        def send(self, text: str) -> None:
+            self.sent.append(text)
+
+        def send_line(self, text: str) -> None:
+            self.sent.append(text)
+
+        def resize(self, cols: int, rows: int) -> None:
+            pass
+
+        def stop(self) -> None:
+            self.started = False
+
+    class FakeShell:
+        """A stand-in connection for the gate tests: only what the gate and
+        ``_terminal_send`` read - ``is_local``, ``isRunning`` and ``send``."""
+
+        def __init__(self, local: bool) -> None:
+            self.is_local = local
+            self.state = {"connected": True}
+            self.sent: list = []
+
+        def isRunning(self) -> bool:            # noqa: N802 - Qt's own name
+            return True
+
+        def send(self, text: str) -> None:
+            self.sent.append(text)
+
+        def send_line(self, text: str) -> None:
+            self.sent.append(text)
+
+    class FakeDevice:
+        def __init__(self) -> None:
+            self.guarded: list = []
+
+        def _guard(self, kind: str, uses_main: bool = True) -> None:
+            self.guarded.append(kind)
+
+        def _allow_own(self) -> None:
+            pass
+
+        def _mark(self, kind: str) -> None:
+            pass
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.device = FakeDevice()
+
+    def make_terminal() -> Any:
+        events: list = []
+
+        def emit(identifier: str, event: str, payload: dict) -> None:
+            events.append((identifier, event, payload))
+
+        screen, _registry = api.build_spec(
+            {"kind": "terminal", "id": "term",
+             "on": ["ready", "closed", "failed"]}, events=emit)
+        return screen, events
+
+    original = net.LocalShellWorker
+    try:
+        net.LocalShellWorker = FakeWorker
+
+        # The spawn wires the worker's three news signals onto the screen.
+        screen, events = make_terminal()
+        api._terminal_spawn(screen, {"cmd": "shell", "cwd": "/home/u"})
+        shell = (screen._addon_terminal or {}).get("shell")
+        check(isinstance(shell, FakeWorker),
+              "spawn puts a worker on the terminal's state")
+        check(shell.started is True, "and starts it")
+        check("Starting local shell" in api._terminal_text(screen),
+              "the screen says a local shell is starting")
+        shell.received.emit("hello\n")
+        check("hello" in api._terminal_text(screen),
+              "what the worker sends is fed straight to the screen")
+        shell.connected.emit()
+        check(any(event == "ready" for _id, event, _p in events),
+              "a connected worker reports ready to the addon")
+        shell.disconnected.emit()
+        check(any(event == "closed" for _id, event, _p in events),
+              "and a dropped one reports closed")
+        check((screen._addon_terminal or {}).get("shell") is None,
+              "the closed shell is unhooked from the terminal")
+
+        # spawn is not SSH-gated: the whole set_widget path reaches no device.
+        screen2, _ev2 = make_terminal()
+        fake_api = FakeApi()
+        handled = api._write_control(fake_api, screen2, "spawn",
+                                     {"cmd": "shell"})
+        check(handled is True
+              and (screen2._addon_terminal or {}).get("shell") is not None,
+              "spawn ran the worker up through set_widget")
+        check(fake_api.device.guarded == [],
+              f"spawn never asks the device for SSH permission: "
+              f"{fake_api.device.guarded}")
+
+        # A local shell's typing bypasses _authorize_terminal too.
+        screen3, _ev3 = make_terminal()
+        local = FakeShell(local=True)
+        screen3._addon_terminal["shell"] = local
+        fake_api3 = FakeApi()
+        api._write_control(fake_api3, screen3, "send", "dir")
+        check(fake_api3.device.guarded == [],
+              f"typing into a local shell skips the SSH gate: "
+              f"{fake_api3.device.guarded}")
+        check(local.sent == ["dir"],
+              "and the words still reach the shell")
+
+        # The contrast that makes the split mean something: an SSH-backed
+        # shell's send is gated exactly as before.
+        screen4, _ev4 = make_terminal()
+        remote = FakeShell(local=False)
+        remote.is_local = False
+        screen4._addon_terminal["shell"] = remote
+        fake_api4 = FakeApi()
+        api._write_control(fake_api4, screen4, "send", "ls")
+        check(fake_api4.device.guarded == ["ssh"],
+              f"an SSH shell's send passes the gate: "
+              f"{fake_api4.device.guarded}")
+    finally:
+        net.LocalShellWorker = original
+
+
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
@@ -1021,6 +1239,7 @@ def main() -> int:
     test_player(api)
     test_desktop_area(app, api)
     test_app_restart_deferred(app, api)
+    test_local_shell(api)
     app.processEvents()
 
     if FAILURES:
