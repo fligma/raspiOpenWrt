@@ -1030,7 +1030,11 @@ class Worker(QThread):
     """
 
     progress = pyqtSignal(str, float)          # (what now, 0..1 or -1 unknown)
-    finished = pyqtSignal(bool, str)           # (ok, the closing words)
+    # Named away from QThread's own ``finished`` on purpose: a signal called
+    # ``finished`` here would hide the base one, and the card would then let go
+    # of the thread while run() was still cleaning up - a running QThread
+    # destroyed, which Qt aborts on. The card ties release to the real finished.
+    outcome = pyqtSignal(bool, str)            # (ok, the closing words)
 
     def __init__(self, mode: str, target: Path, owner: str, repo: str,
                  python: str | None) -> None:
@@ -1072,7 +1076,7 @@ class Worker(QThread):
             # loose from a QThread's run() calls qFatal and aborts the whole
             # process; caught here it is only a job the card can wear as failed,
             # not a crash the moment the work is done.
-            self.finished.emit(False, str(error) or error.__class__.__name__)
+            self.outcome.emit(False, str(error) or error.__class__.__name__)
 
     def _do_install(self) -> None:
         tag = resolve_tag(self.owner, self.repo)
@@ -1096,7 +1100,7 @@ class Worker(QThread):
                                          lambda t: self._progress(t, -1))
             self._progress("putting the build in place", -1, force=True)
             place_build(build_root, self.target)
-            self.finished.emit(True, f"Berry Manager {version} is "
+            self.outcome.emit(True, f"Berry Manager {version} is "
                                      f"installed at {self.target}")
         finally:
             shutil.rmtree(staging, ignore_errors=True)
@@ -1115,11 +1119,11 @@ class Worker(QThread):
         # it on Windows, the moment the compile door was opened.
         ok, missing = python_has(self.python, TOOLCHAIN_MODULES)
         if not ok:
-            self.finished.emit(False, f"{self.python} is missing "
+            self.outcome.emit(False, f"{self.python} is missing "
                                       f"{', '.join(missing)}")
             return
         if self._cancel["cancel"]:
-            self.finished.emit(False, "the build was cancelled")
+            self.outcome.emit(False, "the build was cancelled")
             return
         tag = resolve_tag(self.owner, self.repo)
         version = _readable(tag_version(tag) or tag)
@@ -1144,7 +1148,7 @@ class Worker(QThread):
             run_compile(source, self.target, self.python,
                         lambda text: self._progress(text, -1),
                         self._cancel, base=str(work))
-            self.finished.emit(True, f"a local build of Berry Manager "
+            self.outcome.emit(True, f"a local build of Berry Manager "
                                      f"{version} is installed at "
                                      f"{self.target}")
         finally:
@@ -1814,7 +1818,12 @@ class InstallerCard(QWidget):
         self._worker = Worker("compile" if compiling else "install", target,
                               owner, repo, py)
         self._worker.progress.connect(self._on_progress)
-        self._worker.finished.connect(self._on_finished)
+        self._worker.outcome.connect(self._on_finished)
+        # The outcome is said from inside run(), so the thread is still alive
+        # when _on_finished draws the card; it is let go only on QThread's own
+        # finished, which fires once run() has returned. Releasing it any sooner
+        # destroys a running thread and aborts the setup on the way out.
+        self._worker.finished.connect(self._drop_worker)
         self._worker.start()
 
     def _on_progress(self, text: str, frac: float) -> None:
@@ -1846,9 +1855,21 @@ class InstallerCard(QWidget):
         self.start_button.setEnabled(True)
         self.start_button.setText("Install again" if ok else
                                   self.start_button.text())
-        if self._worker is not None:
-            self._worker.deleteLater()
-            self._worker = None
+
+    def _drop_worker(self) -> None:
+        """Let go of the job thread once its run() has truly ended.
+
+        The worker reports its outcome from inside ``run()``, and the thread
+        stays alive a moment longer while its ``finally`` clears the staging it
+        unpacked. Only ``QThread.finished`` - emitted when ``run()`` returns -
+        is a safe point to destroy it: dropping the reference earlier makes Qt
+        free a thread that is still running, which aborts the whole setup in a
+        way the crash dialog never gets to show.
+        """
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _launch_app(self) -> None:
         if self._program is None:

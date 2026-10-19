@@ -397,6 +397,72 @@ def test_the_newest_and_the_notice(inst: object) -> None:
           "could read it")
 
 
+# --- five: the job thread is let go only when it has truly ended ---
+
+def test_the_worker_lifetime(inst: object) -> None:
+    """The card must not destroy the job thread while it is still running.
+
+    The Worker says its outcome from inside ``run()``, and the thread lives a
+    moment longer while its ``finally`` clears the tree it just unpacked. Letting
+    go of the QThread on that outcome - as the installer used to - frees a thread
+    that is still running, and Qt aborts the process: seen on Linux as a SIGABRT
+    whose fatal frame sits in libQt6Core right after an install that worked. The
+    fix names the outcome signal away from ``finished`` (so ``QThread.finished``
+    stays free) and hangs the release on that real signal, which fires only once
+    ``run()`` has returned - the same shape ``GitHubProbe`` already follows.
+    """
+    print("\n5. the job thread is released only once it has actually stopped")
+    from PyQt6.QtCore import QThread, QCoreApplication, pyqtSignal
+    from PyQt6.QtWidgets import QApplication
+
+    QCoreApplication.instance() or APP.append(QApplication([]))
+
+    # The Worker must carry its own ``outcome`` and leave ``finished`` inherited
+    # from QThread; a re-added custom ``finished`` would shadow the base one and
+    # leave the card with nothing to release on.
+    worker_cls = inst.Worker
+    check("outcome" in vars(worker_cls) and "finished" not in vars(worker_cls),
+          "the Worker shadows QThread.finished with its own signal again, so "
+          "the card has no thread-ended signal to release the job on")
+    text = SOURCE.read_text(encoding="utf-8")
+    check("self._worker.outcome.connect(self._on_finished)" in text,
+          "the card no longer reads the job's outcome signal")
+    check("self._worker.finished.connect(self._drop_worker)" in text
+          and "def _drop_worker" in text,
+          "the card does not let go of the job thread on QThread's real finished")
+    check("finished = pyqtSignal" not in text,
+          "a custom 'finished' signal is back on a QThread subclass, hiding the "
+          "one the release is tied to")
+
+    # A thread shaped like the job: it reports, then keeps running through the
+    # cleanup window. Reading its state at the moment of the report is exactly
+    # where the old release would have destroyed a live thread.
+    class JobLike(QThread):
+        outcome = pyqtSignal(bool, str)
+
+        def run(self) -> None:
+            self.outcome.emit(True, "done")      # said while still running
+            time.sleep(0.4)                        # the cleanup window after it
+
+    seen: dict = {}
+    job = JobLike()
+    job.outcome.connect(lambda ok, words: seen.setdefault("running",
+                                                          job.isRunning()))
+    job.start()
+    for _ in range(40):                            # let the queued report land
+        QCoreApplication.processEvents()
+        if seen:
+            break
+        time.sleep(0.02)
+    check(seen.get("running") is True,
+          "the outcome landed only after the thread had stopped, so this no "
+          "longer pins the release to a moment while the thread still runs")
+    STRAYS.append(job)
+    job.wait(2000)
+    check(not job.isRunning(),
+          "the job thread never ended, so the release point proves nothing")
+
+
 def main() -> int:
     try:
         import installer as inst
@@ -408,6 +474,7 @@ def main() -> int:
     test_a_refused_move(inst)
     test_the_waits_are_milliseconds(inst)
     test_the_newest_and_the_notice(inst)
+    test_the_worker_lifetime(inst)
 
     if FAILURES:
         print()
