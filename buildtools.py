@@ -604,11 +604,11 @@ SHIPPED_CATALOG = {
     # opens a transport, so it is the second shipped addon that must not ride the
     # app's session - and the reason the connection panel says "none" at all.
     "password_manager": ([], "none", "password_managericon.png"),
-    # The virtual desktop. Its SFTP view rides the app's session while every
-    # shell it opens brings its own socket, so its manifest is honest that
-    # both kinds of link are in one tab - the same word berry_web uses for a
-    # different reason.
-    "berryvm": (["ssh", "sftp"], "both", "berryvmicon.png"),
+    # The virtual desktop. The only thing that reaches off this machine is the
+    # app's file session: the device pane, viewer and media player pull over
+    # SFTP, and every shell it opens is the machine's own local process, so it
+    # rides the app's session and needs no socket of its own.
+    "berryvm": (["sftp"], "app", "berryvmicon.png"),
 }
 
 
