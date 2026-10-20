@@ -368,8 +368,8 @@ def test_manifest(addon: Any, api: Api) -> None:
     print("\n1. what the addon says it is")
     check(str(addon.ADDON.get("name")) == "BerryVM",
           f"the name the store shows: {addon.ADDON.get('name')!r}")
-    check(str(addon.ADDON.get("version")) == "2.9",
-          f"the shipped version is 2.9: {addon.ADDON.get('version')!r}")
+    check(str(addon.ADDON.get("version")) == "2.10",
+          f"the shipped version is 2.10: {addon.ADDON.get('version')!r}")
     check(str(addon.ADDON.get("api")) == "1", "the api version is 1")
     check(sorted(addon.ADDON.get("requires") or []) == ["sftp", "ssh"],
           f"both transports are declared: {addon.ADDON.get('requires')!r}")
@@ -456,6 +456,39 @@ def test_home_tree(addon: Any, api: Api) -> None:
     addon._ensure_home()
     check(marker.is_file() and marker.read_text() == "kept",
           "a second _ensure_home is a no-op, not a rebuild")
+    # The memo is per user, not per process: logging in under a new name
+    # moves ``vm_home()``, and a home nobody built is the reason a real
+    # machine's console once died of ENOENT at spawn. The new user's tree
+    # has to be there before a shell, a pane or the desktop itself reaches
+    # for it.
+    api.config.set("default_user", "newmate")
+    addon._ensure_home()
+    check(addon.vm_home().is_dir()
+          and all((addon.vm_home() / name).is_dir()
+                  for name in addon.USER_SUBDIRS),
+          "a login under a new name builds that user's home and its folders")
+    check(marker.is_file() and marker.read_text() == "kept",
+          "and the rebuild leaves everything that was already there alone")
+    # The desktop's coming-up covers the login itself: a user the process
+    # never built for gets a home before the icon layer is even raised.
+    api.config.set("default_user", "logtest")
+    addon._desktop_on()
+    check(addon.vm_home().is_dir(),
+          "coming up on the desktop lays down the logged-in user's home")
+    # A console spawned under a name nobody built still starts: the spawn
+    # guarantees its working folder rather than trusting the memo.
+    api.config.set("default_user", "cmdtest")
+    con = addon.open_console()
+    spawn = api.last_set(f"{con}_term", "spawn") or {}
+    check(Path(str(spawn.get("cwd") or "")).is_dir(),
+          "the console's spawn folder really exists - no ENOENT at boot")
+    # And a local pane walked into a missing folder inside the VM's own
+    # tree lays it down rather than showing an unreadable error.
+    api.config.set("default_user", "panetest")
+    addon.pane_list(addon.PANE_LOCAL, str(addon.vm_home()))
+    check(addon.vm_home().is_dir(),
+          "a pane walked into a home that was not there builds it")
+    api.config.set("default_user", "")
 
 
 def test_settings_mirror(addon: Any, api: Api) -> None:
@@ -977,6 +1010,8 @@ def test_console(addon: Any, api: Api) -> None:
     check(bool(spawn.get("cmd")), "the shell to run is named")
     check(spawn.get("cwd") == str(addon.vm_home()),
           "the shell is spawned in the Linux-shaped home")
+    check(Path(str(spawn.get("cwd") or "")).is_dir(),
+          "and that home is a real folder the worker can start in")
     check(spawn.get("aliases") == {"ll": "dir /al"},
           "and the profile's aliases ride into the worker")
     env = spawn.get("env") or {}
@@ -1269,7 +1304,7 @@ def fresh(api: Api) -> None:
     addon_module._xfer_clip = []
     addon_module.paint_state = {}
     addon_module.media_state = {}
-    addon_module.home_ready = False
+    addon_module.home_ready = ""
     # The taskbar's skip-when-unchanged signature and the tray clock's last
     # written text are module state too; a fresh section has to be able to
     # paint its first row, not be told it already showed it.

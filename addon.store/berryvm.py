@@ -65,7 +65,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "BerryVM",
-    "version": "2.9",
+    "version": "2.10",
     "author": "fligma",
     "api": 1,
     "requires": ["sftp", "ssh"],
@@ -1118,7 +1118,7 @@ pane_path: dict = {}           # pane prefix -> the folder that side shows
 # The cross-window transfer clipboard: rows a Copy left in one pane, waiting
 # for a Paste in the other. Each item is {"pane","name","path","directory"}.
 _xfer_clip: list = []
-home_ready: bool = False       # ``_ensure_home()`` has run in this process
+home_ready: str = ""           # the user ``_ensure_home()`` last built a home for
 
 #: The desktop's own layout memory. Positions are keyed by a tile's
 #: persistent name (the caption it shipped with, before any rename);
@@ -1211,7 +1211,7 @@ def shutdown() -> None:
     console_seq = 0
     ssh_seq = 0
     always_on_top.clear()
-    home_ready = False
+    home_ready = ""
     _desk_positions = {}
     _desk_renames = {}
     minimized = {}
@@ -1796,11 +1796,16 @@ def _arm_desktop_off() -> None:
 
 
 def _desktop_on() -> None:
-    """Bring the desktop up for the person who has logged in (or skipped): the
-    cosplay frames fold away, the taskbar shows again, the icon layer stands
-    back up, and the welcome toast lands."""
+    """Bring the desktop up for the person who has logged in (or skipped): a
+    home is laid down for them first, then the cosplay frames fold away, the
+    taskbar shows again, the icon layer stands back up, and the welcome toast
+    lands."""
     if api is None:
         return
+    # A login can name a user this process has never built a home for; a
+    # real machine has that person's folder waiting before their desktop
+    # shows, and so does this one.
+    _ensure_home()
     for win_id in COSPLAY_WINDOWS:
         if win_id in open_window_ids():
             close_window(win_id)
@@ -2393,18 +2398,26 @@ def home_root() -> Path:
 
 
 def _ensure_home() -> Path:
-    """Create the VM's home layout once, and only once, per running addon.
+    """Create the VM's home layout, and lay down a new one whenever the
+    desktop's user changes.
 
     ``api.paths.data`` has already made the folder itself; what is added here
     is the shape inside it - a Linux tree (``bin etc home tmp usr var`` with a
     ``home/<user>`` full of the usual per-user folders) beside the ``Desktop``
     and ``config`` the desktop itself keeps. So the console has somewhere to
     start that looks like a real home, and the settings mirror has a place to
-    sit. A second call is a no-op rather than a repeat mkdir.
+    sit.
+
+    The memo is kept *per user*, not per process: logging in under a new
+    account moves ``vm_home()`` to a folder nobody ever made, and a shell
+    spawned into it died of ``ENOENT`` exactly like a machine booted without
+    a home. So a call after a login builds the new user's tree; a second
+    call under the same name is a no-op rather than a repeat mkdir.
     """
     global home_ready
     root = home_root()
-    if home_ready:
+    who = vm_user()
+    if home_ready == who:
         return root
     targets = [root / name for name in HOME_DIRS]
     targets += [root / name for name in LINUX_DIRS]
@@ -2416,7 +2429,7 @@ def _ensure_home() -> Path:
         except OSError:
             pass
     _seed_fs_files(root, user_home)
-    home_ready = True
+    home_ready = who
     return root
 
 
@@ -4036,6 +4049,7 @@ def open_explorer() -> str:
     lives in berry sftp, opened by its own icon."""
     if api is None:
         return ""
+    _ensure_home()
     title = CAPTIONS[P_EXPLORER]
     open_window(_program_entry(P_EXPLORER, title, explorer_spec()))
     opened[P_EXPLORER] = {"title": title, "kind": "explorer"}
@@ -4125,6 +4139,17 @@ def _pane_list_local(where: str) -> None:
     target = Path(str(where or ".")).expanduser()
     pane_path[PANE_LOCAL] = str(target)
     _set_path(PANE_LOCAL, str(target))
+    if not target.is_dir():
+        # A missing folder inside the VM's own tree - a fresh account's home,
+        # one deleted from under an open pane - is the machine's business: a
+        # real computer's home is just *there*, so lay it down rather than
+        # show an error. Anything outside the tree stays a plain bad path and
+        # fails below the way it always did.
+        try:
+            target.relative_to(home_root())
+            target.mkdir(parents=True, exist_ok=True)
+        except (ValueError, OSError):
+            pass
     try:
         names = sorted((p.name for p in target.iterdir()), key=str.lower)
     except (OSError, ValueError) as error:
@@ -5073,6 +5098,13 @@ def open_console(start: str = "") -> str:
     win_id = f"{CONSOLE_PREFIX}{console_seq}"
     term_id = f"{win_id}_term"
     cwd = str(start or vm_home())
+    # The spawn's working folder has to exist or the worker dies of ENOENT
+    # before a prompt is ever drawn; a home deleted from under the console
+    # (by the file pane, say) is simply laid back down here.
+    try:
+        Path(cwd).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     open_window(_program_entry(win_id, "Command Prompt",
                                console_spec(win_id, cwd)))
     opened[win_id] = {"title": "Command Prompt", "kind": "console",
