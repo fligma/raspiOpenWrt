@@ -300,6 +300,18 @@ ICON_MEDIA = (
     '</svg>'
 )
 
+#: The four-colour flag the Start button wears: XP's own waving Windows
+#: logo - red top-left, green top-right, blue bottom-left, yellow bottom-
+#: right - each quadrant skewed a little so the whole reads as cloth.
+ICON_FLAG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<path d="M3 9.5 15 7v8.5H3z" fill="#ef4a3a"/>'
+    '<path d="M17 6.7 29 4.2v11.3H17z" fill="#7ac142"/>'
+    '<path d="M3 17.5h12V26L3 23.5z" fill="#2a9fd6"/>'
+    '<path d="M17 17.5h12V28l-12-2.7z" fill="#ffc20e"/>'
+    '</svg>'
+)
+
 #: Program id to the mark its desktop tile wears.
 TILE_ICONS = {
     P_EXPLORER: ICON_COMPUTER,
@@ -515,7 +527,11 @@ def desktop_sheet() -> str:
         "QWidget#berryDesktop { background: " + wall_css() + "; }"
         # The frame: a grey client area under a themed 2px border, the way
         # every XP window is drawn. ``round_corners`` squared or rounds it.
-        "#addonWindow { background: #ece9d8; border: 2px solid "
+        # ``color`` here is the frame's whole text palette: XP is a light
+        # scheme, so the words on any client area are dark by default. A
+        # control that wants otherwise (a title bar, a coloured menu column)
+        # says so with its own rule, which beats this inherited one.
+        "#addonWindow { background: #ece9d8; color: #000000; border: 2px solid "
         + p["frame"] + "; border-radius: "
         + ("3px" if round_corners() else "0px") + "; }"
         "#addonWindowBar { background: " + _bar_css(p) + "; min-height: "
@@ -523,12 +539,31 @@ def desktop_sheet() -> str:
         "#addonWindowBar QLabel { color: " + caption_text()
         + "; font-weight: bold; font-size: "
         + str(scaled(caption_font())) + "px; }"
-        "#addonWindowBar QPushButton { border: 1px solid #ffffff;"
-        " border-radius: 2px; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 #f1927c, stop:0.3 #e04e00, stop:1 #b93000);"
-        " color: #ffffff; font-weight: bold; }"
-        "#addonWindowBar QPushButton:hover { background: #ff7a3c; }"
-        "#addonWindowBar QPushButton:pressed { background: #a02800; }"
+        # The three caption controls. Real XP paints minimize and maximize as
+        # little Luna-green squares and the close as a red one, each with a
+        # pale rim. The object names the host gives them (btnMin/btnMax/
+        # btnClose) are targeted directly, which both buys the authentic two-
+        # colour split and outranks the grey client button rule below - that
+        # rule is otherwise as specific as a plain bar rule and would win it.
+        "#addonWindowBar QPushButton { color: #ffffff; font-weight: bold;"
+        " border: 1px solid #dcefff; border-radius: 2px; }"
+        "#addonWindowBar QPushButton#btnMin,"
+        "#addonWindowBar QPushButton#btnMax { background: qlineargradient("
+        "x1:0,y1:0,x2:0,y2:1, stop:0 #63c063, stop:0.5 #3f9b3f,"
+        " stop:1 #237c23); border: 1px solid #d6f5d6; }"
+        "#addonWindowBar QPushButton#btnMin:hover,"
+        "#addonWindowBar QPushButton#btnMax:hover { background:"
+        " qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #8ad58a,"
+        " stop:1 #3f9b3f); }"
+        "#addonWindowBar QPushButton#btnMin:pressed,"
+        "#addonWindowBar QPushButton#btnMax:pressed { background: #1f6b1f; }"
+        "#addonWindowBar QPushButton#btnClose { background: qlineargradient("
+        "x1:0,y1:0,x2:0,y2:1, stop:0 #f28a70, stop:0.3 #e04e00,"
+        " stop:1 #b93000); border: 1px solid #ffd9c2; }"
+        "#addonWindowBar QPushButton#btnClose:hover { background:"
+        " qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ffab8f,"
+        " stop:1 #d24400); }"
+        "#addonWindowBar QPushButton#btnClose:pressed { background: #9c2800; }"
         # The client-area furniture, so any program looks XP without trying.
         "#addonWindow QPushButton { background: qlineargradient(x1:0,y1:0,"
         " x2:0,y2:1, stop:0 #ffffff, stop:0.45 #f2f4f8, stop:0.55 #dfe4ee,"
@@ -557,26 +592,39 @@ def desktop_sheet() -> str:
         # The Start flyout, painted like an XP menu: a themed header banner,
         # a white left column for the programs, a coloured right column for
         # the folders and a themed green footer holding the two ways out.
-        "#berryStartMenu { background: #ffffff; }"
+        # The white column's text is spelled dark on purpose: the lists would
+        # otherwise take the app's own (light-on-dark) palette and vanish.
+        "#berryStartMenu { background: #ffffff; color: #000000; }"
         "#berryStartHead { background: " + p["bar"] + "; color: #ffffff;"
-        " font-weight: bold; padding: 8px 12px; }"
+        " font-weight: bold; padding: 8px 12px;"
+        " border-top: 1px solid rgba(255,255,255,0.55);"
+        " border-bottom: 2px solid rgba(255,255,255,0.45); }"
         "#berryStartSub { color: " + p["select"] + "; font-weight: bold;"
         " padding: 2px 6px; background: #ffffff; }"
-        "#berryStartLeft { background: #ffffff; }"
-        "#berryStartLeft QListWidget { background: #ffffff; border: none; }"
+        "#berryStartLeft { background: #ffffff; color: #000000;"
+        " border-right: 1px solid " + p["frame"] + "; }"
+        "#berryStartLeft QListWidget { background: #ffffff; color: #000000;"
+        " border: none; }"
+        "#berryStartLeft QListWidget::item { color: #000000;"
+        " padding: 4px 6px; border-radius: 3px; }"
+        "#berryStartLeft QListWidget::item:hover { background: #d6e6fb; }"
         "#berryStartLeft QListWidget::item:selected { background: "
-        + p["select"] + "; color: #ffffff; border-radius: 3px; }"
+        + p["select"] + "; color: #ffffff; }"
         "#berryStartRight { background: " + p["frame"] + "; }"
         "#berryStartRight QListWidget { background: " + p["frame"]
         + "; border: none; color: #ffffff; }"
-        "#berryStartRight QListWidget::item { padding: 4px 6px; }"
+        "#berryStartRight QListWidget::item { padding: 4px 6px;"
+        " border-radius: 3px; }"
+        "#berryStartRight QListWidget::item:hover"
+        " { background: rgba(255, 255, 255, 0.18); }"
         "#berryStartRight QListWidget::item:selected"
-        " { background: rgba(255, 255, 255, 0.25); border-radius: 3px; }"
-        "#berryStartFoot { background: " + p["start"] + "; }"
+        " { background: rgba(255, 255, 255, 0.28); }"
+        "#berryStartFoot { background: " + p["start"]
+        + "; border-top: 1px solid rgba(255,255,255,0.5); }"
         "#berryStartFoot QPushButton { background: transparent;"
         " border: none; color: #ffffff; font-weight: bold; padding: 5px; }"
         "#berryStartFoot QPushButton:hover {"
-        " background: rgba(255, 255, 255, 0.2); }"
+        " background: rgba(255, 255, 255, 0.2); border-radius: 3px; }"
     )
 
 
@@ -609,6 +657,13 @@ def taskbar_sheet() -> str:
         + "; border: 1px solid " + p["item_sel_border"] + "; }"
         "#berryTray { background: " + p["tray"]
         + "; border-left: 1px solid " + p["tray_edge"] + "; }"
+        # The little marks in the tray lie flat on the blue until the mouse
+        # comes over one, exactly like XP's notification icons.
+        "#berryTrayBtn { background: transparent; border: none;"
+        " color: #ffffff; padding: 0px 5px; font-size: "
+        + str(scaled(11)) + "px; }"
+        "#berryTrayBtn:hover { background: rgba(255, 255, 255, 0.22);"
+        " border-radius: 2px; }"
         "#berryClock { color: #ffffff; font-weight: bold; background:"
         " transparent; padding: 0px 10px; }"
     )
@@ -756,18 +811,18 @@ TAB_SPEC = {
          "expand": True,
          "on": ["activated", "closed", "moved", "resized",
                  "minimized", "restored", "maximized", "shortcut"],
-         "shortcuts": [{"keys": "Alt+Tab", "event": "shortcut"},
-                       {"keys": "Up", "event": "shortcut"},
-                       {"keys": "Down", "event": "shortcut"},
-                       {"keys": "Left", "event": "shortcut"},
-                       {"keys": "Right", "event": "shortcut"},
-                       {"keys": "B", "event": "shortcut"},
-                       {"keys": "A", "event": "shortcut"}],
+         # Only the Alt+Tab chord is grabbed. A lone-key shortcut is a
+         # WindowShortcut: Qt weighs it before the focused child sees the
+         # key, so registering bare arrows or the letters a/b (the Konami
+         # trigger) would eat every one typed into a Command Prompt terminal -
+         # up/history and the letters a and b would simply never reach the
+         # shell. A chord that no shell line starts with is safe to keep.
+         "shortcuts": [{"keys": "Alt+Tab", "event": "shortcut"}],
          "children": []},
         {"kind": "row", "id": TASKBAR, "object_name": "berryTaskbar",
          "children": [
              {"kind": "button", "id": START_BTN, "object_name": "berryStart",
-              "text": "Start", "on": ["clicked"],
+              "text": "start", "icon": ICON_FLAG, "on": ["clicked"],
               "tooltip": "Open one of BerryVM's programs; a program already "
                          "open is raised rather than started again"},
              {"kind": "list", "id": TASK_LIST, "object_name": "berryTasks",
@@ -2679,20 +2734,31 @@ def close_start() -> None:
 
 
 def open_start() -> str:
-    """Stand the flyout up in the desktop's lower-left, over the Start
-    button. Already open, it is simply raised again; the window is a plain
-    frame so a person can also shut it with its close box."""
+    """Stand the flyout up as an XP Start menu, not a window: drawn with no
+    title bar and no close box, anchored to the desktop's bottom-left corner
+    so it grows up from the Start button. Already open, it is simply raised
+    again. It is dismissed the way an XP menu is - by choosing something, or
+    by pressing Start again (see :func:`start_pressed`) - never by a title-bar
+    cross, so the frame's ``closable``/``chrome`` are both off."""
     if api is None:
         return ""
     if P_START in open_window_ids():
         raise_window(P_START)
         return P_START
     _ensure_home()
-    wide = scaled(380)
+    wide = scaled(360)
     tall = scaled(440)
+    # Seat the bottom edge on the canvas floor, just above the taskbar. The
+    # canvas is read in device pixels while the primitive zooms the numbers it
+    # is handed, so the place is worked out in device pixels and divided back
+    # through the interface zoom before it is passed down.
+    _, area_h = _desktop_area()
+    zoom = _ui_zoom() or 1.0
+    top = max(0.0, area_h / zoom - tall)
     open_window({
-        "id": P_START, "title": "Start", "closable": True,
-        "width": wide, "height": tall,
+        "id": P_START, "title": "Start", "chrome": False,
+        "closable": False, "resizable": False,
+        "x": 0, "y": int(top), "width": wide, "height": tall,
         "spec": start_flyout_spec(),
     })
     opened[P_START] = {"title": "Start", "kind": "start"}
@@ -5271,9 +5337,11 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         refresh_taskbar()
         return
     # 1c. The desktop's own shortcut: Alt+Tab cycles the windows through
-    # a choose prompt, and the lone arrow/B/A keys feed the Konami buffer.
-    # A global grab is not offered to addons, so a chord fires only while
-    # the Berry Manager window has focus.
+    # a choose prompt. The lone-key Konami capture is no longer grabbed by a
+    # shortcut (it ate keystrokes in the Command Prompt terminal), but the
+    # buffer is still fed through here so the code stays reachable. A global
+    # grab is not offered to addons, so a chord fires only while the Berry
+    # Manager window has focus.
     if body == DESKTOP and event == "shortcut":
         keys = str(payload.get("keys") or "").lower()
         if keys == "alt+tab":
