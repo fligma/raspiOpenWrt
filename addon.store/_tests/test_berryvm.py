@@ -5,12 +5,13 @@ BerryVM is a desktop, so the shapes worth checking without a window are the
 ones the desktop itself is supposed to keep in step: an icon layer that is
 born chromeless and stays at the back, a taskbar that follows what the
 canvas is holding, a Start flyout that opens programs and a Log Off that
-shuts them, two file panes that read from this machine and from the app's
-file session, an editor that refuses what it cannot hold and can Save As its
+signs back out to the welcome screen, a local file picker and a separate
+device browser that hand files
+to each other, an editor that refuses what it cannot hold and can Save As its
 way to a new file, a viewer that pulls a remote picture down before showing
-it, a console that feeds a real local shell, and a Display Properties window
-whose sliders and toggles reach the config, the paint and the icons - both
-on Apply and live as each dial moves.
+it, a console and an ssh window that feed real shells, and a Control Panel
+window whose sliders and toggles reach the config, the paint and
+the icons - both on Apply and live as each dial moves.
 
 Covered here:
 
@@ -24,16 +25,20 @@ Covered here:
 * the theme sheets, the icon layer's shape, and the taskbar following the
   desktop's windows;
 * the Start flyout, the desktop's right-click, and Log Off;
-* the Explorer: both panes, opening across the file session, uploads,
-  downloads, folders, renames and deletes;
+* the local-only My Computer and the separate berry sftp browser: opening
+  across the file session, uploads, downloads, folders, renames and deletes;
+* berry ssh: the connect prompt, the parsed settings, a password and a key
+  file, and the shell's news landing on its window;
+* files moved between the two windows by a drag-and-drop and by Copy/Paste;
 * Notepad's refusals, its save, its Save As, and a scratch buffer finding
   its file;
 * the Picture Viewer's remote pull and its window-replacing zoom;
 * a local console driven through ``spawn``, with the aliases it carries;
-* Display Properties: the density sliders, the caption controls and their
+* the Control Panel: the density sliders, the caption controls and their
   live preview, the wallpaper pickers, the size presets, and Defaults;
 * Paint's canvas and Media Player's playlist, the theme card's repaint,
-  the window-management layout, the XP cosplay, and the logon bubble.
+  the window-management layout, the XP cosplay - boot, login, accounts and
+  power - and the logon bubble.
 
 Run from the Test panel, or::
 
@@ -97,6 +102,40 @@ def find_kind(node: Any, kind: str) -> dict:
     elif isinstance(node, (list, tuple)):
         for item in node:
             found = find_kind(item, kind)
+            if found:
+                return found
+    return {}
+
+
+def collect_ids(node: Any) -> set:
+    """Every ``id`` a spec tree carries, so a test can say a window holds one
+    table and not another without knowing the shape around either."""
+    found: set = set()
+    if isinstance(node, dict):
+        if node.get("id"):
+            found.add(str(node["id"]))
+        for value in node.values():
+            found |= collect_ids(value)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            found |= collect_ids(item)
+    return found
+
+
+def find_id(node: Any, want: str) -> dict:
+    """The one node of a spec tree carrying id ``want`` - the way a test
+    reaches a named control to read its ``expand`` or ``password`` flag
+    without knowing where in the layout it sits."""
+    if isinstance(node, dict):
+        if str(node.get("id") or "") == want:
+            return node
+        for value in node.values():
+            found = find_id(value, want)
+            if found:
+                return found
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            found = find_id(item, want)
             if found:
                 return found
     return {}
@@ -329,11 +368,11 @@ def test_manifest(addon: Any, api: Api) -> None:
     print("\n1. what the addon says it is")
     check(str(addon.ADDON.get("name")) == "BerryVM",
           f"the name the store shows: {addon.ADDON.get('name')!r}")
-    check(str(addon.ADDON.get("version")) == "2.6",
-          f"the shipped version is 2.6: {addon.ADDON.get('version')!r}")
+    check(str(addon.ADDON.get("version")) == "2.8",
+          f"the shipped version is 2.8: {addon.ADDON.get('version')!r}")
     check(str(addon.ADDON.get("api")) == "1", "the api version is 1")
-    check(sorted(addon.ADDON.get("requires") or []) == ["sftp"],
-          f"only the file transport is declared: {addon.ADDON.get('requires')!r}")
+    check(sorted(addon.ADDON.get("requires") or []) == ["sftp", "ssh"],
+          f"both transports are declared: {addon.ADDON.get('requires')!r}")
     check(str(addon.ADDON.get("connection")) == "app",
           "the manifest is honest that everything rides the app's own "
           "session - the shells are this machine's local processes")
@@ -350,13 +389,18 @@ def test_manifest(addon: Any, api: Api) -> None:
     ids = [pid for pid, _cap in addon.PROGRAMS]
     check(ids == [addon.P_EXPLORER, addon.P_NOTEPAD, addon.P_VIEWER,
                   addon.P_CONSOLE, addon.P_BROWSER, addon.P_SETTINGS,
-                  addon.P_PAINT, addon.P_MEDIA],
-          f"the desktop ships eight programs in order: {ids}")
+                  addon.P_PAINT, addon.P_MEDIA, addon.P_SSH, addon.P_SFTP],
+          f"the desktop ships ten programs in order: {ids}")
     check("Paint" in addon.CAPTIONS.values()
           and "Media Player" in addon.CAPTIONS.values(),
           "the new programs are captioned the way Start names them")
+    check("berry ssh" in addon.CAPTIONS.values()
+          and "berry sftp" in addon.CAPTIONS.values(),
+          "the SSH terminal and the SFTP browser are captioned too")
     check(addon.CAPTIONS[addon.P_EXPLORER] == "My Computer",
           "the file manager wears the XP name")
+    check(addon.CAPTIONS[addon.P_SETTINGS] == "Control Panel",
+          "the settings window is named for the control panel it mocks")
 
 
 def test_helpers(addon: Any, api: Api) -> None:
@@ -382,9 +426,21 @@ def test_helpers(addon: Any, api: Api) -> None:
     api.config_values["ui_scale"] = 120
     check(addon.scale() == 120 and addon.scaled(100) == 120,
           "at 120% the sizes the desktop picks itself grow")
-    api.config_values["ui_scale"] = 300
-    check(addon.scale() == 160, "and the dial is clamped at its ceiling")
-    api.config_values["ui_scale"] = 100
+    api.config_values["ui_scale"] = 400
+    check(addon.scale() == 300, "and the widened dial is clamped at its top")
+    api.config_values["ui_scale"] = 30
+    check(addon.scale() == 60, "and at its bottom")
+    del api.config_values["ui_scale"]
+    # The taskbar's own marks: read from config, clamped to their ranges.
+    check(addon.task_icon() == addon.DEFAULTS["task_icon"]
+          and addon.tray_icon() == addon.DEFAULTS["tray_icon"],
+          "the taskbar and tray item sizes default to what the screen fit chose")
+    api.config_values["task_icon"] = 64
+    api.config_values["tray_icon"] = 4
+    check(addon.task_icon() == 40 and addon.tray_icon() == 10,
+          "and both dials clamp to their own ranges")
+    del api.config_values["task_icon"]
+    del api.config_values["tray_icon"]
 
 
 def test_home_tree(addon: Any, api: Api) -> None:
@@ -460,7 +516,7 @@ def test_desktop_and_taskbar(addon: Any, api: Api) -> None:
           "the tiles were built at the desktop's own scale")
     check(addon.CAPTIONS[addon.P_SETTINGS]
           in [t["cells"][0] for t in tiles],
-          "Display Properties is one of them")
+          "Control Panel is one of them")
     # Window management, and the taskbar following it.
     addon.start_program(addon.P_EXPLORER)
     check(addon.P_EXPLORER in api.windows, "My Computer is on the desktop")
@@ -514,8 +570,18 @@ def test_desktop_and_taskbar(addon: Any, api: Api) -> None:
           == addon.scaled(addon.task_height()),
           "the bar is pinned to one button's height, not Qt's tall default")
     check(api.last_set(addon.TASK_LIST, "icon_size")
-          == addon.scaled(addon.TASKBAR_ICON),
-          "and its buttons wear small marks that fit a slim bar")
+          == addon.scaled(addon.task_icon()),
+          "and its buttons wear the configured mark size that fits a slim bar")
+    api.config_values["task_icon"] = 24
+    addon_module._taskbar_shown = ()
+    addon.refresh_taskbar()
+    check(api.last_set(addon.TASK_LIST, "icon_size") == addon.scaled(24),
+          "raising task_icon grows the buttons on the next rewrite")
+    del api.config_values["task_icon"]
+    # Set the bar back to the shipped mark and clear the skip-memo, so the
+    # rewrite guard below starts from a bar that truly has nothing to redo.
+    addon_module._taskbar_shown = ()
+    addon.refresh_taskbar()
     drawn = api.last_set(addon.TASK_LIST, "items") or []
     check(len(drawn) >= 2
           and all(str(row.get("icon") or "").startswith("<svg")
@@ -578,8 +644,9 @@ def test_menus(addon: Any, api: Api) -> None:
     check(api.opens_for(addon.ICONS) == 2,
           "Refresh shut the layer and stood it up again")
     # The flyout's own shape: a left row launches by caption, and the
-    # right column's Control Panel reaches Display Properties. These come
-    # before the footer's two errands, which sign the desktop out.
+    # right column's Control Panel row reaches the settings window - it is
+    # the program's own caption now. These come before the footer's two
+    # ways out, which ask first and then sign the desktop out.
     addon.on_widget(addon.TAB, f"{addon.P_START}_all", "activated",
                     {"text": "Media Player"})
     check(addon.P_MEDIA in api.windows,
@@ -587,7 +654,7 @@ def test_menus(addon: Any, api: Api) -> None:
     addon.on_widget(addon.TAB, f"{addon.P_START}_side", "activated",
                     {"text": "Control Panel"})
     check(addon.P_SETTINGS in api.windows,
-          "the flyout's Control Panel row brings Display Properties up")
+          "the flyout's Control Panel row brings the settings window up")
     # About, and the Escape that means nothing happens - checked while the
     # Paint window from the top of this section is still open.
     api.picks.append("About BerryVM")
@@ -598,24 +665,35 @@ def test_menus(addon: Any, api: Api) -> None:
     addon.start_menu()
     check(api.windows.count(addon.P_PAINT) == 1,
           "an Escape on the menu changes nothing")
-    # The footer's Turn Off is the XP joke; it signs out first, so every
-    # program window - the Paint buffer included - is gone behind it.
-    addon.on_widget(addon.TAB, f"{addon.P_START}_shutdown", "clicked", {})
-    check(any("joke" in line.lower() for line in api.informations()),
-          "Turn Off Computer is the sign-out joke, and says so")
-    check(api.windows.count(addon.P_PAINT) == 0,
-          "and the sign-out took the Paint window with it")
-    # The flyout footer's Log Off shuts every program window and keeps the
-    # desktop, exactly like the Start menu's own Log Off errand.
+    # The footer's two ways out both open XP's three-button ask. Log Off
+    # closes every program window and walks back to the welcome screen -
+    # a no-op on this headless run - so the desktop comes straight back up
+    # with only its icon layer standing.
+    api.picks.append("Log Off")
     addon.on_widget(addon.TAB, f"{addon.P_START}_logoff", "clicked", {})
     check(api.windows == [addon.ICONS],
           f"Log Off left only the icon layer: {api.windows}")
-    check(not addon.opened or list(addon.opened) == [addon.ICONS],
+    check(list(addon.opened) == [addon.ICONS],
           "and the addon's registry agrees")
+    # Cancel - the third button - leaves everything standing: nothing here
+    # has been opened or closed since the log-off put the layer back.
+    addon.start_program(addon.P_PAINT)
+    api.picks.append("Cancel")
+    addon.on_widget(addon.TAB, f"{addon.P_START}_shutdown", "clicked", {})
+    check(addon.P_PAINT in api.windows,
+          "Cancel on the footer ask changes nothing")
+    # Turn Off Computer runs the whole desktop down: every window goes,
+    # the icon layer with it, and only the power button would be left - a
+    # headless run keeps even that to itself.
+    api.picks.append("Turn Off Computer")
+    addon.on_widget(addon.TAB, f"{addon.P_START}_shutdown", "clicked", {})
+    check(api.windows == [],
+          f"Turn Off Computer took the whole desktop: {api.windows}")
+    check(not addon.opened, "and the registry is emptied with it")
 
 
 def test_explorer(addon: Any, api: Api) -> None:
-    print("\n7. My Computer: two panes, one main connection")
+    print("\n7. My Computer (local) and berry sftp (device): two windows")
     fresh(api)
     addon.init(api)
     api.run_clear()
@@ -627,8 +705,25 @@ def test_explorer(addon: Any, api: Api) -> None:
         {"name": "readme.txt", "path": "readme.txt", "directory": False,
          "size": 40},
     ]
+    # My Computer is local-only: it holds the machine's own pane and none of
+    # the device's, which now lives in berry sftp.
     addon.start_program(addon.P_EXPLORER)
-    check(addon.P_EXPLORER in api.windows, "the window is on the desktop")
+    check(addon.P_EXPLORER in api.windows, "My Computer is on the desktop")
+    ex_ids = collect_ids(api.open_entry(addon.P_EXPLORER).get("spec") or {})
+    check(f"{addon.PANE_LOCAL}_table" in ex_ids,
+          "My Computer holds the machine's own pane")
+    check(f"{addon.PANE_REMOTE}_table" not in ex_ids,
+          "and it no longer hosts the device's pane")
+    # berry sftp holds the device's pane, and its table opts into a transfer.
+    addon.start_program(addon.P_SFTP)
+    check(addon.P_SFTP in api.windows, "berry sftp is on the desktop")
+    remote_table = find_kind(
+        api.open_entry(addon.P_SFTP).get("spec") or {}, "table")
+    check(str(remote_table.get("id")) == f"{addon.PANE_REMOTE}_table",
+          "berry sftp holds the device pane")
+    check("drop" in (remote_table.get("on") or [])
+          and remote_table.get("draggable") is True,
+          "its table can be dropped on and dragged from")
     remote_rows = api.last_set(f"{addon.PANE_REMOTE}_table", "rows") or []
     names = [row["cells"][0] for row in remote_rows]
     check("etc" in names and "readme.txt" in names,
@@ -699,10 +794,10 @@ def test_explorer(addon: Any, api: Api) -> None:
     addon.on_widget(addon.TAB, f"{addon.PANE_REMOTE}_delete", "clicked", {})
     check(("remove", "readme.txt") in api.remote_ops,
           "and an accepted one reaches device.remove")
-    # A closed connection is said, not swallowed.
+    # A closed connection is said, on the window that owns the device pane.
     api.sftp_connected = False
     addon.pane_list(addon.PANE_REMOTE, "")
-    note = str(api.last_set(f"{addon.P_EXPLORER}_note", "text")).lower()
+    note = str(api.last_set(f"{addon.P_SFTP}_note", "text")).lower()
     check("not open" in note, f"the closed connection is on the note: {note}")
 
 
@@ -875,6 +970,124 @@ def test_console(addon: Any, api: Api) -> None:
           "and the per-user home sits inside it")
 
 
+def test_ssh(addon: Any, api: Api) -> None:
+    print("\n11. berry ssh: prompted, then connected through the terminal")
+    fresh(api)
+    addon.init(api)
+    api.run_clear()
+    # A password answer reaches the connect as a password; the window is a
+    # fresh ``sh<n>`` with an ssh record and its terminal files under it.
+    api.answers = ["root@10.0.0.5:22", "letmein"]
+    win = addon.open_ssh()
+    check(win == "sh1" and win in api.windows, f"an ssh window stood up: {win}")
+    check((addon.opened.get(win) or {}).get("kind") == "ssh",
+          "the window is recorded as an ssh session")
+    connect = api.last_set(f"{win}_term", "connect") or {}
+    check(connect.get("host") == "10.0.0.5"
+          and int(connect.get("port") or 0) == 22
+          and connect.get("username") == "root"
+          and connect.get("password") == "letmein",
+          f"the connect settings were parsed from the prompt: {connect}")
+    leaf = find_kind(api.open_entry(win).get("spec"), "terminal")
+    check(leaf.get("id") == f"{win}_term"
+          and "ready" in (leaf.get("on") or []),
+          "the window carries a terminal leaf that reports its news")
+    check(addon.terminals.get(f"{win}_term") == win,
+          "the terminal is filed under its window")
+    # The shell's news lands on the window's own status line.
+    addon.on_widget(addon.TAB, f"{win}_term", "ready", {})
+    check("connected" in str(api.last_set(f"{win}_path", "text") or ""),
+          "a ready shell reports on the window's status line")
+    # A blank password means a key file instead; a non-default port parses too.
+    api.answers = ["deploy@box.example:2222", ""]
+    api.file_picks = ["/home/me/id_ed25519"]
+    win2 = addon.open_ssh()
+    check(win2 == "sh2", f"the second session is its own window: {win2}")
+    connect2 = api.last_set(f"{win2}_term", "connect") or {}
+    check(connect2.get("host") == "box.example"
+          and int(connect2.get("port") or 0) == 2222
+          and connect2.get("username") == "deploy"
+          and connect2.get("key_file") == "/home/me/id_ed25519"
+          and not connect2.get("password"),
+          f"a blank password took the key file and the odd port: {connect2}")
+    # Cancelling at the address box opens nothing.
+    api.answers = [None]
+    before = list(api.windows)
+    check(addon.open_ssh() == "" and api.windows == before,
+          "a cancelled prompt opens no window")
+
+
+def test_transfer(addon: Any, api: Api) -> None:
+    print("\n12. Files move between My Computer and berry sftp")
+    fresh(api)
+    addon.init(api)
+    api.run_clear()
+    home = Path(api.paths.data)
+    api.sftp_listing = [
+        {"name": "readme.txt", "path": "readme.txt", "directory": False,
+         "size": 40},
+    ]
+    # Both windows open, so both panes are addressable and each knows where
+    # it stands - the shared module state stays unambiguous.
+    addon.start_program(addon.P_EXPLORER)
+    addon.start_program(addon.P_SFTP)
+    # --- drag a local file onto berry sftp: an upload ---
+    addon.pane_rows[f"{addon.PANE_LOCAL}_table"] = {
+        "a.txt": {"path": str(home / "a.txt"), "directory": False}}
+    addon.on_widget(addon.TAB, f"{addon.PANE_REMOTE}_table", "drop",
+                    {"source": f"{addon.PANE_LOCAL}_table",
+                     "rows": [{"text": "a.txt"}]})
+    check(api.last_upload == str(home / "a.txt"),
+          "a dragged local row was uploaded")
+    check(api.last_remote_target == "a.txt",
+          f"into the folder berry sftp shows: {api.last_remote_target!r}")
+    check(api.sets_count(f"{addon.PANE_REMOTE}_table", "rows") >= 2,
+          "and the device pane was refreshed after the drop")
+    # --- drag a device file onto My Computer: a download ---
+    addon.pane_rows[f"{addon.PANE_REMOTE}_table"] = {
+        "readme.txt": {"path": "readme.txt", "directory": False}}
+    addon.on_widget(addon.TAB, f"{addon.PANE_LOCAL}_table", "drop",
+                    {"source": f"{addon.PANE_REMOTE}_table",
+                     "rows": [{"text": "readme.txt"}]})
+    check(api.last_download == "readme.txt",
+          "a dragged device row was downloaded")
+    # --- a drop back onto its own window is ignored ---
+    api.last_upload = ""
+    addon.on_widget(addon.TAB, f"{addon.PANE_REMOTE}_table", "drop",
+                    {"source": f"{addon.PANE_REMOTE}_table",
+                     "rows": [{"text": "readme.txt"}]})
+    check(api.last_upload == "", "a drop onto its own window does nothing")
+    # --- Copy in My Computer, Paste in berry sftp ---
+    addon.pane_rows[f"{addon.PANE_LOCAL}_table"] = {
+        "b.txt": {"path": str(home / "b.txt"), "directory": False}}
+    api.picks.append("Copy")
+    addon.on_widget(addon.TAB, f"{addon.PANE_LOCAL}_table", "context",
+                    {"text": "b.txt"})
+    check(len(addon._xfer_clip) == 1
+          and addon._xfer_clip[0]["pane"] == addon.PANE_LOCAL,
+          "the row menu's Copy filled the transfer clipboard")
+    api.last_upload = ""
+    addon.on_widget(addon.TAB, f"{addon.PANE_REMOTE}_paste", "clicked", {})
+    check(api.last_upload == str(home / "b.txt"),
+          "Paste in berry sftp uploaded the copied file")
+    # --- Paste into the same window it was copied from: refused, said ---
+    addon._xfer_clip = [{"pane": addon.PANE_REMOTE, "name": "c.txt",
+                         "path": "c.txt", "directory": False}]
+    api.last_download = ""
+    addon.on_widget(addon.TAB, f"{addon.PANE_REMOTE}_paste", "clicked", {})
+    check(api.last_download == "",
+          "a paste into the pane it came from transfers nothing")
+    check("copy a file" in str(
+        api.last_set(f"{addon.P_SFTP}_note", "text") or "").lower(),
+          "and it says which window to copy from instead")
+    # --- a folder is refused, files only ---
+    addon._xfer_clip = [{"pane": addon.PANE_LOCAL, "name": "folder",
+                         "path": str(home / "folder"), "directory": True}]
+    api.last_upload = ""
+    addon.on_widget(addon.TAB, f"{addon.PANE_REMOTE}_paste", "clicked", {})
+    check(api.last_upload == "", "a pasted folder is refused, not uploaded")
+
+
 def test_display_properties(addon: Any, api: Api) -> None:
     print("\n13. Display Properties: Apply reaches everything")
     fresh(api)
@@ -953,6 +1166,22 @@ def test_display_properties(addon: Any, api: Api) -> None:
           "dragging the icon-size slider writes the key straight away")
     check(api.last_set("set_icon_val", "text") == "64",
           "and its read-out keeps step with the knob")
+    # The repaint itself is coalesced: a slider tick queues the rebuild rather
+    # than tearing the icon layer down on every pixel of a drag. Nothing has
+    # landed by the time the key is written; a flush pours it exactly once.
+    opens = api.opens_for(addon.ICONS)
+    addon.on_widget(addon.TAB, "set_icon", "changed", {"value": 72})
+    check(api.opens_for(addon.ICONS) == opens,
+          "a slider move queues the rebuild instead of running it at once")
+    addon.flush_preview()
+    check(api.opens_for(addon.ICONS) == opens + 1,
+          "and the flush pours the coalesced rebuild once")
+    # Apply drains anything still queued, so a commit never waits on the timer.
+    addon.on_widget(addon.TAB, "set_scale", "changed", {"value": 120})
+    opens = api.opens_for(addon.ICONS)
+    addon.settings_apply()
+    check(api.opens_for(addon.ICONS) > opens,
+          "Apply flushes a preview still waiting on the coalescer")
     # A caption colour reaches the config through the same live door.
     addon.on_widget(addon.TAB, "set_active", "changed", {"text": "#123456"})
     check(api.written.get("active_caption") == "#123456",
@@ -1002,6 +1231,8 @@ def fresh(api: Api) -> None:
     addon_module.berry_seq = 0
     addon_module.view_seq = 0
     addon_module.console_seq = 0
+    addon_module.ssh_seq = 0
+    addon_module._xfer_clip = []
     addon_module.paint_state = {}
     addon_module.media_state = {}
     addon_module.home_ready = False
@@ -1010,6 +1241,14 @@ def fresh(api: Api) -> None:
     # paint its first row, not be told it already showed it.
     addon_module._taskbar_shown = ()
     addon_module._clock_shown = None
+    # apply_theme now skips a re-pour identical to the last one, so a fresh
+    # section has to forget that sheet memo too - otherwise init's first paint
+    # is told it already showed the default look and writes nothing.
+    addon_module._theme_sheets_shown = {}
+    # The live-preview backlog and its debounce timer are process state as
+    # well: a new section starts with no queued repaint and no timer running.
+    addon_module._preview_pending = set()
+    addon_module._preview_timer = None
     addon_module._desk_positions = {}
     addon_module._desk_renames = {}
     addon_module.minimized = {}
@@ -1247,8 +1486,8 @@ def test_upgrade_cosplay(addon: Any, api: Api) -> None:
     Every check reads the commands the addon hands its widgets and the pure
     helpers it factors out, so none of it needs Qt: the seek slider, the
     dirty ``*`` title, the four-column listing, a theme repaint, the
-    boot/logon no-ops on a headless run and the Konami code that flips the
-    wallpaper."""
+    boot/logon no-ops on a headless run, the account round-trip behind the
+    welcome screen and the Konami code that flips the wallpaper."""
     print("\n18. the app bumps, the theme and the cosplay")
 
     # --- Media Player: reorder the playlist, drive and seat the seek ---
@@ -1357,20 +1596,135 @@ def test_upgrade_cosplay(addon: Any, api: Api) -> None:
     check("#6a6a72" in sheet,
           "Silver's frame colour repainted the desktop sheet")
 
-    # --- The cosplay: splash, logon and chime all no-op with no window ---
+    # --- The cosplay: boot, welcome, setup and power all no-op headless ---
     fresh(api)
     addon.init(api)
-    for ghost in (addon.SPLASH, addon.LOGON, "sfx"):
+    for ghost in (addon.SPLASH, addon.LOGON, addon.ACC, addon.POWER, "sfx"):
         check(ghost not in api.windows,
               f"{ghost!r} is never left on a headless desktop")
-    # Driving them directly still finds nothing to host them, so nothing lands.
+    # Driving them directly still finds nothing to host them, so nothing
+    # lands: the boot bar hands off, the screens decline, the chime is mute.
     addon.boot_splash()
-    addon.logon_screen()
+    addon.login_screen()
+    addon.account_create_screen()
     addon.startup_sound()
-    check(addon.SPLASH not in api.windows
-          and addon.LOGON not in api.windows
-          and "sfx" not in api.windows,
+    check(all(ghost not in api.windows for ghost in
+              (addon.SPLASH, addon.LOGON, addon.ACC, addon.POWER, "sfx")),
           "the cosplay is a no-op when there is no real window to show it on")
+
+    # --- The cosplay screens' shapes, and the flyout's overflow fix ---
+    boot_ids = collect_ids(addon._splash_spec())
+    check(f"{addon.SPLASH}_brand" in boot_ids
+          and f"{addon.SPLASH}_bar" in boot_ids
+          and f"{addon.SPLASH}_tip" in boot_ids,
+          f"the boot screen carries its brand, bar and tip: {boot_ids}")
+    logon_ids = collect_ids(addon.login_spec())
+    check(f"{addon.LOGON}_who" in logon_ids
+          and f"{addon.LOGON}_pw" in logon_ids
+          and f"{addon.LOGON}_ok" in logon_ids
+          and f"{addon.LOGON}_switch" in logon_ids,
+          f"the welcome screen carries names, a password and two buttons: "
+          f"{logon_ids}")
+    pw = find_id(addon.login_spec(), f"{addon.LOGON}_pw")
+    check(pw.get("password") is True and pw.get("visible") is False,
+          "the password line masks its typing and waits hidden for a name")
+    acc_ids = collect_ids(addon.account_spec())
+    check(f"{addon.ACC}_name" in acc_ids and f"{addon.ACC}_pw" in acc_ids
+          and f"{addon.ACC}_pw2" in acc_ids and f"{addon.ACC}_ok" in acc_ids
+          and f"{addon.ACC}_skip" in acc_ids,
+          f"the setup screen asks a name, a password twice, and a skip: "
+          f"{acc_ids}")
+    check(f"{addon.POWER}_btn" in collect_ids(addon.power_spec()),
+          "the shut-down screen is one power button on black")
+    # The welcome list shows the accounts the VM knows, each with a mark.
+    api.config_values["accounts"] = [{"name": "keigh", "pwd": "deadbeef"}]
+    listing = find_kind(addon.login_spec(), "list")
+    rows = listing.get("items") or []
+    check([str(r.get("text")) for r in rows] == ["keigh"]
+          and all(str(r.get("icon") or "").startswith("<svg") for r in rows),
+          "the account tiles read the config and wear the user mark")
+    del api.config_values["accounts"]
+    # The Start flyout cannot overflow: All Programs expands and scrolls.
+    flyout = addon.start_flyout_spec()
+    check(find_id(flyout, f"{addon.P_START}_all").get("expand") is True,
+          "the All Programs list expands to the room the flyout has")
+
+    # --- The VM's accounts: stored as digests, kept out of the mirror ---
+    fresh(api)
+    addon.init(api)
+    check(addon.vm_accounts() == [], "a clean VM knows no accounts yet")
+    check(addon.add_account("keigh", "hunter2"), "an account can be made")
+    check(addon.add_account("bob", ""),
+          "and one can be made without a password")
+    stored = addon.vm_accounts()
+    check([one["name"] for one in stored] == ["keigh", "bob"],
+          f"both accounts are stored in order: {stored}")
+    check(all(one["pwd"] != "hunter2" for one in stored),
+          "no account keeps its password in plain words")
+    check(addon.account_password_ok("keigh", "hunter2"),
+          "the right password opens")
+    check(not addon.account_password_ok("keigh", "s3cret"),
+          "the wrong one does not")
+    check(addon.account_password_ok("bob", "anything"),
+          "an account with no password lets anything through")
+    check(not addon.account_password_ok("nobody", ""),
+          "and an unknown name is refused outright")
+    # The digests ride the config only: mirror_settings copies DEFAULTS keys,
+    # and ``accounts`` names no default - so the VM's own settings.json - a
+    # file a person can browse from the desktop - never sees them.
+    addon.mirror_settings()
+    mirrored = json.loads(addon.settings_file().read_text())
+    check("accounts" not in mirrored,
+          "the mirror keeps the account digests out of the VM's file")
+
+    # --- The cosplay through the dispatcher: create, login, power cycle ---
+    # Account creation: two passwords that disagree are said on the screen;
+    # agreeing ones make the account, name the user and raise the desktop.
+    api.form[f"{addon.ACC}_name:value"] = "keigh"
+    api.form[f"{addon.ACC}_pw:value"] = "pw1"
+    api.form[f"{addon.ACC}_pw2:value"] = "pw2"
+    addon.on_widget(addon.TAB, f"{addon.ACC}_ok", "clicked", {})
+    note = str(api.last_set(f"{addon.ACC}_note", "text") or "")
+    check("not match" in note,
+          f"mismatched passwords are said on the screen: {note!r}")
+    api.form[f"{addon.ACC}_pw2:value"] = "pw1"
+    addon.on_widget(addon.TAB, f"{addon.ACC}_ok", "clicked", {})
+    check(bool(addon.find_account("keigh")),
+          "the agreeing form created the account")
+    check(api.written.get("default_user") == "keigh",
+          "and the new account became the desktop's user")
+    check(addon.ICONS in api.windows, "the desktop came up under it")
+    # Login: picking a name lifts the password box; a wrong word is said
+    # inline; the right one lands and names the user.
+    addon.on_widget(addon.TAB, f"{addon.LOGON}_who", "selected",
+                    {"text": "keigh"})
+    check(api.last_set(f"{addon.LOGON}_pw", "visible") is True,
+          "picking a name lifts the password box")
+    addon.on_widget(addon.TAB, f"{addon.LOGON}_ok", "clicked",
+                    {"text": "nope"})
+    note = str(api.last_set(f"{addon.LOGON}_note", "text") or "")
+    check("not correct" in note,
+          f"a wrong password is said, never raised: {note!r}")
+    addon.on_widget(addon.TAB, f"{addon.LOGON}_pw", "returned",
+                    {"text": "pw1"})
+    check(api.written.get("default_user") == "keigh",
+          "the right password logs in, from the line itself")
+    # Double-clicking a passwordless name logs straight in - the blank the
+    # person would have typed is already correct.
+    addon.add_account("bob", "")
+    addon.on_widget(addon.TAB, f"{addon.LOGON}_who", "activated",
+                    {"text": "bob"})
+    check(api.written.get("default_user") == "bob",
+          "a passwordless double-click logs straight in")
+    # Power: off empties the desktop; on runs the whole turn-on again, which
+    # headless lands straight back on the standing desktop.
+    addon.start_program(addon.P_PAINT)
+    addon.power_off()
+    check(api.windows == [] and not addon.opened,
+          "power off takes every window and the icon layer down")
+    addon.power_on()
+    check(addon.ICONS in api.windows,
+          "pressing Power brings the desktop back up")
 
     # --- Konami code flips the wallpaper; Alt+Tab raises a window ---
     fresh(api)
@@ -1431,6 +1785,8 @@ def main() -> int:
     test_berrypad(addon, api)
     test_viewer(addon, api)
     test_console(addon, api)
+    test_ssh(addon, api)
+    test_transfer(addon, api)
     test_display_properties(addon, api)
     test_extras(addon, api)
     test_net_and_wallpaper(addon, api)

@@ -21,12 +21,13 @@
     {
       "id": "berryvm",
       "name": "BerryVM",
-      "version": "2.6",
+      "version": "2.8",
       "author": "fligma",
-      "description": "A Windows XP-styled desktop in one tab: wallpaper, Start menu, taskbar and desktop icons, with a two-paned local + device file manager, Notepad, a picture viewer, a real local Command Prompt wired to the machine's own shell, a Linux-shaped home with alias and profile support, a Web Browser, Paint, a Media Player and multi-tab Display Properties with selectable themes, sliders and toggles. Windows snap to half, quarter or full by their title bar, and the taskbar right-clicks into cascade, tile and Show desktop - all dressed up with a boot splash, a logon picker and a few XP easter eggs.",
+      "description": "A Windows XP-styled desktop in one tab: wallpaper, Start menu, taskbar and desktop icons, with a local-only My Computer file picker, a berry sftp remote file browser, a berry ssh terminal and a real local Command Prompt, Notepad, a picture viewer, a Linux-shaped home with alias and profile support, a Web Browser, Paint, a Media Player and a Control Panel - the multi-tab Display Properties with selectable themes, sliders and toggles. Files move between My Computer and berry sftp by drag-and-drop or Copy/Paste. Windows snap to half, quarter or full by their title bar, and the taskbar right-clicks into cascade, tile and Show desktop - all dressed up with an XP boot screen, a welcome login with its own accounts, a power-off cycle and a few XP easter eggs.",
       "filename": "berryvm.py",
       "requires": [
-        "sftp"
+        "sftp",
+        "ssh"
       ],
       "connection": "app",
       "assets": [

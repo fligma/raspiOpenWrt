@@ -22,9 +22,11 @@ The programs that ship with it:
   over the main connection; zoom is a fresh window at a new size.
 * **Command Prompt** - a real local shell (cmd or sh) kept in a pocket
   terminal: the process stays up, ``cd`` sticks, output trickles in.
-* **Display Properties** - the settings window: wallpaper (gradient, solid
-  colour or a picture file), the desktop's own scale, terminal text size,
-  the clock, and the defaults the programs start with.
+* **Control Panel** - the settings window: a Control Panel home over the
+  classic multi-tab Display Properties - wallpaper (gradient, solid
+  colour or a picture file), the desktop's own scale, the taskbar and
+  tray item sizes, terminal text size, the clock, and the defaults the
+  programs start with.
 * **Internet** - a Web Browser over the app's web leaf, with a bookmark shelf.
 * **Paint** - a free-drawing surface (pen, line, rectangle, ellipse, eraser,
   fill) with a colour, a width, undo, and Open/Save As to a PNG off this
@@ -37,8 +39,9 @@ Extras round it out: right-click the desktop for its menu, right-click any
 file row for Open/Edit/View/Transfer/Rename/Delete, drag a window's title bar
 against a desktop edge to snap it to a half, quarter or full with a ghost
 preview, right-click the taskbar to cascade, tile or Show desktop, and Start
-offers Change Background, About and Log Off, which shuts every window on the
-desktop.
+offers Change Background, About and the two ways out: Log Off walks back to
+the welcome screen and Turn Off Computer runs the whole desktop down to a
+power button - press it and the boot bar and login play out again.
 
 The manifest says ``"connection": "app"`` because everything that reaches off
 this machine rides the app's one file session: the device pane, the picture
@@ -62,25 +65,29 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "BerryVM",
-    "version": "2.6",
+    "version": "2.8",
     "author": "fligma",
     "api": 1,
-    "requires": ["sftp"],
-    # The only thing that reaches off this machine is the file session: the
-    # device pane, viewer and media player ride the app's SFTP, and the shells
-    # are the machine's own local processes - no addon-owned socket is opened.
+    "requires": ["sftp", "ssh"],
+    # The file session and the SSH terminal reach off this machine: the berry
+    # sftp pane, viewer and media player ride the app's SFTP, berry ssh opens
+    # its own SSH terminal to a prompted host, and the other shells are the
+    # machine's own local processes.
     "connection": "app",
     "description": "A Windows XP-styled desktop in one tab: wallpaper, Start "
-                   "menu, taskbar and desktop icons, with a two-paned local + "
-                   "device file manager, Notepad, a picture viewer, a real "
-                   "local Command Prompt wired to the machine's own shell, a "
-                   "Linux-shaped home with alias and profile support, a Web "
-                   "Browser, Paint, a Media Player and multi-tab Display "
-                   "Properties with selectable themes, sliders and toggles. "
-                   "Windows snap to half, quarter or full by their title bar, "
-                   "and the taskbar right-clicks into cascade, tile and Show "
-                   "desktop - all dressed up with a boot splash, a logon "
-                   "picker and a few XP easter eggs.",
+                   "menu, taskbar and desktop icons, with a local-only My "
+                   "Computer file picker, a berry sftp remote file browser, a "
+                   "berry ssh terminal and a real local Command Prompt, "
+                   "Notepad, a picture viewer, a Linux-shaped home with alias "
+                   "and profile support, a Web Browser, Paint, a Media Player "
+                   "and a Control Panel - the multi-tab Display Properties "
+                   "with selectable themes, sliders and toggles. Files move "
+                   "between My Computer and berry sftp by drag-and-drop or "
+                   "Copy/Paste. Windows snap to half, quarter or full by "
+                   "their title bar, and the taskbar right-clicks into "
+                   "cascade, tile and Show desktop - all dressed up with an "
+                   "XP boot screen, a welcome login with its own accounts, a "
+                   "power-off cycle and a few XP easter eggs.",
 }
 
 #: The tab's mark when the assets folder carries no picture: a monitor wearing
@@ -121,10 +128,12 @@ P_EXPLORER = "explorer"       # two-paned file manager; titled My Computer
 P_NOTEPAD = "notepad"         # Start entry; editors themselves are ``bp<n>``
 P_VIEWER = "viewer"           # Start entry; viewer windows are ``pv<n>``
 P_CONSOLE = "console"         # Start entry; console windows are ``cs<n>``
-P_SETTINGS = "settings"       # Display Properties
+P_SETTINGS = "settings"       # Control Panel (the Display Properties mock)
 P_BROWSER = "browser"         # the Web Browser window (single instance)
 P_PAINT = "paint"             # Paint: the canvas drawing program
 P_MEDIA = "media"             # Media Player: QtMultimedia audio
+P_SSH = "ssh"                 # Start entry; ssh windows are ``sh<n>``
+P_SFTP = "sftp"               # the berry sftp remote file browser (single)
 
 #: The Start flyout itself. It is a launcher, not a launch-able program, so
 #: it rides in none of ``PROGRAMS``/``CAPTIONS``/``BY_CAPTION`` - it never
@@ -133,11 +142,18 @@ P_MEDIA = "media"             # Media Player: QtMultimedia audio
 #: it falls back to when a flyout cannot be stood up.
 P_START = "start_flyout"
 
-#: The boot splash and the logon picker. Like the Start flyout they are part
-#: of the shell's own cosplay, not launch-able programs, so they ride in no
+#: The boot splash, the logon welcome, the first-run account creation and the
+#: power-off screen. Like the Start flyout these are part of the shell's own
+#: cosplay, not launch-able programs, so they ride in no
 #: ``PROGRAMS``/``CAPTIONS``/``BY_CAPTION`` and get no tile or catalog row.
 SPLASH = "boot_splash"
 LOGON = "logon"
+ACC = "create_account"
+POWER = "power_off"
+
+#: The cosplay screens cover the whole desktop; their ids, so they can be
+#: folded away together and never linger as a stranded black frame.
+COSPLAY_WINDOWS = (SPLASH, LOGON, ACC, POWER)
 
 #: The Konami sequence, matched against the desktop's lone-key shortcuts.
 KONAMI = ("up", "up", "down", "down", "left", "right",
@@ -152,9 +168,14 @@ PROGRAMS: list[tuple[str, str]] = [
     (P_VIEWER, "Picture Viewer"),
     (P_CONSOLE, "Command Prompt"),
     (P_BROWSER, "Internet"),
-    (P_SETTINGS, "Display Properties"),
+    # Renamed from "Display Properties" to complete the Control Panel mock.
+    # The saved desktop layout is keyed by caption, so any stored position
+    # for the old tile name is dropped on a first start - accepted for a mock.
+    (P_SETTINGS, "Control Panel"),
     (P_PAINT, "Paint"),
     (P_MEDIA, "Media Player"),
+    (P_SSH, "berry ssh"),
+    (P_SFTP, "berry sftp"),
 ]
 
 CAPTIONS: dict[str, str] = dict(PROGRAMS)
@@ -170,6 +191,10 @@ BERRY_PREFIX = "bp"
 #: console window, so ``cs<seq>``.
 VIEWER_PREFIX = "pv"
 CONSOLE_PREFIX = "cs"
+
+#: Each SSH terminal gets a window of its own, so ``sh<seq>``; the shells are
+#: multi-instance and share the ``terminals`` dict the console already keeps.
+SSH_PREFIX = "sh"
 
 #: The Explorer's two panes keep short id prefixes of their own - the table,
 #: path label and buttons of one pane all start with these.
@@ -300,6 +325,35 @@ ICON_MEDIA = (
     '</svg>'
 )
 
+#: berry ssh's mark: the console screen wearing a small key, the SSH echo.
+ICON_SSH = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect x="4" y="6" width="24" height="20" rx="1.5" fill="#101418"'
+    ' stroke="#5a5a5a"/>'
+    '<path d="M8 12l4 3-4 3" fill="none" stroke="#e8e8e8" stroke-width="1.6"'
+    ' stroke-linecap="round"/>'
+    '<path d="M14 19h6" stroke="#e8e8e8" stroke-width="1.6"'
+    ' stroke-linecap="round"/>'
+    '<circle cx="23" cy="20" r="3" fill="none" stroke="#ffb020"'
+    ' stroke-width="1.4"/>'
+    '<path d="M25 20h4M27.5 20v2.5" stroke="#ffb020" stroke-width="1.4"'
+    ' stroke-linecap="round"/>'
+    '</svg>'
+)
+
+#: berry sftp's mark: a folder with a pair of up/down arrows, the transfer.
+ICON_SFTP = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<path d="M3 9h8l3 3h15v15H3z" fill="#e8b34b" stroke="#8a6420"/>'
+    '<path d="M3 13.5h26V27H3z" fill="#ffd97a" stroke="#8a6420"'
+    ' stroke-width="0.8"/>'
+    '<path d="M11 17v6M9 21l2 2 2-2" fill="none" stroke="#1c3f7d"'
+    ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
+    '<path d="M21 23v-6M19 19l2-2 2 2" fill="none" stroke="#1c3f7d"'
+    ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
+    '</svg>'
+)
+
 #: The four-colour flag the Start button wears: XP's own waving Windows
 #: logo - red top-left, green top-right, blue bottom-left, yellow bottom-
 #: right - each quadrant skewed a little so the whole reads as cloth.
@@ -309,6 +363,28 @@ ICON_FLAG = (
     '<path d="M17 6.7 29 4.2v11.3H17z" fill="#7ac142"/>'
     '<path d="M3 17.5h12V26L3 23.5z" fill="#2a9fd6"/>'
     '<path d="M17 17.5h12V28l-12-2.7z" fill="#ffc20e"/>'
+    '</svg>'
+)
+
+#: The account mark the welcome screen hangs beside each name: a plain
+#: head-and-shoulders silhouette on a soft blue disc, the XP "flipped user tile".
+ICON_USER = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect x="2" y="2" width="28" height="28" rx="4" fill="#3b74d8"'
+    ' stroke="#1c3f7d" stroke-width="1.2"/>'
+    '<circle cx="16" cy="13" r="4.5" fill="#eaf2ff"/>'
+    '<path d="M8 26c1.5-5 5-7 8-7s6.5 2 8 7z" fill="#eaf2ff"/>'
+    '</svg>'
+)
+
+#: The power mark on the shut-down screen: the green power-loop XP used for
+#: "Turn off computer", drawn as a broken ring with a stem through the top.
+ICON_POWER = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<path d="M16 5v10" fill="none" stroke="#eaffea" stroke-width="3"'
+    ' stroke-linecap="round"/>'
+    '<path d="M22.5 8.5a9 9 0 1 1-13 0" fill="none" stroke="#4aa64a"'
+    ' stroke-width="3" stroke-linecap="round"/>'
     '</svg>'
 )
 
@@ -322,6 +398,8 @@ TILE_ICONS = {
     P_PAINT: ICON_PAINT,
     P_MEDIA: ICON_MEDIA,
     P_BROWSER: ICON_GLOBE,
+    P_SSH: ICON_SSH,
+    P_SFTP: ICON_SFTP,
 }
 
 #: The mark a taskbar button wears, from the ``kind`` its opened record
@@ -336,6 +414,8 @@ KIND_ICONS = {
     "paint": ICON_PAINT,
     "media": ICON_MEDIA,
     "browser": ICON_GLOBE,
+    "ssh": ICON_SSH,
+    "sftp": ICON_SFTP,
 }
 
 #: The taskbar's own shape, in unscaled pixels: one row of buttons tall, and
@@ -661,11 +741,12 @@ def taskbar_sheet() -> str:
         # comes over one, exactly like XP's notification icons.
         "#berryTrayBtn { background: transparent; border: none;"
         " color: #ffffff; padding: 0px 5px; font-size: "
-        + str(scaled(11)) + "px; }"
+        + str(scaled(tray_icon())) + "px; }"
         "#berryTrayBtn:hover { background: rgba(255, 255, 255, 0.22);"
         " border-radius: 2px; }"
         "#berryClock { color: #ffffff; font-weight: bold; background:"
-        " transparent; padding: 0px 10px; }"
+        " transparent; padding: 0px 10px; font-size: "
+        + str(scaled(tray_icon())) + "px; }"
     )
 
 
@@ -703,7 +784,7 @@ FIELDS = [
     {"key": "window_height", "label": "Default window height", "kind": "number",
      "minimum": 180, "maximum": 1600},
     {"key": "ui_scale", "label": "Desktop scale (percent)", "kind": "number",
-     "minimum": 80, "maximum": 160,
+     "minimum": 60, "maximum": 300,
      "hint": "BerryVM's own scale: window sizes and desktop icons multiply by "
              "it. The app's interface zoom is a different dial"},
     {"key": "term_font", "label": "Terminal text size", "kind": "number",
@@ -719,6 +800,12 @@ FIELDS = [
      "minimum": 7, "maximum": 24},
     {"key": "task_height", "label": "Taskbar height", "kind": "number",
      "minimum": 22, "maximum": 64},
+    {"key": "task_icon", "label": "Taskbar button icon size", "kind": "number",
+     "minimum": 12, "maximum": 40,
+     "hint": "The mark each window's taskbar button wears, before the scale"},
+    {"key": "tray_icon", "label": "Taskbar tray item size", "kind": "number",
+     "minimum": 10, "maximum": 32,
+     "hint": "The point size the tray's marks and the clock are drawn at"},
     {"key": "wallpaper", "label": "Wallpaper", "kind": "text",
      "hint": "Bliss, Night, Olive, Crimson, Aqua, Solid, or Picture - the "
              "last two read wallpaper_color and wallpaper_file"},
@@ -755,7 +842,11 @@ DEFAULTS = {
     # The taskbar row and its buttons, read by :func:`taskbar_sheet` and
     # :func:`refresh_taskbar`. The last three are remembered preferences the
     # canvas cannot fully honour (one bar, always on show), kept faithful.
+    # ``task_icon`` and ``tray_icon`` are the marks the bar's buttons and the
+    # tray wear, each tiered from the screen on a first run.
     "task_height": 30,
+    "task_icon": 16,
+    "tray_icon": 16,
     "task_small": False,
     "task_lock": False,
     "task_autohide": False,
@@ -856,7 +947,8 @@ api = None                     # filled in by init()
 always_on_top: set = set()     # window ids kept above the rest
 berry_seq: int = 0             # ``bp<seq>`` ids, one editor per file
 view_seq: int = 0              # ``pv<seq>`` ids, one viewer per picture
-console_seq: int = 0           # ``cs<seq>`` ids, one local shell per window
+console_seq: int = 0            # ``cs<seq>`` ids, one local shell per window
+ssh_seq: int = 0               # ``sh<seq>`` ids, one SSH terminal per window
 opened: dict = {}              # win_id -> {"title", "kind", extra}
 berrypads: dict = {}           # win_id -> {"path", "origin", "title"}
 viewers: dict = {}             # win_id -> {"path", "origin", "size"}
@@ -866,6 +958,9 @@ media_state: dict = {}         # win_id -> {"tracks", "index"} for Media Player
 pane_pick: dict = {}           # table id -> the name its cursor is on
 pane_rows: dict = {}           # table id -> {display name: {"path", ...}}
 pane_path: dict = {}           # pane prefix -> the folder that side shows
+# The cross-window transfer clipboard: rows a Copy left in one pane, waiting
+# for a Paste in the other. Each item is {"pane","name","path","directory"}.
+_xfer_clip: list = []
 home_ready: bool = False       # ``_ensure_home()`` has run in this process
 
 #: The desktop's own layout memory. Positions are keyed by a tile's
@@ -884,6 +979,14 @@ _flash_on: bool = False
 _splash_step: int = 0           # how far the boot splash's bar has come
 _konami: list = []              # the lone keys seen, waiting for the sequence
 _SCHED: dict = {}               # cosplay timers by name, so they can be stopped
+# The live-preview backlog: effects a Display Properties control has asked to
+# repaint, unioned until a short timer pours them once. A slider fires on every
+# pixel, so the repaint is coalesced here rather than run dozens of times.
+_preview_pending: set = set()
+_preview_timer: Any = None       # the single-shot that will flush the backlog
+# The last style sheet poured onto each painted widget, so apply_theme can
+# skip a re-pour that would be byte-identical to what is already on screen.
+_theme_sheets_shown: dict = {}
 
 
 def init(plugin_api: Any) -> None:
@@ -919,26 +1022,17 @@ def init(plugin_api: Any) -> None:
         tick_clock()
     api.schedule.every(0.5, tick_flash)
     api.log("BerryVM ready: an XP-styled desktop in one tab.")
-    _welcome()
-    _xp_cosplay()
-
-
-def _xp_cosplay() -> None:
-    """Run the boot splash, the startup chime and the logon picker, each of
-    which makes itself scarce unless a real window is up. Wrapped whole so a
-    hiccup in one never stops the desktop from coming up."""
-    for step in (boot_splash, startup_sound, logon_screen):
-        try:
-            step()
-        except Exception as error:
-            if api is not None:
-                api.log(f"berryvm: {step.__name__} skipped: {error}")
+    # The cosplay owns the desktop's very coming-up now: boot bar, chime,
+    # account setup and login before the desktop proper appears. Headless -
+    # or with both cosplay keys off - this lands straight on the desktop,
+    # welcome toast and all, the same way ``_xp_cosplay`` used to end.
+    _power_on_sequence()
 
 
 def shutdown() -> None:
     """Close the tab; the app stops any shell inside on its way out, and any
     local console loses its process here - a child nobody owns is a zombie."""
-    global home_ready, berry_seq, view_seq, console_seq
+    global home_ready, berry_seq, view_seq, console_seq, ssh_seq
     global _desk_positions, _desk_renames
     global minimized, attention, _flash_on
     global _splash_step, _konami
@@ -954,9 +1048,11 @@ def shutdown() -> None:
     pane_pick.clear()
     pane_rows.clear()
     pane_path.clear()
+    _xfer_clip.clear()
     berry_seq = 0
     view_seq = 0
     console_seq = 0
+    ssh_seq = 0
     always_on_top.clear()
     home_ready = False
     _desk_positions = {}
@@ -971,6 +1067,12 @@ def shutdown() -> None:
         _stop_sched(_name)
     _splash_step = 0
     _konami = []
+    # The live-preview backlog and the sheet memo are process-lifetime state
+    # too: drop them so a restart paints fresh rather than trusting a stale
+    # "already shown" note or firing a flush left over from the last session.
+    _stop_preview_timer()
+    _preview_pending.clear()
+    _theme_sheets_shown.clear()
     if api is not None:
         api.tabs.close(TAB)
 
@@ -1024,6 +1126,8 @@ PARODY_VERSIONS = {
     P_BROWSER: "6.0 (definitely not Internet Explorer)",
     P_MEDIA: "9.0 (Windows Media Rip-off)",
     P_PAINT: "5.1 (bucket included)",
+    P_SSH: "1.0 (openssh, pretending)",
+    P_SFTP: "3.0 (sftp over the app's session)",
 }
 
 
@@ -1043,52 +1147,242 @@ def _gui_live() -> bool:
         return False
 
 
+# --- the VM's own accounts: created on a first run, logged into after that ---
+
+def _hash_pwd(password: str) -> str:
+    """One login password as the desktop keeps it: a ``sha256`` hex digest,
+    or ``""`` for an account that has no password at all. The plain word is
+    never stored - neither in the config nor in the VM's mirrored
+    ``settings.json`` - so the cosplay costs nothing real in secret."""
+    text = str(password or "")
+    if not text:
+        return ""
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def vm_accounts() -> list:
+    """The accounts this VM knows, each ``{"name", "pwd"}`` with ``pwd`` a
+    digest. Malformed rows are dropped so a hand-edit cannot strand login."""
+    raw = config("accounts", []) or []
+    out: list = []
+    seen: set = set()
+    if isinstance(raw, list):
+        for one in raw:
+            if not isinstance(one, dict):
+                continue
+            name = str(one.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append({"name": name, "pwd": str(one.get("pwd") or "")})
+    return out
+
+
+def find_account(name: str) -> dict:
+    """The stored account whose name matches ``name``, or ``{}``."""
+    want = str(name or "").strip()
+    for one in vm_accounts():
+        if one["name"] == want:
+            return one
+    return {}
+
+
+def account_password_ok(name: str, typed: str) -> bool:
+    """Whether ``typed`` is the chosen account's password. An account with no
+    password lets any (or empty) entry through; an unknown name is refused."""
+    account = find_account(name)
+    if not account:
+        return False
+    stored = str(account.get("pwd") or "")
+    if not stored:
+        return True
+    return _hash_pwd(typed) == stored
+
+
+def add_account(name: str, password: str = "") -> bool:
+    """Create one account and store the whole list. A blank name is refused;
+    a name already taken just updates that account's password. Hands back
+    whether an account landed."""
+    want = str(name or "").strip()
+    if not want or api is None:
+        return False
+    accounts = vm_accounts()
+    digest = _hash_pwd(password)
+    for one in accounts:
+        if one["name"] == want:
+            one["pwd"] = digest
+            break
+    else:
+        accounts.append({"name": want, "pwd": digest})
+    try:
+        api.config.set("accounts", accounts)
+    except Exception:
+        return False
+    return True
+
+
+#: How the boot bar loops: it climbs 0..100 once every ``_SPLASH_CYCLE``
+#: ticks - the way XP's little blue block sweeps and starts over - and folds
+#: away after ``_SPLASH_TOTAL`` ticks, handing off to the welcome screen.
+_SPLASH_CYCLE = 12
+_SPLASH_TOTAL = 45
+
+
+def _cover_entry(win_id: str, spec: dict) -> dict:
+    """A chromeless frame cut to exactly the desktop canvas, so a cosplay
+    screen (boot, welcome, power) covers the whole desktop with no title bar
+    and no way to dismiss it by hand. The canvas is read in device pixels and
+    divided back through the interface zoom, the place the primitive re-grows
+    from."""
+    area_w, area_h = _desktop_area()
+    zoom = _ui_zoom() or 1.0
+    wide = max(scaled(320), int(area_w / zoom))
+    tall = max(scaled(240), int(area_h / zoom))
+    return {"id": win_id, "title": "", "chrome": False, "closable": False,
+            "resizable": False, "x": 0, "y": 0,
+            "width": wide, "height": tall, "spec": spec}
+
+
+def _show_cover(win_id: str, spec: dict, sheet: str) -> None:
+    """Stand a cosplay frame up over the desktop and paint it: the sheet goes
+    on the frame itself, the same way the icon layer is styled, so its whole
+    subtree wears the boot/welcome colours rather than the app's dark."""
+    open_window(_cover_entry(win_id, spec))
+    try:
+        api.tabs.set_widget(TAB, win_id, "style", sheet)
+    except Exception:
+        pass
+    raise_window(win_id)
+
+
+def _cos_note(win_id: str, text: str) -> None:
+    """Write one line on a cosplay screen's own note label."""
+    if api is None:
+        return
+    try:
+        api.tabs.set_widget(TAB, f"{win_id}_note", "text", str(text))
+    except Exception:
+        pass
+
+
+def _boot_sheet() -> str:
+    """The XP boot screen: dead black, white brand words, and a blue progress
+    box swept by the looping bar."""
+    brand = scaled(28)
+    sub = scaled(13)
+    tip = scaled(11)
+    box = scaled(240)
+    return (
+        "#addonWindow { background: #000000; border: none; }"
+        "#addonWindowBody { background: #000000; border: none; }"
+        "#berryBoot, #berryBoot QWidget { background: transparent;"
+        " border: none; }"
+        "#berryBootBrand { color: #ffffff; font-weight: bold;"
+        " font-size: " + str(brand) + "px; }"
+        "#berryBootSub { color: #d8d8d8; font-size: " + str(sub) + "px; }"
+        "#berryBootTip { color: #b0b0b0; font-size: " + str(tip) + "px; }"
+        "#berryBootBar { min-width: " + str(box) + "px; max-width:"
+        + str(box) + "px; border: 1px solid #5b9bf8; background: #0a246a;}"
+        "#berryBootBar::chunk { background: #2f7fdc; }"
+    )
+
+
+def _login_sheet() -> str:
+    """The welcome screen's two-tone blue: a lit panel for the names, white
+    words, a plain white password box and XP-ish buttons."""
+    title = scaled(26)
+    hint = scaled(14)
+    return (
+        "#addonWindow { border: none; background: qlineargradient(x1:0,"
+        "y1:0,x2:0,y2:1, stop:0 #5a8ed6, stop:0.55 #2f63b8,"
+        " stop:0.55 #1c3f7d, stop:1 #14305e); }"
+        "#addonWindowBody { background: transparent; border: none; }"
+        "#berryLogin, #berryLogin QWidget { background: transparent;"
+        " border: none; }"
+        "#berryLoginTitle { color: #ffffff; font-weight: bold;"
+        " font-size: " + str(title) + "px; }"
+        "#berryLoginHint { color: #eaf2ff; font-size: " + str(hint) + "px; }"
+        "#berryLoginNote { color: #ffd97a; font-size: " + str(hint) + "px; }"
+        "#berryLoginList { background: rgba(255, 255, 255, 0.12);"
+        " border: 1px solid rgba(255, 255, 255, 0.4); color: #ffffff;"
+        " font-size: " + str(hint) + "px; }"
+        "#berryLoginList::item { padding: 4px 8px; border-radius: 3px; }"
+        "#berryLoginList::item:selected { background: rgba(255, 255, 255,"
+        " 0.32); }"
+        "#berryLoginInput, #berryLoginPw { background: #ffffff;"
+        " color: #000000; border: 1px solid #6b8fb8; padding: 3px; }"
+        "#berryLoginBtn { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 #eef3fb, stop:1 #c3d2e8); color: #173a6b;"
+        " border: 1px solid #4a6ea5; border-radius: 4px; padding: 4px 12px;"
+        " font-size: " + str(hint) + "px; }"
+        "#berryLoginBtn:hover { background: #ffffff; }"
+    )
+
+
+def _power_sheet() -> str:
+    """The shut-down screen: black again, one grey line of words and the green
+    power mark in the middle."""
+    text = scaled(15)
+    return (
+        "#addonWindow { background: #000000; border: none; }"
+        "#addonWindowBody { background: #000000; border: none; }"
+        "#berryPower, #berryPower QWidget { background: transparent;"
+        " border: none; }"
+        "#berryPowerText { color: #d8d8d8; font-size: " + str(text) + "px; }"
+        "#berryPowerBtn { background: #12305e; color: #ffffff;"
+        " border: 1px solid #5b9bf8; border-radius: 6px; padding: 10px 18px;"
+        " font-size: " + str(scaled(14)) + "px; }"
+        "#berryPowerBtn:hover { background: #1c4a8a; }"
+    )
+
+
 def _splash_spec() -> dict:
-    """The boot bar: the brand line, a progress meter, a rotating tip, held
-    apart by springs so it sits in the middle of a bare black frame."""
-    return {"kind": "column", "children": [
-        {"kind": "spacer"},
-        {"kind": "label", "id": f"{SPLASH}_brand",
-         "text": f"BerryVM {ADDON.get('version')}",
-         "align": "center"},
-        {"kind": "label", "id": f"{SPLASH}_load",
-         "text": "Loading...", "align": "center"},
-        {"kind": "progress", "id": f"{SPLASH}_bar", "maximum": 100,
-         "value": 0},
-        {"kind": "label", "id": f"{SPLASH}_tip", "text": SPLASH_TIPS[0],
-         "align": "center", "word_wrap": True},
-        {"kind": "spacer"},
+    """The boot screen's own layout: the brand and version pushed toward the
+    middle, the looping progress box beneath, and a rotating tip at the foot -
+    all on the black frame :func:`_boot_sheet` paints."""
+    return {"kind": "column", "object_name": "berryBoot", "children": [
+        {"kind": "spacer", "expand": True},
+        {"kind": "label", "id": f"{SPLASH}_brand", "object_name": "berryBootBrand",
+         "text": "BerryVM  XP", "align": "center"},
+        {"kind": "label", "id": f"{SPLASH}_load", "object_name": "berryBootSub",
+         "text": f"version {ADDON.get('version')}", "align": "center"},
+        {"kind": "spacer", "expand": True},
+        {"kind": "row", "children": [
+            {"kind": "spacer", "expand": True},
+            {"kind": "progress", "id": f"{SPLASH}_bar",
+             "object_name": "berryBootBar", "maximum": 100, "value": 0},
+            {"kind": "spacer", "expand": True},
+        ]},
+        {"kind": "label", "id": f"{SPLASH}_tip", "object_name": "berryBootTip",
+         "text": SPLASH_TIPS[0], "align": "center", "word_wrap": True},
+        {"kind": "spacer", "expand": True},
     ]}
 
 
 def boot_splash() -> None:
-    """Stand the loading frame up and let a timer fill its bar, then fold it
-    away to reveal the desktop. Non-blocking: it is a window, not a modal, so
-    nothing waits on it, and it only ever shows when a real window can hold
-    it."""
+    """Stand the XP boot screen up over the whole desktop and let a timer loop
+    its bar, then fold it away into :func:`_after_boot`. Non-blocking; a no-op
+    with no real window to show it on."""
     global _splash_step
     if api is None or not _gui_live() or not config("boot_splash", True):
+        _after_boot()
         return
     _splash_step = 0
-    wide, tall = _screen_geometry()
     try:
-        open_window({
-            "id": SPLASH, "title": "BerryVM", "chrome": False,
-            "closable": False, "resizable": False,
-            "x": int(wide * 0.3), "y": int(tall * 0.34),
-            "width": scaled(360), "height": scaled(170),
-            "spec": _splash_spec(),
-        })
-        raise_window(SPLASH)
-        _SCHED["splash"] = api.schedule.every(0.15, _splash_tick)
+        _show_cover(SPLASH, _splash_spec(), _boot_sheet())
+        _SCHED["splash"] = api.schedule.every(0.1, _splash_tick)
     except Exception as error:
         api.log(f"berryvm: boot splash skipped: {error}")
+        _after_boot()
 
 
 def _splash_tick() -> None:
-    """Advance one notch of the bar and change the tip; fold the splash away
-    once the bar fills. A no-op the moment the frame is gone, so a lingering
-    timer never reaches a window that has closed."""
+    """Advance the boot bar one notch. It sweeps 0..100 every cycle and starts
+    over - the way XP's block kept restarting - and only completes, closing
+    the splash and handing off, once the whole run has played out. A no-op the
+    moment the frame is gone, so a lingering timer never reaches a closed
+    window."""
     global _splash_step
     if api is None:
         return
@@ -1096,89 +1390,355 @@ def _splash_tick() -> None:
         _stop_sched("splash")
         return
     _splash_step += 1
-    shown = min(100, _splash_step * 7)
+    done = _splash_step >= _SPLASH_TOTAL
+    if done:
+        shown = 100
+    else:
+        into = _splash_step % _SPLASH_CYCLE
+        shown = 100 if into == 0 and _splash_step > _SPLASH_CYCLE else int(
+            100 * into / max(1, _SPLASH_CYCLE - 1))
     try:
         api.tabs.set_widget(TAB, f"{SPLASH}_bar", "value", shown)
-        api.tabs.set_widget(TAB, f"{SPLASH}_tip", "text",
-                            SPLASH_TIPS[_splash_step % len(SPLASH_TIPS)])
+        if _splash_step % 5 == 0:
+            api.tabs.set_widget(
+                TAB, f"{SPLASH}_tip", "text",
+                SPLASH_TIPS[(_splash_step // 5) % len(SPLASH_TIPS)])
     except Exception:
         pass
-    if shown >= 100:
+    if done:
         close_window(SPLASH)
         _stop_sched("splash")
+        _after_boot()
 
 
-def _logon_users() -> list:
-    """The names the logon picker offers: the default user first, then
-    whoever is running the app - the accounts a person might mean, without
-    asking them to type one."""
-    users: list = []
-    default = str(config("default_user", "root") or "").strip()
-    if default and default not in users:
-        users.insert(0, default)
-    try:
-        import getpass
-        os_user = str(getpass.getuser() or "").strip()
-        if os_user and os_user not in users:
-            users.append(os_user)
-    except Exception:
-        pass
-    return users or [default or "user"]
-
-
-def logon_spec() -> dict:
-    """The XP-style welcome screen: a list of faces and the two ways in."""
-    return {"kind": "column", "children": [
-        {"kind": "label", "id": f"{LOGON}_head",
-         "text": "To begin, choose your name"},
-        {"kind": "list", "id": f"{LOGON}_who", "items": _logon_users(),
-         "on": ["selected", "activated"], "expand": True,
-         "tooltip": "Double-click a name to log on, or pick one and press "
-                    "Log On."},
+def login_spec() -> dict:
+    """The welcome screen: a lit panel of the accounts this VM knows, and the
+    way in. Pick a name and the password box comes up; press Log On. Accounts
+    that were made without a password let an empty entry straight through."""
+    names = [{"text": one["name"], "icon": ICON_USER} for one in vm_accounts()]
+    return {"kind": "column", "object_name": "berryLogin", "children": [
+        {"kind": "spacer", "expand": True},
+        {"kind": "label", "id": f"{LOGON}_title", "object_name": "berryLoginTitle",
+         "text": "Welcome to BerryVM", "align": "center"},
+        {"kind": "label", "object_name": "berryLoginHint",
+         "text": "To begin, click your name", "align": "center"},
         {"kind": "row", "children": [
-            {"kind": "button", "id": f"{LOGON}_ok", "text": "Log On",
-             "on": ["clicked"], "expand": True},
-            {"kind": "button", "id": f"{LOGON}_skip", "text": "Skip",
-             "on": ["clicked"], "expand": True,
-             "tooltip": "Leave the desktop's user exactly as it is"},
+            {"kind": "spacer", "expand": True},
+            {"kind": "column", "children": [
+                {"kind": "list", "id": f"{LOGON}_who",
+                 "object_name": "berryLoginList", "items": names,
+                 "on": ["selected", "activated"], "icon_size": scaled(48)},
+                {"kind": "label", "id": f"{LOGON}_prompt",
+                 "object_name": "berryLoginHint",
+                 "text": "Password:", "align": "center"},
+                {"kind": "line", "id": f"{LOGON}_pw",
+                 "object_name": "berryLoginPw", "password": True,
+                 "on": ["returned"], "visible": False},
+                {"kind": "row", "children": [
+                    {"kind": "button", "id": f"{LOGON}_ok",
+                     "object_name": "berryLoginBtn", "text": "Log On",
+                     "on": ["clicked"], "expand": True},
+                    {"kind": "button", "id": f"{LOGON}_switch",
+                     "object_name": "berryLoginBtn", "text": "Back",
+                     "on": ["clicked"], "expand": True},
+                ]},
+            ]},
+            {"kind": "spacer", "expand": True},
         ]},
+        {"kind": "label", "id": f"{LOGON}_note", "object_name": "berryLoginNote",
+         "text": "", "align": "center", "word_wrap": True},
+        {"kind": "spacer", "expand": True},
     ]}
 
 
-def logon_screen() -> None:
-    """Show the welcome picker once per session, skippable. It is a plain
-    frame so its person can also close it; picking a name feeds the config's
-    ``default_user`` and folds it away."""
-    if api is None or not _gui_live() or not config("logon", True):
+def login_screen() -> None:
+    """Show the welcome screen over the darkened desktop. It is the way back
+    in from a log-off as well as the first thing after the boot bar."""
+    if api is None or not _gui_live():
+        return
+    pane_pick.pop(LOGON, None)
+    try:
+        _show_cover(LOGON, login_spec(), _login_sheet())
+    except Exception as error:
+        api.log(f"berryvm: welcome screen skipped: {error}")
+
+
+def _reveal_password(name: str) -> None:
+    """A picked name lifts the password line out of hiding and gives the
+    prompt that name, the way the welcome screen waited for a choice before
+    it asked for anything."""
+    if api is None:
         return
     try:
-        wide, tall = _screen_geometry()
-        open_window({
-            "id": LOGON, "title": "Welcome to BerryVM",
-            "closable": True,
-            "x": int(wide * 0.32), "y": int(tall * 0.2),
-            "width": scaled(320), "height": scaled(360),
-            "spec": logon_spec(),
-        })
-        raise_window(LOGON)
-    except Exception as error:
-        api.log(f"berryvm: logon screen skipped: {error}")
+        api.tabs.set_widget(TAB, f"{LOGON}_pw", "visible", True)
+        api.tabs.set_widget(TAB, f"{LOGON}_prompt", "text",
+                            f"Password for {name}:" if name
+                            else "Password:")
+    except Exception:
+        pass
 
 
-def logon_picked(name: str) -> None:
-    """One name chosen on the welcome screen: make it the user the desktop
-    offers, then put the picker away."""
+def _do_login(name: str, typed: str) -> None:
+    """Check one welcome pick against its stored digest and, when it matches,
+    make it the desktop's user and bring the desktop up. A wrong password is
+    said on the screen, never raised."""
     if api is None:
         return
     name = str(name or "").strip()
     if not name:
+        _cos_note(LOGON, "Choose who you are first.")
+        return
+    if not find_account(name):
+        _cos_note(LOGON, "There is no such account on this VM.")
+        return
+    if not account_password_ok(name, typed):
+        _cos_note(LOGON, "The password you entered is not correct. Try again.")
+        try:
+            api.tabs.set_widget(TAB, f"{LOGON}_pw", "value", "")
+        except Exception:
+            pass
         return
     try:
         api.config.set("default_user", name)
     except Exception:
         pass
     close_window(LOGON)
-    api.ui.notify(f"BerryVM: welcome, {name}.")
+    _desktop_on()
+
+
+def account_spec() -> dict:
+    """The first-run account setup: a name, an optional password typed twice,
+    and a Skip for a person who just wants the desktop now. It is the welcome
+    screen's shape wearing the same blue."""
+    return {"kind": "column", "object_name": "berryLogin", "children": [
+        {"kind": "spacer", "expand": True},
+        {"kind": "label", "object_name": "berryLoginTitle",
+         "text": "Set up your account", "align": "center"},
+        {"kind": "label", "object_name": "berryLoginHint",
+         "text": "Give this machine a name, and a password if you want one.",
+         "align": "center", "word_wrap": True},
+        {"kind": "row", "children": [
+            {"kind": "spacer", "expand": True},
+            {"kind": "column", "children": [
+                {"kind": "label", "object_name": "berryLoginHint",
+                 "text": "Your name"},
+                {"kind": "line", "id": f"{ACC}_name",
+                 "object_name": "berryLoginInput"},
+                {"kind": "label", "object_name": "berryLoginHint",
+                 "text": "Password (optional)"},
+                {"kind": "line", "id": f"{ACC}_pw", "object_name": "berryLoginInput",
+                 "password": True},
+                {"kind": "label", "object_name": "berryLoginHint",
+                 "text": "Re-enter the password"},
+                {"kind": "line", "id": f"{ACC}_pw2", "object_name": "berryLoginInput",
+                 "password": True, "on": ["returned"]},
+                {"kind": "row", "children": [
+                    {"kind": "button", "id": f"{ACC}_ok",
+                     "object_name": "berryLoginBtn", "text": "Create",
+                     "on": ["clicked"], "expand": True},
+                    {"kind": "button", "id": f"{ACC}_skip",
+                     "object_name": "berryLoginBtn", "text": "Skip",
+                     "on": ["clicked"], "expand": True},
+                ]},
+            ]},
+            {"kind": "spacer", "expand": True},
+        ]},
+        {"kind": "label", "id": f"{ACC}_note", "object_name": "berryLoginNote",
+         "text": "", "align": "center", "word_wrap": True},
+        {"kind": "spacer", "expand": True},
+    ]}
+
+
+def account_create_screen() -> None:
+    """Show the setup screen when the VM knows no accounts yet."""
+    if api is None or not _gui_live():
+        return
+    try:
+        _show_cover(ACC, account_spec(), _login_sheet())
+    except Exception as error:
+        api.log(f"berryvm: account setup skipped: {error}")
+
+
+def account_commit() -> None:
+    """Create the account the setup form names, once its two password lines
+    agree, then bring the desktop up. A skip leaves no account behind."""
+    if api is None:
+        return
+    name = str(_read_one(f"{ACC}_name", "") or "").strip()
+    password = str(_read_one(f"{ACC}_pw", "") or "")
+    again = str(_read_one(f"{ACC}_pw2", "") or "")
+    if not name:
+        _cos_note(ACC, "Type a name for this account.")
+        return
+    if password != again:
+        _cos_note(ACC, "The two passwords do not match.")
+        return
+    if not add_account(name, password):
+        _cos_note(ACC, "That account could not be created.")
+        return
+    try:
+        api.config.set("default_user", name)
+    except Exception:
+        pass
+    close_window(ACC)
+    _desktop_on()
+
+
+def power_spec() -> dict:
+    """The shut-down screen: a black desktop, one line of grey words, and a
+    single power mark in the middle to boot back into the welcome."""
+    return {"kind": "column", "object_name": "berryPower", "children": [
+        {"kind": "spacer", "expand": True},
+        {"kind": "label", "object_name": "berryPowerText",
+         "text": "It is now safe to turn off your computer.",
+         "align": "center", "word_wrap": True},
+        {"kind": "row", "children": [
+            {"kind": "spacer", "expand": True},
+            {"kind": "button", "id": f"{POWER}_btn",
+             "object_name": "berryPowerBtn", "text": "Power",
+             "icon": ICON_POWER, "on": ["clicked"]},
+            {"kind": "spacer", "expand": True},
+        ]},
+        {"kind": "spacer", "expand": True},
+    ]}
+
+
+def _arm_desktop_off() -> None:
+    """Take the working desktop away so a cosplay screen covers the whole tab:
+    hide the taskbar row and shut the icon layer and any other cosplay frame.
+    The welcome and boot screens sit in the space this clears."""
+    if api is None:
+        return
+    try:
+        api.tabs.set_widget(TAB, TASKBAR, "visible", False)
+    except Exception:
+        pass
+    for win_id in COSPLAY_WINDOWS:
+        if win_id in open_window_ids():
+            close_window(win_id)
+    if ICONS in open_window_ids():
+        close_window(ICONS)
+    opened.pop(ICONS, None)
+
+
+def _desktop_on() -> None:
+    """Bring the desktop up for the person who has logged in (or skipped): the
+    cosplay frames fold away, the taskbar shows again, the icon layer stands
+    back up, and the welcome toast lands."""
+    if api is None:
+        return
+    for win_id in COSPLAY_WINDOWS:
+        if win_id in open_window_ids():
+            close_window(win_id)
+    try:
+        api.tabs.set_widget(TAB, TASKBAR, "visible", True)
+    except Exception:
+        pass
+    if ICONS not in open_window_ids():
+        open_icon_layer()
+    apply_theme()
+    refresh_taskbar()
+    _welcome()
+
+
+def _after_boot() -> None:
+    """The boot bar has finished: sound the chime, then either the setup (no
+    accounts yet), the welcome (accounts known), or straight to the desktop
+    if the cosplay has been switched off in the config."""
+    if api is None:
+        return
+    startup_sound()
+    if not config("logon", True):
+        _desktop_on()
+        return
+    if not vm_accounts():
+        account_create_screen()
+    else:
+        login_screen()
+
+
+def _power_on_sequence() -> None:
+    """The whole turn-on: hide the desktop, play the boot bar, and hand off to
+    the login. With no screen to cosplay on - a headless test run - the
+    desktop simply comes up. Both cosplay keys off means just the toast."""
+    if api is None:
+        return
+    boot = bool(config("boot_splash", True))
+    login = bool(config("logon", True))
+    if not _gui_live():
+        _desktop_on()
+        return
+    if not (boot or login):
+        _welcome()
+        return
+    _arm_desktop_off()
+    if boot:
+        boot_splash()
+    else:
+        _after_boot()
+
+
+def power_off() -> None:
+    """Shut the desktop down to black: close every window, take the taskbar
+    and icon layer away, and leave a single power button on the screen. This
+    is the real log-off-and-power-off, not the old joke - the tab itself still
+    stays put, because it is a desktop in a tab and not the machine."""
+    if api is None:
+        return
+    for win_id in program_window_ids():
+        close_window(win_id)
+        forget_window(win_id)
+    close_start()
+    _arm_desktop_off()
+    if _gui_live():
+        try:
+            _show_cover(POWER, power_spec(), _power_sheet())
+        except Exception as error:
+            api.log(f"berryvm: power-off screen skipped: {error}")
+
+
+def power_on() -> None:
+    """Press the power button: fold the shut-down screen away and run the whole
+    boot-and-login turn-on again."""
+    if api is None:
+        return
+    if POWER in open_window_ids():
+        close_window(POWER)
+    _power_on_sequence()
+
+
+def log_off_to_welcome() -> None:
+    """Log the person off but not the machine: close their windows, take the
+    taskbar and icons away, and stand the welcome screen over the darkened
+    desktop - XP's log-off-to-welcome. With the login cosplay switched off
+    the desktop simply comes back up."""
+    if api is None:
+        return
+    for win_id in program_window_ids():
+        close_window(win_id)
+        forget_window(win_id)
+    _arm_desktop_off()
+    if not _gui_live() or not bool(config("logon", True)):
+        _desktop_on()
+    elif vm_accounts():
+        login_screen()
+    else:
+        account_create_screen()
+
+
+def start_power_dialog() -> None:
+    """The Start footer's way out, asked as XP asked it: a three-option
+    confirm - Log Off, Turn Off Computer, Cancel - whichever footer button
+    opened it. Log Off walks back to the welcome screen; Turn Off runs the
+    whole desktop down to the power button; Cancel leaves everything
+    standing."""
+    if api is None:
+        return
+    picked = api.ui.choose(["Log Off", "Turn Off Computer", "Cancel"])
+    if picked == "Turn Off Computer":
+        power_off()
+    elif picked == "Log Off":
+        log_off_to_welcome()
 
 
 def startup_sound() -> None:
@@ -1340,9 +1900,29 @@ def _apply_screen_defaults() -> None:
     else:
         scale_pct = min(scale_pct, 80)
     scale_pct = max(80, min(160, scale_pct))
+    # BerryVM's scale now runs to a much wider dial, so let the screen's own
+    # shape push it past the old floor and ceiling: a big monitor earns a
+    # larger desktop, a cramped one a smaller.
+    if screen_w >= 3200:
+        scale_pct = max(scale_pct, 180)
+    elif screen_w < 800:
+        scale_pct = min(scale_pct, 75)
+    scale_pct = max(60, min(300, scale_pct))
+    # The taskbar's marks and the tray's follow the same tier as the screen:
+    # a roomy bar on a big panel, a slim one on a pocket machine.
+    if screen_w >= 2400:
+        task_px, tray_px = 24, 18
+    elif screen_w >= 1600:
+        task_px, tray_px = 20, 17
+    elif screen_w >= 1024:
+        task_px, tray_px = 16, 16
+    else:
+        task_px, tray_px = 14, 12
     DEFAULTS["window_width"] = width
     DEFAULTS["window_height"] = height
     DEFAULTS["ui_scale"] = scale_pct
+    DEFAULTS["task_icon"] = task_px
+    DEFAULTS["tray_icon"] = tray_px
 
 
 # --- small pure helpers, so the shapes above can be read without a window ---
@@ -1389,12 +1969,13 @@ def short_name(path: Any) -> str:
 def scale() -> int:
     """BerryVM's own desktop scale in percent. The app's interface zoom is a
     different dial the addon cannot turn; this one moves the windows and
-    tiles this desktop draws."""
+    tiles this desktop draws. The range runs wide - 60 to 300 - so a small
+    netbook can shrink the desktop as well as a big monitor grow it."""
     try:
         number = int(config("ui_scale", DEFAULTS["ui_scale"]))
     except (TypeError, ValueError):
         return int(DEFAULTS["ui_scale"])
-    return max(80, min(160, number))
+    return max(60, min(300, number))
 
 
 def scaled(pixels: int) -> int:
@@ -1462,6 +2043,19 @@ def inactive_caption() -> str:
 def task_height() -> int:
     """The taskbar row's height in pixels, before the desktop scale."""
     return _num("task_height", 22, 64)
+
+
+def task_icon() -> int:
+    """The mark a taskbar button wears, in pixels before the desktop scale.
+    Once a fixed 16; now a dial of its own so the bar's icons can grow or
+    shrink independently of the bar's height."""
+    return _num("task_icon", 12, 40)
+
+
+def tray_icon() -> int:
+    """The tray's own item size, in pixels before the desktop scale: the
+    point size the notification marks and the clock are drawn at."""
+    return _num("tray_icon", 10, 32)
 
 
 def icon_px() -> int:
@@ -2030,7 +2624,7 @@ def refresh_taskbar() -> None:
                  bool(minimized.get(win_id)) or win_id in maximized)
                 for win_id in program_window_ids())
     state = (scaled(task_height()),
-             scaled(12 if task_small() else TASKBAR_ICON), row)
+             scaled(12 if task_small() else task_icon()), row)
     if state == _taskbar_shown:
         return
     _taskbar_shown = state
@@ -2223,26 +2817,44 @@ def forget_window(win_id: str) -> None:
                     if str(owner) == win_id]:
         terminals.pop(term_id, None)
     if win_id == P_EXPLORER:
-        # The Explorer's two panes are the only tables that live straight on
-        # the tab id; a machine window's picks die with its own record.
-        for pane in (PANE_LOCAL, PANE_REMOTE):
-            pane_pick.pop(f"{pane}_table", None)
-            pane_rows.pop(f"{pane}_table", None)
-            pane_path.pop(pane, None)
+        # My Computer owns the local pane only; its table, picks and path go
+        # with it, while the device side lives on in berry sftp.
+        pane_pick.pop(f"{PANE_LOCAL}_table", None)
+        pane_rows.pop(f"{PANE_LOCAL}_table", None)
+        pane_path.pop(PANE_LOCAL, None)
+    elif win_id == P_SFTP:
+        # berry sftp owns the remote pane; a closed window stops any device
+        # listing and drops where that side had walked.
+        pane_pick.pop(f"{PANE_REMOTE}_table", None)
+        pane_rows.pop(f"{PANE_REMOTE}_table", None)
+        pane_path.pop(PANE_REMOTE, None)
 
 
 # --- painting: the theme and the icon layer ---
 
+def _pour_sheet(widget_id: str, sheet: str) -> None:
+    """Put one stylesheet on a widget only when it differs from what is
+    already there. During a drag or a colour change many re-pours are
+    byte-identical; skipping the identical one keeps Qt from re-parsing a
+    sheet it has already applied - the same skip-when-unchanged bargain
+    :func:`refresh_taskbar` and :func:`tick_clock` keep."""
+    if _theme_sheets_shown.get(widget_id) == sheet:
+        return
+    _theme_sheets_shown[widget_id] = sheet
+    api.tabs.set_widget(TAB, widget_id, "style", sheet)
+
+
 def apply_theme() -> None:
     """Put both sheets on: the desktop's (wallpaper and every window inside
     it) and the taskbar's. Called at init and again whenever Display
-    Properties says Apply."""
+    Properties says Apply. Each pour is skipped when the sheet has not
+    changed, so a coalesced or repeated repaint costs nothing."""
     if api is None:
         return
-    api.tabs.set_widget(TAB, DESKTOP, "style", desktop_sheet())
-    api.tabs.set_widget(TAB, TASKBAR, "style", taskbar_sheet())
+    _pour_sheet(DESKTOP, desktop_sheet())
+    _pour_sheet(TASKBAR, taskbar_sheet())
     if ICONS in open_window_ids():
-        api.tabs.set_widget(TAB, ICONS, "style", ICON_FRAME_SHEET)
+        _pour_sheet(ICONS, ICON_FRAME_SHEET)
 
 
 def icon_layer_spec() -> dict:
@@ -2287,7 +2899,11 @@ def open_icon_layer() -> None:
     })
     opened[ICONS] = {"title": "icons", "kind": "icon_layer"}
     draw_desk_icons()
+    # A brand-new widget needs the frame sheet whatever the memo says, so
+    # this write is unconditional; the memo is then synced so a following
+    # apply_theme sees the layer already styled and skips the identical pour.
     api.tabs.set_widget(TAB, ICONS, "style", ICON_FRAME_SHEET)
+    _theme_sheets_shown[ICONS] = ICON_FRAME_SHEET
 
 
 def draw_desk_icons() -> None:
@@ -2641,7 +3257,7 @@ def start_choice(picked: Any) -> None:
     elif text == "About BerryVM":
         about_box()
     elif text == "Log Off":
-        log_off()
+        log_off_to_welcome()
 
 
 # --- the Start flyout: the XP two-pane menu ---
@@ -2702,7 +3318,7 @@ def start_flyout_spec() -> dict:
                 {"kind": "label", "object_name": "berryStartSub",
                  "text": "All Programs"},
                 {"kind": "list", "id": f"{P_START}_all", "items": every,
-                 "on": ["activated"], "icon_size": scaled(24),
+                 "on": ["activated"], "expand": True, "icon_size": scaled(24),
                  "tooltip": "Everything BerryVM ships"},
             ]},
             {"kind": "column", "object_name": "berryStartRight", "children": [
@@ -2715,10 +3331,12 @@ def start_flyout_spec() -> dict:
         {"kind": "row", "object_name": "berryStartFoot", "children": [
             {"kind": "button", "id": f"{P_START}_logoff", "text": "Log Off",
              "on": ["clicked"], "expand": True,
-             "tooltip": "Close every window on the desktop"},
+             "tooltip": "Close your windows and walk back to the welcome "
+                        "screen"},
             {"kind": "button", "id": f"{P_START}_shutdown",
              "text": "Turn Off Computer", "on": ["clicked"], "expand": True,
-             "tooltip": "The XP sign-out joke; the tab stays put"},
+             "tooltip": "Run the desktop down to a power button; press it "
+                        "to boot again"},
         ]},
         {"kind": "label", "id": f"{P_START}_note", "text": "",
          "word_wrap": True},
@@ -2747,14 +3365,20 @@ def open_start() -> str:
         return P_START
     _ensure_home()
     wide = scaled(360)
-    tall = scaled(440)
+    # The flyout's height is read from the room the desktop actually has
+    # rather than a fixed number: with ten programs to list, a hard 440 could
+    # grow past a short screen and cut the bottom of the menu off. It asks for
+    # 560 scaled pixels but never more than the canvas gives, minus a small
+    # gap so its foot clears the taskbar.
+    _, area_h = _desktop_area()
+    zoom = _ui_zoom() or 1.0
+    room = area_h / zoom
+    tall = int(max(scaled(360), min(scaled(560), room - scaled(6))))
     # Seat the bottom edge on the canvas floor, just above the taskbar. The
     # canvas is read in device pixels while the primitive zooms the numbers it
     # is handed, so the place is worked out in device pixels and divided back
     # through the interface zoom before it is passed down.
-    _, area_h = _desktop_area()
-    zoom = _ui_zoom() or 1.0
-    top = max(0.0, area_h / zoom - tall)
+    top = max(0.0, room - tall)
     open_window({
         "id": P_START, "title": "Start", "chrome": False,
         "closable": False, "resizable": False,
@@ -2785,21 +3409,17 @@ def start_pressed() -> None:
 
 
 def start_flyout_picked(list_id: str, text: str) -> None:
-    """One flyout row doubled. A program caption - from either left column -
-    launches through the shared :func:`start_choice`; the right column's
-    ``My *`` rows walk Explorer to that folder, My Computer opens the file
-    manager (it is a program caption too), and Control Panel brings Display
-    Properties up."""
+    """One flyout row doubled. A program caption - from either left column,
+    or the right column's Control Panel now that the settings window is
+    named that - launches through the shared :func:`start_choice`; the right
+    column's ``My *`` rows walk Explorer to that folder and My Computer opens
+    the file manager (it is a program caption too)."""
     text = str(text or "")
     if not text:
         return
     if text in BY_CAPTION:
         close_start()
         start_choice(text)
-        return
-    if text == "Control Panel":
-        close_start()
-        open_settings()
         return
     if text.startswith("My "):
         close_start()
@@ -2846,6 +3466,10 @@ def start_program(win_id: str) -> None:
         open_media()
     elif win_id == P_BROWSER:
         open_browser()
+    elif win_id == P_SSH:
+        open_ssh()
+    elif win_id == P_SFTP:
+        open_sftp()
     else:
         api.ui.notify(f"BerryVM has no program {win_id!r}.")
 
@@ -3115,13 +3739,21 @@ def _selected_text(identifier: str) -> str:
     return str(found[0]) if found else ""
 
 
-# --- 1. My Computer: the two-paned file manager ---
+# --- 1. My Computer (local) and berry sftp (device): two file panes ---
 
-#: What the hint line above the panes says, so nobody has to guess which
-#: side is which machine.
-EXPLORER_HINT = ("Left: this computer. Right: the device, over the app's "
-                 "main connection. Double-click to open; right-click a row "
-                 "for its menu.")
+#: What the hint line above My Computer's pane says: this window is the
+#: machine's own disk, and the device lives in the separate berry sftp
+#: window; a file moves between them by a drag or a Copy/Paste.
+EXPLORER_HINT = ("This computer's own files. Drag a file onto berry sftp - "
+                 "or Copy it here and Paste there - to send it to the "
+                 "device. Double-click to open; right-click a row for its "
+                 "menu.")
+
+#: The berry sftp window's hint: the device's files, and the way back.
+SFTP_HINT = ("The device, over the app's file session. Drag a file onto My "
+             "Computer - or Copy it here and Paste there - to bring it onto "
+             "this machine. Double-click to open; right-click a row for its "
+             "menu.")
 
 #: Pane prefix -> (origin word, display name). Everything below reads a pane
 #: through this table, so the two sides differ in data source only.
@@ -3130,26 +3762,52 @@ PANE_KINDS = {
     PANE_REMOTE: ("remote", "Device"),
 }
 
+#: Which window hosts which pane now that My Computer and berry sftp are
+#: separate: a pane's note line belongs to the window that shows it.
+PANE_WINDOW = {
+    PANE_LOCAL: P_EXPLORER,
+    PANE_REMOTE: P_SFTP,
+}
+
+
+def _pane_note(pane: str, text: str = "") -> None:
+    """Set the note line of the window that owns this pane - My Computer for
+    the local side, berry sftp for the remote - so a message shows where the
+    person is looking and not on a window that may be closed."""
+    _note(PANE_WINDOW.get(pane, P_EXPLORER), text)
+
 
 def explorer_spec() -> dict:
-    """One window, two panes, a fold line between them: the columns of the
-    panes are built by the same function with a different prefix, so an
-    action means the same thing on both sides."""
+    """My Computer, local-only now: one column holding the machine's own file
+    pane. The device's pane lives in its own berry sftp window, and the two
+    move files between themselves by drag-and-drop and Copy/Paste."""
     return {"kind": "column", "children": [
         {"kind": "label", "id": f"{P_EXPLORER}_hint", "text": EXPLORER_HINT,
          "word_wrap": True},
-        {"kind": "splitter", "sizes": [1, 1], "children": [
-            _pane_column(PANE_LOCAL, "This computer"),
-            _pane_column(PANE_REMOTE, "Device (file session)"),
-        ]},
+        _pane_column(PANE_LOCAL, "This computer"),
         {"kind": "label", "id": f"{P_EXPLORER}_note", "text": "",
          "word_wrap": True},
     ]}
 
 
+def sftp_spec() -> dict:
+    """The berry sftp window: the device's file pane, held in a single column
+    the same shape My Computer's local pane takes, so a row can be dragged
+    from one window and dropped on the other."""
+    return {"kind": "column", "children": [
+        {"kind": "label", "id": f"{P_SFTP}_hint", "text": SFTP_HINT,
+         "word_wrap": True},
+        _pane_column(PANE_REMOTE, "Device (SFTP)"),
+        {"kind": "label", "id": f"{P_SFTP}_note", "text": "",
+         "word_wrap": True},
+    ]}
+
+
 def _pane_column(pane: str, heading: str) -> dict:
-    """One side of the Explorer: where it is, the rows it holds, and the
-    buttons that act on the picked one."""
+    """One file pane: where it is, the rows it holds, and the buttons that
+    act on the picked one. Both windows build their pane with this same
+    function, so a row dragged from one can be dropped on the other."""
+    other = "berry sftp" if pane == PANE_LOCAL else "My Computer"
     transfer = ("Upload \u2192" if pane == PANE_LOCAL
                 else "\u2190 Download")
     return {"kind": "column", "children": [
@@ -3172,10 +3830,12 @@ def _pane_column(pane: str, heading: str) -> dict:
         ]},
         {"kind": "table", "id": f"{pane}_table",
          "columns": ["Name", "Size", "Mode", "Modified"],
-         "on": ["selected", "activated", "context"],
+         "on": ["selected", "activated", "context", "drop"],
+         "draggable": True,
          "expand": "both",
          "tooltip": "Double-click a folder to walk in or a file to open it; "
-                    "right-click for the item's menu."},
+                    "right-click for the item's menu. Drag a file onto the "
+                    "other window to copy it there."},
         {"kind": "row", "children": [
             {"kind": "button", "id": f"{pane}_open", "text": "Open",
              "on": ["clicked"]},
@@ -3185,32 +3845,48 @@ def _pane_column(pane: str, heading: str) -> dict:
              "on": ["clicked"]},
             {"kind": "button", "id": f"{pane}_delete", "text": "Delete",
              "on": ["clicked"]},
+            {"kind": "button", "id": f"{pane}_paste", "text": "Paste",
+             "on": ["clicked"],
+             "tooltip": f"Copy a file in {other}, then Paste it here"},
             {"kind": "button", "id": f"{pane}_send", "text": transfer,
              "on": ["clicked"],
-             "tooltip": ("Copy the picked file into the folder the other "
-                         "pane is showing")},
+             "tooltip": f"Copy the picked file into the folder {other} is "
+                        "showing"},
         ]},
     ]}
 
 
 def open_explorer() -> str:
-    """Bring My Computer up, or raise the window that is already open, and
-    read both panes from wherever they last stood."""
+    """Bring My Computer up, or raise the window already open, and read the
+    local pane from wherever it last stood. It is local-only now: the device
+    lives in berry sftp, opened by its own icon."""
     if api is None:
         return ""
     title = CAPTIONS[P_EXPLORER]
-    width, height = window_size()
-    open_window(_program_entry(P_EXPLORER, title, explorer_spec(),
-                               width * 2, height))
+    open_window(_program_entry(P_EXPLORER, title, explorer_spec()))
     opened[P_EXPLORER] = {"title": title, "kind": "explorer"}
     refresh_taskbar()
-    # Where each side stands between openings: home here, the device's root
-    # there, unless a listing earlier in this session said otherwise.
+    # Where the local side stands between openings: the home folder, unless a
+    # listing earlier in this session said otherwise.
     pane_path.setdefault(PANE_LOCAL, str(vm_home()))
-    pane_path.setdefault(PANE_REMOTE, "")
     pane_list(PANE_LOCAL, pane_path[PANE_LOCAL])
-    pane_list(PANE_REMOTE, pane_path[PANE_REMOTE])
     return P_EXPLORER
+
+
+def open_sftp() -> str:
+    """Bring the berry sftp window up, or raise it, and list the device's
+    root. Its pane is the remote side, so every device action - open, rename,
+    delete, download - works here exactly as it did in the old two-paned
+    Explorer's right column."""
+    if api is None:
+        return ""
+    title = CAPTIONS[P_SFTP]
+    open_window(_program_entry(P_SFTP, title, sftp_spec()))
+    opened[P_SFTP] = {"title": title, "kind": "sftp"}
+    refresh_taskbar()
+    pane_path.setdefault(PANE_REMOTE, "")
+    pane_list(PANE_REMOTE, pane_path[PANE_REMOTE])
+    return P_SFTP
 
 
 def pane_meta(pane: str, name: str) -> dict:
@@ -3311,14 +3987,14 @@ def _pane_list_remote(where: str) -> None:
     if not api.device.is_connected("sftp"):
         pane_rows[f"{PANE_REMOTE}_table"] = {}
         api.tabs.set_widget(TAB, f"{PANE_REMOTE}_table", "rows", [])
-        _note(P_EXPLORER, "device pane: the file session is not open - "
+        _pane_note(PANE_REMOTE, "device pane: the file session is not open - "
                           "connect it on the app's Connection panel and "
                           "press Refresh.")
         return
     try:
         entries = api.device.list(rel) or []
     except Exception as error:
-        _note(P_EXPLORER, f"device pane could not read that folder: {error}")
+        _pane_note(PANE_REMOTE, f"device pane could not read that folder: {error}")
         return
     rows: dict = {}
     laid: list[dict] = []
@@ -3340,7 +4016,7 @@ def _pane_list_remote(where: str) -> None:
                      "icon": file_icon(name, is_dir)})
     pane_rows[f"{PANE_REMOTE}_table"] = rows
     api.tabs.set_widget(TAB, f"{PANE_REMOTE}_table", "rows", laid)
-    _note(P_EXPLORER, f"device: {len(laid)} item(s)")
+    _pane_note(PANE_REMOTE, f"device: {len(laid)} item(s)")
 
 
 def pane_enter(pane: str, name: str) -> None:
@@ -3348,7 +4024,7 @@ def pane_enter(pane: str, name: str) -> None:
     is what the Open button and a double-click both come down to."""
     meta = pane_meta(pane, name)
     if not meta:
-        _note(P_EXPLORER, "Select an item first.")
+        _pane_note(pane, "Select an item first.")
         return
     if meta.get("directory"):
         pane_list(pane, str(meta.get("path") or ""))
@@ -3391,7 +4067,7 @@ def pane_open_picked(pane: str) -> None:
     if not name:
         name = _selected_text(f"{pane}_table")
     if not name:
-        _note(P_EXPLORER, "Select an item first.")
+        _pane_note(pane, "Select an item first.")
         return
     pane_enter(pane, name)
 
@@ -3410,7 +4086,7 @@ def open_item(pane: str, name: str, meta: dict) -> None:
     elif is_text(name):
         open_berrypad(path, origin, name)
     else:
-        _note(P_EXPLORER, f"{name} is neither a picture nor text BerryVM "
+        _pane_note(pane, f"{name} is neither a picture nor text BerryVM "
                           "can open - use Upload/Download or Run instead.")
 
 
@@ -3423,19 +4099,19 @@ def pane_new_folder(pane: str) -> None:
         try:
             (Path(pane_path[pane]) / name).mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            _note(P_EXPLORER, f"could not create the folder: {error}")
+            _pane_note(pane, f"could not create the folder: {error}")
             return
-        _note(P_EXPLORER, f"{name} created")
+        _pane_note(pane, f"{name} created")
         pane_list(pane, pane_path[pane])
         return
     rel = posixpath.join(pane_path[pane] or "", name)
     try:
         api.device.mkdir(rel)
     except Exception as error:
-        _note(P_EXPLORER, f"could not create the folder on the device: "
+        _pane_note(pane, f"could not create the folder on the device: "
                           f"{error}")
         return
-    _note(P_EXPLORER, f"{name} created on the device")
+    _pane_note(pane, f"{name} created on the device")
     pane_list(pane, pane_path[pane])
 
 
@@ -3443,7 +4119,7 @@ def pane_rename(pane: str) -> None:
     name = pane_picked(pane)
     meta = pane_meta(pane, name)
     if not meta:
-        _note(P_EXPLORER, "Select an item to rename.")
+        _pane_note(pane, "Select an item to rename.")
         return
     fresh = api.ui.input("Rename", "New name", name)
     fresh = str(fresh or "").strip()
@@ -3453,7 +4129,7 @@ def pane_rename(pane: str) -> None:
         try:
             Path(meta["path"]).rename(Path(pane_path[pane]) / fresh)
         except OSError as error:
-            _note(P_EXPLORER, f"could not rename: {error}")
+            _pane_note(pane, f"could not rename: {error}")
             return
     else:
         old = str(meta["path"])
@@ -3461,7 +4137,7 @@ def pane_rename(pane: str) -> None:
         try:
             api.device.rename(old, new)
         except Exception as error:
-            _note(P_EXPLORER, f"could not rename on the device: {error}")
+            _pane_note(pane, f"could not rename on the device: {error}")
             return
     pane_list(pane, pane_path[pane])
 
@@ -3470,7 +4146,7 @@ def pane_delete(pane: str) -> None:
     name = pane_picked(pane)
     meta = pane_meta(pane, name)
     if not meta:
-        _note(P_EXPLORER, "Select an item to delete.")
+        _pane_note(pane, "Select an item to delete.")
         return
     kind = "folder" if meta.get("directory") else "file"
     if not api.ui.question("Delete",
@@ -3485,45 +4161,121 @@ def pane_delete(pane: str) -> None:
             else:
                 target.unlink()
         except OSError as error:
-            _note(P_EXPLORER, f"could not delete: {error}")
+            _pane_note(pane, f"could not delete: {error}")
             return
     else:
         try:
             api.device.remove(str(meta["path"]), True)
         except Exception as error:
-            _note(P_EXPLORER, f"could not delete on the device: {error}")
+            _pane_note(pane, f"could not delete on the device: {error}")
             return
-    _note(P_EXPLORER, f"{name} deleted")
+    _pane_note(pane, f"{name} deleted")
     pane_list(pane, pane_path[pane])
 
 
-def pane_send(pane: str) -> None:
-    """Cross the picked item to the other pane: an upload puts a local file
-    into the device folder the right pane shows, a download pulls a remote
-    one into the folder the left pane shows."""
-    name = pane_picked(pane)
-    meta = pane_meta(pane, name)
-    if not meta or meta.get("directory"):
-        _note(P_EXPLORER, "Select a file to send across.")
+def _push_to_remote(name: str, local_path: str) -> None:
+    """Upload one local file into the folder berry sftp is showing, then
+    refresh that side. If the sftp window is not open there is nowhere for it
+    to land, so say so on My Computer rather than fail in silence."""
+    if PANE_REMOTE not in pane_path:
+        _pane_note(PANE_LOCAL, "Open berry sftp to receive the upload.")
         return
-    if pane == PANE_LOCAL:
-        target = posixpath.join(pane_path[PANE_REMOTE] or "", name)
-        try:
-            landed = api.device.upload(str(meta["path"]), target)
-        except Exception as error:
-            _note(P_EXPLORER, f"upload failed: {error}")
-            return
-        _note(P_EXPLORER, f"uploaded to {landed}")
-        pane_list(PANE_REMOTE, pane_path[PANE_REMOTE])
+    target = posixpath.join(pane_path[PANE_REMOTE] or "", name)
+    try:
+        landed = api.device.upload(str(local_path), target)
+    except Exception as error:
+        _pane_note(PANE_REMOTE, f"upload failed: {error}")
+        return
+    _pane_note(PANE_REMOTE, f"uploaded to {landed}")
+    pane_list(PANE_REMOTE, pane_path[PANE_REMOTE])
+
+
+def _pull_to_local(name: str, remote_path: str) -> None:
+    """Download one device file into the folder My Computer is showing, then
+    refresh that side. No My Computer window means nowhere to put it."""
+    if PANE_LOCAL not in pane_path:
+        _pane_note(PANE_REMOTE, "Open My Computer to receive the download.")
         return
     into = Path(pane_path[PANE_LOCAL]) / name
     try:
-        landed = api.device.download(str(meta["path"]), str(into))
+        landed = api.device.download(str(remote_path), str(into))
     except Exception as error:
-        _note(P_EXPLORER, f"download failed: {error}")
+        _pane_note(PANE_LOCAL, f"download failed: {error}")
         return
-    _note(P_EXPLORER, f"downloaded to {landed or into}")
+    _pane_note(PANE_LOCAL, f"downloaded to {landed or into}")
     pane_list(PANE_LOCAL, pane_path[PANE_LOCAL])
+
+
+def pane_send(pane: str) -> None:
+    """Cross the picked item to the other window: an upload puts a local file
+    into the folder berry sftp shows, a download pulls a device file into the
+    folder My Computer shows."""
+    name = pane_picked(pane)
+    meta = pane_meta(pane, name)
+    if not meta or meta.get("directory"):
+        _pane_note(pane, "Select a file to send across.")
+        return
+    if pane == PANE_LOCAL:
+        _push_to_remote(name, str(meta["path"]))
+    else:
+        _pull_to_local(name, str(meta["path"]))
+
+
+def pane_copy(pane: str, name: str) -> None:
+    """Put the picked row on the transfer clipboard, tagged with the pane it
+    came from; Paste in the other window moves it across."""
+    meta = pane_meta(pane, name)
+    if not meta:
+        return
+    _xfer_clip.clear()
+    _xfer_clip.append({"pane": pane, "name": name,
+                       "path": str(meta.get("path") or name),
+                       "directory": bool(meta.get("directory"))})
+    other = "berry sftp" if pane == PANE_LOCAL else "My Computer"
+    _pane_note(pane, f"Copied {name}. Paste it in {other}.")
+
+
+def pane_paste(pane: str) -> None:
+    """Move everything on the transfer clipboard into this pane, bringing it
+    from the other window. Files only; a row copied in this same window has
+    nowhere cross-window to go, so it is left where it is."""
+    if not _xfer_clip:
+        _pane_note(pane, "Nothing to paste.")
+        return
+    other = "berry sftp" if pane == PANE_LOCAL else "My Computer"
+    for item in _xfer_clip:
+        if str(item.get("pane")) == pane:
+            _pane_note(pane, f"Copy a file in {other} to paste it here.")
+            continue
+        if item.get("directory"):
+            _pane_note(pane, f"{item.get('name')} is a folder - files only.")
+            continue
+        if pane == PANE_REMOTE:
+            _push_to_remote(str(item.get("name")), str(item.get("path")))
+        else:
+            _pull_to_local(str(item.get("name")), str(item.get("path")))
+
+
+def pane_drop(pane: str, payload: dict) -> None:
+    """A row dragged out of the other window and dropped here: move each file
+    it names across. A drop back onto its own pane is ignored, and a folder is
+    refused - a file has to have somewhere else to land."""
+    source = str((payload or {}).get("source") or "")[:3]
+    if source not in PANE_KINDS or source == pane:
+        return
+    for row in (payload or {}).get("rows") or []:
+        name = str(row.get("text") or "")
+        if not name:
+            continue
+        meta = pane_meta(source, name)
+        if not meta or meta.get("directory"):
+            _pane_note(pane, f"{name} is not a file that can be dropped "
+                             "here.")
+            continue
+        if pane == PANE_REMOTE:
+            _push_to_remote(name, str(meta["path"]))
+        else:
+            _pull_to_local(name, str(meta["path"]))
 
 
 def pane_menu(pane: str, name: str) -> None:
@@ -3538,7 +4290,7 @@ def pane_menu(pane: str, name: str) -> None:
     lines = ["Open"]
     if not meta.get("directory"):
         lines += ["Edit in Notepad", "View as picture"]
-    lines += ["Rename", "Delete"]
+    lines += ["Rename", "Delete", "Copy"]
     if pane == PANE_LOCAL:
         lines += ["Upload to device"]
     else:
@@ -3557,6 +4309,8 @@ def pane_menu(pane: str, name: str) -> None:
     elif picked == "Delete":
         pane_pick[f"{pane}_table"] = name
         pane_delete(pane)
+    elif picked == "Copy":
+        pane_copy(pane, name)
     elif picked in ("Upload to device", "Download to local pane"):
         pane_pick[f"{pane}_table"] = name
         pane_send(pane)
@@ -3564,14 +4318,16 @@ def pane_menu(pane: str, name: str) -> None:
 
 def pane_menu_desktop(pane: str) -> None:
     """A right-click on the empty part of a pane's table: the pane's own
-    refresh and new folder, which need no selection."""
-    picked = api.ui.choose(["Refresh", "New Folder", "Up"])
+    refresh, new folder and paste, which need no selection."""
+    picked = api.ui.choose(["Refresh", "New Folder", "Up", "Paste"])
     if picked == "Refresh":
         pane_list(pane, pane_path[pane])
     elif picked == "New Folder":
         pane_new_folder(pane)
     elif picked == "Up":
         pane_up(pane)
+    elif picked == "Paste":
+        pane_paste(pane)
 
 
 # --- 2. Notepad: one editor window per file ---
@@ -4174,6 +4930,138 @@ def console_news(win_id: str, event: str, payload: dict) -> None:
                             "shell ended - close the window, open another")
 
 
+# --- 6b. berry ssh: an SSH terminal to a machine you name ---
+
+def ssh_spec(win_id: str) -> dict:
+    """A status line over a real terminal screen, the Command Prompt's shape
+    pointed not at a local shell but at the ``connect`` property: an SSH
+    session this addon owns, opened to whatever host the person typed."""
+    return {"kind": "column", "children": [
+        {"kind": "label", "id": f"{win_id}_path", "text": "",
+         "expand": True, "word_wrap": True},
+        {"kind": "terminal", "id": f"{win_id}_term",
+         "font_size": term_font(),
+         "on": ["ready", "closed", "failed", "title"]},
+    ]}
+
+
+def _ssh_settings(text: str, profile: dict) -> dict:
+    """Parse ``user@host[:port]`` into the settings dict a terminal connect
+    reads. A blank user or port falls back to the app's profile, then to the
+    usual default of 22; the password or key file is added by the caller."""
+    text = str(text or "").strip()
+    username = str(profile.get("username") or "")
+    host = str(profile.get("host") or "")
+    fallback_port = profile.get("port") or 22
+    if "@" in text:
+        user, _, text = text.partition("@")
+        username = user.strip() or username
+    text = text.strip()
+    port: Any = fallback_port
+    if text:
+        if ":" in text and text.count(":") == 1:   # host:port, not IPv6
+            host, _, tail = text.rpartition(":")
+            tail = str(tail).strip()
+            if tail.isdigit():
+                port = int(tail)
+            host = host.strip()
+        else:
+            host = text
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 22
+    return {"host": str(host or "").strip(), "port": port,
+            "username": str(username or "").strip()}
+
+
+def open_ssh() -> str:
+    """Prompt for a machine, then a password (or a key file), and open a
+    terminal window that connects straight to it. Each window owns its own
+    SSH session, so several can sit side by side to different hosts, and
+    closing one never touches the app's own connection. Prefilled from the
+    active profile so the device in front of the person is one Enter away."""
+    global ssh_seq
+    if api is None:
+        return ""
+    profile = {}
+    try:
+        profile = api.session.profile() or {}
+    except Exception:
+        profile = {}
+    seed = f"{profile.get('username') or ''}@{profile.get('host') or ''}"
+    seed_port = profile.get("port") or 22
+    try:
+        if int(seed_port) != 22:
+            seed += f":{seed_port}"
+    except (TypeError, ValueError):
+        pass
+    target = api.ui.input("berry ssh",
+                          "Connect to (user@host[:port]):", seed)
+    if target is None:
+        return ""                          # cancelled at the address box
+    settings = _ssh_settings(target, profile)
+    if not settings["host"]:
+        api.ui.notify("berry ssh needs a host to connect to.")
+        return ""
+    password = api.ui.input(
+        "berry ssh",
+        f"Password for {settings['username']}@{settings['host']} "
+        "(leave blank to use a key file):", "", secret=True)
+    if password is None:
+        return ""                          # cancelled at the password box
+    if password:
+        settings["password"] = password
+    else:
+        key_file = api.ui.pick_file(
+            "berry ssh", kind="open",
+            filter="Keys (*.pem *.key *.pub);;All files (*)")
+        if str(key_file or "").strip():
+            settings["key_file"] = str(key_file).strip()
+    ssh_seq += 1
+    win_id = f"{SSH_PREFIX}{ssh_seq}"
+    term_id = f"{win_id}_term"
+    where = f"{settings['username']}@{settings['host']}:{settings['port']}"
+    title = f"berry ssh - {where}"
+    open_window(_program_entry(win_id, title, ssh_spec(win_id)))
+    opened[win_id] = {"title": title, "kind": "ssh", "host": settings["host"],
+                      "port": settings["port"],
+                      "username": settings["username"]}
+    terminals[term_id] = win_id
+    refresh_taskbar()
+    api.tabs.set_widget(TAB, f"{win_id}_path", "text", f"connecting to {where}")
+    api.tabs.set_widget(TAB, term_id, "connect", settings)
+    return win_id
+
+
+def ssh_news(win_id: str, event: str, payload: dict) -> None:
+    """One SSH terminal's own news, written onto its window's status line. The
+    shell prints its prompt, so this only marks the joins: connected, failed
+    or closed. A title the far side sends is folded into the window's caption
+    and the record the taskbar reads."""
+    if api is None:
+        return
+    record = opened.get(win_id) or {}
+    where = (f"{record.get('username')}@{record.get('host')}"
+             f":{record.get('port')}")
+    if event == "ready":
+        api.tabs.set_widget(TAB, f"{win_id}_path", "text",
+                            f"connected - {where}")
+    elif event == "failed":
+        api.tabs.set_widget(TAB, f"{win_id}_path", "text",
+                            f"ssh error: {payload.get('error') or 'failed'}")
+    elif event == "closed":
+        api.tabs.set_widget(TAB, f"{win_id}_path", "text",
+                            "connection closed - close the window, open "
+                            "another")
+    elif event == "title":
+        said = str(payload.get("text") or "").strip()
+        if said:
+            record["title"] = f"berry ssh - {said}"
+            opened[win_id] = record
+            refresh_taskbar()
+
+
 # --- 7. Display Properties: the settings window ---
 
 #: Each Display Properties dial: control id -> (config key, low, high, what
@@ -4183,7 +5071,7 @@ def console_news(win_id: str, event: str, payload: dict) -> None:
 #: opened window takes. :func:`settings_preview` reads this table on each
 #: slider ``changed``.
 _SLIDERS = {
-    "set_scale": ("ui_scale", 80, 160, "scale"),
+    "set_scale": ("ui_scale", 60, 300, "scale"),
     "set_font": ("term_font", 8, 28, "font"),
     "set_width": ("window_width", 240, 2400, "size"),
     "set_height": ("window_height", 180, 1600, "size"),
@@ -4191,6 +5079,8 @@ _SLIDERS = {
     "set_cap_h": ("caption_height", 16, 48, "bar"),
     "set_cap_font": ("caption_font", 7, 24, "bar"),
     "set_task_h": ("task_height", 22, 64, "task"),
+    "set_task_icon": ("task_icon", 12, 40, "task"),
+    "set_tray_icon": ("tray_icon", 10, 32, "task"),
 }
 
 #: Each toggle: control id -> (config key, what a flip repaints).
@@ -4419,7 +5309,7 @@ def settings_spec() -> dict:
                 ]},
                 {"kind": "group", "text": "Density", "children": [
                     _set_slider("set_scale", "Desktop scale %",
-                                "ui_scale", 80, 160),
+                                "ui_scale", 60, 300),
                     _set_slider("set_icon", "Icon size", "icon_px", 24, 96),
                     _set_slider("set_font", "Terminal text",
                                 "term_font", 8, 28),
@@ -4427,6 +5317,10 @@ def settings_spec() -> dict:
                 {"kind": "group", "text": "Taskbar and shells", "children": [
                     _set_slider("set_task_h", "Taskbar height",
                                 "task_height", 22, 64),
+                    _set_slider("set_task_icon", "Taskbar button icon",
+                                "task_icon", 12, 40),
+                    _set_slider("set_tray_icon", "Tray item size",
+                                "tray_icon", 10, 32),
                     _set_toggle("set_small", "Use small buttons",
                                 "task_small",
                                 "Slimmer taskbar buttons and Start padding"),
@@ -4492,6 +5386,9 @@ def settings_apply(close_after: bool = False) -> None:
     on the desktop right now."""
     if api is None:
         return
+    # Pour any live-preview repaint still queued by a drag: a commit is never
+    # left waiting on the debounce timer, and the full repaint below wins.
+    flush_preview()
     was = scale()
     api.config.set("theme", str(_read_one("set_theme", DEFAULT_THEME)))
     api.config.set("wallpaper", str(_read_one("set_wall", "Bliss")))
@@ -4588,15 +5485,72 @@ def settings_pick_colour() -> None:
     _note(P_SETTINGS, f"wallpaper: {picked}")
 
 
+def _stop_preview_timer() -> None:
+    """Hush a pending preview flush, if one is armed. The in-app scheduler's
+    handle stops; a process/stub timer cancels. Both names are tried so the
+    coalescer works under either runtime without a special case."""
+    global _preview_timer
+    timer = _preview_timer
+    _preview_timer = None
+    if timer is None:
+        return
+    for verb in ("stop", "cancel"):
+        hook = getattr(timer, verb, None)
+        if callable(hook):
+            try:
+                hook()
+            except Exception:
+                pass
+            return
+
+
+def queue_preview(effect: str) -> None:
+    """Record that one preview effect needs repainting and re-arm a single short
+    timer to do it. A slider fires ``changed`` on every pixel it moves; each
+    tick lands here, unioning its effect and restarting the countdown, so a
+    continuing drag keeps deferring and the repaint runs once - when the knob
+    settles - instead of dozens of times across the drag."""
+    global _preview_timer
+    if api is None:
+        return
+    _preview_pending.add(effect)
+    _stop_preview_timer()
+    _preview_timer = api.schedule.after(0.09, flush_preview)
+
+
+def flush_preview() -> None:
+    """Pour the coalesced repaint once: apply every effect a preview has queued
+    since the last flush, then clear the backlog and hush the timer. The
+    debounce calls this once the knob settles; :func:`settings_apply` and
+    :func:`settings_defaults` also call it directly so a commit never waits on
+    a timer left running."""
+    _stop_preview_timer()
+    if not _preview_pending:
+        return
+    pending = set(_preview_pending)
+    _preview_pending.clear()
+    if pending & {"scale", "icon", "bar", "task", "theme"}:
+        apply_theme()
+    if pending & {"scale", "icon"}:
+        relayout_desktop()
+    if "font" in pending:
+        apply_term_font()
+    if "task" in pending:
+        refresh_taskbar()
+
+
 def settings_preview(identifier: str, payload: dict) -> None:
     """Live-preview one Display Properties control the moment it moves: write
-    the single key it owns, keep its read-out in step, and repaint just
-    enough to show the change. A scale or icon size rebuilds the tile grid, a
-    caption or taskbar control re-pours the sheets (and the bar's row), a text
-    size retypes the shells, and a window-size dial only moves the defaults a
-    not-yet-opened window takes. Apply and OK still commit the whole set
-    through :func:`settings_apply`; this is the XP habit of a change showing
-    as the knob turns."""
+    the single key it owns, keep its read-out in step, and queue just enough
+    repainting to show the change. The repaint is coalesced through
+    :func:`queue_preview`, so a slider dragged across dozens of pixels pours
+    the look once the knob settles rather than on every tick. A scale or icon
+    size rebuilds the tile grid, a caption or taskbar control re-pours the
+    sheets (and the bar's row), a text size retypes the shells, and a
+    window-size dial only moves the defaults a not-yet-opened window takes.
+    Apply and OK still commit the whole set through :func:`settings_apply`,
+    which flushes anything still queued; this is the XP habit of a change
+    showing as the knob turns."""
     if api is None:
         return
     body = str(identifier or "")
@@ -4611,32 +5565,28 @@ def settings_preview(identifier: str, payload: dict) -> None:
         api.config.set(key, value)
         api.tabs.set_widget(TAB, f"{body}_val", "text", str(value))
         mirror_settings()
-        if effect in ("scale", "icon"):
-            apply_theme()
-            relayout_desktop()
-        elif effect == "font":
-            apply_term_font()
-        elif effect == "task":
-            apply_theme()
-            refresh_taskbar()
-        elif effect == "bar":
-            apply_theme()
-        # "size" moves only the defaults; nothing on screen changes yet.
+        # The write and read-out land now (a test, and the eye, expect them
+        # mid-drag); the repaint - which for a scale or icon size tears the
+        # whole icon layer down and rebuilds it - is coalesced so a drag of
+        # dozens of ticks pours it once the knob settles. "size" moves only
+        # the defaults a not-yet-opened window takes, so nothing is queued.
+        if effect in ("scale", "icon", "font", "task", "bar"):
+            queue_preview(effect)
         return
     if body in _TOGGLES:
         key, effect = _TOGGLES[body]
         api.config.set(key, bool(payload.get("checked")))
         mirror_settings()
-        apply_theme()
-        if effect == "task":
-            refresh_taskbar()
+        queue_preview(effect)
         if body == "set_clock":
+            # The clock's own on/off is a discrete label write, not a repaint;
+            # reflect it at once rather than on the coalescer's beat.
             tick_clock()
         return
     if body in _COLORS:
         api.config.set(_COLORS[body], str(payload.get("text") or "").strip())
         mirror_settings()
-        apply_theme()
+        queue_preview("theme")
         return
 
 
@@ -4659,11 +5609,32 @@ def settings_size_preset(width: int, height: int) -> None:
 
 
 def settings_fit_screen() -> None:
-    """Size a default window against this machine's own screen: sixty percent
-    across, seventy down, clamped to the range the dials offer - the same
-    shape :func:`_apply_screen_defaults` bakes on a first run."""
-    wide, tall = _screen_geometry()
-    settings_size_preset(int(wide * 0.6), int(tall * 0.7))
+    """Fit the whole desktop to this machine's own screen in one click: the
+    default window size, BerryVM's scale and the taskbar/tray marks, all read
+    back from the same tiers :func:`_apply_screen_defaults` bakes on a first
+    run. Everything lands in the config, so a person can still go and nudge a
+    dial by hand afterwards."""
+    if api is None:
+        return
+    _apply_screen_defaults()
+    settings_size_preset(DEFAULTS["window_width"], DEFAULTS["window_height"])
+    was = scale()
+    writes = {
+        "set_scale": ("ui_scale", 60, 300),
+        "set_task_icon": ("task_icon", 12, 40),
+        "set_tray_icon": ("tray_icon", 10, 32),
+    }
+    for identifier, (key, low, high) in writes.items():
+        value = max(low, min(high, int(DEFAULTS[key])))
+        api.config.set(key, value)
+        api.tabs.set_widget(TAB, identifier, "value", value)
+        api.tabs.set_widget(TAB, f"{identifier}_val", "text", str(value))
+    mirror_settings()
+    apply_theme()
+    if scale() != was:
+        relayout_desktop()
+    refresh_taskbar()
+    _note(P_SETTINGS, "Fitted to this screen.")
 
 
 def settings_defaults() -> None:
@@ -4671,6 +5642,9 @@ def settings_defaults() -> None:
     match - the Defaults button means it."""
     if api is None:
         return
+    # Drain the live-preview backlog first, so a half-dragged dial cannot
+    # re-paint over the shipped look the Defaults button has just restored.
+    flush_preview()
     was = scale()
     for key, value in DEFAULTS.items():
         api.config.set(key, value)
@@ -5357,16 +6331,10 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
                 f"{P_START}_side") and event == "activated":
         start_flyout_picked(body, str(payload.get("text") or ""))
         return
-    if event == "clicked" and body == f"{P_START}_logoff":
+    if event == "clicked" and body in (f"{P_START}_logoff",
+                                       f"{P_START}_shutdown"):
         close_start()
-        log_off()
-        return
-    if event == "clicked" and body == f"{P_START}_shutdown":
-        close_start()
-        log_off()
-        api.ui.information("Turn Off Computer",
-                           "It's a joke, un mate. Berry Manager stays put - "
-                           "this is a desktop in a tab, not the machine.")
+        start_power_dialog()
         return
     if body == TASK_LIST and event == "selected":
         win_id = picked_window()
@@ -5402,13 +6370,16 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
                           str(payload.get("name") or ""),
                           str(payload.get("old") or ""))
         return
-    # 4. A local console's news. The Command Prompt is the only shell left,
-    # so its terminal reports straight to the console window that owns it.
+    # 4. A shell's own news. The Command Prompt and berry ssh both report
+    # through a terminal id; each dispatches to the window that owns it, by
+    # the kind its opened record carries.
     if is_terminal_id(body):
         owner = terminals[body]
         record = opened.get(owner) or {}
         if record.get("kind") == "console":
             console_news(owner, event, payload)
+        elif record.get("kind") == "ssh":
+            ssh_news(owner, event, payload)
         return
     # 4b. Paint and Media Player. Their controls are handled ahead of the
     # generic button-suffix cases below, so a ``_save`` on the Paint window
@@ -5450,26 +6421,50 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     if event == "clicked" and body.startswith(f"{P_MEDIA}_"):
         media_button(body[len(P_MEDIA) + 1:])
         return
-    # 4c. The cosplay: the logon picker's faces and the startup chime's
-    # player. Both only ever exist when a real window hosted them, so these
-    # rows are dead weight on a headless run and never reached in a test.
+    # 4c. The cosplay: the welcome screen's names, password and Back, the
+    # account setup's Create/Skip, and the power screen's one button. None of
+    # these widgets exist unless a real window hosted a screen, so these rows
+    # are dead weight on a headless run and never reached in a test.
     if body == f"{LOGON}_who":
         name = str(payload.get("text") or "")
         if event == "selected":
             pane_pick[LOGON] = name
+            _reveal_password(name)
         elif event == "activated" and name:
-            logon_picked(name)
+            pane_pick[LOGON] = name
+            # Double-clicking a name with no password logs straight in - the
+            # blank entry it would type is already correct.
+            if account_password_ok(name, ""):
+                _do_login(name, "")
+            else:
+                _reveal_password(name)
         return
-    if event == "clicked" and body == f"{LOGON}_ok":
-        logon_picked(pane_pick.get(LOGON) or "")
+    if event == "clicked" and body == f"{LOGON}_switch":
+        login_screen()
         return
-    if event == "clicked" and body == f"{LOGON}_skip":
-        close_window(LOGON)
+    if body in (f"{LOGON}_ok", f"{LOGON}_pw") \
+            and event in ("clicked", "returned"):
+        typed = str(payload.get("text") or "")
+        if not typed:
+            typed = str(_read_one(f"{LOGON}_pw", "") or "")
+        _do_login(pane_pick.get(LOGON) or "", typed)
+        return
+    if (event == "clicked" and body == f"{ACC}_ok") \
+            or (event == "returned" and body == f"{ACC}_pw2"):
+        account_commit()
+        return
+    if event == "clicked" and body == f"{ACC}_skip":
+        close_window(ACC)
+        _desktop_on()
+        return
+    if event == "clicked" and body == f"{POWER}_btn":
+        power_on()
         return
     if body == "sfx_player" and event in ("done", "error"):
         close_window("sfx")
         return
-    # 5. The Explorer: its two tables and their buttons.
+    # 5. The file panes: My Computer's local table and berry sftp's remote
+    # table, and the buttons under each.
     if body.endswith("_table") and body[:3] in PANE_KINDS:
         pane = body[:3]
         name = str(payload.get("text") or "")
@@ -5481,6 +6476,8 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
                 pane_enter(pane, name)
         elif event == "context":
             pane_menu(pane, name)
+        elif event == "drop":
+            pane_drop(pane, payload)
         return
     if event == "returned" and body.endswith("_path") \
             and body[:3] in PANE_KINDS:
@@ -5512,6 +6509,8 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
             pane_rename(pane)
         elif action == "delete":
             pane_delete(pane)
+        elif action == "paste":
+            pane_paste(pane)
         elif action == "send":
             pane_send(pane)
         return
@@ -5657,4 +6656,4 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
 #: The Explorer buttons that share one dispatch: everything a pane prefix +
 #: an underscore + one of these words means the same action on either side.
 PANE_ACTIONS = ("up", "home", "root", "refresh", "open", "new", "rename",
-                "delete", "send")
+                "delete", "paste", "send")

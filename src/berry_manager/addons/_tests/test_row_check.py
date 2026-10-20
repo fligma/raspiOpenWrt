@@ -256,6 +256,7 @@ def test_taskbar_primitives(api: Any) -> None:
     can be re-set later; this drives the real primitives offscreen.
     """
     print("\n6. a taskbar list flows sideways, pins its height and wears icons")
+    from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QListView
     from PyQt6.QtCore import QSize
 
@@ -296,6 +297,29 @@ def test_taskbar_primitives(api: Any) -> None:
           "a taskbar item named an icon but came up blank")
     check(bar.item(1).icon().isNull(),
           "a plain string item grew an icon it was never given")
+    # One non-wrapping row should never scroll: the flow branch switches
+    # both bars off, so buttons that run out of room clip at the edge the
+    # way a real taskbar's do instead of pushing a scrollbar into a slim
+    # strip that has no room for one.
+    check(bar.horizontalScrollBarPolicy()
+          == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+          and bar.verticalScrollBarPolicy()
+          == Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+          "a flow: horizontal list still grew scrollbars of its own")
+    # And only that branch: a plain vertical list keeps both bars as Qt
+    # had them, and a grid keeps its vertical one - the branch the icon
+    # layer depends on to scroll its tiles when the desktop is small.
+    plain, _registry = api.build_spec({"kind": "list", "id": "plain"})
+    check(plain.horizontalScrollBarPolicy()
+          != Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+          and plain.verticalScrollBarPolicy()
+          != Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+          "a plain list lost a scrollbar it never asked to hide")
+    grid, _registry = api.build_spec({"kind": "list", "id": "tiles",
+                                      "grid": True})
+    check(grid.verticalScrollBarPolicy()
+          != Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+          "a grid's vertical bar was switched off by the taskbar's fix")
 
 
 # --- seven: a chromeless window's body can be made see-through ---
@@ -433,6 +457,76 @@ def test_config_cache() -> None:
         addon_common.write_config_json(path, {"theme": "zune"})
         check(addon_common.read_config_cached(path) == {"theme": "zune"},
               "a write through the API left an old reading in place")
+
+
+# --- ten b: the merged config view is memoized, and a write drops it ---
+
+def test_config_merged(api: Any) -> None:
+    """``config.get`` reads one key out of a whole merged view (defaults over
+    the file), so that merge is remembered between calls - a UI that reads key
+    after key per repaint pays for it once. Every writer has to drop the
+    memory, or a value just written would not come back on the next read. This
+    proves both halves: the cache answers the same, and set/update/all/pop/
+    reset are all seen at once, with ``all`` handed out as a copy.
+    """
+    print("\n10b. the merged config view caches, and a write clears it")
+    import tempfile
+    from pathlib import Path
+
+    class _Addon:
+        config_fields: list = []
+        config_defaults: dict = {}
+        config_title: str = ""
+
+    class _Api:
+        id = "rowcheck-merged"
+        _addon = _Addon()
+
+        @staticmethod
+        def error(*_a: Any, **_k: Any) -> None:
+            return None
+
+    with tempfile.TemporaryDirectory(prefix="rowcheck-merged-") as folder:
+        base = Path(folder)
+        real_config = api.addon_config_path
+        real_schema = api.addon_schema_path
+        try:
+            api.addon_config_path = lambda _id: base / "config.json"
+            api.addon_schema_path = lambda _id: base / "schema.json"
+            cfg = api.ConfigAPI(_Api())
+            cfg.declare(fields=[{"key": "theme", "kind": "text"}],
+                        defaults={"theme": "bliss", "size": 10})
+            check(cfg.get("theme") == "bliss",
+                  "a declared default did not read back through the merged view")
+            check(cfg.get("size") == 10,
+                  "the second key of the merged view was lost")
+            # A second read answers from the cache and still says the same.
+            check(cfg.get("theme") == "bliss",
+                  "the cached read changed the answer")
+            # A write must be seen by the very next read, or the cache lies.
+            cfg.set("theme", "zune")
+            check(cfg.get("theme") == "zune",
+                  "config.set was not reflected by the next get")
+            cfg.update({"size": 20, "extra": True})
+            check(cfg.get("size") == 20 and cfg.get("extra") is True,
+                  "config.update was not reflected by the next get")
+            merged = cfg.all()
+            check(merged.get("theme") == "zune" and merged.get("size") == 20,
+                  "config.all did not show the written values")
+            # all() hands out a copy: poisoning it must not poison the cache.
+            merged["theme"] = "poisoned"
+            check(cfg.get("theme") == "zune",
+                  "the merged view was shared out, not copied")
+            cfg.pop("theme")
+            check(cfg.get("theme") == "bliss",
+                  "config.pop did not drop the key back to its default")
+            cfg.set("theme", "silver")
+            cfg.reset()
+            check(cfg.get("theme") == "bliss",
+                  "config.reset did not fall back to the defaults")
+        finally:
+            api.addon_config_path = real_config
+            api.addon_schema_path = real_schema
 
 
 # --- eleven: a free-movement grid seats tiles by name and reports a drop ---
@@ -1202,6 +1296,44 @@ def test_local_shell(api: Any) -> None:
         net.LocalShellWorker = original
 
 
+# --- twenty-three: a table opts into a row drag and a file drop ---
+
+def test_table_dragdrop(api: Any) -> None:
+    print("\n23. a table can opt into row drags and file drops")
+    events: list = []
+
+    def emit(identifier: str, event: str, payload: dict) -> None:
+        events.append((identifier, event, payload))
+
+    spec = {"kind": "table", "id": "files", "columns": ["Name"],
+            "draggable": True, "on": ["selected", "drop"]}
+    table, _registry = api.build_spec(spec, events=emit)
+    check(table is not None, "a draggable table spec built")
+    check(getattr(table, "_addon_draggable", False) is True,
+          "the draggable flag was stored on the table")
+    check(table.acceptDrops() is True,
+          "an opted-in table accepts drops")
+    filters = [child for child in table.children()
+               if isinstance(child, api._TableTransferFilter)]
+    check(bool(filters), "the transfer filter was installed for the table")
+
+    # A table that never asked for a drop is left exactly as Qt made it: no
+    # draggable mark, and no filter listening on it.
+    events2: list = []
+
+    def emit2(identifier: str, event: str, payload: dict) -> None:
+        events2.append((identifier, event, payload))
+
+    plain, _ = api.build_spec({"kind": "table", "id": "plain",
+                               "columns": ["Name"], "on": ["selected"]},
+                              events=emit2)
+    check(getattr(plain, "_addon_draggable", False) is False,
+          "a table with no 'draggable' does not start a drag")
+    check(not [child for child in plain.children()
+               if isinstance(child, api._TableTransferFilter)],
+          "and no transfer filter was put on it")
+
+
 def main() -> int:
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, encoding="utf-8",
@@ -1228,6 +1360,7 @@ def main() -> int:
     test_zoom_ladder()
     test_icon_cache(api)
     test_config_cache()
+    test_config_merged(api)
     test_grid_movement_and_rename(api)
     test_window_min_max_attention(api)
     test_shortcut_prop(api)
@@ -1240,6 +1373,7 @@ def main() -> int:
     test_desktop_area(app, api)
     test_app_restart_deferred(app, api)
     test_local_shell(api)
+    test_table_dragdrop(api)
     app.processEvents()
 
     if FAILURES:

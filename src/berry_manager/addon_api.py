@@ -265,7 +265,9 @@ behind its swatch), ``terminal``, ``canvas`` (a free-drawing paint surface),
 ``player`` (an audio leaf) - all take ``id``, ``text``, ``tooltip``,
 ``style`` (a stylesheet, so an addon can style its own tab), ``enabled``,
 ``visible``, ``font_size`` (drawn at the interface zoom), ``items``, ``value``,
-``placeholder``, ``checked``, ``minimum``,
+``placeholder``, ``password`` (on a ``line``: the characters are masked as they
+are typed, the way a logon box hides a password, though the value still reads
+back whole), ``checked``, ``minimum``,
 ``maximum``, ``columns``, ``word_wrap``, ``readonly``, ``multi``, ``icon`` (a mark
 worn beside a widget's words - a button's picture - from a file path, an SVG
 document or a base64 data URI), ``expand``
@@ -328,6 +330,12 @@ notice, the same bargain a ``web`` leaf strikes without QtWebEngine.
 ``list``/``table``/``tree`` row, carrying that row's ``text`` and ``cells``)
 and, for a ``table``/``tree``/``list``,
 ``context`` (a right-click, carrying the text of the row under the cursor). A
+``table`` that lists ``drop`` in ``on`` also hears ``drop`` when a row dragged
+from another of its kind is released over it, carrying ``{"source": <the id of
+the table it came from>, "rows": [{"text", "cells"}...], "target": <the label of
+the row dropped on, or "">}``; only a table also marked ``"draggable": True``
+gives its own rows up to such a drag, so a file pane can hand rows between
+windows while every other table is left exactly as it was. A
 ``terminal`` answers to ``ready`` (its connection came up), ``closed`` (it went
 down, asked for or lost) and ``failed`` (carrying the reason), and to ``bell``
 and ``title`` (the screen's own news) when it is asked for them. A ``web`` leaf
@@ -399,9 +407,11 @@ import stat as stat_module
 from typing import Any, Callable
 
 from PyQt6.QtCore import (
+    QByteArray,
     QEvent,
     QEventLoop,
     QModelIndex,
+    QMimeData,
     QObject,
     QSize,
     Qt,
@@ -414,6 +424,7 @@ from PyQt6.QtGui import (
     QBrush,
     QColor,
     QAction,
+    QDrag,
     QFont,
     QFontMetrics,
     QIcon,
@@ -1187,6 +1198,11 @@ def _apply_common(widget: QWidget, spec: dict, registry: dict,
         widget.setEnabled(bool(spec["enabled"]))
     if "visible" in spec:
         widget.setVisible(bool(spec["visible"]))
+    if spec.get("password") and isinstance(widget, QLineEdit):
+        # A line meant for a secret: characters are masked as they go in, the
+        # way an XP logon box hides a password. The value is still read back
+        # whole by ``widget_value(id, "value")``, so a login can check it.
+        widget.setEchoMode(QLineEdit.EchoMode.Password)
     if spec.get("font_size"):
         font = widget.font()
         # The addon's size drawn at the interface zoom.
@@ -1443,6 +1459,17 @@ def _connect_events(widget: QWidget, wanted: Any, identifier: str,
         # wants to write in one pass.
         widget.viewport().installEventFilter(
             _GridMovedFilter(widget, identifier, events))
+    if "drop" in names and isinstance(widget, QTreeWidget):
+        # A row dragged out of one file pane lands on another: the same hand
+        # that lifts a desktop tile starts a ``QDrag`` here and drops a row's
+        # worth of names on a pane in another window, and the receiving table
+        # reports it back as a ``drop``. Only a table the spec marked
+        # ``draggable`` ever gives a row up, but any table that asked for
+        # ``drop`` will catch one. A table that asked for neither is untouched.
+        widget.setAcceptDrops(True)
+        widget.viewport().setAcceptDrops(True)
+        widget.viewport().installEventFilter(
+            _TableTransferFilter(widget, identifier, events))
 
 
 class _GridMovedFilter(QObject):
@@ -1511,6 +1538,114 @@ class _GridMovedFilter(QObject):
                 "text": moved["cells"][0] if moved["cells"] else "",
                 "x": moved["x"], "y": moved["y"]})
         self._events(self._id, "moved", payload)
+
+
+#: The MIME type a marked table's rows travel under. The payload is JSON of
+#: ``{"source": <dragged table's id>, "rows": [{"text", "cells"}...]}``, so
+#: the pane that catches a drop knows which window the row came from without a
+#: second round trip - the same bargain the ``selected`` read already strikes.
+BERRY_ROW_MIME = "application/x-berryvm-row"
+
+
+class _TableTransferFilter(QObject):
+    """Let one marked table give its rows to a drag and another take them.
+
+    A file pane that says ``"draggable": True`` and asks for ``"drop"`` needs
+    the hand that picks a row to be able to lift it onto a pane in another of
+    the addon's windows. Qt's own item-view drag only moves rows inside a single
+    widget, and it would move a row without ever telling the addon, so this
+    filter owns the whole exchange: it starts a ``QDrag`` once the pointer has
+    passed the platform's drag distance with a row under it, and it accepts a
+    drop back through the same custom MIME - reading the row the pointer is
+    over as the target so the addon can tell a folder from bare background.
+
+    A table that never asked for ``"drop"`` is not given this filter at all, and
+    a table given it but not marked ``draggable`` can still receive a drop from
+    a sibling pane - only the lift is gated, not the catch.
+    """
+
+    def __init__(self, view: QTreeWidget, identifier: str,
+                 events: Callable[[str, str, dict], None]) -> None:
+        super().__init__(view)
+        self._view = view
+        self._id = str(identifier)
+        self._events = events
+        self._press_pos = None
+        self._lift = False
+
+    def eventFilter(self, watched, event) -> bool:          # noqa: N802
+        etype = event.type()
+        try:
+            if etype == QEvent.Type.MouseButtonPress \
+                    and event.button() == Qt.MouseButton.LeftButton:
+                self._press_pos = event.position().toPoint()
+                self._lift = True
+            elif etype == QEvent.Type.MouseMove and self._lift:
+                if self._maybe_start(event.position().toPoint()):
+                    self._lift = False
+                    self._press_pos = None
+                    return True
+            elif etype == QEvent.Type.MouseButtonRelease:
+                self._lift = False
+                self._press_pos = None
+            elif etype in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+                if event.mimeData().hasFormat(BERRY_ROW_MIME):
+                    event.acceptProposedAction()
+                    return True
+            elif etype == QEvent.Type.Drop:
+                return self._handle_drop(event)
+        except Exception:
+            # A view torn down mid-gesture must not take the addon with it:
+            # the filter says nothing and lets the event fall through.
+            self._lift = False
+            return False
+        return False
+
+    def _drag_distance(self) -> int:
+        try:
+            return int(QApplication.startDragDistance())
+        except Exception:
+            return 8
+
+    def _selected_rows(self) -> list[dict]:
+        rows = []
+        for item in self._view.selectedItems():
+            rows.append({"text": _context_text(item), "cells": _row_cells(item)})
+        return rows
+
+    def _maybe_start(self, pos) -> bool:
+        if not getattr(self._view, "_addon_draggable", False):
+            return False
+        if self._press_pos is None:
+            return False
+        if (pos - self._press_pos).manhattanLength() < self._drag_distance():
+            return False
+        rows = self._selected_rows()
+        if not rows:
+            return False
+        payload = json.dumps({"source": self._id, "rows": rows})
+        mime = QMimeData()
+        mime.setData(BERRY_ROW_MIME, QByteArray(payload.encode("utf-8")))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
+        return True
+
+    def _handle_drop(self, event) -> bool:
+        mime = event.mimeData()
+        if not mime.hasFormat(BERRY_ROW_MIME):
+            return False
+        try:
+            data = json.loads(bytes(mime.data(BERRY_ROW_MIME)).decode("utf-8"))
+        except (ValueError, TypeError, UnicodeDecodeError):
+            return False
+        target = _context_text(self._view.itemAt(event.position().toPoint()))
+        self._events(self._id, "drop", {
+            "source": str(data.get("source") or ""),
+            "rows": data.get("rows") or [],
+            "target": target})
+        event.acceptProposedAction()
+        return True
 
 
 def _row_cells(item: QTreeWidgetItem) -> list[str]:
@@ -2292,9 +2427,16 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
         if str(spec.get("flow") or "").lower() in ("horizontal", "left", "row"):
             # A taskbar lays its buttons out sideways along one line rather
             # than down a column: Qt's own LeftToRight flow with no wrapping,
-            # so the strip stays a single row and grows along the bar.
+            # so the strip stays a single row and grows along the bar. A row
+            # that runs out of room should lose the last button off the edge
+            # the way a real taskbar does, not grow a scroll bar nobody asked
+            # for - so both bars are switched off for this one flow.
             listing.setFlow(QListView.Flow.LeftToRight)
             listing.setWrapping(False)
+            listing.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            listing.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         if spec.get("icon_size") and not spec.get("grid"):
             # A plain (non-tile) list that names an icon size - a taskbar's
             # buttons - has its marks drawn at that edge rather than the
@@ -2355,6 +2497,11 @@ def _make_leaf(kind: str, spec: dict) -> QWidget | None:
             # "check" becomes user-tickable here, and its changes come back as
             # a "toggled" event. See _place_row and the row delegate.
             table._addon_check_column = int(spec["checkbox"])
+        # A table only gives its rows to a drag when the spec asks for it, so
+        # the handful of panes that carry files can be moved between while
+        # every other table on the machine is left exactly as it was. See
+        # :class:`_TableTransferFilter`.
+        table._addon_draggable = bool(spec.get("draggable"))
         table.setItemDelegate(_RowStyleDelegate(table))
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         return table
@@ -7549,6 +7696,11 @@ class ConfigAPI:
     def __init__(self, api: "AddonAPI") -> None:
         self._api = api
         self._addon = api._addon
+        # The merged, JSON-safe view beside a fingerprint of the two files it
+        # was built from, so a UI that reads key after key per repaint pays the
+        # full merge once instead of once per key. Writers drop it; a changed
+        # file drops it by the fingerprint alone.
+        self._merged_memo: tuple | None = None
 
     # --- the file ---
 
@@ -7592,6 +7744,7 @@ class ConfigAPI:
                  "defaults": self._addon.config_defaults}))
         if not self.exists():
             guard(lambda: write_config_json(self.file, self._addon.config_defaults))
+        self._merged_memo = None
         return self.all()
 
     def schema(self) -> list:
@@ -7615,13 +7768,38 @@ class ConfigAPI:
         """Exactly what is in the file, with nothing filled in."""
         return read_config_cached(self.file)
 
+    def _cache_key(self) -> tuple:
+        """A cheap fingerprint of the two files the merged view is built from:
+        each one's mtime and size, or a marker when it is not there yet. Disk
+        reads are already cached below; this guards only the merge and the
+        JSON-safe walk that sit on top of them."""
+        def stamp(target: Path) -> tuple:
+            try:
+                info = target.stat()
+            except OSError:
+                return (-1, -1)
+            return (info.st_mtime_ns, info.st_size)
+        return (stamp(self.file), stamp(addon_schema_path(self._api.id)))
+
+    def _merged(self) -> dict:
+        """The merged, JSON-safe view, rebuilt only when a file moved or a
+        writer said it had changed. Never handed out raw: :func:`all` copies it
+        and :func:`get` only reads one key, so a caller cannot poison the cache."""
+        key = self._cache_key()
+        memo = self._merged_memo
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        merged = jsonable(merge_config(self.defaults(), self.stored()))
+        self._merged_memo = (key, merged)
+        return merged
+
     def all(self) -> dict:
         """The file over the declared defaults, read fresh from disk."""
-        return jsonable(merge_config(self.defaults(), self.stored()))
+        return dict(self._merged())
 
     def get(self, key: str, default: Any = None) -> Any:
         """One value out of the merged file, dotted keys and all."""
-        return jsonable(config_get(self.all(), str(key), default))
+        return jsonable(config_get(self._merged(), str(key), default))
 
     def set(self, key: str, value: Any) -> None:
         """Write one key into the file."""
@@ -7636,7 +7814,9 @@ class ConfigAPI:
             write_config_json(self.file, merged)
             return jsonable(merged)
 
-        return guard(apply, reporter=self._api.error) or {}
+        result = guard(apply, reporter=self._api.error) or {}
+        self._merged_memo = None
+        return result
 
     def pop(self, key: str, default: Any = None) -> Any:
         """Remove a key so the default applies again."""
@@ -7646,7 +7826,9 @@ class ConfigAPI:
             write_config_json(self.file, stored)
             return jsonable(default if gone is None else gone)
 
-        return guard(apply, reporter=self._api.error) or jsonable(default)
+        result = guard(apply, reporter=self._api.error) or jsonable(default)
+        self._merged_memo = None
+        return result
 
     def reset(self) -> dict:
         """Throw the file away and go back to the addon's defaults."""
@@ -7659,7 +7841,9 @@ class ConfigAPI:
             write_config_json(self.file, merged)
             return jsonable(merged)
 
-        return guard(apply, reporter=self._api.error) or {}
+        result = guard(apply, reporter=self._api.error) or {}
+        self._merged_memo = None
+        return result
 
     def text(self) -> str:
         """The file as written, for an editor."""
@@ -7679,7 +7863,9 @@ class ConfigAPI:
             write_config_json(self.file, jsonable(data))
             return jsonable(merge_config(self.defaults(), data))
 
-        return guard(apply, reporter=self._api.error) or {}
+        result = guard(apply, reporter=self._api.error) or {}
+        self._merged_memo = None
+        return result
 
 
 class ScheduledTimer:
