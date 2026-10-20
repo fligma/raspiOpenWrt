@@ -368,8 +368,8 @@ def test_manifest(addon: Any, api: Api) -> None:
     print("\n1. what the addon says it is")
     check(str(addon.ADDON.get("name")) == "BerryVM",
           f"the name the store shows: {addon.ADDON.get('name')!r}")
-    check(str(addon.ADDON.get("version")) == "2.8",
-          f"the shipped version is 2.8: {addon.ADDON.get('version')!r}")
+    check(str(addon.ADDON.get("version")) == "2.9",
+          f"the shipped version is 2.9: {addon.ADDON.get('version')!r}")
     check(str(addon.ADDON.get("api")) == "1", "the api version is 1")
     check(sorted(addon.ADDON.get("requires") or []) == ["sftp", "ssh"],
           f"both transports are declared: {addon.ADDON.get('requires')!r}")
@@ -505,6 +505,40 @@ def test_desktop_and_taskbar(addon: Any, api: Api) -> None:
     icon_sheet = str(api.last_set(addon.ICONS, "style") or "")
     check("berryDeskGrid" in icon_sheet,
           "the icon layer's own sheet makes the wallpaper show through")
+    # Readability: the app paints every widget dark through its own
+    # window-wide ``QWidget`` rule, and a rule that matches a widget directly
+    # is not inherited away by anything set on a parent. So the desktop's
+    # sheet must carry a client-area base that pushes that dark back out -
+    # and every rule that wants to keep its own colours, here and in the
+    # cosplay and icon-layer sheets, has to outspecify it.
+    check("#addonWindow QWidget { background: transparent; color: #000000; }"
+          in sheet,
+          "the client-area base takes the app's dark back off every window")
+    for want in ("#addonWindow #addonWindowBar {",
+                 "#addonWindow QGroupBox::title",
+                 "#addonWindow QTabBar::tab",
+                 "#addonWindow QCheckBox",
+                 "#addonWindow QHeaderView::section",
+                 "#addonWindow QComboBox QAbstractItemView",
+                 "#addonWindow QListWidget::item:selected",
+                 "#addonWindow #berryStartMenu",
+                 "#addonWindow #berryStartRight QListWidget::item",
+                 "Tahoma"):
+        check(want in sheet,
+              f"the desktop sheet spells the XP rule {want!r}")
+    check("#addonWindow #berryDeskGrid" in icon_sheet,
+          "the icon layer's grid rules outrank the client-area base")
+    boot = addon._boot_sheet()
+    login = addon._login_sheet()
+    power = addon._power_sheet()
+    check("#addonWindow #berryBootBrand" in boot
+          and "#addonWindow #berryBootBar::chunk" in boot,
+          "the boot screen's words outrank the base: white on black stays")
+    check("#addonWindow #berryLoginTitle" in login
+          and "#addonWindow #berryLoginList::item" in login,
+          "the welcome screen's names stay light on the blue")
+    check("#addonWindow #berryPowerText" in power,
+          "and the shut-down line stays readable on the black")
     # The tiles: one per program, each with a drawn mark.
     tiles = api.last_set(addon.ICON_GRID, "rows") or []
     check(len(tiles) == len(addon.PROGRAMS),

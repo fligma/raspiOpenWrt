@@ -65,7 +65,7 @@ from addon_common import AddonError, find_addon_picture
 
 ADDON = {
     "name": "BerryVM",
-    "version": "2.8",
+    "version": "2.9",
     "author": "fligma",
     "api": 1,
     "requires": ["sftp", "ssh"],
@@ -601,109 +601,261 @@ def desktop_sheet() -> str:
     buttons inside any window are XP buttons, lists are XP lists. The canvas
     itself is only ever reached by its object name, so the wallpaper cannot
     wash over the frames.
+
+    The base rule far below is what makes the words readable. The app paints
+    everything dark through its own window-wide ``QWidget`` rule, which
+    matches every widget inside these frames directly - and a rule that
+    reaches a widget by name never inherits away from it. Left alone that is
+    dark panels inside a light window and white words over white controls:
+    the invisible text. One rule pushes the app's dark off everything inside
+    a frame, and every control that wants a face of its own is spelled after
+    it, in this same sheet, where a later tie outranks an earlier one.
     """
     p = palette()
     return (
         "QWidget#berryDesktop { background: " + wall_css() + "; }"
         # The frame: a grey client area under a themed 2px border, the way
         # every XP window is drawn. ``round_corners`` squared or rounds it.
-        # ``color`` here is the frame's whole text palette: XP is a light
-        # scheme, so the words on any client area are dark by default. A
-        # control that wants otherwise (a title bar, a coloured menu column)
-        # says so with its own rule, which beats this inherited one.
         "#addonWindow { background: #ece9d8; color: #000000; border: 2px solid "
         + p["frame"] + "; border-radius: "
         + ("3px" if round_corners() else "0px") + "; }"
-        "#addonWindowBar { background: " + _bar_css(p) + "; min-height: "
-        + str(scaled(caption_height())) + "px; }"
-        "#addonWindowBar QLabel { color: " + caption_text()
-        + "; font-weight: bold; font-size: "
-        + str(scaled(caption_font())) + "px; }"
+        # Two pieces of host furniture that live on the canvas itself: the
+        # amber attention border a flashed window wears, and the translucent
+        # rectangle that shows where a title-bar drag will drop. This sheet
+        # replaces the canvas's own wholesale, so both are spelled again.
+        '#addonWindow[attention="true"] { border: 2px solid #ffb347; }'
+        "#addonSnapPreview { background: rgba(90, 140, 220, 70);"
+        " border: 2px solid rgba(150, 190, 250, 200); border-radius: 4px; }"
+        # The client-area base. Every widget inside a frame - the containers
+        # a spec rows things through, the labels that name them, the note
+        # lines that explain them - takes the window's own beige and dark
+        # words from here, rather than the app's dark sheet. Controls with a
+        # face of their own are written below, where a same-specificity tie
+        # goes to the later rule; the bar and the flyout wear two ids, so
+        # this single-id-plus-class rule can never outspecify them.
+        "#addonWindow QWidget { background: transparent; color: #000000; }"
+        # Tahoma, the face XP itself was drawn in, everywhere this desktop
+        # speaks - falling back to Segoe UI where Tahoma is not installed.
+        # Terminals and editors are deliberately absent: they keep their
+        # own monospace faces.
+        "#addonWindow QLabel, #addonWindow QPushButton,"
+        " #addonWindow QToolButton, #addonWindow QGroupBox,"
+        " #addonWindow QCheckBox, #addonWindow QRadioButton,"
+        " #addonWindow QLineEdit, #addonWindow QSpinBox,"
+        " #addonWindow QComboBox, #addonWindow QListWidget,"
+        " #addonWindow QTreeWidget, #addonWindow QTabBar::tab"
+        " { font-family: \"Tahoma\", \"Segoe UI\", sans-serif; }"
         # The three caption controls. Real XP paints minimize and maximize as
         # little Luna-green squares and the close as a red one, each with a
         # pale rim. The object names the host gives them (btnMin/btnMax/
-        # btnClose) are targeted directly, which both buys the authentic two-
-        # colour split and outranks the grey client button rule below - that
-        # rule is otherwise as specific as a plain bar rule and would win it.
-        "#addonWindowBar QPushButton { color: #ffffff; font-weight: bold;"
-        " border: 1px solid #dcefff; border-radius: 2px; }"
-        "#addonWindowBar QPushButton#btnMin,"
-        "#addonWindowBar QPushButton#btnMax { background: qlineargradient("
+        # btnClose) are targeted directly for the authentic two-colour
+        # split. Every bar rule now wears two ids: the bar is a widget inside
+        # the frame like any other, and the base rule above would otherwise
+        # outspecify a plain ``#addonWindowBar`` and flatten it clear.
+        "#addonWindow #addonWindowBar { background: " + _bar_css(p)
+        + "; min-height: " + str(scaled(caption_height())) + "px; }"
+        "#addonWindow #addonWindowBar QLabel { color: " + caption_text()
+        + "; font-weight: bold; font-size: "
+        + str(scaled(caption_font())) + "px; }"
+        "#addonWindow #addonWindowBar QPushButton { color: #ffffff;"
+        " font-weight: bold; border: 1px solid #dcefff; border-radius: 2px; }"
+        "#addonWindow #addonWindowBar QPushButton#btnMin,"
+        "#addonWindow #addonWindowBar QPushButton#btnMax {"
+        " background: qlineargradient("
         "x1:0,y1:0,x2:0,y2:1, stop:0 #63c063, stop:0.5 #3f9b3f,"
         " stop:1 #237c23); border: 1px solid #d6f5d6; }"
-        "#addonWindowBar QPushButton#btnMin:hover,"
-        "#addonWindowBar QPushButton#btnMax:hover { background:"
+        "#addonWindow #addonWindowBar QPushButton#btnMin:hover,"
+        "#addonWindow #addonWindowBar QPushButton#btnMax:hover {"
+        " background:"
         " qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #8ad58a,"
         " stop:1 #3f9b3f); }"
-        "#addonWindowBar QPushButton#btnMin:pressed,"
-        "#addonWindowBar QPushButton#btnMax:pressed { background: #1f6b1f; }"
-        "#addonWindowBar QPushButton#btnClose { background: qlineargradient("
+        "#addonWindow #addonWindowBar QPushButton#btnMin:pressed,"
+        "#addonWindow #addonWindowBar QPushButton#btnMax:pressed {"
+        " background: #1f6b1f; }"
+        "#addonWindow #addonWindowBar QPushButton#btnClose {"
+        " background: qlineargradient("
         "x1:0,y1:0,x2:0,y2:1, stop:0 #f28a70, stop:0.3 #e04e00,"
         " stop:1 #b93000); border: 1px solid #ffd9c2; }"
-        "#addonWindowBar QPushButton#btnClose:hover { background:"
+        "#addonWindow #addonWindowBar QPushButton#btnClose:hover {"
+        " background:"
         " qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ffab8f,"
         " stop:1 #d24400); }"
-        "#addonWindowBar QPushButton#btnClose:pressed { background: #9c2800; }"
+        "#addonWindow #addonWindowBar QPushButton#btnClose:pressed {"
+        " background: #9c2800; }"
         # The client-area furniture, so any program looks XP without trying.
-        "#addonWindow QPushButton { background: qlineargradient(x1:0,y1:0,"
+        "#addonWindow QPushButton, #addonWindow QToolButton"
+        " { background: qlineargradient(x1:0,y1:0,"
         " x2:0,y2:1, stop:0 #ffffff, stop:0.45 #f2f4f8, stop:0.55 #dfe4ee,"
         " stop:1 #cdd8ea); border: 1px solid " + p["edge"] + ";"
         " border-radius: 3px;"
         " padding: 3px 10px; color: #000000; }"
-        "#addonWindow QPushButton:hover { border: 1px solid #e9a900;"
+        "#addonWindow QPushButton:hover, #addonWindow QToolButton:hover"
+        " { border: 1px solid #e9a900;"
         " background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ffffff,"
         " stop:0.5 #fdfbe3, stop:1 #f7e9b0); }"
-        "#addonWindow QPushButton:pressed { background: #d4d0c8;"
+        "#addonWindow QPushButton:pressed, #addonWindow QToolButton:pressed"
+        " { background: #d4d0c8;"
         " border: 1px solid #4a6f9c; }"
-        "#addonWindow QPushButton:disabled { color: #a0a0a0;"
+        "#addonWindow QPushButton:disabled, #addonWindow QToolButton:disabled"
+        " { color: #a0a0a0;"
         " background: #f0f0f0; border: 1px solid #c8c8c8; }"
         "#addonWindow QLineEdit, #addonWindow QPlainTextEdit,"
         "#addonWindow QListWidget, #addonWindow QTreeWidget,"
-        "#addonWindow QComboBox { background: #ffffff; color: #000000;"
+        "#addonWindow QComboBox, #addonWindow QSpinBox"
+        " { background: #ffffff; color: #000000;"
         " border: 1px solid " + p["edge"] + ";"
         " selection-background-color: " + p["select"] + ";"
         " selection-color: #ffffff; }"
-        "#addonWindow QGroupBox { border: 1px solid #d4d0c8;"
-        " border-radius: 3px; margin-top: 6px; }"
+        # A combo's drop-down button is its own little beige cap, and the
+        # popup list belongs to the combo - so both are painted here rather
+        # than left to the app's dark menu colours.
+        "#addonWindow QComboBox::drop-down { width: 18px;"
+        " border-left: 1px solid " + p["edge"] + ";"
+        " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 #fdfdf6, stop:1 #d8d4c2); }"
+        "#addonWindow QComboBox QAbstractItemView { background: #ffffff;"
+        " color: #000000; border: 1px solid " + p["edge"] + ";"
+        " selection-background-color: " + p["select"]
+        + "; selection-color: #ffffff; }"
+        # XP's group boxes: an etched frame, a blue title in the notch - the
+        # look of every real Control Panel page.
+        "#addonWindow QGroupBox { background: transparent;"
+        " border: 1px solid #b6b6a6; border-radius: 2px;"
+        " margin-top: 8px; padding: 6px; color: #000000; }"
+        "#addonWindow QGroupBox::title { color: #0a246a;"
+        " background: transparent; }"
+        # The tabs a Control Panel page is divided by, as XP drew them: soft
+        # capsules sitting on the pane's line, the chosen one pale and
+        # merged into the pane below it.
+        "#addonWindow QTabWidget::pane { background: transparent;"
+        " border: 1px solid #919b9c; }"
+        "#addonWindow QTabBar::tab { background: qlineargradient(x1:0,y1:0,"
+        " x2:0,y2:1, stop:0 #f8f6ee, stop:1 #d9d4bf); color: #000000;"
+        " border: 1px solid #919b9c; border-bottom: none;"
+        " border-top-left-radius: 5px; border-top-right-radius: 5px;"
+        " padding: 4px 12px; margin-right: -2px; }"
+        "#addonWindow QTabBar::tab:selected { background: #ece9d8;"
+        " border-color: #8b867a; padding-bottom: 6px; margin-bottom: -1px; }"
+        "#addonWindow QTabBar::tab:hover:!selected { background: #fdfbee; }"
+        # Ticks and radios, painted small and square like XP's rather than
+        # riding the app's dark indicator boxes.
+        "#addonWindow QCheckBox, #addonWindow QRadioButton"
+        " { background: transparent; color: #000000; padding: 2px; }"
+        "#addonWindow QCheckBox::indicator, #addonWindow QRadioButton::indicator"
+        " { width: 13px; height: 13px; }"
+        "#addonWindow QCheckBox::indicator { background: #ffffff;"
+        " border: 1px solid #7f9db9; border-radius: 2px; }"
+        "#addonWindow QCheckBox::indicator:checked { background: "
+        + p["select"] + "; border: 1px solid #1e548f; }"
+        "#addonWindow QRadioButton::indicator { background: #ffffff;"
+        " border: 1px solid #7f9db9; border-radius: 7px; }"
+        "#addonWindow QRadioButton::indicator:checked { background: "
+        + p["select"] + "; border: 3px solid #ffffff; }"
+        # Rows inside a list or a file table: dark words on white, the pale
+        # XP shade on every other line, a soft blue track under the mouse
+        # and the theme's solid blue once picked - none of it the app's.
+        "#addonWindow QListWidget::item, #addonWindow QTreeWidget::item"
+        " { color: #000000; padding: 3px; }"
+        "#addonWindow QListWidget::item:alternate,"
+        " #addonWindow QTreeWidget::item:alternate"
+        " { background: #f7f6ef; color: #000000; }"
+        "#addonWindow QListWidget::item:hover:!selected,"
+        " #addonWindow QTreeWidget::item:hover:!selected"
+        " { background: #e5f0f8; }"
+        "#addonWindow QListWidget::item:selected,"
+        " #addonWindow QTreeWidget::item:selected { background: "
+        + p["select"] + "; color: #ffffff; }"
+        # A file list's column headers, raised like XP's: pale top, warm
+        # bottom, a hairline between.
+        "#addonWindow QHeaderView::section { background: qlineargradient("
+        "x1:0,y1:0,x2:0,y2:1, stop:0 #ffffff, stop:0.5 #f3f1e6,"
+        " stop:1 #d6d3c4); color: #000000;"
+        " border: 1px solid #a5a394; border-left: none; border-top: none;"
+        " padding: 3px 6px; }"
+        # Progress bars: XP's fill was a green block, not the theme blue -
+        # the boot screen keeps its own blue by painting over this with its
+        # two-id rule.
         "#addonWindow QProgressBar { border: 1px solid " + p["edge"] + ";"
-        " border-radius: 2px; text-align: center; background: #ffffff; }"
-        "#addonWindow QProgressBar::chunk { background: " + p["select"]
-        + "; }"
+        " border-radius: 2px; text-align: center; background: #ffffff;"
+        " color: #000000; }"
+        "#addonWindow QProgressBar::chunk { background: qlineargradient("
+        "x1:0,y1:0,x2:0,y2:1, stop:0 #7ed86f, stop:0.45 #4cb64d,"
+        " stop:1 #2f8f2f); }"
+        # The settings sliders, grooved like XP's: a pale channel, a raised
+        # knob with the green trim the Luna slider wore.
+        "#addonWindow QSlider::groove:horizontal { height: 6px;"
+        " background: #dcd8c9; border: 1px solid #919b9c;"
+        " border-radius: 3px; }"
+        "#addonWindow QSlider::handle:horizontal { width: 12px;"
+        " margin: -5px 0; background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+        " stop:0 #f6f5ef, stop:0.5 #d3d0c1, stop:1 #b0ac9b);"
+        " border: 1px solid #6d9071; border-radius: 3px; }"
+        # Scrollbars on the light rails: a pale channel, a raised silver
+        # thumb, no arrow buttons - same shape the app draws, in the
+        # window's own colours instead of the dark.
+        "#addonWindow QScrollBar:vertical { width: 14px;"
+        " background: #f0efe4; border: 1px solid #d4d0c8; }"
+        "#addonWindow QScrollBar::handle:vertical { min-height: 24px;"
+        " background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #fbfaf3,"
+        " stop:0.5 #d8d5c8, stop:1 #b9b6a6); border: 1px solid #9d9a8b;"
+        " border-radius: 3px; }"
+        "#addonWindow QScrollBar::handle:vertical:hover { background: #eef3ea; }"
+        "#addonWindow QScrollBar:horizontal { height: 14px;"
+        " background: #f0efe4; border: 1px solid #d4d0c8; }"
+        "#addonWindow QScrollBar::handle:horizontal { min-width: 24px;"
+        " background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #fbfaf3,"
+        " stop:0.5 #d8d5c8, stop:1 #b9b6a6); border: 1px solid #9d9a8b;"
+        " border-radius: 3px; }"
+        "#addonWindow QScrollBar::handle:horizontal:hover"
+        " { background: #eef3ea; }"
+        "#addonWindow QScrollBar::add-line:vertical,"
+        " #addonWindow QScrollBar::sub-line:vertical,"
+        " #addonWindow QScrollBar::add-page:vertical,"
+        " #addonWindow QScrollBar::sub-page:vertical,"
+        " #addonWindow QScrollBar::add-line:horizontal,"
+        " #addonWindow QScrollBar::sub-line:horizontal,"
+        " #addonWindow QScrollBar::add-page:horizontal,"
+        " #addonWindow QScrollBar::sub-page:horizontal"
+        " { height: 0; width: 0; background: transparent; border: none; }"
         # The Start flyout, painted like an XP menu: a themed header banner,
         # a white left column for the programs, a coloured right column for
         # the folders and a themed green footer holding the two ways out.
-        # The white column's text is spelled dark on purpose: the lists would
-        # otherwise take the app's own (light-on-dark) palette and vanish.
-        "#berryStartMenu { background: #ffffff; color: #000000; }"
-        "#berryStartHead { background: " + p["bar"] + "; color: #ffffff;"
+        # Every rule wears two ids: the flyout is a window like any other,
+        # and the client-area base above would otherwise outspecify a plain
+        # ``#berryStart...`` rule and wash dark words over the blue.
+        "#addonWindow #berryStartMenu { background: #ffffff;"
+        " color: #000000; }"
+        "#addonWindow #berryStartHead { background: " + p["bar"]
+        + "; color: #ffffff;"
         " font-weight: bold; padding: 8px 12px;"
         " border-top: 1px solid rgba(255,255,255,0.55);"
         " border-bottom: 2px solid rgba(255,255,255,0.45); }"
-        "#berryStartSub { color: " + p["select"] + "; font-weight: bold;"
-        " padding: 2px 6px; background: #ffffff; }"
-        "#berryStartLeft { background: #ffffff; color: #000000;"
+        "#addonWindow #berryStartSub { color: " + p["select"]
+        + "; font-weight: bold; padding: 2px 6px; background: #ffffff; }"
+        "#addonWindow #berryStartLeft { background: #ffffff; color: #000000;"
         " border-right: 1px solid " + p["frame"] + "; }"
-        "#berryStartLeft QListWidget { background: #ffffff; color: #000000;"
-        " border: none; }"
-        "#berryStartLeft QListWidget::item { color: #000000;"
+        "#addonWindow #berryStartLeft QListWidget { background: #ffffff;"
+        " color: #000000; border: none; }"
+        "#addonWindow #berryStartLeft QListWidget::item { color: #000000;"
         " padding: 4px 6px; border-radius: 3px; }"
-        "#berryStartLeft QListWidget::item:hover { background: #d6e6fb; }"
-        "#berryStartLeft QListWidget::item:selected { background: "
-        + p["select"] + "; color: #ffffff; }"
-        "#berryStartRight { background: " + p["frame"] + "; }"
-        "#berryStartRight QListWidget { background: " + p["frame"]
+        "#addonWindow #berryStartLeft QListWidget::item:hover"
+        " { background: #d6e6fb; }"
+        "#addonWindow #berryStartLeft QListWidget::item:selected"
+        " { background: " + p["select"] + "; color: #ffffff; }"
+        "#addonWindow #berryStartRight { background: " + p["frame"] + "; }"
+        "#addonWindow #berryStartRight QListWidget { background: " + p["frame"]
         + "; border: none; color: #ffffff; }"
-        "#berryStartRight QListWidget::item { padding: 4px 6px;"
-        " border-radius: 3px; }"
-        "#berryStartRight QListWidget::item:hover"
-        " { background: rgba(255, 255, 255, 0.18); }"
-        "#berryStartRight QListWidget::item:selected"
-        " { background: rgba(255, 255, 255, 0.28); }"
-        "#berryStartFoot { background: " + p["start"]
+        "#addonWindow #berryStartRight QListWidget::item { padding: 4px 6px;"
+        " color: #ffffff; border-radius: 3px; }"
+        "#addonWindow #berryStartRight QListWidget::item:hover"
+        " { background: rgba(255, 255, 255, 0.18); color: #ffffff; }"
+        "#addonWindow #berryStartRight QListWidget::item:selected"
+        " { background: rgba(255, 255, 255, 0.28); color: #ffffff; }"
+        "#addonWindow #berryStartFoot { background: " + p["start"]
         + "; border-top: 1px solid rgba(255,255,255,0.5); }"
-        "#berryStartFoot QPushButton { background: transparent;"
+        "#addonWindow #berryStartFoot QPushButton { background: transparent;"
         " border: none; color: #ffffff; font-weight: bold; padding: 5px; }"
-        "#berryStartFoot QPushButton:hover {"
+        "#addonWindow #berryStartFoot QPushButton:hover {"
         " background: rgba(255, 255, 255, 0.2); border-radius: 3px; }"
     )
 
@@ -767,12 +919,17 @@ ICON_FRAME_SHEET = (
     # ``::item`` rule below, stay visible over the wallpaper.
     "#addonWindowBody { background: transparent; border: none; }"
     "#addonWindow QWidget { background: transparent; border: none; }"
-    "#berryDeskGrid { background: transparent; border: none;"
+    # The grid's own rules wear two ids. The desktop sheet now paints every
+    # widget inside a frame dark-on-beige and every list white-on-black, and
+    # a plain ``#berryDeskGrid`` would be outspecified by both - the tiles
+    # would lose their white captions to the wallpaper.
+    "#addonWindow #berryDeskGrid { background: transparent; border: none;"
     " color: #ffffff; font-weight: bold; outline: none; }"
-    "#berryDeskGrid::item { background: transparent; color: #ffffff;"
-    " border: 1px solid transparent; border-radius: 2px; padding: 2px; }"
-    "#berryDeskGrid::item:selected { background: rgba(49, 106, 197, 0.55);"
-    " border: 1px dotted #ffffff; }"
+    "#addonWindow #berryDeskGrid::item { background: transparent;"
+    " color: #ffffff; border: 1px solid transparent; border-radius: 2px;"
+    " padding: 2px; }"
+    "#addonWindow #berryDeskGrid::item:selected"
+    " { background: rgba(49, 106, 197, 0.55); border: 1px dotted #ffffff; }"
 )
 
 # --- what can be configured, and its defaults ---
@@ -1274,17 +1431,23 @@ def _boot_sheet() -> str:
     tip = scaled(11)
     box = scaled(240)
     return (
+        # Everything but the frame's own rule wears two ids: the desktop
+        # sheet's client-area base outspecifies a plain ``#berryBoot...``,
+        # and black words on this black screen are the definition of gone.
         "#addonWindow { background: #000000; border: none; }"
-        "#addonWindowBody { background: #000000; border: none; }"
-        "#berryBoot, #berryBoot QWidget { background: transparent;"
-        " border: none; }"
-        "#berryBootBrand { color: #ffffff; font-weight: bold;"
+        "#addonWindow #addonWindowBody { background: #000000; border: none; }"
+        "#addonWindow #berryBoot, #addonWindow #berryBoot QWidget"
+        " { background: transparent; border: none; }"
+        "#addonWindow #berryBootBrand { color: #ffffff; font-weight: bold;"
         " font-size: " + str(brand) + "px; }"
-        "#berryBootSub { color: #d8d8d8; font-size: " + str(sub) + "px; }"
-        "#berryBootTip { color: #b0b0b0; font-size: " + str(tip) + "px; }"
-        "#berryBootBar { min-width: " + str(box) + "px; max-width:"
-        + str(box) + "px; border: 1px solid #5b9bf8; background: #0a246a;}"
-        "#berryBootBar::chunk { background: #2f7fdc; }"
+        "#addonWindow #berryBootSub { color: #d8d8d8; font-size:"
+        + str(sub) + "px; }"
+        "#addonWindow #berryBootTip { color: #b0b0b0; font-size:"
+        + str(tip) + "px; }"
+        "#addonWindow #berryBootBar { min-width: " + str(box) + "px;"
+        " max-width: " + str(box) + "px; border: 1px solid #5b9bf8;"
+        " background: #0a246a;}"
+        "#addonWindow #berryBootBar::chunk { background: #2f7fdc; }"
     )
 
 
@@ -1294,29 +1457,37 @@ def _login_sheet() -> str:
     title = scaled(26)
     hint = scaled(14)
     return (
+        # Two ids on every rule but the frame's, so the desktop sheet's
+        # client-area base cannot put dark words on this blue.
         "#addonWindow { border: none; background: qlineargradient(x1:0,"
         "y1:0,x2:0,y2:1, stop:0 #5a8ed6, stop:0.55 #2f63b8,"
         " stop:0.55 #1c3f7d, stop:1 #14305e); }"
-        "#addonWindowBody { background: transparent; border: none; }"
-        "#berryLogin, #berryLogin QWidget { background: transparent;"
+        "#addonWindow #addonWindowBody { background: transparent;"
         " border: none; }"
-        "#berryLoginTitle { color: #ffffff; font-weight: bold;"
+        "#addonWindow #berryLogin, #addonWindow #berryLogin QWidget"
+        " { background: transparent; border: none; }"
+        "#addonWindow #berryLoginTitle { color: #ffffff; font-weight: bold;"
         " font-size: " + str(title) + "px; }"
-        "#berryLoginHint { color: #eaf2ff; font-size: " + str(hint) + "px; }"
-        "#berryLoginNote { color: #ffd97a; font-size: " + str(hint) + "px; }"
-        "#berryLoginList { background: rgba(255, 255, 255, 0.12);"
-        " border: 1px solid rgba(255, 255, 255, 0.4); color: #ffffff;"
+        "#addonWindow #berryLoginHint { color: #eaf2ff; font-size:"
+        + str(hint) + "px; }"
+        "#addonWindow #berryLoginNote { color: #ffd97a; font-size:"
+        + str(hint) + "px; }"
+        "#addonWindow #berryLoginList { background: rgba(255, 255, 255,"
+        " 0.12); border: 1px solid rgba(255, 255, 255, 0.4); color: #ffffff;"
         " font-size: " + str(hint) + "px; }"
-        "#berryLoginList::item { padding: 4px 8px; border-radius: 3px; }"
-        "#berryLoginList::item:selected { background: rgba(255, 255, 255,"
-        " 0.32); }"
-        "#berryLoginInput, #berryLoginPw { background: #ffffff;"
-        " color: #000000; border: 1px solid #6b8fb8; padding: 3px; }"
-        "#berryLoginBtn { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 #eef3fb, stop:1 #c3d2e8); color: #173a6b;"
+        "#addonWindow #berryLoginList::item { padding: 4px 8px;"
+        " border-radius: 3px; color: #ffffff; }"
+        "#addonWindow #berryLoginList::item:selected"
+        " { background: rgba(255, 255, 255,"
+        " 0.32); color: #ffffff; }"
+        "#addonWindow #berryLoginInput, #addonWindow #berryLoginPw"
+        " { background: #ffffff; color: #000000;"
+        " border: 1px solid #6b8fb8; padding: 3px; }"
+        "#addonWindow #berryLoginBtn { background: qlineargradient(x1:0,"
+        "y1:0,x2:0,y2:1, stop:0 #eef3fb, stop:1 #c3d2e8); color: #173a6b;"
         " border: 1px solid #4a6ea5; border-radius: 4px; padding: 4px 12px;"
         " font-size: " + str(hint) + "px; }"
-        "#berryLoginBtn:hover { background: #ffffff; }"
+        "#addonWindow #berryLoginBtn:hover { background: #ffffff; }"
     )
 
 
@@ -1325,15 +1496,18 @@ def _power_sheet() -> str:
     power mark in the middle."""
     text = scaled(15)
     return (
+        # Two ids again: this screen's words are grey on black, and the
+        # desktop sheet's dark-on-beige base would erase them.
         "#addonWindow { background: #000000; border: none; }"
-        "#addonWindowBody { background: #000000; border: none; }"
-        "#berryPower, #berryPower QWidget { background: transparent;"
-        " border: none; }"
-        "#berryPowerText { color: #d8d8d8; font-size: " + str(text) + "px; }"
-        "#berryPowerBtn { background: #12305e; color: #ffffff;"
+        "#addonWindow #addonWindowBody { background: #000000; border: none; }"
+        "#addonWindow #berryPower, #addonWindow #berryPower QWidget"
+        " { background: transparent; border: none; }"
+        "#addonWindow #berryPowerText { color: #d8d8d8; font-size:"
+        + str(text) + "px; }"
+        "#addonWindow #berryPowerBtn { background: #12305e; color: #ffffff;"
         " border: 1px solid #5b9bf8; border-radius: 6px; padding: 10px 18px;"
         " font-size: " + str(scaled(14)) + "px; }"
-        "#berryPowerBtn:hover { background: #1c4a8a; }"
+        "#addonWindow #berryPowerBtn:hover { background: #1c4a8a; }"
     )
 
 
