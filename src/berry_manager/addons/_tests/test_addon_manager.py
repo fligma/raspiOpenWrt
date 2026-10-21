@@ -1110,6 +1110,20 @@ def test_the_rows_from_the_app() -> None:
         other = AddonAPI(manager, addons["berry"])
         check(other.session.git_token() == "",
               "a second addon got the token its own switch never gave it")
+        # The two shipped addons that carry the app's own GitHub traffic are
+        # handed the token as soon as the profile holds one, switch or not,
+        # so a private store works the moment a key is pasted in.
+        for auto in ("addon_store", "manager_update"):
+            auto_api = AddonAPI(manager, make_addon(auto))
+            check(auto_api.session.git_token() == "secret-token",
+                  f"{auto} was refused the token its kind is handed by right")
+            check(auto_api.session.github_headers()["Authorization"]
+                  == "token secret-token",
+                  f"{auto} still sent its catalog request anonymously")
+        win.app_config["git_token"] = ""
+        check(AddonAPI(manager, make_addon("addon_store")).session.git_token()
+              == "",
+              "an auto-token addon was handed something with an empty field")
     finally:
         os.environ.pop("BERRY_DESKTOP_DIR", None)
 

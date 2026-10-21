@@ -348,8 +348,10 @@ The pages of the Settings bar, and what each holds:
     that nothing was sent and so this is the anonymous answer. Addons hold no
     token of their own in this version: `api.session.git_token()` answers a
     profile's value only for the addons switched on for it on their Addon
-    manager tab, so an empty field, or a field nobody is allowed to read, leaves
-    everything anonymous. A token an older copy kept on one addon's own settings
+    manager tab - the two that carry the app's own GitHub traffic, the addon
+    store and the Manager update, are handed it whenever the field is filled,
+    switch or no switch - so an empty field, or a field nobody is allowed to
+    read, leaves everything anonymous. A token an older copy kept on one addon's own settings
     is lifted into this field the first time the new version loads the profile -
     that addon's switch is turned on so it keeps fetching what it fetched before,
     the old key is deleted, and the move is written to the log.
@@ -1022,7 +1024,7 @@ The object in `init` is the only door into the app:
 | Namespace | What it gives |
 | --- | --- |
 | `api.id`, `api.name`, `api.log(text)`, `api.error(text)` | identity and the shared log |
-| `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the four an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request), `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything), `addon_state(id)` (how that addon stands here - `installed`, `enabled` and `running` as one dict, read off the app's own records) and `set_addon_running(id, running)` (write the switch *and* load or stop the addon, answering with the same state dict). The Addon manager's own calls are here too, so that page is only a drawing of what the app keeps: `addons()` (every installed addon - id, name, version, author, `installed`/`enabled`/`running`/`bundled`, its kind, `requires`, its connection, the popout it declared and the one in force, its tab names and whether its window is open), `addon_card(id)` (one of those rows complete), `set_addon_popout(id, on)` / `addon_popout(id)`, `set_addon_git_token(id, on)`, `set_addon_shortcut(id, on)`, `show_addon_window(id)`, `app_setting(key)` (reads any profile setting) and `set_app_setting(key, value)` (writes only the handful an addon may touch - `addon_dev_enabled` - so nobody's connection details can be rewritten from an addon). The one GitHub token is read here: `git_token()` answers the profile's token for an addon switched on for it and `""` for one that is not or when the field is blank, and `github_headers()` hands back `{}` or the two headers `http.client` wants - `Authorization: token ...` with `X-GitHub-Api-Version` beside it |
+| `api.session` | everything the session knows: `profile()`, `settings()`, `status()`, `tabs()`, `current_tab()`, `web_url()`, `version()`, `app_stylesheet()` (already scaled to the current zoom), `zoom()`, `app_icon()`, and the four an installer needs: `rescan_addons()` (look at `addons` again on the next turn of the event loop, so the caller is not torn down mid-request), `set_addon_enabled(id, enabled)` (write another addon's switch into the active profile, without starting or stopping anything), `addon_state(id)` (how that addon stands here - `installed`, `enabled` and `running` as one dict, read off the app's own records) and `set_addon_running(id, running)` (write the switch *and* load or stop the addon, answering with the same state dict). The Addon manager's own calls are here too, so that page is only a drawing of what the app keeps: `addons()` (every installed addon - id, name, version, author, `installed`/`enabled`/`running`/`bundled`, its kind, `requires`, its connection, the popout it declared and the one in force, its tab names and whether its window is open), `addon_card(id)` (one of those rows complete), `set_addon_popout(id, on)` / `addon_popout(id)`, `set_addon_git_token(id, on)`, `set_addon_shortcut(id, on)`, `show_addon_window(id)`, `app_setting(key)` (reads any profile setting) and `set_app_setting(key, value)` (writes only the handful an addon may touch - `addon_dev_enabled` - so nobody's connection details can be rewritten from an addon). The one GitHub token is read here: `git_token()` answers the profile's token for an addon switched on for it - and always for the two shipped addons named in `SessionAPI.AUTO_TOKEN_ADDONS` (`addon_store`, `manager_update`), which carry the app's own GitHub traffic - and `""` for one that is not or when the field is blank, and `github_headers()` hands back `{}` or the two headers `http.client` wants - `Authorization: token ...` with `X-GitHub-Api-Version` beside it |
 | `api.device` | SSH and SFTP over the app's one main connection, or a connection of the addon's own: `run(command)`, `run_async(command, callback)`, `shell_send(line)`, `is_connected()`, `ensure_connected()`, `open()` (raw paramiko), and `list`, `exists`, `stat`, `read_text`, `read_bytes`, `write_text`, `write_bytes`, `append_text`, `mkdir`, `remove`, `rename`, `upload`, `download`. Every call is refused unless the master switch, that transport's app-wide switch, the addon's own switch on its Settings page and that transport's switch on the same row are all on, the transport is listed under `"requires"`, and the connection it reaches is the one `"connection"` declares - which for an addon sharing the app's session also means that connection has to be open. A `terminal` leaf in one of the addon's own tabs is judged by exactly these gates too, only reached through `api.tabs.set_widget` instead of this namespace (see **Addons in other languages**) |
 | `api.tabs` | `add_web_tab`, `add_tab` - each taking `position`, `pinned` and `icon_only` - `close`, `rename`, `activate`, `names`, `exists`, `lock(hold)` - hold the window's bar on the tab it is showing, so a job running in that tab cannot be clicked away from; the app lets go of the hold when the addon stops, `url`, `navigate`, `reload`, `view`, `widget`, `set_widget`, `widget_value`, `set_html`, `inject_css`, `inject_js`, `set_style`, `set_icon`, `icon`, `use_app_icon`, `set_pinned` |
 | `api.window` | the window this addon's tabs live in, when they live in one of its own: `popout(tab, on)` takes a tab out of the main bar into a top-level window or back into the slot it left, `popped(tab)` and `state(tab)` say where it stands, and while it is out the addon steers it - `open`, `close`, `raise_window`, `show(tab, on)`, `center`, `set_title`, `set_size`, `set_minimum`, `set_position`, `set_resizable`, `set_closable`, `set_always_on_top`, `set_style`, `set_icon`. `set_shortcut(on)` asks for a Desktop link that starts this one addon in a window of its own and `shortcut_path()` says where it is (see [Popout windows](#popout-windows-an-addon-in-a-window-of-its-own)) |
@@ -2042,9 +2044,10 @@ the modules it imports are fetched from, so an addon arrives with exactly what s
 beside the catalog row naming it. The header chip at the top of the tab says where
 the list points: one source named in full, several named by the first and counted.
 The token is no longer the store's own field: GitHub is reached with the one
-git token the profile keeps in Settings > Connection, and only for an addon
-whose **Use the global git token** switch is up - so a private repository is
-made reachable from one place, for every source at once. The same header
+git token the profile keeps in Settings > Connection, and the store is
+handed it whenever that field holds one - a private repository starts
+working the moment a token is pasted in, with no switch to find. Other
+addons still need their **Use the global git token** switch. The same header
 holds the answer about settings for this session only: a **delete settings**
 check box beside the chip, drawn from `delete_config` and put back under it
 whenever the config is saved from Settings, so a page edit always wins and a
@@ -2622,9 +2625,10 @@ repository, tag prefix, the two version lines and the check settings live in
 `addons/_data/manager_update/config.json`, so pointing the update at a fork is a
 config edit, and a change to them re-points, re-times and re-checks without a
 restart. The tab holds no token of its own: every request carries whatever
-`api.session.git_token()` answers with, which is the profile's one GitHub token
-while **Use the global git token** is up on this addon's tab in the store's
-Addon manager, and nothing at all while it is off. Its own published test,
+`api.session.git_token()` answers with, which is the profile's one GitHub
+token as soon as the field holds one - the updater is one of the two shipped
+addons handed the token by right, no switch involved - and nothing at all
+while the field is empty. Its own published test,
 `addons/_tests/test_manager_update.py`, drives
 every state of the check, the version list and its pane, the notices, the
 schedule, the asset and link picking, the byte sniffing, the swap, the whole

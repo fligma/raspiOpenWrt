@@ -5474,17 +5474,31 @@ class SessionAPI:
 
     # --- the git token the profile holds ---
 
+    #: The addons that ship inside the program and speak to GitHub for the app
+    #: itself - the store reads its catalogs with it, Manager update lists the
+    #: published builds with it - and so are handed the profile's token as soon
+    #: as one is written, switch or no switch. A private repository then works
+    #: the moment a token exists, and every other addon stays behind its own
+    #: **use the global git token** switch.
+    AUTO_TOKEN_ADDONS = ("addon_store", "manager_update")
+
     def git_token(self) -> str:
         """The profile's global git token, for this addon, or ``""`` for anonymous.
 
         One token is kept in Settings > Connection and an addon only ever sees it
         when its own **use the global git token** switch is up: the default answer
         is empty, so an addon that asks without asking gets the public rate limit
-        and nothing else. The token buys two things and no third - a private
-        repository can be read, and the hourly limit is the authenticated one.
+        and nothing else. The two shipped addons named in :attr:`AUTO_TOKEN_ADDONS`
+        are the exception - they carry the app's own GitHub traffic, so the token
+        is theirs whenever the field holds one. The token buys two things and no
+        third - a private repository can be read, and the hourly limit is the
+        authenticated one.
         """
         addon = getattr(self._api, "_addon", None)
-        if addon is None or not bool(getattr(addon, "git_token", False)):
+        if addon is None:
+            return ""
+        if not bool(getattr(addon, "git_token", False)) and \
+                str(getattr(addon, "id", "")) not in self.AUTO_TOKEN_ADDONS:
             return ""
         return str(self._win.app_config.get("git_token") or "").strip()
 
