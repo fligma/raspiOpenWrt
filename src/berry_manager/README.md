@@ -2439,8 +2439,16 @@ against a folder of its own.
 entry, and keeps the program itself up to date. It reads this repository's
 tags off GitHub's API, takes the ones whose names are the prefix `berry` plus
 a version - `berry1.6.0` is version 1.6.0, anything else the tags name is
-ignored - and compares the newest against the version this copy carries. That
-version has exactly one source now, `core.const.APP_VERSION`: the About
+ignored - and compares the newest against the version this copy carries. Tags
+spell versions two ways at once: the older ones as plain decimals, and the
+current build byte-packed, where `berry0x3.0x6.0xd` is the release a person
+would call 3.6.13. So every version is parsed once, as the bytes it names - a
+part with a `0x` lead read as hex, a bare part read as the decimal it looks
+like - and written back in decimal before it reaches the page. Both spellings
+then name themselves the same in every sentence on the tab, group onto the same
+major line and cannot be told apart by a comparison; the tag is kept as written,
+because it is the repository's own name for the release and what a fetch is asked
+for. That version has exactly one source now, `core.const.APP_VERSION`: the About
 dialog shows it, `api.session.version()` answers with it, and the update
 check compares against it, so one line changes per release. A repository with
 no `berry` tag yet - the state before the first release is ever published -
@@ -2499,7 +2507,32 @@ app's own relaunch, and a refusal leaves this copy running until the user
 starts the new one themselves. A copy running from a source checkout is
 turned away with the reason - there is no single file of it to replace.
 
-The tab is a spec, and it is two panes over the job's log. Since 2.0 the left
+The tab is a spec, and it opens on the program itself rather than on a list of
+everything published: a large picture of the app's own mark above its name, the
+one line saying which version this copy runs, the status line, the
+`owner/repo @ prefix*` chip saying where the tags come from and the **show log**
+box. Under the head sit **Check now**, **Update**, **Downgrade** and **Open
+releases page**, all reporting through `on_widget`. **Update** is drawn only when
+a check found a version ahead of this copy that carries a file this system can
+fetch, and its own caption names that version (*Update to berry3.6.13*) rather
+than leaving it to be worked out from the list; **Downgrade** is always there,
+because a way back is wanted whether or not anything new is out, and it is the
+only route to the rest of the tab - pressing it pulls the two panes out from
+under the head, reads **Hide the version list** while they are open, and pressing
+it again folds them away. A download folds them away
+for its length, and the head is deliberately not quieted while one runs: it is
+the one line that stays true either way, and its buttons are already greyed.
+
+The head and the list install different versions on purpose. The head's button
+installs the offer it was drawn from, and the list's installs whichever row the
+list is pointing at; both go through the same careful swap, and pressing the
+head's button moves the list onto its own version on the way so the two agree.
+This is the bug the layout closes: one button used to install whatever a dropdown
+happened to be showing, so opening a line to look at some ancient build quietly
+changed what *update* would do - and an update is offered only when the version
+ahead really has a file, so the tab never promises a download it cannot finish.
+
+What the Downgrade button reveals is two panes over the job's log, and the left
 pane is not a flat list of every tag: the published versions are grouped into
 their **major lines** - `2.0`, `1.9`, `1.8` - newest line first, and each line is
 one button (`2.0  more`) until it is opened. Opening a line is what lays its
@@ -2509,7 +2542,7 @@ all of their builds, and the line below the one this copy is on - which is the
 only line that opens by itself - is one click away rather than a scroll. An open
 line writes its heading as its number, how many builds it holds and where this
 copy sits against it (*this copy is on it*, *ahead of this copy*, *a way back*,
-*further back than 1.6.0, where going back stops*), and each dropdown entry names
+*further back than 3.0.0, where going back stops*), and each dropdown entry names
 its version with the same marking beside it, since a dropdown only shows one
 entry at a time. Ten lines fit; what is past them is not left off the page but
 goes under one **Older lines** dropdown at the foot of the list, named in the same
@@ -2533,11 +2566,11 @@ asked for only when its row is picked, then kept for the rest of the run, so
 clicking back and forth costs nothing. A version nobody has picked yet says so in
 the pane rather than showing an empty box, and promises to fetch what it was for
 as soon as it is chosen - reading the account of every tag to draw a tab would be
-the slowest way to say nothing new. The header keeps the status line and an
-`owner/repo @ prefix*` chip saying where the tags come from, and
-below the panes **Check now**, **Install the picked version** and **Open
-releases page** (the repository's releases in an embedded tab) report through
-`on_widget`. It wears `assets/manager_updateicon.png` - the one name every
+the slowest way to say nothing new. The button inside that list is **Install the
+picked version**, reachable only once the list has been pulled out, and the line
+beside it says what the click does: which version goes where this copy runs and,
+for a way back below the keep line, that it goes *over an erased setup*. It wears
+`assets/manager_updateicon.png` - the one name every
 shipped addon's picture is looked for under - falling back on the drawn download
 mark held in `TAB_ICON` when the file is missing, and it is pinned and
 icon-only like the store's, holding beside Settings instead of taking a place in
@@ -2564,18 +2597,29 @@ does not care where its lines are printed - and a job with no pane to print on
 never asks for the hold.
 
 **Going back is offered as readily as going up**: the same one careful swap,
-one file for another - down to `min_version`, which starts at `1.6.0`. A program
+one file for another - down to `min_version`, which starts at `3.0.0`. A program
 older than that predates how this addon stages a download and moves it into
 place, so a move that far back is refused before anything is fetched, and the
 refusal names the line so it can be moved.
 
-A second line, `keep_min_version`, starts at `2.0.0` and says something narrower:
+A second line, `keep_min_version`, starts at `3.6.0` and says something narrower:
 how far back the swap may be made *carelessly*. At or above it, going back offers
 to leave the written data where it is; below it, keeping `config/`, the installed
 addons and the written themes as they stand is not on offer at all - a program
 that old is read to disagree with those files rather than merely to be behind
 them - and the only way back is to back up and erase first. The versions under the
 line stay reachable, and stay installable by the clean route.
+
+The rule is said where the choice is made, not only in the dialog that stops the
+install afterwards: a way back below the keep line is marked **erase first** in
+the dropdown's own words, an amber plate under the list names in full what
+installing it takes away - it backs the config folder, every addon the store
+installed and every copied theme up beside the program, then erases them all -
+and the line beside the install button says the click goes over an erased setup.
+The plate and that line belong to the list, so folding the list away with the
+**Downgrade** button takes the warning with it: the head of the tab stays the app,
+not an alarm about addons nobody is looking at, and pulling the list back up puts
+the warning back.
 
 Going up asks a yes or no; going back over a newer copy asks three things,
 because what is at risk is not the program but everything written down beside it.
@@ -2630,12 +2674,19 @@ token as soon as the field holds one - the updater is one of the two shipped
 addons handed the token by right, no switch involved - and nothing at all
 while the field is empty. Its own published test,
 `addons/_tests/test_manager_update.py`, drives
-every state of the check, the version list and its pane, the notices, the
-schedule, the asset and link picking, the byte sniffing, the swap, the whole
+every state of the check, the version list and its pane, the head of the tab and
+its offer - the button that appears only with a version ahead that has a file,
+the one that opens the list whether or not anything is out, and the two installing
+the versions each of them answers for - the marks the keep line leaves on the
+list, the notices, the
+schedule, the asset and link picking - where the setup program that rides
+every release is never the one picked, whatever it is called - the byte sniffing, the swap, the whole
 job machine and the view it puts over the tab - the card's name, the bar's share,
 the console's lines and the hold on the window's tab bar, on a tab that has the
 pane and on a tab that has not - without a network, and the build runs it like
-every other addon's.
+every other addon's. Both spellings a repository publishes are checked to reach
+the same major line, the same dropdown row and the same release, so a tag written
+`0x1.0x6.0x1` and a tag written `1.6.1` are one version to this tab.
 
 ### Store addon: OpenWrt Log Viewer
 

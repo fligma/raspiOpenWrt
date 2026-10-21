@@ -48,11 +48,28 @@ its buttons report back through ``on_widget``; it wears
 ``assets/manager_updateicon.png`` when the program ships one and a drawn
 download mark when it does not.
 
-The tab lists every published version rather than only the newest, but groups
-them into their major lines - ``2.0``, ``1.9``, ``1.8`` - newest line first, each
-line opening to the hotfixes under it. A flat list of every build reads as noise
-once a program has a few years of tags, and the line below the one this copy is
-on is only wanted occasionally, so it starts as one button and its versions are
+The tab opens on the program itself rather than on a list of everything
+published: the app's own mark, its name, the version this copy runs and the one
+line saying whether anything is ahead of it. Under that are two buttons -
+``Update``, which appears only when a check found a version ahead that carries a
+file this system can fetch, and names that version in its own caption - and
+``Downgrade``, which is always there, because a way back is wanted whether or not
+anything new is out, and pulls the whole version list out from under the head -
+reading *Hide the version list* while that list is open, since the button says
+which way it is about to move the page.
+The two installs answer for different versions on purpose: the head's button
+installs the offer it was drawn from, and the list's button installs whichever row
+the list is pointing at. That distinction is the bug this layout closes - a button
+marked *update* used to install whatever an old dropdown happened to be showing,
+so opening a line to look at some ancient build quietly moved what the update
+would do.
+
+The list the Downgrade button reveals holds every published version rather than
+only the newest, but groups them into their major lines - ``2.0``, ``1.9``,
+``1.8`` - newest line first, each line opening to the hotfixes under it. A flat
+list of every build reads as noise once a program has a few years of tags, and
+the line below the one this copy is on is only wanted occasionally, so it starts
+as one button and its versions are
 laid out when it is opened; opening costs nothing, since the tags were all read
 in one request. Where the version itself sits is said three ways: in the heading
 of its line, as one coloured chip in the pane beside it, and in the words of the
@@ -69,9 +86,9 @@ nothing new.
 Installing is offered in both directions: a version ahead is an update, the
 running one is marked, and an older one is a way back - the same swap, since a
 program that has gone wrong is fixed by putting the previous file in its place.
-Going back has two lines, both settings like everything else. ``1.6.0`` is the
+Going back has two lines, both settings like everything else. ``3.0.0`` is the
 floor: a version older than that predates things the swap itself relies on, so it
-is refused with the reason rather than installed, warning or no warning. ``2.0.0``
+is refused with the reason rather than installed, warning or no warning. ``3.6.0``
 is the keep line: at or above it an older version is asked about with three honest
 answers rather than a yes or no, because what is at risk is not the program but
 everything written down beside it - keep it and take the risk, back up ``config``
@@ -80,6 +97,14 @@ newer copy wrote (the installed addons, the profile files, the written themes), 
 leave this copy where it is. Below the keep line the middle answer is not on
 offer: so far back, the only way to go is clean, and the dialog says so with two
 buttons. Nothing is fetched or written before that answer is given.
+
+The rule is also said where the choice is made rather than only in the dialog that
+stops the install afterwards: a way back below the keep line is marked *erase
+first* in the list, the amber plate under the list names the three things an
+install of it backs up and then erases, and the line beside the install button
+says the click goes *over an erased setup*. Fold the list away and the warning
+folds with it - the head of the tab is the app, not an alarm about addons nobody
+is looking at.
 
 When the check runs by itself it is the user who has to notice, not the tab
 that is not open, so a version found is sent through ``api.ui.popup`` and comes
@@ -116,15 +141,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from addon_common import AddonError, config_get, find_addon_picture, merge_config
+from addon_common import (AddonError, config_get, find_addon_picture,
+                          find_icon, merge_config)
 
 ADDON = {
     "name": "Berry Manager update",
-    "version": "1.8",
+    "version": "1.9",
     "author": "fligma",
-    "description": "Groups the berry tags published on GitHub into their major "
-                   "lines, newest first, each line opening to its own builds, and "
-                   "says which version this copy is; what is past the pane's room "
+    "description": "Opens on the program's own mark and the version this copy "
+                   "runs, with one line saying what is ahead; Update appears only "
+                   "when a published version ahead of this one carries a file, and "
+                   "Downgrade is always there, pulling out every berry tag on "
+                   "GitHub, grouped into their major lines, newest first, each "
+                   "line opening to its own builds; what is past the pane's room "
                    "goes under an Older dropdown. Any of them - a newer release, "
                    "or an older one back to the floor set here - is put in the "
                    "running program's place once its release's file has been "
@@ -166,6 +195,15 @@ slot_names: dict[str, list] = {}   # the words each dropdown was last handed
 #: whose words did change is written exactly as it was before this memo existed.
 slot_words: dict[str, Any] = {}
 filling = False             # a dropdown is being laid out, not chosen from
+#: Whether the whole version list has been pulled out under the head of the tab.
+#: Only :func:`toggle_picker` moves it, and a job moves the list back away for as
+#: long as it is on screen - see :func:`_job_show`.
+picker_open = False
+#: The version the Update button would install, as the last check read it: the
+#: newest one ahead of this copy that carries a file. Kept apart from what the
+#: list is pointing at, because the button at the head of the tab answers for the
+#: update and must not move when somebody opens a line to look at an old build.
+upgrade: dict | None = None
 
 #: What follows is far too small to be this program; a page or a stub.
 MIN_PROGRAM_BYTES = 200_000
@@ -206,19 +244,90 @@ KNOWN_EXEC_SUFFIXES = (".so",)
 
 #: The oldest version the swap will go back to when the config says nothing.
 #: It sits at the onefile-to-onedir line: a build below it predates how this
-#: addon stages and swaps a program, so a move that far back is more likely to
+#: addon stages and moves a program, so a move that far back is more likely to
 #: leave a broken install than a working older copy, and is refused outright.
-#: It is written in the program's own byte-packed hex, as every version here is.
+#: It is written in the program's own byte-packed hex, as every version here is;
+#: what a person reads on the tab is the decimal this form stands for (3.0.0).
 OLDEST_ALLOWED = "0x3.0x0.0x0"
 
 #: The oldest version that may be installed with this copy's own setup left
 #: where it is. A way back below this line is only offered after everything
 #: written down - the config folder, the installed addons, the themes somebody
-#: copied - has been backed up and erased, because a program that old is read to
-#: disagree with those files rather than merely to be behind them. It is not the
-#: same line as ``OLDEST_ALLOWED``: that one refuses the move outright, this one
-#: refuses to make the move carelessly.
-KEEP_ALLOWED = "0x3.0x0.0x0"
+#: copied - has been backed up and erased, because a program that far behind is
+#: read to disagree with those files rather than merely to be behind them. It is
+#: not the same line as ``OLDEST_ALLOWED``, and it must never be drawn at it:
+#: the two together would leave no version that is installable but not keepable,
+#: and the rule about wiping the written data would be a rule nobody ever meets.
+#: Every release of the 3.6 line writes the profile, the addon records and the
+#: store's sources in shapes that line began with, so a copy from it or above is
+#: trusted with what is on disk, and one below it is not.
+KEEP_ALLOWED = "0x3.0x6.0x0"
+
+# --- versions and tags: how the two spellings a repository publishes are read ---
+
+#: Where the parsing below is kept, keyed by the version's own text. The same
+#: tags are read again on every repaint - the grouping, the stances, the major
+#: lines' headings - and parsing a tag is pure, so a list that has not changed
+#: should not cost a second parse of anything in it. Bounded by the number of
+#: versions a repository can ever publish; the clear is only a guard against a
+#: value typed into a settings field turning the memo into a leak.
+_VERSION_PARSED: dict[str, tuple] = {}
+
+
+def _version_parts(value: Any) -> tuple:
+    """The bytes out of a dotted version, as a tuple that can be compared.
+
+    Two spellings of one version are in the published tags of this repository at
+    the same time, so both are read on their own terms. A part written with a
+    ``0x`` lead is one byte of hex - ``0x3.0x6.0xd`` is the release a person
+    would call ``3.6.13`` - and a part written bare is read as the decimal it
+    looks like, because that is how the older tags spell themselves: ``3.6.13``
+    is the same version as ``0x3.0x6.0xd``, and ``1.10.0`` is ten, not the
+    sixteen a blanket hex reading would make of it. Reading bare parts as hex was
+    how an old tag could be picked as the newest release and how this copy could
+    be told it was ahead of a version that came out before it. A part that is
+    neither is passed over, and a version with no readable byte is only compared
+    as text (see ``version_newer``).
+
+    The answer is a tuple and so is safely shared: whoever reads it makes their
+    own list before changing anything.
+    """
+    key = str(value or "")
+    found = _VERSION_PARSED.get(key)
+    if found is not None:
+        return found
+    parts: list[int] = []
+    for raw in key.split("."):
+        part = raw.strip()
+        packed = part[:2].lower() == "0x"
+        if packed:
+            part = part[2:]
+        digits = "0123456789abcdefABCDEF" if packed else "0123456789"
+        if part and all(c in digits for c in part):
+            parts.append(int(part, 16 if packed else 10))
+    parsed = tuple(parts)
+    if len(_VERSION_PARSED) > 512:
+        _VERSION_PARSED.clear()
+    _VERSION_PARSED[key] = parsed
+    return parsed
+
+
+def shown_version(value: Any) -> str:
+    """A version in the decimal a person reads off the title bar.
+
+    The tags and the settings hold the byte-packed form the program is built from
+    (``0x3.0x6.0xd``), the older tags hold plain decimals, and a list that showed
+    both side by side would read as two lines of versions rather than one. Every
+    version is therefore put through its own bytes and written back in decimal
+    before it reaches the tab; comparisons are unaffected, since both spellings
+    read to the same tuple. A version nothing can read is handed back as it came,
+    so an unparseable tag is still named for what the repository calls it.
+    """
+    parts = _version_parts(value)
+    if not parts:
+        return str(value or "").strip()
+    return ".".join(str(part) for part in parts)
+
 
 # --- what can be configured, and what it starts out as ---
 
@@ -260,14 +369,19 @@ FIELDS = [
     {"key": "min_version", "label": "Oldest version it may go back to",
      "kind": "text",
      "hint": "Going backwards is offered for any version at or above this one, "
-             f"and refused below it. Blank is {OLDEST_ALLOWED}; a fork that "
-             "publishes differently may name its own."},
+             f"and refused below it. Blank is "
+             f"{shown_version(OLDEST_ALLOWED)} - written "
+             f"{OLDEST_ALLOWED} in the packed form the tags use; either "
+             "spelling may be typed, and a fork that publishes differently may "
+             "name its own."},
     {"key": "keep_min_version", "label": "Oldest version its setup may be kept for",
      "kind": "text",
      "hint": "Going back to a version at or above this one offers to leave the "
              "config folder and the installed addons where they are. Below it "
-             f"the only way back is to back up and erase first - blank is "
-             f"{KEEP_ALLOWED}."},
+             f"the only way back is to back everything up and erase it first - "
+             f"blank is {shown_version(KEEP_ALLOWED)}, written "
+             f"{KEEP_ALLOWED}. It has to stay above the line above, or no "
+             "version would ever be far enough back to need the wipe."},
 ]
 
 #: The GitHub token is not one of these: it belongs to the profile and is read
@@ -279,8 +393,22 @@ GROUPS = [("Where updates come from",
            ["check_startup", "check_again", "check_minutes", "notify_found",
             "min_version", "keep_min_version"])]
 
-BUTTONS = (("check", "Check now"), ("update", "Install the picked version"),
+BUTTONS = (("check", "Check now"),
+           ("upgrade", "Update"),
+           ("downgrade", "Downgrade"),
+           ("install", "Install the picked version"),
            ("page", "Open releases page"))
+
+#: The two buttons the tab opens with, beside the mark of the program: the one
+#: that installs what is ahead, and the one that pulls the whole version list out.
+#: ``upgrade`` starts off the page because there is nothing to say it is wanted
+#: until a check has read a version ahead with a file on it; ``downgrade`` is
+#: always there, since a way back is wanted whether or not anything new is out.
+HERO_BUTTONS = ("check", "upgrade", "downgrade", "page")
+
+#: The one button inside the version list, which is only reachable once that list
+#: has been pulled out.
+PICK_BUTTONS = ("install",)
 
 # --- small text helpers ---
 
@@ -319,54 +447,16 @@ def profile_token() -> str:
         return ""
 
 
-# --- versions and tags ---
-
-#: Where the parsing below is kept, keyed by the version's own text. The same
-#: tags are read again on every repaint - the grouping, the stances, the major
-#: lines' headings - and parsing a tag is pure, so a list that has not changed
-#: should not cost a second parse of anything in it. Bounded by the number of
-#: versions a repository can ever publish; the clear is only a guard against a
-#: value typed into a settings field turning the memo into a leak.
-_VERSION_PARSED: dict[str, tuple] = {}
-
-
-def _version_parts(value: Any) -> tuple:
-    """The bytes out of a dotted version, as a tuple that can be compared.
-
-    The version is byte-packed hex: each dotted part is its own ``0x`` hex byte
-    (``0x3.0x1.0x0`` for the release decimal would call ``3.1.0``), so each part
-    is read in base 16 and the run of them compared as numbers. A ``0x`` lead is
-    trimmed when it is there and a part may be left bare; a part that is not hex
-    at all is passed over, and a version with no readable byte is only compared
-    as text (see ``version_newer``).
-
-    The answer is a tuple and so is safely shared: whoever reads it makes their
-    own list before changing anything.
-    """
-    key = str(value or "")
-    found = _VERSION_PARSED.get(key)
-    if found is not None:
-        return found
-    parts: list[int] = []
-    for raw in key.split("."):
-        part = raw.strip()
-        if part[:2].lower() == "0x":
-            part = part[2:]
-        if part and all(c in "0123456789abcdefABCDEF" for c in part):
-            parts.append(int(part, 16))
-    parsed = tuple(parts)
-    if len(_VERSION_PARSED) > 512:
-        _VERSION_PARSED.clear()
-    _VERSION_PARSED[key] = parsed
-    return parsed
-
+# --- where one published version stands against this copy ---
 
 def version_newer(remote: Any, local: Any) -> bool:
     """Whether the published version is ahead of the one running here.
 
-    Each dotted byte is read in hex and the run of them compared as numbers, so
-    ``0x3.0x1.0x10`` beats ``0x3.0x1.0x9`` rather than losing to it as text
-    would; a version with no readable byte at all is only compared as text.
+    Each dotted part is read as the number it spells - hex when it carries the
+    ``0x`` lead the packed form is written with, decimal when it is bare - and
+    the run of them is compared, so ``0x3.0x1.0x10`` beats ``0x3.0x1.0x9`` and
+    ``3.1.16`` beats ``3.1.9`` rather than losing to them as text would; a
+    version with no readable part at all is only compared as text.
     """
     wanted, have = _version_parts(remote), _version_parts(local)
     if wanted and have:
@@ -380,9 +470,11 @@ def version_newer(remote: Any, local: Any) -> bool:
 def tag_version(name: Any, prefix: str) -> str:
     """The version a tag names, or nothing when it is not an update tag.
 
-    ``berry1.5.9`` with the default prefix reads as ``1.5.9``; anything that
-    does not start with the prefix, or starts with it and holds no digits,
-    is not one of this program's releases.
+    ``berry1.5.9`` with the default prefix reads as ``1.5.9`` and
+    ``berry0x1.0x5.0x9`` reads as the same release; anything that does not start
+    with the prefix, or starts with it and holds no digits, is not one of this
+    program's releases. The spelling kept is the one the tag was written with -
+    what the tab shows is ``shown_version`` of it.
     """
     text = one_line(name)
     mark = one_line(prefix)
@@ -396,7 +488,9 @@ def pick_latest(tags: list, prefix: str) -> tuple[str, str] | None:
     """The newest ``(tag, version)`` of a tag list, or nothing.
 
     GitHub hands tags back in an order of its own, so this does not trust
-    it: every one that reads as a version is compared and the best kept.
+    it: every one that reads as a version is compared and the best kept. The
+    version handed back is the decimal the tab speaks in, whichever spelling the
+    tag was written with.
     """
     best: tuple[str, str] | None = None
     for name in tags or []:
@@ -404,16 +498,16 @@ def pick_latest(tags: list, prefix: str) -> tuple[str, str] | None:
         if not version:
             continue
         if best is None or version_newer(version, best[1]):
-            best = (one_line(name), version)
+            best = (one_line(name), shown_version(version))
     return best
 
 
 def local_version() -> str:
-    """The version this copy carries, as the app answers it."""
+    """The version this copy carries, in the decimal the tab speaks in."""
     if api is None:
         return ""
     try:
-        return one_line(api.session.version())
+        return shown_version(api.session.version())
     except (AddonError, AttributeError, TypeError):
         return ""
 
@@ -485,13 +579,6 @@ QPushButton {{ padding: {max(2, gap - 1)}px {_metric('pad_x_px', 14)}px; }}
 """
 
 
-def banner_style() -> str:
-    """The tab's own name, in the theme's brightest words."""
-    return (f"QLabel {{ color: {_colour('bright', '#e8e8e8')};"
-            f" font-size: 13pt; font-weight: 600;"
-            f" padding: {max(2, _room() // 2)}px 2px 2px 2px; }}")
-
-
 def chip_style() -> str:
     """The small plate the repository's address is written on."""
     gap = max(2, _room() - 2)
@@ -533,6 +620,24 @@ def tab_icon() -> str:
         paths = None
     try:
         return find_addon_picture(paths, OWN_ID) or TAB_ICON
+    except (OSError, AddonError):
+        return TAB_ICON
+
+
+def app_picture() -> str:
+    """The program's own mark, for the head of the tab.
+
+    The head is the app, not this addon, so it is the picture shipped beside the
+    program's own ``icon.png`` that is asked for - the same file the window and
+    the splash are drawn from. Where there is no folder to read, or nothing in it,
+    the tab's own mark stands in rather than the head coming up empty.
+    """
+    try:
+        folder = api.paths.assets
+    except (AddonError, AttributeError, TypeError):    # no api on a bare import
+        folder = None
+    try:
+        return find_icon(folder, "", "icon.png") or tab_icon()
     except (OSError, AddonError):
         return TAB_ICON
 
@@ -594,6 +699,44 @@ def chip_words_style(colour: str) -> str:
             f" {_metric('radius_px', 6)}px;"
             f" padding: 1px {max(4, _room() - 2)}px; }}")
 
+
+def hero_style() -> str:
+    """The program's own name, over its mark: the first thing the tab says."""
+    return (f"QLabel {{ color: {_colour('bright', '#e8e8e8')};"
+            f" font-size: 16pt; font-weight: 700;"
+            f" padding: {max(2, _room() - 2)}px 2px 0 2px; }}")
+
+
+def keep_warning_style() -> str:
+    """The line that says the written data goes first, on a plate of its own.
+
+    This is the one sentence on the tab that has to be read before a button is
+    pressed, so it is not left as plain text in the page's ground colour: it wears
+    the theme's warning colour inside a border, which is what a person who is
+    about to lose their addons is shown first.
+    """
+    warn = _colour('warn', '#ffb020')
+    return (f"QLabel {{ color: {warn};"
+            f" border: 1px solid {warn};"
+            f" border-radius: {_metric('radius_px', 6)}px;"
+            f" padding: {max(4, _room() - 2)}px; }}")
+
+
+def primary_style() -> str:
+    """The button the tab is offering: filled with the theme's own colour.
+
+    Two of the five actions are the ones a person came for - putting the version
+    ahead of this copy in its place, and installing whatever the list is pointed
+    at - and a row of equally-dressed buttons says that about none of them.
+    """
+    accent = _colour('accent', '#c51a4a')
+    return (f"QPushButton {{ background-color: {accent}; color: #ffffff;"
+            f" border: 1px solid {accent};"
+            f" border-radius: {_metric('radius_px', 6)}px;"
+            f" padding: {_room()}px {_metric('pad_x_px', 14)}px;"
+            f" font-weight: 600; }}"
+            f" QPushButton:disabled {{ color: #c8c8c8; }}")
+
 #: The splitter that holds the browsing panes over the job's log, and the share
 #: of the tab's height each of the two is promised. The log starts folded away -
 #: see :func:`show_log` - so the versions fill the screen, and it opens back to
@@ -613,6 +756,12 @@ MAJOR_SLOTS = 10
 #: row number, so neither can be mistaken for one of the major lines' controls.
 OLDER_PICK = "molder"
 OLDER_HEAD = "molderhead"
+
+#: How big the program's own mark is drawn at the head of the tab. It is the
+#: first thing on the page and the thing that says *this is the program you are
+#: updating*, so it is drawn at about the size of the window's own title, not as
+#: a chip beside a line of text.
+HERO_ICON = 128
 
 # --- the view a job puts over the browsing panes ---
 
@@ -785,59 +934,114 @@ def _story_pane() -> dict:
 
 
 def tab_spec() -> dict:
-    """The published versions beside what the picked one was for, over the log.
+    """The program and where it stands, with the whole list folded away under it.
 
-    A version list is only useful beside the story of the version picked from
-    it, so the tab is two panes: the major lines newest first on the left, each
-    opening to its own builds, and on the right the release's own title, who
-    published it and when, the commit it was cut from, the words it was
-    published with, and the files it moved. The job's log keeps the bottom half,
-    where a download says what it is doing step by step.
+    The tab opens on the app itself: its mark, the version running here and the
+    one sentence that says whether anything is ahead of it. Two buttons follow -
+    the update, when there is one to be had, and the way back, which is always
+    offered because wanting an older build has nothing to do with whether a new
+    one is out. Nothing else is on the page until the way back is asked for.
 
-    The two browsing panes are held in a column of their own, because a job
-    lays its console over them - see :func:`_job_view` - and the log stays under
-    the whole of it.
+    That second step is the whole browser this tab used to open with: the major
+    lines and their builds on the left, the account of the picked one on the
+    right, and the install button under them with the keep rule written above it.
+    It is folded away rather than removed, because it is a lot of page for the one
+    thing most people came for - the button at the top.
 
     Every line between those panes moves: the list beside its account of the
     picked version, the version's words above the files it moved, and the log
     under both. The log starts folded away and stays out of the way until it is
-    asked for - the box in the header, a drag of the fold line, or a job that
-    ended badly, which opens it by itself.
+    asked for - the box at the head of the tab, a drag of the fold line, or a job
+    that ended badly, which opens it by itself.
     """
     return {"kind": "column", "children": [
-        {"kind": "row", "id": "headrow", "children": [
-            {"kind": "label", "text": "Berry Manager update",
-             "style": banner_style()},
-            {"kind": "label", "id": "status", "text": "Ready.",
-             "word_wrap": True, "expand": True,
-             "style": words_style(_colour('ok', '#23d18b'))},
-            {"kind": "label", "id": "source", "text": "",
-             "style": chip_style()},
-            {"kind": "check", "id": "showlog", "text": "show log",
-             "checked": False,
-             "tooltip": "The job's log under the two panes. It starts folded "
-                        "away; tick it to pull it back up, or drag - or "
-                        "double-click - the line between the panes and it",
-             "on": ["toggled"]},
+        _hero(),
+        {"kind": "row", "id": "actionrow", "children": [
+            _button("check", "Check now",
+                    tooltip="Read the published tags again and say where this "
+                            "copy stands among them"),
+            _button("upgrade", "Update", visible=False, style=primary_style(),
+                    tooltip="Fetch the version ahead of this copy and put it "
+                            "where the old one ran. Nothing else moves."),
+            _button("downgrade", "Downgrade",
+                    tooltip="Every published version, newest first, with the "
+                            "one of them this program may be put back to. A way "
+                            "back further than the keep line erases what is "
+                            "written down beside the program first, and says so "
+                            "before anything is fetched."),
+            _button("page", "Open releases page"),
         ]},
         {"kind": "splitter", "vertical": True, "id": LOG_PANE,
          "sizes": LOG_SHARE, "children": [
             {"kind": "column", "children": [
-                {"kind": "splitter", "id": "browse", "sizes": [2, 3],
-                 "children": [
-                    _majors_pane(),
-                    _story_pane(),
-                ]},
+                _picker(),
                 _job_view(),
             ]},
             {"kind": "multi", "id": "log", "collapsed": True, "readonly": True,
              "placeholder": "every step of the last update, as it happened",
              "tooltip": "The same lines go into the program's own log"},
         ]},
-        {"kind": "row", "id": "actionrow", "children": [
-            {"kind": "button", "id": identifier, "text": text,
-             "on": ["clicked"]} for identifier, text in BUTTONS],
-        },
+    ]}
+
+
+def _button(identifier: str, text: str, **extra: Any) -> dict:
+    """One of this tab's buttons, by the id its click is reported under."""
+    leaf = {"kind": "button", "id": identifier, "text": text, "on": ["clicked"]}
+    leaf.update(extra)
+    return leaf
+
+
+def _hero() -> dict:
+    """The head of the tab: the program's mark, its version and what is ahead."""
+    return {"kind": "column", "id": "hero", "children": [
+        {"kind": "image", "id": "appicon", "size": HERO_ICON},
+        {"kind": "label", "id": "appname", "text": "Berry Manager",
+         "style": hero_style()},
+        {"kind": "label", "id": "here", "text": "", "word_wrap": True,
+         "style": version_style()},
+        {"kind": "label", "id": "status", "text": "Ready.",
+         "word_wrap": True,
+         "style": words_style(_colour('ok', '#23d18b'))},
+        {"kind": "row", "children": [
+            {"kind": "label", "id": "source", "text": "",
+             "style": chip_style()},
+            {"kind": "spacer"},
+            {"kind": "check", "id": "showlog", "text": "show log",
+             "checked": False,
+             "tooltip": "The job's log under the panes. It starts folded "
+                        "away; tick it to pull it back up, or drag - or "
+                        "double-click - the line between the panes and it",
+             "on": ["toggled"]},
+        ]},
+    ]}
+
+
+def _picker() -> dict:
+    """The whole version list, folded away until the way back is asked for.
+
+    It is the browsing pair as it always was - the major lines and the account of
+    the version picked from them - with the keep rule written between the two
+    panes and the install button under it, so the rule and the button that meets
+    it are on the same screen. The column starts hidden; :func:`toggle_picker`
+    is the only thing that pulls it out.
+    """
+    return {"kind": "column", "id": "pickpane", "visible": False, "children": [
+        {"kind": "label", "text": "Every published version",
+         "style": section_style()},
+        {"kind": "splitter", "id": "browse", "sizes": [2, 3], "children": [
+            _majors_pane(),
+            _story_pane(),
+        ]},
+        {"kind": "label", "id": "keepline", "text": "", "word_wrap": True,
+         "visible": False, "style": keep_warning_style()},
+        {"kind": "row", "id": "pickrow", "children": [
+            _button("install", "Install the picked version",
+                    style=primary_style(),
+                    tooltip="Fetch the version the list is pointing at and put "
+                            "it where this one ran"),
+            {"kind": "label", "id": "picknote", "text": "",
+             "word_wrap": True, "style": meta_style()},
+        ]},
     ]}
 
 
@@ -851,6 +1055,7 @@ def build_tab() -> None:
     api.tabs.add_tab(TAB, spec=tab_spec(), style=tab_style(),
                      pinned=True, icon_only=True)
     api.tabs.set_icon(TAB, tab_icon())
+    _set("appicon", "image", app_picture())
 
 
 def _set(identifier: str, prop: str, value: Any) -> None:
@@ -1213,6 +1418,20 @@ def commit_of(values: dict, sha: str) -> dict:
 _WIN_WORDS = ("windows", "win32", "win64", ".exe")
 _LIN_WORDS = ("linux", "ubuntu", "debian")
 
+#: The setup is the door, not the room: it installs this program, and is never
+#: the payload an update swaps in. It rides every release beside the program
+#: archives under names that say the same system, and the setup is listed
+#: first - so the word has to be read out of the name before anything is
+#: chosen, or the updater downloads the installer, which passes every byte
+#: check (it is a real, large, honest program) and gets put where the program
+#: ran.
+_SETUP_WORD = "setup"
+
+
+def _is_setup(name: str) -> bool:
+    """Whether a file or link names the setup program rather than this one."""
+    return _SETUP_WORD in str(name or "").lower()
+
 
 def _asset_name(asset: dict) -> str:
     return one_line(asset.get("name"))
@@ -1222,7 +1441,9 @@ def pick_asset(release: dict, system: str) -> dict | None:
     """The release asset built for this system, or nothing.
 
     A name naming this system wins; a name naming the other one is never
-    chosen; one naming neither is taken only when nothing better came.
+    chosen; one naming neither is taken only when nothing better came. The
+    setup program is none of these - it is what installs a release, not what
+    one updates to - and is skipped whatever else it is called.
     """
     assets = [row for row in (release.get("assets") or []) if isinstance(row, dict)]
     mine = _WIN_WORDS if system == "windows" else _LIN_WORDS
@@ -1231,6 +1452,8 @@ def pick_asset(release: dict, system: str) -> dict | None:
     for asset in assets:
         low = _asset_name(asset).lower()
         if not one_line(asset.get("browser_download_url")):
+            continue
+        if _is_setup(low):
             continue
         if any(word in low for word in mine):
             named.append(asset)
@@ -1251,13 +1474,16 @@ def pick_body_link(release: dict, system: str) -> str:
     This is what lets a release that carries no assets still update anything:
     a direct link to the program file - not to the workflow's artifact page,
     which needs a login and cannot be read anonymously, a fact the download
-    itself reports when it is handed one.
+    itself reports when it is handed one. A link to the setup is refused for
+    the same reason an asset of that name is: it installs a program, it is
+    not one to swap in.
     """
     mine = _WIN_WORDS if system == "windows" else _LIN_WORDS
     other = _LIN_WORDS if system == "windows" else _WIN_WORDS
     links = [one_line(link).rstrip(".,;") for link in body_links(release)]
     links = [link for link in links
-             if not any(word in link.lower() for word in other)]
+             if not any(word in link.lower() for word in other)
+             and not _is_setup(link.rstrip("/").rsplit("/", 1)[-1])]
     for link in links:
         if any(word in link.lower() for word in mine):
             return link
@@ -1343,8 +1569,13 @@ def file_colour(status: Any) -> str:
 
 
 def _floor(values: dict) -> str:
-    """The oldest version the swap will go back to, as this copy is configured."""
-    return one_line(config_get(values, "min_version", "")) or OLDEST_ALLOWED
+    """The oldest version the swap will go back to, as this copy is configured.
+
+    Answered in decimal, because the line is quoted back to the user in the
+    refusal and in the heading of a line that sits under it.
+    """
+    return (shown_version(config_get(values, "min_version", ""))
+            or shown_version(OLDEST_ALLOWED))
 
 
 def keep_floor(values: dict) -> str:
@@ -1352,9 +1583,11 @@ def keep_floor(values: dict) -> str:
 
     The line the question is asked on: at or above it a way back offers to keep
     everything written down beside the program, and below it the same question is
-    not on offer at all - only the backed-up, erased way back is.
+    not on offer at all - only the backed-up, erased way back is. Decimal like
+    every other version the tab says out loud.
     """
-    return one_line(config_get(values, "keep_min_version", "")) or KEEP_ALLOWED
+    return (shown_version(config_get(values, "keep_min_version", ""))
+            or shown_version(KEEP_ALLOWED))
 
 
 def keep_allowed(values: dict, version: Any) -> bool:
@@ -1368,6 +1601,51 @@ def keep_allowed(values: dict, version: Any) -> bool:
     if not wanted:
         return False
     return not version_newer(keep_floor(values), wanted)
+
+
+def current_values() -> dict:
+    """The config as it stands right now, or the defaults when there is no api.
+
+    A repaint of the list needs the keep line for every row it draws, and the rows
+    are painted by helpers that are handed no config of their own - so the one
+    place that reads it has to answer for a bare import and a test harness as well
+    as for the running app, rather than raise at the first row.
+    """
+    if api is None:
+        return dict(DEFAULTS)
+    try:
+        return merge_config(DEFAULTS, api.config.stored())
+    except (AddonError, TypeError):
+        return dict(DEFAULTS)
+
+
+def version_name(entry: dict, values: dict | None = None) -> str:
+    """The words one published version is called by on the tab.
+
+    The tag is the repository's own spelling, and two spellings of one version are
+    published here at the same time, so the tab names a version by its prefix and
+    its decimal - the same thing every other line on the page says - and falls
+    back on the tag only for a version nothing can read.
+    """
+    version = one_line(entry.get("version"))
+    if not version:
+        return one_line(entry.get("tag"))
+    return f"{_prefix(values or DEFAULTS)}{version}"
+
+
+def erase_first(entry: dict, values: dict | None = None) -> bool:
+    """Whether putting this version in place would have to erase the written data.
+
+    The rule is the keep line's and nothing else's: a way back that is reachable
+    but further back than that line can only be installed over a backup, so every
+    place that offers it - the row in the list, the state line, the warning under
+    the install button - asks this one question rather than repeating the sum.
+    A version with no file to fetch is not on offer at all, so it is not marked.
+    """
+    if str(entry.get("stance") or "") != "older" or not entry.get("download"):
+        return False
+    return not keep_allowed(values if values is not None else current_values(),
+                            entry.get("version"))
 
 
 def _prefix(values: dict) -> str:
@@ -1417,7 +1695,12 @@ def offer_of(entry: dict) -> str:
     """What the version list says beside one tag's version."""
     words = STANCE_WORDS.get(str(entry.get("stance") or ""), STANCE_WORDS["unknown"])
     if entry.get("stance") in ("newer", "older"):
-        words += " - file attached" if entry.get("download") else " - no file"
+        if not entry.get("download"):
+            return words + " - no file"
+        # The deep ways back are marked where they are picked from, not only in
+        # the dialog that stops the install: a list of hotfixes that reads as
+        # though every one of them were a safe click is a list of traps.
+        return words + (", erase first" if erase_first(entry) else " - file attached")
     return words
 
 
@@ -1458,18 +1741,19 @@ def picked_entry() -> dict | None:
 def major_of(version: Any) -> str:
     """The line one published version belongs to, named by its first two bytes.
 
-    ``0x3.0x1.0x0`` and ``0x3.0x1.0x5`` are both on the ``0x3.0x1`` line: what
-    separates them is a hotfix, and a pane that lists them one under the other
-    reads as noise once a program has a few years of tags behind it. The label is
-    the version's own leading dotted bytes kept as they are written - hex, like
-    every version here - rather than rebuilt from parsed numbers. A version with
-    a single byte is its own line, and a tag nothing reads as a version belongs
-    to none.
+    ``3.6.0`` and ``3.6.5`` are both on the ``3.6`` line: what separates them is a
+    hotfix, and a pane that lists them one under the other reads as noise once a
+    program has a few years of tags behind it. The label is rebuilt from the
+    version's own bytes and so is written in decimal whatever spelling the tag
+    used - the two spellings this repository publishes are one line here rather
+    than two, which is what keeps a person's own version from being looked for on
+    a line drawn under a different name. A version with a single byte is its own
+    line, and a tag nothing reads as a version belongs to none.
     """
-    parts = [part for part in str(one_line(version)).split(".") if part]
-    if not _version_parts(version) or not parts:
+    parts = _version_parts(version)
+    if not parts:
         return ""
-    return ".".join(parts[:2])
+    return ".".join(str(part) for part in parts[:2])
 
 
 def majors(entries: list) -> list[dict]:
@@ -1511,10 +1795,15 @@ def slot_of(major: Any) -> int:
     dropdown of its own, which is what the Older dropdown at the foot of the pane
     is for: it holds exactly those versions, so nothing is left unsaid and nothing
     is left unpickable.
+
+    The line is looked for by its bytes rather than by its text, so a major named
+    in either of the two spellings reaches the same row.
     """
-    wanted = one_line(major)
+    wanted = shown_version(major)
+    if not wanted:
+        return -1
     for slot, line in enumerate(lines[:MAJOR_SLOTS]):
-        if str(line.get("major") or "") == wanted:
+        if shown_version(line.get("major") or "") == wanted:
             return slot
     return -1
 
@@ -1543,8 +1832,7 @@ def older_index(text: Any) -> int:
     if not wanted:
         return -1
     for index in older_indices():
-        entry = published[index]
-        if wanted in (entry.get("version"), entry.get("tag")):
+        if _entry_matches(published[index], wanted):
             return index
     return -1
 
@@ -1751,12 +2039,26 @@ def meta_of(entry: dict, values: dict) -> str:
     return "  \u00b7  ".join(pieces)
 
 
-def state_of(entry: dict, have: str, ok: bool, why: str) -> str:
-    """What the install button would do with this version picked."""
+def state_of(entry: dict, have: str, ok: bool, why: str,
+             values: dict | None = None) -> str:
+    """What the install button would do with this version picked.
+
+    The sentence is the warning's place as much as the reassurance's: a way back
+    that is further than the keep line does not get the promise that nothing else
+    moves, because something else does move - everything written down beside the
+    program goes into a backup first.
+    """
     version = one_line(entry.get("version"))
     if not ok:
         return why
     if entry.get("stance") == "older":
+        if erase_first(entry, values):
+            return (f"A way back, and a deep one: berry{version} is further back "
+                    f"than {keep_floor(values or current_values())}, and below "
+                    "that line the only way back starts clean. Installing backs "
+                    "the config folder, the installed addons and the copied "
+                    "themes up beside the program and then erases them, so the "
+                    "older copy never reads a setup written by a newer one.")
         return (f"A way back: installing puts berry{version} where "
                 f"berry{have or 'this copy'} runs now. The config folder and "
                 "the addons stay exactly where they are.")
@@ -1849,6 +2151,22 @@ def combo_text(payload: Any) -> str:
     return one_line(payload)
 
 
+def _entry_matches(entry: dict, wanted: str) -> bool:
+    """Whether one published version is the one a dropdown's words name.
+
+    The version is the first word of an entry, so the marking beside it never gets
+    in the way of the match, and both spellings are tried: a dropdown that was laid
+    down by an older copy of this addon, or a report typed into a test, can name
+    the version the way the tag spells it, and being read back is the least a
+    published version can do for a page that is holding it.
+    """
+    if not wanted:
+        return False
+    if wanted in (entry.get("version"), entry.get("tag")):
+        return True
+    return shown_version(wanted) == one_line(entry.get("version"))
+
+
 def index_of(major: Any, text: Any) -> int:
     """Which published version one dropdown entry names, within its own line.
 
@@ -1865,8 +2183,7 @@ def index_of(major: Any, text: Any) -> int:
     for index in lines[slot].get("entries") or []:
         if not 0 <= index < len(published):
             continue
-        entry = published[index]
-        if wanted in (entry.get("version"), entry.get("tag")):
+        if _entry_matches(published[index], wanted):
             return index
     return -1
 
@@ -2081,6 +2398,39 @@ def hide_chip() -> None:
     _set("vsha", "visible", False)
 
 
+def show_picker_note(values: dict, entry: dict | None, have: str,
+                     floor: str) -> None:
+    """The warning under the version list, and the line beside its install button.
+
+    The keep rule is said where the choice is made, not only in the dialog that
+    stops the install afterwards: a person who has picked a version twenty builds
+    back and is about to press a button marked *install* has to be told that this
+    one takes their addons and their settings with it, in the same words every
+    time, before the press rather than after it.
+    """
+    if api is None:
+        return
+    if entry is None:
+        _set("keepline", "visible", False)
+        _set("picknote", "text", "")
+        return
+    deep = erase_first(entry, values)
+    _set("keepline", "visible", deep)
+    if deep:
+        _set("keepline", "text",
+             f"{version_name(entry, values)} is further back than "
+             f"{keep_floor(values)}, and below that line keeping what is written "
+             "down is not offered: installing it backs the config folder, every "
+             "addon the store installed and every copied theme up beside the "
+             "program and then erases them all. An older program reading a newer "
+             "setup is how a way back ends in a broken install.")
+    ok, _why = installable(entry, values, have, floor)
+    _set("picknote", "text",
+         (f"Puts {version_name(entry, values)} where "
+          f"berry{have or 'this copy'} runs"
+          + (", over an erased setup" if deep else "")) if ok else "")
+
+
 def show_detail(values: dict, entry: dict | None, have: str, floor: str,
                 fetch: bool = True) -> None:
     """The right-hand pane, for one version or for the state of having none.
@@ -2100,26 +2450,33 @@ def show_detail(values: dict, entry: dict | None, have: str, floor: str,
         hide_chip()
         show_text("vdetail", no_tags_account(values, have, _prefix(values)))
         show_files(None)
+        show_picker_note(values, None, have, floor)
         return
     if fetch:
         load_detail(entry, values)
     release = entry.get("release") if isinstance(entry.get("release"), dict) else {}
-    title = one_line(entry.get("tag"))
+    title = version_name(entry, values)
     named = one_line(release.get("name"))
-    if named and named != title:
+    # A release whose own name is nothing but its tag said over again is not a
+    # title - the version the tab is already showing is that name, in the spelling
+    # the whole page is written in. Only a release titled for what it does earns
+    # the second half of the line.
+    if named and named.replace(" ", "").lower() not in (
+            one_line(entry.get("tag")).lower(), title.lower()):
         title = f"{title}  \u2014  {named}"
     ok, why = installable(entry, values, have, floor)
     colour = stance_colour(entry.get("stance"))
     show_words("vtitle", title, colour)
     show_words("vmeta", meta_of(entry, values))
     show_chip(entry)
-    show_words("vstate", state_of(entry, have, ok, why),
+    show_words("vstate", state_of(entry, have, ok, why, values),
                colour if ok else stance_colour("too old"))
     if fetch or read_already(entry.get("tag")):
         show_text("vdetail", account_of(entry, values, have, floor))
     else:
         show_text("vdetail", not_read_words(entry))
     show_files(entry)
+    show_picker_note(values, entry, have, floor)
 
 
 def pick_row(index: int) -> None:
@@ -2219,7 +2576,16 @@ def check_now(_checked: bool = False) -> None:
         if not version:
             continue
         release = releases.get(str(row.get("tag")))
-        entry = {"tag": one_line(row.get("tag")), "version": version,
+        entry = {"tag": one_line(row.get("tag")),
+                 # Every version the tab goes on to say is held in the one
+                 # decimal spelling: the two spellings the repository publishes
+                 # then group onto the same line, name themselves the same way in
+                 # every sentence on the page, and cannot be told apart by a
+                 # comparison that reads one of them as hex and the other as
+                 # decimal. The tag is kept as written, because it is the
+                 # repository's own name for the release and what a fetch is
+                 # asked for.
+                 "version": shown_version(version),
                  "sha": one_line(row.get("sha")), "previous": "",
                  "release": release if isinstance(release, dict) else None,
                  "commit": None, "files": None, "download": None,
@@ -2250,6 +2616,7 @@ def check_now(_checked: bool = False) -> None:
             "with")
         show_versions(have, floor)
         show_detail(values, None, have, floor)
+        refresh_hero(values, have, floor)
         return
     picked = _default_pick(entries)
     # The pane opens on the line the picked version is on and on nothing else:
@@ -2262,8 +2629,17 @@ def check_now(_checked: bool = False) -> None:
         counts[str(entry.get("stance"))] = counts.get(str(entry.get("stance")), 0) + 1
     if counts["newer"]:
         word = "update" if counts["newer"] == 1 else "updates"
-        say(f"{newest['tag']} is out - pick a version and Install puts it in "
-            f"this copy's place ({counts['newer']} {word} ahead)", bad=True)
+        if update_offer(entries) is None:
+            # Ahead, but nothing to fetch: the Update button is not on the page,
+            # so the status line is the one place that has to say why a newer
+            # version is not being offered - a tag with no file on it is not an
+            # update a person can install.
+            say(f"{version_name(newest, values)} is out but no release ahead of "
+                f"berry{have or '?'} carries a file this system can fetch "
+                f"({counts['newer']} {word} ahead)", bad=True)
+        else:
+            say(f"{version_name(newest, values)} is out - Update puts it in this "
+                f"copy's place ({counts['newer']} {word} ahead)", bad=True)
     elif counts["this"]:
         say(f"berry{have} is the newest published version - {counts['older']} "
             f"older one(s) can still be gone back to")
@@ -2273,8 +2649,107 @@ def check_now(_checked: bool = False) -> None:
             f"{floor} is how far back installing goes")
     show_versions(have, floor)
     show_detail(values, published[picked], have, floor)
+    refresh_hero(values, have, floor)
     note(f"{len(entries)} published version(s) read; this copy is "
-         f"berry{have or '?'}, the floor for going back is {floor}")
+         f"berry{have or '?'}, the floor for going back is {floor}, and the "
+         f"keep line is {keep_floor(values)}")
+
+
+# --- the head of the tab: what is ahead, and the way back ---
+
+def update_offer(entries: list | None = None) -> dict | None:
+    """The version the Update button would install: the newest ahead with a file.
+
+    The list is newest first, so the first entry that is ahead of this copy and
+    carries something this system can fetch *is* the update - no comparison of
+    two spellings and no second guess at which of several newer tags was the last
+    one published. A newer tag whose release carries nothing is passed over: the
+    button is not there to start a download that cannot be finished, and the
+    status line and that version's own account both say what is missing.
+    """
+    for entry in (published if entries is None else entries):
+        if str(entry.get("stance") or "") == "newer" and entry.get("download"):
+            return entry
+    return None
+
+
+def refresh_hero(values: dict, have: str, floor: str) -> None:
+    """Paint the head of the tab: this copy, and the update that follows from it.
+
+    Called by the check, by a job that has landed, and once when the tab is built
+    so the version running here is on the page before anything has been read.
+    The Update button is the whole of the offer: it is shown only when a version
+    ahead of this copy has a file to fetch, and it says which version it means in
+    its own caption rather than leaving it to be worked out from the list - which
+    is the thing this tab used to get wrong, a button marked *update* installing
+    whatever an old dropdown happened to be showing.
+    """
+    global upgrade
+    offer = update_offer()
+    upgrade = offer
+    _set("here", "text",
+         f"This copy is berry{have or '?'}" if have
+         else "This copy's version could not be read")
+    _set("upgrade", "visible", offer is not None)
+    if offer is not None:
+        _set("upgrade", "text", f"Update to {version_name(offer, values)}")
+    if not picker_open:
+        # The warning belongs to the list, and the list is folded away: leaving
+        # an erased-setup notice under a hidden pane would have the tab say it
+        # with nothing on screen to answer for it.
+        _set("keepline", "visible", False)
+
+
+def toggle_picker(force: Any = None) -> None:
+    """Pull the whole version list out, or fold it away again.
+
+    This is the Downgrade button. Opening it is what lets the tab stay a mark and
+    two lines until a way back is actually wanted, and it is also the only place
+    the full browser - and so the install button, the keep rule and every version
+    below this copy - can be reached from. The button's own caption turns with
+    it, and the wipe warning comes and goes with the list rather than staying
+    painted under a folded page. The versions are read on the way if
+    nothing has been read yet, so a person who opens the list before the start-up
+    check has run is not handed an empty pane.
+    """
+    global picker_open
+    if api is None:
+        return
+    picker_open = (not picker_open) if force is None else bool(force)
+    _set("pickpane", "visible", picker_open and not working)
+    # The button says which way it is about to move the page, so a person who
+    # came here for an older build is not left pressing a word that reads like
+    # an install while the list is already open under it.
+    _set("downgrade", "text",
+         "Hide the version list" if picker_open else "Downgrade")
+    if not picker_open:
+        # The wipe warning belongs to the list. With the list folded away there
+        # is nothing on screen for the sentence to be about, and leaving it up
+        # would have the tab shout about erased addons over a picture of the app.
+        _set("keepline", "visible", False)
+        _set("picknote", "text", "")
+        return
+    if not published and not working:
+        check_now()
+    if not published:
+        say("there is no published version to go back to yet - the check has "
+            "nothing to read", bad=True)
+        return
+    entry = picked_entry()
+    if entry is None:
+        pick_row(_default_pick(published))
+        entry = picked_entry()
+    values = merge_config(DEFAULTS, api.config.stored())
+    show_picker_note(values, entry, local_version(), _floor(values))
+    back = [one_line(item.get("version")) for item in published
+            if str(item.get("stance") or "") == "older"]
+    if back:
+        say(f"pick a version to go back to - {len(back)} of them are behind "
+            f"berry{local_version() or '?'} and reachable, and the install "
+            "button puts the one picked in this copy's place")
+    else:
+        say(f"nothing published is behind berry{local_version() or '?'} at "
+            "the distance this program will go back")
 
 
 # --- what a way back may ask to be taken away first ---
@@ -2530,7 +3005,8 @@ def downgrade_words(entry: dict, have: str, wanted: str, across: bool,
         offer = ("You may keep what is written down beside this program, or back "
                  "it up and start clean over it.")
     else:
-        offer = (f"This is further back than {one_line(keep_line) or KEEP_ALLOWED}, "
+        offer = (f"This is further back than "
+                 f"{one_line(keep_line) or shown_version(KEEP_ALLOWED)}, "
                  "and below that line keeping what is written down is not offered: "
                  "the only way back is to copy it into a backup and erase it "
                  "first.")
@@ -3073,10 +3549,14 @@ def _job_show(show: bool) -> bool:
     a job started on a tab built without the pane - an older layout, or a bare
     test harness - finds out it has nowhere to print and carries on regardless.
 
-    The card is meant to own the whole tab while a job runs, so the header,
-    the button row and the folded log under the panes all step aside with it and
-    come back on the same call. The console behind the card keeps to the fold:
-    it is pulled up only by the card's own button.
+    The card is meant to own the whole tab while a job runs, so the button row
+    and the folded log under the panes step aside with it and come back on the
+    same call; so does the pulled-out list of versions, whatever the Downgrade
+    button had left it doing. The head of the tab - the mark, the version this
+    copy is and the answer to "is there an update" - is deliberately *not*
+    quieted: it is the one line that stays true while a download runs, and the
+    buttons in it are already greyed by :func:`_buttons`. The console behind the
+    card keeps to the fold: it is pulled up only by the card's own button.
     """
     if api is None:
         return False
@@ -3085,8 +3565,9 @@ def _job_show(show: bool) -> bool:
         api.tabs.set_widget(TAB, "browse", "visible", not show)
     except AddonError:
         return False
-    for quiet in ("headrow", "actionrow", "log"):
+    for quiet in ("actionrow", "log"):
         _set(quiet, "visible", not show)
+    _set("pickpane", "visible", picker_open and not show)
     return bool(placed)
 
 
@@ -3542,6 +4023,10 @@ def finish_download() -> None:
     have, floor = wanted or local_version(), _floor(values)
     restance(have, floor)
     show_versions(have, floor)
+    # The head of the tab is the promise this finishes: whichever way the swap
+    # went, "is there an update" now has a different answer, and the Update
+    # button has to go with it.
+    refresh_hero(values, have, floor)
     entry = picked_entry()
     if entry is not None:
         show_detail(values, entry, have, floor, fetch=False)
@@ -3556,8 +4041,8 @@ def finish_download() -> None:
              "until it is closed and the new one started")
 
 
-def update_selected(_checked: bool = False) -> None:
-    """Download the picked release and swap it for this program, forwards or back.
+def install_entry(entry: dict) -> None:
+    """Download one published release and swap it for this program, forwards or back.
 
     The same careful swap either way: one file replaced. What differs is the
     asking - going up is a yes or no, while going back over a newer version has
@@ -3574,11 +4059,6 @@ def update_selected(_checked: bool = False) -> None:
     """
     global found
     if api is None or working:
-        return
-    entry = picked_entry()
-    if entry is None:
-        say("there is no version picked yet - press Check, then pick one from "
-            "a line", bad=True)
         return
     values = merge_config(DEFAULTS, api.config.stored())
     have, floor = local_version(), _floor(values)
@@ -3641,6 +4121,42 @@ def update_selected(_checked: bool = False) -> None:
         _finish(str(error), bad=True)
         return
     _later(0.0, connect_step)
+
+
+def update_selected(_checked: bool = False) -> None:
+    """Install the version the pulled-out list is pointing at.
+
+    The button inside the version list, so it means the row a person has their
+    eye on - which is the whole reason the list and the update at the head of the
+    tab are two buttons rather than one that guesses.
+    """
+    entry = picked_entry()
+    if entry is None:
+        say("there is no version picked yet - press Check, then pick one from "
+            "a line", bad=True)
+        return
+    install_entry(entry)
+
+
+def install_update(_checked: bool = False) -> None:
+    """The Update button at the head of the tab: install the version that is ahead.
+
+    It installs the offer the button was drawn from, not whatever the list happens
+    to be showing, and it moves the list to that version on the way so the pane
+    and the button agree about what is about to happen.
+    """
+    offer = upgrade if upgrade is not None else update_offer()
+    if offer is None:
+        offer = update_offer()
+    if offer is None:
+        say("there is no update to install - nothing published is ahead of "
+            "this copy with a file on it", bad=True)
+        return
+    for index, entry in enumerate(published):
+        if entry is offer:
+            pick_row(index)
+            break
+    install_entry(offer)
 
 
 def open_page(_checked: bool = False) -> None:
@@ -3720,6 +4236,9 @@ def init(plugin_api: Any) -> None:
         title="Berry Manager update - addons/_data/manager_update/config.json")
     build_tab()
     show_source(values)
+    # The version this copy runs is put on the page before anything has been
+    # read, so the head is never blank while the first check is still going.
+    refresh_hero(values, local_version(), _floor(values))
     api.ui.menu_item("Check for Berry Manager updates", focus_tab, menu="Tools")
     apply_schedule(values)
     if config_get(values, "check_startup", True):
@@ -3733,6 +4252,7 @@ def start() -> None:
 
 def shutdown() -> None:
     global api, working, job, found, published, picked, ticker
+    global picker_open, upgrade
     _drop_http()
     _stop_timer(ticker)
     ticker = None
@@ -3747,6 +4267,8 @@ def shutdown() -> None:
     notes.clear()
     slot_names.clear()
     slot_words.clear()
+    picker_open = False
+    upgrade = None
     api = None
 
 
@@ -3765,15 +4287,20 @@ def _run(name: str, *arguments: Any) -> None:
 def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
     """Something on the tab was used: run what its id and interaction mean.
 
-    Three kinds of thing report in here. The buttons at the bottom are looked up
-    by their id, the log's fold box is its own case, and the version pane answers
-    for itself: a dropdown whose line was laid out says what it is showing, and
-    the button of a line says to open or shut it. Both of the last two carry the
-    row of the pane they belong to in their name, so a pick is matched against the
-    versions of that line alone - which is the one place a fork's repository can
-    publish the same number on two lines and still be answered correctly. The one
-    dropdown that carries no row number is the Older one, and it is matched against
-    the lines the pane had no room for.
+    Three kinds of thing report in here. The buttons are looked up by their id -
+    the four at the head of the tab plus the install inside the version list - the
+    log's fold box is its own case, and the version pane answers for itself: a
+    dropdown whose line was laid out says what it is showing, and the button of a
+    line says to open or shut it. Both of the last two carry the row of the pane
+    they belong to in their name, so a pick is matched against the versions of
+    that line alone - which is the one place a fork's repository can publish the
+    same number on two lines and still be answered correctly. The one dropdown
+    that carries no row number is the Older one, and it is matched against the
+    lines the pane had no room for.
+
+    The head and the list are separate on purpose: **upgrade** means the version
+    the tab offered, **install** means the version the list is pointed at, and
+    **downgrade** only pulls the list out.
     """
     if str(tab) != TAB:
         return
@@ -3796,7 +4323,8 @@ def on_widget(tab: str, identifier: str, event: str, payload: dict) -> None:
         return
     if str(event) != "clicked":
         return
-    _run({"check": "check_now", "update": "update_selected",
+    _run({"check": "check_now", "upgrade": "install_update",
+          "downgrade": "toggle_picker", "install": "update_selected",
           "page": "open_page"}.get(name or "") or "")
 
 

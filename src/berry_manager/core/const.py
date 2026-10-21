@@ -58,7 +58,7 @@ def find_asset(filename: str) -> Path | None:
 #: floors, the GitHub tag and the setup. Only the surfaces a person reads off
 #: the running window - the title bar, the splash and the tray tooltip - show
 #: the decimal below.
-APP_VERSION = "0x3.0x6.0xd"
+APP_VERSION = "0x3.0x6.0xe"
 UPDATE_TAG_PREFIX = "berry"
 
 
