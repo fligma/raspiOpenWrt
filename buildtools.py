@@ -381,11 +381,21 @@ def _property_getter(node: ast.Assign) -> ast.AST | None:
     return None
 
 
+def _is_property_line(value: ast.AST) -> bool:
+    """Whether an assignment's right side is a ``property(...)`` call."""
+    return (isinstance(value, ast.Call)
+            and getattr(value.func, "id", "") == "property")
+
+
 def _public_calls(cls: ast.ClassDef) -> list[tuple[str, ast.AST]]:
     """The methods and properties an addon can call, as name and definition pairs.
 
     A property is checked on its getter, which is where the words for it live;
     a ``property(...)`` line with nothing readable behind it counts as silent.
+    A plain class constant is neither, and is left out: the Docs pane walks
+    ``vars(cls)`` looking for functions and properties only, so a tuple or a
+    number written at class level is nothing the pane shows and nothing the
+    pane can leave saying nothing.
     """
     found: list[tuple[str, ast.AST]] = []
     for node in cls.body:
@@ -394,10 +404,24 @@ def _public_calls(cls: ast.ClassDef) -> list[tuple[str, ast.AST]]:
                 found.append((node.name, node))
         elif isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                if isinstance(target, ast.Name) and not target.id.startswith("_") \
+                        and _is_property_line(node.value):
                     node._class = cls                # type: ignore[attr-defined]
                     found.append((target.id, _property_getter(node) or node))
     return found
+
+
+#: The node kinds ``ast.get_docstring`` answers for; on Python 3.11 asking
+#: about anything else raises rather than returns nothing, and an
+#: unresolvable ``property(...)`` line reaches here as one of those.
+_DOC_NODES = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _docstring_of(node: ast.AST) -> str:
+    """The docstring of a node that can have one; the empty word for the rest."""
+    if not isinstance(node, _DOC_NODES):
+        return ""
+    return ast.get_docstring(node) or ""
 
 
 def api_missing(path: Path) -> list[str]:
@@ -427,10 +451,10 @@ def api_missing(path: Path) -> list[str]:
             bad.append(f"{_name_for_report(path)}: class {name} is gone")
             continue
         for method, node in _public_calls(cls):
-            if not (ast.get_docstring(node) or "").strip():
+            if not _docstring_of(node).strip():
                 location = f"{_name_for_report(path)}:{getattr(node, 'lineno', cls.lineno)}"
                 bad.append(f"{location}: {name}.{method} says nothing about itself")
-    if path.name == PROTOCOL and not (ast.get_docstring(tree) or "").strip():
+    if path.name == PROTOCOL and not _docstring_of(tree).strip():
         bad.append(f"{_name_for_report(path)}:1: the module has no docstring")
     return bad
 
